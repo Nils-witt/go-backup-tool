@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -65,10 +66,12 @@ func environWithout(names ...string) []string {
 // the file, without re-running the backup command or gpg and without
 // affecting any other target's own attempts.
 //
-// cfg.cmd is run via "sh -c" deliberately: it lets an operator pass a full
-// shell pipeline (e.g. "mysqldump db | gzip") as the backup source. cfg.cmd
-// is operator-supplied CLI configuration, not untrusted external input, so
-// this is the intended behavior rather than a command-injection risk.
+// cfg.cmd is run through the platform shell ("sh -c" on every OS but
+// Windows, "cmd /C" there — see newSourceCommand) deliberately: it lets an
+// operator pass a full shell pipeline (e.g. "mysqldump db | gzip") as the
+// backup source. cfg.cmd is operator-supplied CLI configuration, not
+// untrusted external input, so this is the intended behavior rather than a
+// command-injection risk.
 //
 // onTargetDone, if non-nil, is called exactly once per target — index-
 // aligned with cfg.targets — as soon as that target's own outcome is known
@@ -139,6 +142,19 @@ func runPipeline(ctx context.Context, cfg *config, log *slog.Logger, onTargetDon
 	return bytesWritten, firstPipelineError(cfg.cmd, sourceErr, gpgErr, stageErr, uploadErr)
 }
 
+// newSourceCommand builds the (not yet started) command that runs cmd
+// through the platform shell. Windows has no "sh" on PATH by default (Go's
+// standard installer doesn't ship one, unlike every other supported OS), so
+// it uses "cmd /C" there instead; everywhere else it uses "sh -c", per
+// runPipeline's doc comment.
+func newSourceCommand(ctx context.Context, cmd string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.CommandContext(ctx, "cmd", "/C", cmd) //nolint:gosec // cfg.cmd is operator-supplied CLI config, not untrusted input; see runPipeline's doc comment
+	}
+
+	return exec.CommandContext(ctx, "sh", "-c", cmd) //nolint:gosec // cfg.cmd is operator-supplied CLI config, not untrusted input; see runPipeline's doc comment
+}
+
 // startEncryptingPipeline starts cfg.cmd piped into gpg (sourceCmd's stdout
 // wired to gpgCmd's stdin) and returns both commands, already started, plus
 // gpgOut: gpg's stdout, ready for the caller to drain (e.g. via stageBackup)
@@ -147,7 +163,7 @@ func runPipeline(ctx context.Context, cfg *config, log *slog.Logger, onTargetDon
 // documented contract — gpgCmd first, since sourceCmd's exit only matters
 // once gpg (its downstream reader) is done with it.
 func startEncryptingPipeline(ctx context.Context, cfg *config, log *slog.Logger) (sourceCmd, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
-	sourceCmd = exec.CommandContext(ctx, "sh", "-c", cfg.cmd) //nolint:gosec // cfg.cmd is operator-supplied CLI config, not untrusted input; see runPipeline's doc comment
+	sourceCmd = newSourceCommand(ctx, cfg.cmd)
 	sourceCmd.Stderr = os.Stderr
 	// The backup command may be arbitrary and its output/behavior is
 	// outside our control; make sure it can't read the encryption
