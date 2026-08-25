@@ -1,0 +1,86 @@
+# Example go-backup-tool config file. Copy to config.yaml (or pass
+# -config <path>) and fill in the values you need. This file is the only
+# way to configure a job: go-backup-tool has no CLI flags for cmd, targets,
+# recipients, etc. — only -config (this file's path) and -job (see below).
+#
+# Every server go-backup-tool can upload to is defined once, by name, under
+# servers:. Jobs never set region/endpoint/path-style/path themselves — a
+# job's targets: list just names which server(s) to upload to and which
+# bucket to use on each, so the same server definition can be reused across
+# many jobs.
+#
+# type: selects the destination kind: "s3" (the default, so it can be
+# omitted) for an S3 (or S3-compatible) bucket, or "local" for a directory
+# on the local filesystem (e.g. a mounted NFS share, external disk, or
+# another backup tool's watched directory). A local server only needs path;
+# a target's bucket is still required and is used as a subdirectory under
+# it, so the object ends up at path/bucket/key.
+servers:
+  - name: primary
+    region: us-east-1
+    # endpoint: "" # e.g. https://minio.example.com for a self-hosted S3 server
+    # path-style: false
+    # Static credentials for this server, read from the named environment
+    # variables at startup (never written in this file, same as
+    # GPG_PASSPHRASE below). Omit both to fall back to the AWS SDK's default
+    # credential chain (env vars, shared config file, IAM role, ...).
+    # access-key-env: PRIMARY_S3_ACCESS_KEY
+    # secret-key-env: PRIMARY_S3_SECRET_KEY
+  - name: offsite
+    region: us-east-1
+    endpoint: "https://minio.example.com"
+    path-style: true
+    access-key-env: OFFSITE_S3_ACCESS_KEY
+    secret-key-env: OFFSITE_S3_SECRET_KEY
+  - name: nas
+    type: local
+    path: /mnt/backups
+
+# Every job is defined under jobs:, one entry per backup; run all jobs (in
+# order) with no -job flag, or one with -job <name>. Every key below is
+# optional and falls back to a built-in default. Any key may also be set at
+# the top level, alongside jobs:, to act as a shared default every job
+# inherits and can override. GPG_PASSPHRASE for symmetric: true is still
+# read from the environment only, never from this file. timeout applies to
+# the whole run (every job), not per job.
+
+# timeout: 30m # applies to the whole run (every job), not per job
+
+jobs:
+  - name: database
+    cmd: "mysqldump --single-transaction mydb | gzip"
+    key: "db-{time}.gpg"
+    targets:
+      - server: primary
+        bucket: my-backup-bucket
+    recipients:
+      - me@example.com
+    # symmetric: false
+    # armor: false
+    # gpg-bin: gpg
+    # gpg-homedir: ""
+    interval: 6h # this job repeats every 6h; go-backup-tool keeps running instead of exiting
+  - name: uploads
+    cmd: "tar czf - /srv/uploads"
+    key: "uploads-{time}.gpg"
+    recipients:
+      - me@example.com
+    # A job may upload the same backup to more than one server by listing
+    # more than one entry under targets:. Every target uploads the same
+    # encrypted object (same key), so only the server and bucket differ.
+    # A local server works the same way (see "nas" above): the object is
+    # written to /mnt/backups/my-backup-bucket-local/uploads-<time>.gpg.
+    targets:
+      - server: primary
+        bucket: my-backup-bucket
+      - server: offsite
+        bucket: my-backup-bucket-offsite
+      - server: nas
+        bucket: my-backup-bucket-local
+    # no interval: this job runs once and doesn't repeat, even though
+    # "database" above keeps the whole process alive
+
+# A job's key keeps its {time} placeholder each time it (re-)runs, so a
+# repeating job gets a fresh object on every run instead of overwriting the
+# last one; go-backup-tool warns at startup if a repeating job's key has no
+# {time} placeholder at all.

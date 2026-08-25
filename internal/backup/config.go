@@ -1,0 +1,644 @@
+// Package backup implements go-backup-tool's pipeline: run a shell command,
+// encrypt its stdout with gpg, and stream the ciphertext to one or more
+// targets: an S3 (or S3-compatible) bucket, or a directory on the local
+// filesystem.
+package backup
+
+import (
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+type stringSlice []string
+
+func (s *stringSlice) String() string { return strings.Join(*s, ",") }
+
+func (s *stringSlice) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+// config holds one backup job's parameters.
+type config struct {
+	name       string // job name, from its jobs: entry; always set
+	cmd        string
+	key        string         // may still contain the {time} placeholder; resolved fresh per run
+	targetRefs []jobTargetRef // raw targets: entries, resolved against servers by resolveJobTargets
+	targets    []target       // resolved destinations; empty until resolveJobTargets runs
+	recipients stringSlice
+	symmetric  bool
+	armor      bool
+	gpgBin     string
+	gpgHomedir string
+	interval   time.Duration // repeat every interval; 0 runs the job once
+	passphrase string        // resolved from GPG_PASSPHRASE when symmetric
+}
+
+// jobTargetRef is one targets: entry as written in a job: a server name
+// (looked up in the top-level servers: list) plus the bucket to use on it.
+type jobTargetRef struct {
+	server string
+	bucket string
+}
+
+// serverKind distinguishes a servers: entry's destination type. The zero
+// value is serverKindS3, so existing config files (and target literals in
+// tests) that never set type: keep working unchanged.
+type serverKind string
+
+const (
+	serverKindS3    serverKind = ""      // default; type: s3 also selects this
+	serverKindLocal serverKind = "local" // type: local
+)
+
+// parseServerKind validates a fileServer's Type field, defaulting an unset
+// or explicit "s3" value to serverKindS3.
+func parseServerKind(t string) (serverKind, error) {
+	switch strings.TrimSpace(t) {
+	case "", "s3":
+		return serverKindS3, nil
+	case string(serverKindLocal):
+		return serverKindLocal, nil
+	default:
+		return "", fmt.Errorf("unknown type %q (want \"s3\" or %q)", t, serverKindLocal)
+	}
+}
+
+// target is one upload destination for a job, fully resolved from a
+// jobTargetRef against its named server. A job uploads the same encrypted
+// object to every one of its targets. Its kind determines which of the
+// fields below apply: s3 (the default) uses bucket/region/endpoint/
+// pathStyle/credentials; local uses only bucket (as a subdirectory of
+// localPath) and localPath itself.
+type target struct {
+	serverName string // the servers: entry this came from, for diagnostics
+	kind       serverKind
+	bucket     string
+	region     string
+	endpoint   string
+	pathStyle  bool
+
+	// accessKeyEnv/secretKeyEnv are the server's configured env var names
+	// (set at config-build time); accessKey/secretKey are their resolved
+	// values, filled in later by resolveTargetCredentials. Both empty means
+	// no static credentials: newS3Client falls back to the AWS SDK's
+	// default credential chain. Unused for a local target.
+	accessKeyEnv string
+	secretKeyEnv string
+	accessKey    string
+	secretKey    string
+
+	// localPath is the local server's root directory (only set when
+	// kind == serverKindLocal). The object is written to
+	// localPath/bucket/key, mirroring the S3 bucket/key layout.
+	localPath string
+}
+
+// runConfig is the result of parseFlags: one or more jobs to run, plus the
+// overall run timeout.
+type runConfig struct {
+	jobs    []*config
+	timeout time.Duration
+}
+
+// Built-in defaults for fields a job's or server's config file entry
+// doesn't set.
+const (
+	defaultConfigPath = "config.yaml" // used when -config isn't given explicitly
+	defaultKeyPattern = "backup-{time}.gpg"
+	defaultRegion     = "us-east-1"
+	defaultGPGBin     = "gpg"
+)
+
+// fileJob mirrors config's per-job fields for YAML unmarshaling, used both
+// for the top-level shared defaults and for each entry under jobs:. Any
+// field left unset falls through to the built-in default (top-level) or the
+// top-level value (a jobs: entry).
+//
+// A job names its upload destination(s) via targets:, each entry a
+// {server, bucket} pair referencing a servers: entry defined at the top
+// level (see fileServer) — server connection details (region, endpoint,
+// path-style, credentials) live there, not on the job.
+type fileJob struct {
+	Name       string          `yaml:"name"`
+	Cmd        string          `yaml:"cmd"`
+	Key        string          `yaml:"key"`
+	Targets    []fileJobTarget `yaml:"targets"`
+	Recipients []string        `yaml:"recipients"`
+	Symmetric  bool            `yaml:"symmetric"`
+	Armor      bool            `yaml:"armor"`
+	GPGBin     string          `yaml:"gpg-bin"`
+	GPGHomedir string          `yaml:"gpg-homedir"`
+	Interval   string          `yaml:"interval"`
+}
+
+// fileJobTarget mirrors jobTargetRef for YAML unmarshaling.
+type fileJobTarget struct {
+	Server string `yaml:"server"`
+	Bucket string `yaml:"bucket"`
+}
+
+// fileServer is one top-level servers: entry, defined once and referenced by
+// name from any job's targets: list. type: selects the destination kind:
+// "s3" (the default) for an S3 (or S3-compatible) endpoint, using
+// region/endpoint/path-style/access-key-env/secret-key-env; or "local" for a
+// directory on the local filesystem, using only path. AccessKeyEnv/
+// SecretKeyEnv name environment variables to read static credentials from
+// (both required together, or neither); like GPG_PASSPHRASE, credentials
+// are never read directly out of the config file itself. When neither is
+// set, an s3 server falls back to the AWS SDK's default credential chain
+// (env vars, shared config, IAM role, ...).
+type fileServer struct {
+	Name         string `yaml:"name"`
+	Type         string `yaml:"type"`
+	Region       string `yaml:"region"`
+	Endpoint     string `yaml:"endpoint"`
+	PathStyle    bool   `yaml:"path-style"`
+	AccessKeyEnv string `yaml:"access-key-env"`
+	SecretKeyEnv string `yaml:"secret-key-env"`
+	Path         string `yaml:"path"` // local only: root directory backups are written under
+}
+
+// fileConfig is the top-level shape of the YAML config file. Its embedded
+// fileJob holds shared defaults applied to every entry in Jobs before that
+// entry's own fields override them.
+type fileConfig struct {
+	fileJob `yaml:",inline"`
+
+	Timeout string       `yaml:"timeout"`
+	Servers []fileServer `yaml:"servers"`
+	Jobs    []fileJob    `yaml:"jobs"`
+}
+
+// parseFlags parses args (typically os.Args[1:]) into a runConfig, writing
+// usage output to out on error or -h/-help. It takes an explicit argument
+// list and a fresh FlagSet (rather than the package-level flag.CommandLine)
+// so it can be called repeatedly and in isolation from tests.
+//
+// All job parameters come from the YAML config file (-config, defaulting to
+// config.yaml); there are no CLI flags to set them individually. Every job
+// is defined under the config file's jobs: list; -job selects a single one
+// to run, or every job runs (in order) when -job isn't given.
+//
+// Each job's key keeps any {time} placeholder unresolved: it's substituted
+// fresh by the caller immediately before every run (see substituteKeyTime),
+// not here, so a job with a nonzero interval doesn't overwrite the same
+// object on every repeat.
+func parseFlags(args []string, out io.Writer) (*runConfig, error) {
+	fs := flag.NewFlagSet("go-backup-tool", flag.ContinueOnError)
+	fs.SetOutput(out)
+
+	var (
+		configPath string
+		jobFilter  string
+	)
+
+	fs.StringVar(&configPath, "config", defaultConfigPath, "path to the YAML config file")
+	fs.StringVar(&jobFilter, "job", "", "run only the named job from the config file's jobs: list")
+
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+
+	configExplicit := false
+
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "config" {
+			configExplicit = true
+		}
+	})
+
+	fileCfg, err := loadFileConfig(configPath, configExplicit)
+	if err != nil {
+		return nil, err
+	}
+
+	if fileCfg == nil {
+		return nil, fmt.Errorf("no config file found at %q; create one (see config.example.yaml) or pass -config <path>", configPath)
+	}
+
+	jobs, err := resolveJobs(fileCfg)
+	if err != nil {
+		return nil, err
+	}
+
+	jobs, err = applyJobFilter(jobs, jobFilter)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := validateJobs(jobs); err != nil {
+		return nil, err
+	}
+
+	if err := resolvePassphrases(jobs); err != nil {
+		return nil, err
+	}
+
+	if err := resolveTargetCredentials(jobs); err != nil {
+		return nil, err
+	}
+
+	var timeout time.Duration
+
+	if fileCfg.Timeout != "" {
+		timeout, err = time.ParseDuration(fileCfg.Timeout)
+		if err != nil {
+			return nil, fmt.Errorf("parsing config file timeout %q: %w", fileCfg.Timeout, err)
+		}
+	}
+
+	return &runConfig{jobs: jobs, timeout: timeout}, nil
+}
+
+// resolveJobs builds the list of jobs to run from fileCfg's jobs: list,
+// layering fileCfg's top-level fields as shared defaults under each entry's
+// own fields, and resolving each job's targets: against fileCfg's servers:.
+func resolveJobs(fileCfg *fileConfig) ([]*config, error) {
+	if len(fileCfg.Jobs) == 0 {
+		return nil, errors.New("config file must define at least one job under a jobs list")
+	}
+
+	return buildJobsFromFile(fileCfg)
+}
+
+// buildJobsFromFile builds one *config per entry in fileCfg.Jobs, layering
+// fileCfg's top-level fields as defaults under each entry's own fields and
+// resolving each job's targets: against fileCfg.Servers.
+func buildJobsFromFile(fileCfg *fileConfig) ([]*config, error) {
+	servers, err := buildServers(fileCfg.Servers)
+	if err != nil {
+		return nil, err
+	}
+
+	jobs := make([]*config, 0, len(fileCfg.Jobs))
+	seen := make(map[string]bool, len(fileCfg.Jobs))
+
+	for i, fj := range fileCfg.Jobs {
+		name := strings.TrimSpace(fj.Name)
+		if name == "" {
+			return nil, fmt.Errorf("jobs[%d]: name is required", i)
+		}
+
+		if seen[name] {
+			return nil, fmt.Errorf("jobs[%d]: duplicate job name %q", i, name)
+		}
+
+		seen[name] = true
+
+		cfg := newConfigDefaults()
+		cfg.name = name
+
+		if err := applyFileJob(cfg, &fileCfg.fileJob); err != nil {
+			return nil, fmt.Errorf("job %q: %w", name, err)
+		}
+
+		if err := applyFileJob(cfg, &fj); err != nil {
+			return nil, fmt.Errorf("job %q: %w", name, err)
+		}
+
+		if err := resolveJobTargets(cfg, servers); err != nil {
+			return nil, fmt.Errorf("job %q: %w", name, err)
+		}
+
+		jobs = append(jobs, cfg)
+	}
+
+	return jobs, nil
+}
+
+// buildServers resolves fileServers into a name -> resolvedServer map,
+// validating that every entry has a non-empty, unique name and that
+// access-key-env/secret-key-env are set together or not at all. It does
+// not read the named environment variables yet: that's deferred to
+// resolveTargetCredentials, called only for jobs that survive -job
+// filtering, so an unrelated/unused server's credentials don't need to be
+// present in the environment for a run that never touches it.
+func buildServers(fileServers []fileServer) (map[string]resolvedServer, error) {
+	servers := make(map[string]resolvedServer, len(fileServers))
+
+	for i, fs := range fileServers {
+		name := strings.TrimSpace(fs.Name)
+		if name == "" {
+			return nil, fmt.Errorf("servers[%d]: name is required", i)
+		}
+
+		if _, exists := servers[name]; exists {
+			return nil, fmt.Errorf("servers[%d]: duplicate server name %q", i, name)
+		}
+
+		kind, err := parseServerKind(fs.Type)
+		if err != nil {
+			return nil, fmt.Errorf("server %q: %w", name, err)
+		}
+
+		if kind == serverKindLocal {
+			server, err := buildLocalServer(name, &fs)
+			if err != nil {
+				return nil, err
+			}
+
+			servers[name] = server
+
+			continue
+		}
+
+		if (fs.AccessKeyEnv == "") != (fs.SecretKeyEnv == "") {
+			return nil, fmt.Errorf("server %q: access-key-env and secret-key-env must be set together", name)
+		}
+
+		region := fs.Region
+		if region == "" {
+			region = defaultRegion
+		}
+
+		servers[name] = resolvedServer{
+			name:         name,
+			region:       region,
+			endpoint:     fs.Endpoint,
+			pathStyle:    fs.PathStyle,
+			accessKeyEnv: fs.AccessKeyEnv,
+			secretKeyEnv: fs.SecretKeyEnv,
+		}
+	}
+
+	return servers, nil
+}
+
+// buildLocalServer validates and builds a resolvedServer for a type: local
+// servers: entry, which uses only path and none of the S3-specific fields.
+func buildLocalServer(name string, fs *fileServer) (resolvedServer, error) {
+	if strings.TrimSpace(fs.Path) == "" {
+		return resolvedServer{}, fmt.Errorf("server %q: path is required for type: local", name)
+	}
+
+	if fs.Endpoint != "" || fs.PathStyle || fs.AccessKeyEnv != "" || fs.SecretKeyEnv != "" {
+		return resolvedServer{}, fmt.Errorf("server %q: endpoint/path-style/access-key-env/secret-key-env are not valid for type: local", name)
+	}
+
+	return resolvedServer{name: name, kind: serverKindLocal, path: fs.Path}, nil
+}
+
+// resolvedServer is one servers: entry after defaulting its region, ready
+// to be combined with a job's targetRef bucket into a target. Its
+// credentials, if any, are still just environment variable names at this
+// point; resolveTargetCredentials reads their values later.
+type resolvedServer struct {
+	name         string
+	kind         serverKind
+	region       string
+	endpoint     string
+	pathStyle    bool
+	accessKeyEnv string
+	secretKeyEnv string
+	path         string // local only: root directory backups are written under
+}
+
+// resolveJobTargets resolves cfg's raw target references (targetRefs, from
+// targets:) against servers, building cfg.targets. A job with no target
+// references at all is left with an empty cfg.targets; validateJob reports
+// that as an error.
+func resolveJobTargets(cfg *config, servers map[string]resolvedServer) error {
+	if len(cfg.targetRefs) == 0 {
+		return nil
+	}
+
+	cfg.targets = make([]target, len(cfg.targetRefs))
+
+	for i, ref := range cfg.targetRefs {
+		if strings.TrimSpace(ref.server) == "" {
+			return fmt.Errorf("targets[%d]: server is required", i)
+		}
+
+		if strings.TrimSpace(ref.bucket) == "" {
+			return fmt.Errorf("targets[%d]: bucket is required", i)
+		}
+
+		server, ok := servers[ref.server]
+		if !ok {
+			return fmt.Errorf("targets[%d]: no server named %q defined under servers", i, ref.server)
+		}
+
+		cfg.targets[i] = target{
+			serverName:   server.name,
+			kind:         server.kind,
+			bucket:       ref.bucket,
+			region:       server.region,
+			endpoint:     server.endpoint,
+			pathStyle:    server.pathStyle,
+			accessKeyEnv: server.accessKeyEnv,
+			secretKeyEnv: server.secretKeyEnv,
+			localPath:    server.path,
+		}
+	}
+
+	return nil
+}
+
+// resolveTargetCredentials reads each job's targets' static credentials
+// from the environment (the access-key-env/secret-key-env named by the
+// target's server), for every job in jobs — call this only after -job
+// filtering has narrowed jobs down to what will actually run. A target
+// whose server configured no credentials is left with none, and
+// newS3Client falls back to the AWS SDK's default credential chain for it.
+func resolveTargetCredentials(jobs []*config) error {
+	for _, j := range jobs {
+		for i := range j.targets {
+			t := &j.targets[i]
+			if t.accessKeyEnv == "" {
+				continue
+			}
+
+			accessKey := os.Getenv(t.accessKeyEnv)
+			if accessKey == "" {
+				return fmt.Errorf("server %q: environment variable %q (access-key-env) is not set", t.serverName, t.accessKeyEnv)
+			}
+
+			secretKey := os.Getenv(t.secretKeyEnv)
+			if secretKey == "" {
+				return fmt.Errorf("server %q: environment variable %q (secret-key-env) is not set", t.serverName, t.secretKeyEnv)
+			}
+
+			t.accessKey, t.secretKey = accessKey, secretKey
+		}
+	}
+
+	return nil
+}
+
+// newConfigDefaults returns a *config with the built-in defaults applied to
+// every job before its config file fields are layered on top.
+func newConfigDefaults() *config {
+	return &config{
+		key:    defaultKeyPattern,
+		gpgBin: defaultGPGBin,
+	}
+}
+
+// applyJobFilter applies -job, if given, restricting jobs to the single
+// named job. It's an error to name a job that doesn't exist.
+func applyJobFilter(jobs []*config, jobFilter string) ([]*config, error) {
+	if jobFilter == "" {
+		return jobs, nil
+	}
+
+	for _, j := range jobs {
+		if j.name == jobFilter {
+			return []*config{j}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("-job %q: no such job in config file", jobFilter)
+}
+
+// validateJobs validates every job, returning the first error found.
+func validateJobs(jobs []*config) error {
+	for _, j := range jobs {
+		if err := validateJob(j); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateJob checks that a single job's parameters are complete and
+// self-consistent.
+func validateJob(cfg *config) error {
+	switch {
+	case strings.TrimSpace(cfg.cmd) == "":
+		return jobError(cfg, errors.New("cmd is required"))
+	case len(cfg.targets) == 0:
+		return jobError(cfg, errors.New("at least one target is required (see targets: and servers:)"))
+	case cfg.symmetric && len(cfg.recipients) > 0:
+		return jobError(cfg, errors.New("symmetric cannot be combined with recipients"))
+	case !cfg.symmetric && len(cfg.recipients) == 0:
+		return jobError(cfg, errors.New("specify at least one recipient, or set symmetric: true"))
+	case cfg.interval < 0:
+		return jobError(cfg, errors.New("interval must not be negative"))
+	}
+
+	return nil
+}
+
+// jobError prefixes err with cfg's job name, so validation and passphrase
+// errors are attributable to the job that caused them.
+func jobError(cfg *config, err error) error {
+	return fmt.Errorf("job %q: %w", cfg.name, err)
+}
+
+// resolvePassphrases reads GPG_PASSPHRASE once (if any job needs it) and
+// assigns it to every symmetric job, then clears it from the environment.
+// All symmetric jobs in a run share the same passphrase; per-job passphrases
+// aren't supported.
+func resolvePassphrases(jobs []*config) error {
+	needsPassphrase := false
+
+	for _, j := range jobs {
+		if j.symmetric {
+			needsPassphrase = true
+
+			break
+		}
+	}
+
+	if !needsPassphrase {
+		return nil
+	}
+
+	passphrase := os.Getenv("GPG_PASSPHRASE")
+	if passphrase == "" {
+		return errors.New("symmetric: true requires the GPG_PASSPHRASE environment variable to be set")
+	}
+	// Cleared once captured so it doesn't linger in this process's own
+	// environment any longer than necessary; runPipeline also strips it
+	// explicitly from every child process's environment. Unsetenv only
+	// fails for an invalid (empty) name, which this literal isn't.
+	_ = os.Unsetenv("GPG_PASSPHRASE")
+
+	for _, j := range jobs {
+		if j.symmetric {
+			j.passphrase = passphrase
+		}
+	}
+
+	return nil
+}
+
+// loadFileConfig reads and parses the YAML config file at path. If explicit
+// is false (the caller didn't pass -config), a missing file at the default
+// path is not an error and loadFileConfig returns (nil, nil).
+func loadFileConfig(path string, explicit bool) (*fileConfig, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // path is operator-supplied CLI config (-config flag or its default), not untrusted input
+	if err != nil {
+		if !explicit && errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+
+		return nil, fmt.Errorf("reading config file %q: %w", path, err)
+	}
+
+	var fc fileConfig
+	if err := yaml.Unmarshal(data, &fc); err != nil {
+		return nil, fmt.Errorf("parsing config file %q: %w", path, err)
+	}
+
+	return &fc, nil
+}
+
+// applyString sets *dst to val if val is non-empty.
+func applyString(dst *string, val string) {
+	if val != "" {
+		*dst = val
+	}
+}
+
+// applyBool sets *dst to val if val is true (false is indistinguishable
+// from unset, but every bool field here already defaults to false).
+func applyBool(dst *bool, val bool) {
+	if val {
+		*dst = val
+	}
+}
+
+// applyFileJob fills any field of cfg that fj sets, leaving the rest (its
+// current value, typically a built-in default or a shared top-level
+// default already applied) untouched.
+func applyFileJob(cfg *config, fj *fileJob) error {
+	applyString(&cfg.cmd, fj.Cmd)
+	applyString(&cfg.key, fj.Key)
+	applyString(&cfg.gpgBin, fj.GPGBin)
+	applyString(&cfg.gpgHomedir, fj.GPGHomedir)
+
+	applyBool(&cfg.symmetric, fj.Symmetric)
+	applyBool(&cfg.armor, fj.Armor)
+
+	if len(fj.Targets) > 0 {
+		cfg.targetRefs = make([]jobTargetRef, len(fj.Targets))
+		for i, t := range fj.Targets {
+			cfg.targetRefs[i] = jobTargetRef{server: t.Server, bucket: t.Bucket}
+		}
+	}
+
+	if len(fj.Recipients) > 0 {
+		cfg.recipients = append(stringSlice(nil), fj.Recipients...)
+	}
+
+	if fj.Interval != "" {
+		d, err := time.ParseDuration(fj.Interval)
+		if err != nil {
+			return fmt.Errorf("parsing interval %q: %w", fj.Interval, err)
+		}
+
+		cfg.interval = d
+	}
+
+	return nil
+}
