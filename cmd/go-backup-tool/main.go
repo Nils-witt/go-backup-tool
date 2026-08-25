@@ -9,5 +9,5 @@ import (
 )
 
 func main() {
-	os.Exit(backup.Run(os.Args[1:], os.Stderr))
+	os.Exit(backup.Main(os.Args[1:], os.Stderr))
 }

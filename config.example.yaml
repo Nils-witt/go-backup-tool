@@ -3,6 +3,18 @@
 # way to configure a job: go-backup-tool has no CLI flags for cmd, targets,
 # recipients, etc. — only -config (this file's path) and -job (see below).
 #
+# On Windows, go-backup-tool.exe can also run as a Windows service instead
+# of an interactive console process:
+#   go-backup-tool.exe -service=install -config C:\path\to\config.yaml
+#   go-backup-tool.exe -service=start
+# -service=install registers the currently running .exe, plus any other
+# flags given alongside it (like -config above), as the service's command
+# line; -service=stop and -service=uninstall reverse that. Once installed,
+# starting the service runs it the same way as the console invocation, but
+# logging to the Windows Event Log instead of the console (there isn't
+# one), and it shuts down on SCM stop/shutdown requests instead of Ctrl-C.
+# This is Windows-only; on other platforms -service isn't a recognized flag.
+#
 # Every server go-backup-tool can upload to is defined once, by name, under
 # servers:. Jobs never set region/endpoint/path-style/path themselves — a
 # job's targets: list just names which server(s) to upload to and which

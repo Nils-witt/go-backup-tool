@@ -33,6 +33,18 @@ import (
 // job is a one-shot run that has already finished, keeps running to keep
 // that dashboard reachable until ctx is canceled.
 func Run(args []string, stderr io.Writer) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	return runWithContext(ctx, args, stderr)
+}
+
+// runWithContext is Run's implementation, taking an externally supplied base
+// context instead of deriving one from OS signals. This lets a Windows
+// service (see service_windows.go) drive shutdown from Service Control
+// Manager stop/shutdown requests, which — unlike Ctrl-C/SIGTERM — aren't
+// delivered to a service process the normal OS-signal way.
+func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	rc, err := parseFlags(args, stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -43,9 +55,6 @@ func Run(args []string, stderr io.Writer) int {
 
 		return 2
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	if rc.timeout > 0 {
 		var cancel context.CancelFunc
