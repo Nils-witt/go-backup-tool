@@ -139,8 +139,8 @@ func newReceiverMux(receivers map[string]resolvedReceiver) *http.ServeMux {
 	status := newReceiverStatusStore(receivers)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, status, discardLogger))
-	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, status, discardLogger))
+	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, status, discardLogger, nil))
+	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, status, discardLogger, nil))
 
 	return mux
 }

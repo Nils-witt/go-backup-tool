@@ -520,3 +520,51 @@ func TestScheduleStartTimeSkipsCatchUpWhenAlreadyRecorded(t *testing.T) { //noli
 		t.Errorf("marker recorded %d runs, want 0 (already-covered slot must not trigger a catch-up run)", got)
 	}
 }
+
+func TestNeedsRetentionTracking(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		jobs      []*config
+		receivers map[string]resolvedReceiver
+		want      bool
+	}{
+		{name: "no jobs or receivers", want: false},
+		{
+			name: "local target without retention",
+			jobs: []*config{{targets: []target{{kind: serverKindLocal}}}},
+			want: false,
+		},
+		{
+			name: "s3 target with retention field set is irrelevant (not local)",
+			jobs: []*config{{targets: []target{{kind: serverKindS3, retention: time.Hour}}}},
+			want: false,
+		},
+		{
+			name: "local target with retention",
+			jobs: []*config{{targets: []target{{kind: serverKindLocal, retention: time.Hour}}}},
+			want: true,
+		},
+		{
+			name:      "receiver without retention",
+			receivers: map[string]resolvedReceiver{"a": {id: "a"}},
+			want:      false,
+		},
+		{
+			name:      "receiver with retention",
+			receivers: map[string]resolvedReceiver{"a": {id: "a", retention: 24 * time.Hour}},
+			want:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := needsRetentionTracking(tt.jobs, tt.receivers); got != tt.want {
+				t.Errorf("needsRetentionTracking() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

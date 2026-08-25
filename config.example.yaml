@@ -40,10 +40,11 @@
 # "90m" for 90 minutes — "d" for days works alongside every unit Go's
 # time.ParseDuration already supports, including "m" for minutes) to
 # delete its own objects automatically once they're older than that.
-# go-backup-tool tracks what it wrote in a small sqlite database at
-# path/.go-backup-tool-retention.db so it only ever deletes objects it
-# wrote itself; retention is swept after every write to that server, and
-# once at startup. Omit retention (the default) to keep objects forever.
+# go-backup-tool tracks what it wrote in the shared state sqlite database
+# kept alongside this config file (.go-backup-tool-state.db) so it only
+# ever deletes objects it wrote itself; retention is swept after every
+# write to that server, and once at startup. Omit retention (the default)
+# to keep objects forever.
 # A remote server has no retention: of its own — that's configured on the
 # destination instance's matching receivers: entry instead.
 #

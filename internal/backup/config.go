@@ -9,6 +9,7 @@
 package backup
 
 import (
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -62,6 +63,14 @@ type config struct {
 	// uploadTargetWithRetry.
 	retries    int
 	retryDelay time.Duration
+
+	// stateDB is the shared state/retention sqlite database (see
+	// schedule_state.go and retention.go), set on each run's own copy of its
+	// job's config by runner.runOnce so recordLocalWrite/removeRetentionRecord
+	// reach it without every function in the upload call chain needing its
+	// own db parameter. Nil disables retention tracking for this run (e.g.
+	// the db couldn't be opened at startup) — see recordLocalWrite.
+	stateDB *sql.DB
 }
 
 // jobTargetRef is one targets: entry as written in a job: a server name
@@ -239,8 +248,9 @@ type fileJobTarget struct {
 // accepted for days (parsed by parseDayDuration, since the standard library
 // has no day unit; "m" is already minutes in time.ParseDuration, not
 // months); when set, any object this tool writes under path is deleted once
-// it's older than that, tracked via a small sqlite database at
-// path/.go-backup-tool-retention.db (see retention.go). Unset or "0"
+// it's older than that, tracked in the shared state sqlite database kept
+// alongside the config file (see retention.go and schedule_state.go). Unset
+// or "0"
 // disables automatic cleanup. Token (remote only) is the bearer token sent
 // to the destination instance's receiver API, matching one of its
 // receivers: entries' own token — unlike access-key-env/secret-key-env,

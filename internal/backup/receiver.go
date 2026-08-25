@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -192,8 +193,13 @@ func (s *receiverStatusStore) snapshot() []receiverSnapshot {
 // starts serving, for every receiver with retention: set — mirroring
 // sweepStartupRetention's reasoning for local server targets: without this,
 // a receiver would only get swept whenever it next happens to receive a
-// write, potentially long after files there actually expired.
-func sweepStartupReceiverRetention(ctx context.Context, receivers map[string]resolvedReceiver, log *slog.Logger) {
+// write, potentially long after files there actually expired. A nil db
+// (retention tracking unavailable this run) is a no-op.
+func sweepStartupReceiverRetention(ctx context.Context, db *sql.DB, receivers map[string]resolvedReceiver, log *slog.Logger) {
+	if db == nil {
+		return
+	}
+
 	for _, recv := range receivers {
 		if recv.retention <= 0 {
 			continue
@@ -203,7 +209,7 @@ func sweepStartupReceiverRetention(ctx context.Context, receivers map[string]res
 
 		log.Debug("startup receiver retention sweep", "id", recv.id, "path", recv.path, "retention", recv.retention)
 
-		if err := sweepRetentionForTarget(ctx, t, log); err != nil {
+		if err := sweepRetentionForTarget(ctx, db, t, log); err != nil {
 			log.Warn("startup receiver retention sweep failed", "id", recv.id, "err", err)
 		}
 	}

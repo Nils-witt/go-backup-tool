@@ -83,15 +83,14 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		log.Debug("run timeout set", "timeout", rc.timeout)
 	}
 
-	sweepStartupRetention(ctx, rc.jobs, log)
-
 	var stateDB *sql.DB
 
-	// Opened whenever a job needs it for catch-up scheduling, or whenever
-	// the web UI is up to show it: without listen: set, nothing reads the
-	// persisted last-run info, so skip the file entirely for a plain CLI
-	// run.
-	if needsScheduleState(rc.jobs) || rc.listen != "" {
+	// Opened whenever a job needs it for catch-up scheduling, whenever the
+	// web UI is up to show it, or whenever a local target or receiver has
+	// retention: set: without any of those, nothing reads or writes this db,
+	// so skip the file entirely for a plain CLI run with no retention
+	// configured.
+	if needsScheduleState(rc.jobs) || rc.listen != "" || needsRetentionTracking(rc.jobs, rc.receivers) {
 		path := scheduleStateDBPath(rc.configPath)
 
 		db, err := openScheduleStateDB(ctx, path)
@@ -105,6 +104,8 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		}
 	}
 
+	sweepStartupRetention(ctx, stateDB, rc.jobs, log)
+
 	store := newStatusStore(rc.jobs)
 
 	if stateDB != nil {
@@ -116,9 +117,9 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	var srv *webUIServer
 
 	if rc.listen != "" {
-		sweepStartupReceiverRetention(ctx, rc.receivers, log)
+		sweepStartupReceiverRetention(ctx, stateDB, rc.receivers, log)
 
-		srv = startWebUI(rc.listen, store, rc.receivers, log)
+		srv = startWebUI(rc.listen, store, rc.receivers, log, stateDB)
 	}
 
 	var wg sync.WaitGroup
@@ -398,6 +399,7 @@ func nextGridTime(start time.Time, interval time.Duration, now time.Time) time.T
 func (r *runner) runOnce(ctx context.Context, job *config) {
 	run := *job
 	run.key = substituteKeyTime(job.key)
+	run.stateDB = r.stateDB
 
 	log := r.log.With("job", job.name, "key", run.key)
 
@@ -498,8 +500,13 @@ func warnIfKeyWontChange(log *slog.Logger, job *config) {
 // among jobs' targets. Without this, a server whose jobs all run on long
 // intervals would only get swept whenever one of them next happens to write
 // to it — potentially long after files there actually expired, e.g. right
-// after go-backup-tool restarts following a period of downtime.
-func sweepStartupRetention(ctx context.Context, jobs []*config, log *slog.Logger) {
+// after go-backup-tool restarts following a period of downtime. A nil db
+// (retention tracking unavailable this run) is a no-op.
+func sweepStartupRetention(ctx context.Context, db *sql.DB, jobs []*config, log *slog.Logger) {
+	if db == nil {
+		return
+	}
+
 	seen := make(map[string]bool)
 
 	for _, j := range jobs {
@@ -513,9 +520,31 @@ func sweepStartupRetention(ctx context.Context, jobs []*config, log *slog.Logger
 
 			log.Debug("startup retention sweep", "server", t.serverName, "path", t.localPath, "retention", t.retention)
 
-			if err := sweepRetentionForTarget(ctx, t, log); err != nil {
+			if err := sweepRetentionForTarget(ctx, db, t, log); err != nil {
 				log.Warn("startup retention sweep failed", "server", t.serverName, "err", err)
 			}
 		}
 	}
+}
+
+// needsRetentionTracking reports whether any job's local target or any
+// receiver has retention: set, i.e. whether the shared state db needs to be
+// opened purely to support retention tracking (independent of
+// needsScheduleState or -listen).
+func needsRetentionTracking(jobs []*config, receivers map[string]resolvedReceiver) bool {
+	for _, j := range jobs {
+		for i := range j.targets {
+			if j.targets[i].kind == serverKindLocal && j.targets[i].retention > 0 {
+				return true
+			}
+		}
+	}
+
+	for _, recv := range receivers {
+		if recv.retention > 0 {
+			return true
+		}
+	}
+
+	return false
 }

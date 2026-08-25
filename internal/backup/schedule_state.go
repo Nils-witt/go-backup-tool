@@ -15,7 +15,11 @@ import (
 // the config file, tracking each start-time-anchored job's last successful
 // run so a restart can tell a genuinely missed run (nothing recorded for the
 // most recent due grid slot) apart from an ordinary restart of a job that
-// already ran on time.
+// already ran on time. It also holds the objects table (see retention.go)
+// tracking every file written to a local target or receiver with retention:
+// set, so a later sweep knows what's eligible for automatic deletion — one
+// shared database rather than a separate retention db per local root,
+// disambiguated by the per-row server/path columns below.
 const scheduleStateDBName = ".go-backup-tool-state.db"
 
 // scheduleStateDBPath returns the state db path for the config file at
@@ -82,7 +86,80 @@ func openScheduleStateDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
 	}
 
+	// objects records every file go-backup-tool has written to a local
+	// target or receiver with retention: set, so a later sweep (see
+	// retention.go) knows what's eligible for automatic deletion.
+	// retention_seconds records the retention duration in effect when each
+	// object was written, so a later config change to a server's retention:
+	// doesn't retroactively change how long already-written objects are
+	// kept (see sweepRetention). It defaults to 0 ("unknown") so rows from
+	// before this column existed keep sweeping under the target's current
+	// retention, exactly as they did before it was added.
+	const objectsSchema = `CREATE TABLE IF NOT EXISTS objects (
+		server            TEXT NOT NULL,
+		bucket            TEXT NOT NULL,
+		path              TEXT NOT NULL PRIMARY KEY,
+		written_at        TIMESTAMP NOT NULL,
+		retention_seconds INTEGER NOT NULL DEFAULT 0
+	)`
+
+	if _, err := db.ExecContext(ctx, objectsSchema); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
+	}
+
+	if err := ensureRetentionSecondsColumn(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrating job state db %q: %w", path, err)
+	}
+
 	return db, nil
+}
+
+// ensureRetentionSecondsColumn adds the retention_seconds column to objects
+// if it's missing, for a state db created before that column existed.
+// CREATE TABLE IF NOT EXISTS above is a no-op against such a db, so the
+// column has to be added explicitly.
+func ensureRetentionSecondsColumn(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(objects)`)
+	if err != nil {
+		return fmt.Errorf("reading objects table schema: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var found bool
+
+	for rows.Next() {
+		var (
+			cid           int
+			name, colType string
+			notNull, pk   int
+			defaultValue  sql.NullString
+		)
+
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk); err != nil {
+			return fmt.Errorf("reading objects table schema: %w", err)
+		}
+
+		if name == "retention_seconds" {
+			found = true
+			break
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("reading objects table schema: %w", err)
+	}
+
+	if found {
+		return nil
+	}
+
+	if _, err := db.ExecContext(ctx, `ALTER TABLE objects ADD COLUMN retention_seconds INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("adding retention_seconds column: %w", err)
+	}
+
+	return nil
 }
 
 // writeLastSuccess records that job name last completed successfully at at.

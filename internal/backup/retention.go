@@ -5,134 +5,25 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"time"
-
-	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 )
 
-// retentionDBName is the sqlite database go-backup-tool keeps at the root of
-// every local server with retention: set, tracking what it has written there
-// so a later sweep knows what's eligible for automatic deletion. It lives
-// alongside the buckets it tracks rather than e.g. under the job's own
-// config, since a local server may be shared by several jobs, each of which
-// may write under a different retention (see jobTargetRef.retention) — the
-// per-row retention_seconds column below is what actually makes that work,
-// not this database's location.
-const retentionDBName = ".go-backup-tool-retention.db"
-
-// retentionDBPath returns the sqlite database path for a local server whose
-// root directory is localRoot.
-func retentionDBPath(localRoot string) string {
-	return filepath.Join(localRoot, retentionDBName)
-}
-
-// openRetentionDB opens (creating if needed) the retention-tracking sqlite
-// database at path, ensuring its schema exists. The caller must Close it.
-//
-// SetMaxOpenConns(1) serializes every access through a single connection:
-// sqlite handles one writer at a time regardless, and go-backup-tool's own
-// jobs (which may share a local server, and so this same database file) run
-// concurrently, so this avoids "database is locked" errors from this
-// process's own concurrent use rather than relying on busy_timeout alone.
-func openRetentionDB(ctx context.Context, path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, fmt.Errorf("opening retention db %q: %w", path, err)
-	}
-
-	db.SetMaxOpenConns(1)
-
-	// retention_seconds records the retention duration in effect when each
-	// object was written, so a later config change to a server's retention:
-	// doesn't retroactively change how long already-written objects are
-	// kept (see sweepRetention). It defaults to 0 ("unknown") so rows from
-	// before this column existed keep sweeping under the target's current
-	// retention, exactly as they did before it was added.
-	const schema = `CREATE TABLE IF NOT EXISTS objects (
-		server            TEXT NOT NULL,
-		bucket            TEXT NOT NULL,
-		path              TEXT NOT NULL PRIMARY KEY,
-		written_at        TIMESTAMP NOT NULL,
-		retention_seconds INTEGER NOT NULL DEFAULT 0
-	)`
-
-	if _, err := db.ExecContext(ctx, schema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("initializing retention db %q: %w", path, err)
-	}
-
-	if err := ensureRetentionSecondsColumn(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrating retention db %q: %w", path, err)
-	}
-
-	return db, nil
-}
-
-// ensureRetentionSecondsColumn adds the retention_seconds column to objects
-// if it's missing, for a retention db created before that column existed.
-// CREATE TABLE IF NOT EXISTS above is a no-op against such a db, so the
-// column has to be added explicitly.
-func ensureRetentionSecondsColumn(ctx context.Context, db *sql.DB) error {
-	rows, err := db.QueryContext(ctx, `PRAGMA table_info(objects)`)
-	if err != nil {
-		return fmt.Errorf("reading objects table schema: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var found bool
-
-	for rows.Next() {
-		var (
-			cid           int
-			name, colType string
-			notNull, pk   int
-			defaultValue  sql.NullString
-		)
-
-		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk); err != nil {
-			return fmt.Errorf("reading objects table schema: %w", err)
-		}
-
-		if name == "retention_seconds" {
-			found = true
-			break
-		}
-	}
-
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("reading objects table schema: %w", err)
-	}
-
-	if found {
-		return nil
-	}
-
-	if _, err := db.ExecContext(ctx, `ALTER TABLE objects ADD COLUMN retention_seconds INTEGER NOT NULL DEFAULT 0`); err != nil {
-		return fmt.Errorf("adding retention_seconds column: %w", err)
-	}
-
-	return nil
-}
-
-// recordLocalWrite records, in t's server's retention database, that cfg's
-// job just wrote the object at localObjectPath(cfg, t) — then sweeps that
-// server for anything now past its retention window. Only called after a
-// successful write to a local target whose server has retention: set;
-// retention == 0 means no tracking (and so nothing to sweep).
+// recordLocalWrite records, in the shared state db, that cfg's job just
+// wrote the object at localObjectPath(cfg, t) — then sweeps t's server for
+// anything now past its retention window. Only called after a successful
+// write to a local target whose server has retention: set; retention == 0
+// means no tracking (and so nothing to sweep). cfg.stateDB == nil (the db
+// couldn't be opened, or nothing needed it at startup — see
+// needsRetentionTracking) also disables tracking rather than erroring, since
+// the backup write itself already succeeded and this is auxiliary
+// bookkeeping.
 func recordLocalWrite(ctx context.Context, cfg *config, t *target, log *slog.Logger) error {
-	if t.retention <= 0 {
+	if t.retention <= 0 || cfg.stateDB == nil {
 		return nil
 	}
-
-	db, err := openRetentionDB(ctx, retentionDBPath(t.localPath))
-	if err != nil {
-		return err
-	}
-	defer func() { _ = db.Close() }()
 
 	path := localObjectPath(cfg, t)
 
@@ -141,50 +32,39 @@ func recordLocalWrite(ctx context.Context, cfg *config, t *target, log *slog.Log
 
 	retentionSeconds := int64(t.retention / time.Second)
 
-	if _, err := db.ExecContext(ctx, upsert, t.serverName, t.bucket, path, time.Now().UTC(), retentionSeconds); err != nil {
-		return fmt.Errorf("recording write to retention db %q: %w", retentionDBPath(t.localPath), err)
+	if _, err := cfg.stateDB.ExecContext(ctx, upsert, t.serverName, t.bucket, path, time.Now().UTC(), retentionSeconds); err != nil {
+		return fmt.Errorf("recording write to state db: %w", err)
 	}
 
-	log.Debug("recorded write to retention db", "path", path, "server", t.serverName, "retention", t.retention)
+	log.Debug("recorded write to state db", "path", path, "server", t.serverName, "retention", t.retention)
 
-	return sweepRetention(ctx, db, t, log)
+	return sweepRetention(ctx, cfg.stateDB, t, log)
 }
 
-// removeRetentionRecord removes any retention-db record for the object at
+// removeRetentionRecord removes any retention record for the object at
 // localObjectPath(cfg, t), used when that object's write is rolled back
 // (see handleDeleteObject in webui.go) so the database doesn't go on
 // tracking a file that no longer exists.
 func removeRetentionRecord(ctx context.Context, cfg *config, t *target) error {
-	if t.retention <= 0 {
+	if t.retention <= 0 || cfg.stateDB == nil {
 		return nil
 	}
 
-	db, err := openRetentionDB(ctx, retentionDBPath(t.localPath))
-	if err != nil {
-		return err
-	}
-	defer func() { _ = db.Close() }()
-
-	if _, err := db.ExecContext(ctx, `DELETE FROM objects WHERE path = ?`, localObjectPath(cfg, t)); err != nil {
-		return fmt.Errorf("removing retention db record: %w", err)
+	if _, err := cfg.stateDB.ExecContext(ctx, `DELETE FROM objects WHERE path = ?`, localObjectPath(cfg, t)); err != nil {
+		return fmt.Errorf("removing retention record: %w", err)
 	}
 
 	return nil
 }
 
-// sweepRetentionForTarget opens t's server's retention database and sweeps
-// it, for callers (see sweepStartupRetention) that don't already have a
-// *sql.DB open for it.
-func sweepRetentionForTarget(ctx context.Context, t *target, log *slog.Logger) error {
-	if t.retention <= 0 {
+// sweepRetentionForTarget sweeps db for t's server, for callers (see
+// sweepStartupRetention/sweepStartupReceiverRetention) that aren't already
+// in the middle of a write. A nil db (retention tracking unavailable this
+// run — see needsRetentionTracking) is a no-op.
+func sweepRetentionForTarget(ctx context.Context, db *sql.DB, t *target, log *slog.Logger) error {
+	if t.retention <= 0 || db == nil {
 		return nil
 	}
-
-	db, err := openRetentionDB(ctx, retentionDBPath(t.localPath))
-	if err != nil {
-		return err
-	}
-	defer func() { _ = db.Close() }()
 
 	return sweepRetention(ctx, db, t, log)
 }
@@ -216,7 +96,9 @@ func sweepRetention(ctx context.Context, db *sql.DB, t *target, log *slog.Logger
 	var errs []error
 
 	for _, p := range expired {
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Debug("removing expired backup", "path", p, "server", t.serverName, "retention", t.retention)
+
+		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			errs = append(errs, fmt.Errorf("removing expired backup %q: %w", p, err))
 			continue
 		}
@@ -240,7 +122,7 @@ func sweepRetention(ctx context.Context, db *sql.DB, t *target, log *slog.Logger
 func expiredRetentionPaths(ctx context.Context, db *sql.DB, server string, now time.Time, fallbackRetention time.Duration) (paths []string, err error) {
 	rows, err := db.QueryContext(ctx, `SELECT path, written_at, retention_seconds FROM objects WHERE server = ?`, server)
 	if err != nil {
-		return nil, fmt.Errorf("querying retention db: %w", err)
+		return nil, fmt.Errorf("querying retention rows: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -252,7 +134,7 @@ func expiredRetentionPaths(ctx context.Context, db *sql.DB, server string, now t
 		)
 
 		if err := rows.Scan(&p, &writtenAt, &retentionSeconds); err != nil {
-			return nil, fmt.Errorf("reading retention db: %w", err)
+			return nil, fmt.Errorf("reading retention rows: %w", err)
 		}
 
 		retention := time.Duration(retentionSeconds) * time.Second
@@ -266,7 +148,7 @@ func expiredRetentionPaths(ctx context.Context, db *sql.DB, server string, now t
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading retention db: %w", err)
+		return nil, fmt.Errorf("reading retention rows: %w", err)
 	}
 
 	return paths, nil

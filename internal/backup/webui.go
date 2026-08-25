@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -30,8 +31,11 @@ type webUIServer struct {
 // Binding happens synchronously so a bad address is reported immediately and
 // callers can rely on the server being reachable as soon as this returns; it
 // returns nil if addr couldn't be bound, leaving the web UI disabled for
-// this run rather than failing the whole process over a dashboard.
-func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger) *webUIServer {
+// this run rather than failing the whole process over a dashboard. db is the
+// shared state/retention db (see schedule_state.go and retention.go), used
+// by the receiver API's handlers to track retention on incoming writes; nil
+// disables that tracking (see recordLocalWrite).
+func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB) *webUIServer {
 	var lc net.ListenConfig
 
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
@@ -46,8 +50,8 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 	mux.HandleFunc("GET /", handleDashboard)
 	mux.HandleFunc("GET /api/status", handleStatus(store))
 	mux.HandleFunc("GET /api/receivers", handleReceiverStatus(receiverStore))
-	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, receiverStore, log))
-	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, receiverStore, log))
+	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, receiverStore, log, db))
+	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, receiverStore, log, db))
 
 	srv := &webUIServer{
 		http: &http.Server{Handler: logRequests(log, mux), ReadHeaderTimeout: 10 * time.Second},
@@ -142,7 +146,7 @@ func handleReceiverStatus(store *receiverStatusStore) http.HandlerFunc {
 // instance's own local-target writes share the same on-disk behavior
 // (atomic temp-file-then-rename) and retention tracking. Every attempt is
 // recorded to status, win or lose, so /api/receivers reflects it.
-func handleReceiveObject(receivers map[string]resolvedReceiver, status *receiverStatusStore, log *slog.Logger) http.HandlerFunc {
+func handleReceiveObject(receivers map[string]resolvedReceiver, status *receiverStatusStore, log *slog.Logger, db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := authorizeReceiver(w, r, receivers)
 		if !ok {
@@ -155,7 +159,7 @@ func handleReceiveObject(receivers map[string]resolvedReceiver, status *receiver
 			return
 		}
 
-		cfg := &config{key: key}
+		cfg := &config{key: key, stateDB: db}
 		t := receiverTarget(recv)
 
 		if err := writeLocalObject(cfg, t, r.Body); err != nil {
@@ -180,7 +184,7 @@ func handleReceiveObject(receivers map[string]resolvedReceiver, status *receiver
 // receiver API's client-facing counterpart to deleteRemoteObject in
 // pipeline.go. Every attempt is recorded to status, win or lose, so
 // /api/receivers reflects it.
-func handleDeleteObject(receivers map[string]resolvedReceiver, status *receiverStatusStore, log *slog.Logger) http.HandlerFunc {
+func handleDeleteObject(receivers map[string]resolvedReceiver, status *receiverStatusStore, log *slog.Logger, db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := authorizeReceiver(w, r, receivers)
 		if !ok {
@@ -193,7 +197,7 @@ func handleDeleteObject(receivers map[string]resolvedReceiver, status *receiverS
 			return
 		}
 
-		cfg := &config{key: key}
+		cfg := &config{key: key, stateDB: db}
 		t := receiverTarget(recv)
 
 		if err := deleteLocalObject(cfg, t); err != nil {
