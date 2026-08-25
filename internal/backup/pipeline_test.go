@@ -1,15 +1,18 @@
 package backup
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -116,7 +119,55 @@ func TestDeleteLocalObjectMissingFileIsNotError(t *testing.T) {
 	}
 }
 
-func TestUploadToTargetsLocal(t *testing.T) {
+// stageTestContent stages content into a private temp file via the real
+// stageBackup, for tests exercising uploadStagedToTargets/
+// uploadTargetWithRetry against a real file on disk the way runPipeline
+// does, rather than an in-memory reader. The file is removed automatically
+// when the test ends.
+func stageTestContent(t *testing.T, content string) string {
+	t.Helper()
+
+	path, n, err := stageBackup(&config{}, strings.NewReader(content))
+	if err != nil {
+		t.Fatalf("stageBackup() unexpected error: %v", err)
+	}
+
+	if n != int64(len(content)) {
+		t.Fatalf("stageBackup() bytesWritten = %d, want %d", n, len(content))
+	}
+
+	t.Cleanup(func() { _ = os.Remove(path) })
+
+	return path
+}
+
+// collectTargetDone returns an onTargetDone callback safe for the
+// concurrent use uploadStagedToTargets requires (every target's own
+// goroutine calls it), plus a getter for what it collected so far, for
+// tests that need to inspect each target's reported outcome.
+func collectTargetDone(n int) (onDone func(index int, err error), results func() []error) {
+	var mu sync.Mutex
+
+	errs := make([]error, n)
+
+	onDone = func(index int, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		errs[index] = err
+	}
+
+	results = func() []error {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return append([]error(nil), errs...)
+	}
+
+	return onDone, results
+}
+
+func TestUploadStagedToTargetsLocal(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -129,17 +180,15 @@ func TestUploadToTargetsLocal(t *testing.T) {
 
 	const content = "hello from the pipeline"
 
-	targetErrs, bytesWritten, err := uploadToTargets(t.Context(), cfg, strings.NewReader(content), discardLogger)
+	onDone, results := collectTargetDone(len(cfg.targets))
+
+	err := uploadStagedToTargets(t.Context(), cfg, stageTestContent(t, content), onDone, discardLogger)
 	if err != nil {
-		t.Fatalf("uploadToTargets() unexpected error: %v", err)
+		t.Fatalf("uploadStagedToTargets() unexpected error: %v", err)
 	}
 
-	if len(targetErrs) != 1 || targetErrs[0] != nil {
-		t.Fatalf("uploadToTargets() targetErrs = %v, want [nil]", targetErrs)
-	}
-
-	if bytesWritten != int64(len(content)) {
-		t.Errorf("uploadToTargets() bytesWritten = %d, want %d", bytesWritten, len(content))
+	if targetErrs := results(); len(targetErrs) != 1 || targetErrs[0] != nil {
+		t.Fatalf("uploadStagedToTargets() reported target results = %v, want [nil]", targetErrs)
 	}
 
 	got, err := os.ReadFile(localObjectPath(cfg, &cfg.targets[0]))
@@ -152,12 +201,12 @@ func TestUploadToTargetsLocal(t *testing.T) {
 	}
 }
 
-// TestUploadToTargetsContinuesAfterOneTargetFails verifies that a failure
-// writing to one target (here, a local target whose destination directory
-// path is occupied by a file, so os.MkdirAll for it errors) doesn't stop
-// uploadToTargets from finishing the other targets: they should still
-// receive the full stream and succeed independently.
-func TestUploadToTargetsContinuesAfterOneTargetFails(t *testing.T) {
+// TestUploadStagedToTargetsContinuesAfterOneTargetFails verifies that a
+// failure writing to one target (here, a local target whose destination
+// directory path is occupied by a file, so os.MkdirAll for it errors)
+// doesn't stop uploadStagedToTargets from finishing the other targets: they
+// should still receive the full stream and succeed independently.
+func TestUploadStagedToTargetsContinuesAfterOneTargetFails(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -179,21 +228,20 @@ func TestUploadToTargetsContinuesAfterOneTargetFails(t *testing.T) {
 
 	const content = "hello from the pipeline"
 
-	targetErrs, bytesWritten, err := uploadToTargets(t.Context(), cfg, strings.NewReader(content), discardLogger)
+	onDone, results := collectTargetDone(len(cfg.targets))
+
+	err := uploadStagedToTargets(t.Context(), cfg, stageTestContent(t, content), onDone, discardLogger)
 	if err == nil {
-		t.Fatal("uploadToTargets() error = nil, want non-nil because the bad target failed")
+		t.Fatal("uploadStagedToTargets() error = nil, want non-nil because the bad target failed")
 	}
 
+	targetErrs := results()
 	if len(targetErrs) != 2 || targetErrs[0] == nil {
-		t.Fatalf("uploadToTargets() targetErrs = %v, want [<err>, nil]", targetErrs)
+		t.Fatalf("uploadStagedToTargets() reported target results = %v, want [<err>, nil]", targetErrs)
 	}
 
 	if targetErrs[1] != nil {
-		t.Errorf("uploadToTargets() good target err = %v, want nil (other target's failure shouldn't affect it)", targetErrs[1])
-	}
-
-	if bytesWritten != int64(len(content)) {
-		t.Errorf("uploadToTargets() bytesWritten = %d, want %d", bytesWritten, len(content))
+		t.Errorf("uploadStagedToTargets() good target err = %v, want nil (other target's failure shouldn't affect it)", targetErrs[1])
 	}
 
 	got, err := os.ReadFile(localObjectPath(cfg, &cfg.targets[1]))
@@ -206,18 +254,13 @@ func TestUploadToTargetsContinuesAfterOneTargetFails(t *testing.T) {
 	}
 }
 
-// TestUploadToTargetsStuckTargetDoesntCorruptOthers reproduces a bug where a
-// remote target whose dial never completes (here, an unreachable address)
-// poisoned every other target once the run's context expired: net/http
-// closes a stuck request's body (the target's pipe reader) when it gives up
-// on it, and that read-side close turned into io.ErrClosedPipe on the
-// shared io.MultiWriter fan-out uploadToTargets used to write to every
-// target at once. That single error was then used to force-close every
-// target's pipe, so a healthy local target failed with "io: read/write on
-// closed pipe" even though nothing was wrong with it and it hadn't even
-// received any data yet (the stuck target was ahead of it in cfg.targets,
-// so it was still waiting its turn under the old sequential MultiWriter).
-func TestUploadToTargetsStuckTargetDoesntCorruptOthers(t *testing.T) {
+// TestUploadStagedToTargetsIsolatesSlowTarget guards against a bug fixed
+// earlier: every target now opens its own independent handle on the staged
+// file and uploads in its own goroutine, so a target that's slow or stuck
+// (here, a remote target whose dial never completes) cannot block or
+// corrupt any other target's upload, unlike an earlier design that streamed
+// the backup directly to every target through one shared reader.
+func TestUploadStagedToTargetsIsolatesSlowTarget(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -233,23 +276,22 @@ func TestUploadToTargetsStuckTargetDoesntCorruptOthers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 	defer cancel()
 
-	content := bytes.Repeat([]byte("x"), 5<<20) // several 32KB chunks, so the stuck target is ahead of the local one when the deadline hits
+	const content = "hello from the pipeline"
 
-	targetErrs, bytesWritten, err := uploadToTargets(ctx, cfg, bytes.NewReader(content), discardLogger)
+	onDone, results := collectTargetDone(len(cfg.targets))
+
+	err := uploadStagedToTargets(ctx, cfg, stageTestContent(t, content), onDone, discardLogger)
 	if err == nil {
-		t.Fatal("uploadToTargets() error = nil, want non-nil because the remote target failed")
+		t.Fatal("uploadStagedToTargets() error = nil, want non-nil because the remote target failed")
 	}
 
+	targetErrs := results()
 	if targetErrs[0] == nil {
-		t.Error("uploadToTargets() remote target err = nil, want non-nil")
+		t.Error("uploadStagedToTargets() remote target err = nil, want non-nil")
 	}
 
 	if targetErrs[1] != nil {
-		t.Errorf("uploadToTargets() local target err = %v, want nil (the remote target's failure shouldn't affect it)", targetErrs[1])
-	}
-
-	if bytesWritten != int64(len(content)) {
-		t.Errorf("uploadToTargets() bytesWritten = %d, want %d", bytesWritten, len(content))
+		t.Errorf("uploadStagedToTargets() local target err = %v, want nil (the remote target's failure shouldn't affect it)", targetErrs[1])
 	}
 
 	got, readErr := os.ReadFile(localObjectPath(cfg, &cfg.targets[1]))
@@ -257,8 +299,113 @@ func TestUploadToTargetsStuckTargetDoesntCorruptOthers(t *testing.T) {
 		t.Fatalf("reading local target's written file: %v", readErr)
 	}
 
-	if !bytes.Equal(got, content) {
+	if string(got) != content {
 		t.Error("local target's written content does not match source")
+	}
+}
+
+// TestUploadTargetWithRetryRecoversTransientFailure verifies the retry
+// behavior itself: a target that fails its first two attempts and succeeds
+// on the third should end up successful, with every attempt (including the
+// two that failed) having read the full staged content — retrying a target
+// re-reads the same local file rather than needing the backup re-run.
+func TestUploadTargetWithRetryRecoversTransientFailure(t *testing.T) {
+	t.Parallel()
+
+	const content = "hello from the pipeline"
+
+	var (
+		mu       sync.Mutex
+		requests int
+		bodies   []string
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+
+		mu.Lock()
+		requests++
+		n := requests
+
+		bodies = append(bodies, string(body))
+		mu.Unlock()
+
+		if n < 3 {
+			http.Error(w, "transient failure", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	cfg := &config{key: "backup.gpg", retries: 3, retryDelay: time.Millisecond}
+	tgt := &target{serverName: "flaky", kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a", token: "x"}
+
+	err := uploadTargetWithRetry(t.Context(), cfg, tgt, stageTestContent(t, content), discardLogger)
+	if err != nil {
+		t.Fatalf("uploadTargetWithRetry() unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if requests != 3 {
+		t.Errorf("requests = %d, want 3 (2 failures + 1 success)", requests)
+	}
+
+	for i, body := range bodies {
+		if body != content {
+			t.Errorf("attempt %d body = %q, want %q", i+1, body, content)
+		}
+	}
+}
+
+// TestUploadTargetWithRetryExhausted verifies that a target which never
+// succeeds is retried exactly cfg.retries times and then reported as
+// failed, without affecting the staged file itself (nothing here re-runs
+// the backup).
+func TestUploadTargetWithRetryExhausted(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, "always fails", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	cfg := &config{key: "backup.gpg", retries: 2, retryDelay: time.Millisecond}
+	tgt := &target{serverName: "always-down", kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a", token: "x"}
+
+	err := uploadTargetWithRetry(t.Context(), cfg, tgt, stageTestContent(t, "hello"), discardLogger)
+	if err == nil {
+		t.Fatal("uploadTargetWithRetry() error = nil, want non-nil")
+	}
+
+	if got := requests.Load(); got != 2 {
+		t.Errorf("requests = %d, want 2 (cfg.retries)", got)
+	}
+}
+
+// TestUploadTargetWithRetryZeroTriesOnce verifies that a *config built
+// directly (retries left at its Go zero value, as many tests and any code
+// that doesn't go through newConfigDefaults do) still uploads once instead
+// of never attempting the upload at all.
+func TestUploadTargetWithRetryZeroTriesOnce(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := &config{key: "backup.gpg"} // retries left at 0
+	tgt := &target{serverName: "nas", kind: serverKindLocal, bucket: "sub", localPath: dir}
+
+	if err := uploadTargetWithRetry(t.Context(), cfg, tgt, stageTestContent(t, "hello"), discardLogger); err != nil {
+		t.Fatalf("uploadTargetWithRetry() unexpected error: %v", err)
+	}
+
+	if _, err := os.Stat(localObjectPath(cfg, tgt)); err != nil {
+		t.Errorf("target was never uploaded to: %v", err)
 	}
 }
 

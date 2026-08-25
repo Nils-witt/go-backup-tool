@@ -1,7 +1,11 @@
 // Package backup implements go-backup-tool's pipeline: run a shell command,
-// encrypt its stdout with gpg, and stream the ciphertext to one or more
-// targets: an S3 (or S3-compatible) bucket, a directory on the local
-// filesystem, or another go-backup-tool instance's receiver API.
+// encrypt its stdout with gpg, stage the ciphertext to a local temp file,
+// then upload that file to one or more targets: an S3 (or S3-compatible)
+// bucket, a directory on the local filesystem, or another go-backup-tool
+// instance's receiver API. Each target uploads (and retries on failure)
+// independently from the staged file, so one target's trouble never
+// requires re-running the backup command or gpg, and never affects any
+// other target.
 package backup
 
 import (
@@ -43,6 +47,21 @@ type config struct {
 	interval   time.Duration // repeat every interval; 0 runs the job once
 	startTime  time.Time     // anchors the interval grid; zero means "run immediately, then every interval"
 	passphrase string        // resolved from GPG_PASSPHRASE when symmetric
+
+	// stagingDir is the directory the encrypted backup is written to before
+	// any target upload starts (see stageBackup); empty means the OS default
+	// temp directory (os.CreateTemp's behavior when given "").
+	stagingDir string
+
+	// retries is how many times each target's upload is attempted (1 means
+	// no retry) before that target is reported as failed; retryDelay is how
+	// long to wait between attempts. Retries are per target: one target
+	// exhausting its retries doesn't affect any other target's attempts, and
+	// none of them re-run the backup command or gpg, since every attempt
+	// re-reads the same already-staged local file. See
+	// uploadTargetWithRetry.
+	retries    int
+	retryDelay time.Duration
 }
 
 // jobTargetRef is one targets: entry as written in a job: a server name
@@ -139,6 +158,8 @@ const (
 	defaultKeyPattern = "backup-{time}.gpg"
 	defaultRegion     = "us-east-1"
 	defaultGPGBin     = "gpg"
+	defaultRetries    = 3
+	defaultRetryDelay = 5 * time.Second
 )
 
 // fileJob mirrors config's per-job fields for YAML unmarshaling, used both
@@ -162,6 +183,9 @@ type fileJob struct {
 	GPGHomedir string          `yaml:"gpg-homedir"`
 	Interval   string          `yaml:"interval"`
 	StartTime  string          `yaml:"start-time"`
+	StagingDir string          `yaml:"staging-dir"`
+	Retries    int             `yaml:"retries"`
+	RetryDelay string          `yaml:"retry-delay"`
 }
 
 // fileJobTarget mirrors jobTargetRef for YAML unmarshaling.
@@ -715,8 +739,10 @@ func resolveTargetCredentials(jobs []*config) error {
 // every job before its config file fields are layered on top.
 func newConfigDefaults() *config {
 	return &config{
-		key:    defaultKeyPattern,
-		gpgBin: defaultGPGBin,
+		key:        defaultKeyPattern,
+		gpgBin:     defaultGPGBin,
+		retries:    defaultRetries,
+		retryDelay: defaultRetryDelay,
 	}
 }
 
@@ -856,9 +882,27 @@ func applyFileJob(cfg *config, fj *fileJob) error {
 	applyString(&cfg.key, fj.Key)
 	applyString(&cfg.gpgBin, fj.GPGBin)
 	applyString(&cfg.gpgHomedir, fj.GPGHomedir)
+	applyString(&cfg.stagingDir, fj.StagingDir)
 
 	applyBool(&cfg.symmetric, fj.Symmetric)
 	applyBool(&cfg.armor, fj.Armor)
+
+	// fj.Retries == 0 is indistinguishable from "not set in this fj" (YAML's
+	// zero value for an omitted int), same ambiguity applyBool documents for
+	// bool fields; retries: 0 wouldn't be a meaningful setting anyway (there
+	// would be no attempts at all), so treating it as unset costs nothing.
+	if fj.Retries > 0 {
+		cfg.retries = fj.Retries
+	}
+
+	if fj.RetryDelay != "" {
+		d, err := time.ParseDuration(fj.RetryDelay)
+		if err != nil {
+			return fmt.Errorf("parsing retry-delay %q: %w", fj.RetryDelay, err)
+		}
+
+		cfg.retryDelay = d
+	}
 
 	if len(fj.Targets) > 0 {
 		cfg.targetRefs = make([]jobTargetRef, len(fj.Targets))

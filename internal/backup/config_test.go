@@ -1559,3 +1559,132 @@ jobs:
 		t.Fatalf("parseFlags() error = %v, want substring %q", err, `duplicate receiver id "dup"`)
 	}
 }
+
+func TestParseFlagsRetriesDefaults(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	cfg := singleJob(t, rc)
+	if cfg.retries != defaultRetries {
+		t.Errorf("cfg.retries = %v, want %v", cfg.retries, defaultRetries)
+	}
+
+	if cfg.retryDelay != defaultRetryDelay {
+		t.Errorf("cfg.retryDelay = %v, want %v", cfg.retryDelay, defaultRetryDelay)
+	}
+
+	if cfg.stagingDir != "" {
+		t.Errorf("cfg.stagingDir = %q, want empty (OS default temp dir)", cfg.stagingDir)
+	}
+}
+
+func TestParseFlagsRetriesAndStagingDir(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+    retries: 5
+    retry-delay: 30s
+    staging-dir: /var/lib/go-backup-tool/staging
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	cfg := singleJob(t, rc)
+	if cfg.retries != 5 {
+		t.Errorf("cfg.retries = %v, want 5", cfg.retries)
+	}
+
+	if cfg.retryDelay != 30*time.Second {
+		t.Errorf("cfg.retryDelay = %v, want 30s", cfg.retryDelay)
+	}
+
+	if cfg.stagingDir != "/var/lib/go-backup-tool/staging" {
+		t.Errorf("cfg.stagingDir = %q, want %q", cfg.stagingDir, "/var/lib/go-backup-tool/staging")
+	}
+}
+
+func TestParseFlagsRetryDelayBadFileValue(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+    retry-delay: "not-a-duration"
+`)
+
+	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "parsing retry-delay") {
+		t.Fatalf("parseFlags() error = %v, want substring %q", err, "parsing retry-delay")
+	}
+}
+
+func TestParseFlagsMultiJobPerJobRetries(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+retries: 2
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: default-retries
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+  - name: custom-retries
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+    retries: 7
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	want := map[string]int{"default-retries": 2, "custom-retries": 7}
+
+	for _, j := range rc.jobs {
+		if j.retries != want[j.name] {
+			t.Errorf("job %q retries = %v, want %v", j.name, j.retries, want[j.name])
+		}
+	}
+}

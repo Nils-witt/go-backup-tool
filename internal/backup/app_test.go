@@ -2,6 +2,9 @@ package backup
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -72,6 +75,99 @@ func TestRunOnceRecordsLastRunToStateDB(t *testing.T) { //nolint:paralleltest //
 
 	if run.End.Before(run.Start) {
 		t.Errorf("run.End %v is before run.Start %v", run.End, run.Start)
+	}
+}
+
+// TestRunOnceRefreshesEachTargetIndependently verifies the live status
+// store reflects a fast target's outcome as soon as that target finishes,
+// without waiting for a slower target (here, a remote target whose response
+// the test holds back deliberately) still in progress — i.e. the web UI's
+// /api/status can show one target as done while another is still running,
+// rather than every target flipping from running to its final state
+// together only once the whole job completes. See runPipeline's
+// onTargetDone and runOnce's wiring of it to store.targetDone.
+func TestRunOnceRefreshesEachTargetIndependently(t *testing.T) {
+	if _, err := exec.LookPath("gpg"); err != nil {
+		t.Skip("gpg not found in PATH, skipping")
+	}
+
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	release := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // held open until the test says the slow target may finish
+
+		_, _ = io.Copy(io.Discard, r.Body)
+
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	job := &config{
+		name:       "test",
+		cmd:        "echo hi",
+		key:        "backup-{time}.gpg",
+		symmetric:  true,
+		passphrase: "unit-test-passphrase",
+		gpgBin:     "gpg",
+		targets: []target{
+			{serverName: "slow-remote", kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a", token: "x"},
+			{serverName: "fast-local", kind: serverKindLocal, bucket: "sub", localPath: dir},
+		},
+	}
+
+	store := newStatusStore([]*config{job})
+	r := &runner{log: discardLogger, store: store}
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		r.runOnce(context.Background(), job)
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+
+	for {
+		if time.Now().After(deadline) {
+			close(release)
+			<-done
+
+			t.Fatal("timed out waiting for the fast local target to finish independently of the slow remote target")
+		}
+
+		snap := store.snapshot()
+		remoteState := snap[0].Targets[0].State
+		localState := snap[0].Targets[1].State
+
+		if localState == stateOK {
+			if remoteState != stateRunning {
+				close(release)
+				<-done
+
+				t.Fatalf("local target finished, but remote target state = %q, want %q (it should still be in flight, held by the test)", remoteState, stateRunning)
+			}
+
+			break
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	close(release)
+	<-done
+
+	snap := store.snapshot()
+	if snap[0].Targets[0].State != stateOK {
+		t.Errorf("remote target final state = %q, want %q", snap[0].Targets[0].State, stateOK)
+	}
+
+	if snap[0].Targets[1].State != stateOK {
+		t.Errorf("local target final state = %q, want %q", snap[0].Targets[1].State, stateOK)
 	}
 }
 

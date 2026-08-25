@@ -399,10 +399,18 @@ func (r *runner) runOnce(ctx context.Context, job *config) {
 	r.store.starting(job.name)
 	log.Info("job starting", "targets", len(run.targets))
 
-	targetErrs, bytesWritten, err := runPipeline(ctx, &run, log)
+	// Refreshes this target's state (in both the live status store and the
+	// state db) the moment its own outcome is known, independently of every
+	// other target and without waiting for the whole job to finish — see
+	// runPipeline's onTargetDone doc.
+	onTargetDone := func(index int, terr error) {
+		r.store.targetDone(job.name, index, terr)
+		r.persistTargetRun(ctx, job.name, index, terr)
+	}
+
+	bytesWritten, err := runPipeline(ctx, &run, log, onTargetDone)
 	duration := time.Since(start)
 
-	r.recordTargetResults(ctx, job.name, run.targets, targetErrs, err)
 	r.store.finished(job.name, err, bytesWritten)
 	r.recordLastRun(ctx, job.name, start, err, bytesWritten)
 
@@ -430,31 +438,6 @@ func (r *runner) runOnce(ctx context.Context, job *config) {
 			log.Info("uploaded target", "target", targetLabel(t), "url", remoteObjectURL(t, run.key))
 		case serverKindS3:
 			log.Info("uploaded target", "target", targetLabel(t), "url", fmt.Sprintf("s3://%s/%s", t.bucket, run.key))
-		}
-	}
-}
-
-// recordTargetResults updates the status store's per-target state for a
-// finished run, and persists each target's success/failure to the state db
-// (see persistTargetRun) so it survives a restart. targetErrs is
-// index-aligned with targets when runPipeline reached the upload stage; if
-// it failed earlier (e.g. the source command never started), targetErrs is
-// empty and every target is instead marked with the run's overall error,
-// since no target-specific detail exists.
-func (r *runner) recordTargetResults(ctx context.Context, jobName string, targets []target, targetErrs []error, err error) {
-	if len(targetErrs) == len(targets) {
-		for i, terr := range targetErrs {
-			r.store.targetDone(jobName, i, terr)
-			r.persistTargetRun(ctx, jobName, i, terr)
-		}
-
-		return
-	}
-
-	if err != nil {
-		for i := range targets {
-			r.store.targetDone(jobName, i, err)
-			r.persistTargetRun(ctx, jobName, i, err)
 		}
 	}
 }

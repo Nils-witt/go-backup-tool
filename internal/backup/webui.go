@@ -176,10 +176,10 @@ func handleReceiveObject(receivers map[string]resolvedReceiver, status *receiver
 	}
 }
 
-// handleDeleteObject serves DELETE /api/v1/objects/{id}/{key...}, used by a
-// sending instance's cleanupPartialUpload to roll back a partial upload
-// after a mid-stream pipeline failure. Every attempt is recorded to status,
-// win or lose, so /api/receivers reflects it.
+// handleDeleteObject serves DELETE /api/v1/objects/{id}/{key...}, the
+// receiver API's client-facing counterpart to deleteRemoteObject in
+// pipeline.go. Every attempt is recorded to status, win or lose, so
+// /api/receivers reflects it.
 func handleDeleteObject(receivers map[string]resolvedReceiver, status *receiverStatusStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := authorizeReceiver(w, r, receivers)

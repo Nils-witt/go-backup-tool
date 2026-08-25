@@ -150,8 +150,8 @@ func recordLocalWrite(ctx context.Context, cfg *config, t *target, log *slog.Log
 
 // removeRetentionRecord removes any retention-db record for the object at
 // localObjectPath(cfg, t), used when that object's write is rolled back
-// after a mid-stream pipeline failure (see cleanupPartialUpload) so the
-// database doesn't go on tracking a file that no longer exists.
+// (see handleDeleteObject in webui.go) so the database doesn't go on
+// tracking a file that no longer exists.
 func removeRetentionRecord(ctx context.Context, cfg *config, t *target) error {
 	if t.retention <= 0 {
 		return nil
