@@ -127,13 +127,17 @@ func TestUploadToTargetsLocal(t *testing.T) {
 
 	const content = "hello from the pipeline"
 
-	targetErrs, err := uploadToTargets(t.Context(), cfg, strings.NewReader(content))
+	targetErrs, bytesWritten, err := uploadToTargets(t.Context(), cfg, strings.NewReader(content))
 	if err != nil {
 		t.Fatalf("uploadToTargets() unexpected error: %v", err)
 	}
 
 	if len(targetErrs) != 1 || targetErrs[0] != nil {
 		t.Fatalf("uploadToTargets() targetErrs = %v, want [nil]", targetErrs)
+	}
+
+	if bytesWritten != int64(len(content)) {
+		t.Errorf("uploadToTargets() bytesWritten = %d, want %d", bytesWritten, len(content))
 	}
 
 	got, err := os.ReadFile(localObjectPath(cfg, &cfg.targets[0]))

@@ -40,6 +40,7 @@ type config struct {
 	gpgBin     string
 	gpgHomedir string
 	interval   time.Duration // repeat every interval; 0 runs the job once
+	startTime  time.Time     // anchors the interval grid; zero means "run immediately, then every interval"
 	passphrase string        // resolved from GPG_PASSPHRASE when symmetric
 }
 
@@ -112,9 +113,10 @@ type target struct {
 // runConfig is the result of parseFlags: one or more jobs to run, plus the
 // overall run timeout and the optional web UI listen address.
 type runConfig struct {
-	jobs    []*config
-	timeout time.Duration
-	listen  string // empty disables the web UI; see fileConfig.Listen
+	jobs       []*config
+	timeout    time.Duration
+	listen     string // empty disables the web UI; see fileConfig.Listen
+	configPath string // where the config file was loaded from; state db lives alongside it
 }
 
 // Built-in defaults for fields a job's or server's config file entry
@@ -146,6 +148,7 @@ type fileJob struct {
 	GPGBin     string          `yaml:"gpg-bin"`
 	GPGHomedir string          `yaml:"gpg-homedir"`
 	Interval   string          `yaml:"interval"`
+	StartTime  string          `yaml:"start-time"`
 }
 
 // fileJobTarget mirrors jobTargetRef for YAML unmarshaling.
@@ -273,7 +276,7 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 		}
 	}
 
-	return &runConfig{jobs: jobs, timeout: timeout, listen: strings.TrimSpace(fileCfg.Listen)}, nil
+	return &runConfig{jobs: jobs, timeout: timeout, listen: strings.TrimSpace(fileCfg.Listen), configPath: configPath}, nil
 }
 
 // resolveJobs builds the list of jobs to run from fileCfg's jobs: list,
@@ -633,6 +636,8 @@ func validateJob(cfg *config) error {
 		return jobError(cfg, errors.New("specify at least one recipient, or set symmetric: true"))
 	case cfg.interval < 0:
 		return jobError(cfg, errors.New("interval must not be negative"))
+	case !cfg.startTime.IsZero() && cfg.interval <= 0:
+		return jobError(cfg, errors.New("start-time requires interval"))
 	}
 
 	return nil
@@ -748,6 +753,15 @@ func applyFileJob(cfg *config, fj *fileJob) error {
 		}
 
 		cfg.interval = d
+	}
+
+	if fj.StartTime != "" {
+		t, err := time.Parse(time.RFC3339, fj.StartTime)
+		if err != nil {
+			return fmt.Errorf("parsing start-time %q: %w", fj.StartTime, err)
+		}
+
+		cfg.startTime = t
 	}
 
 	return nil

@@ -19,6 +19,29 @@ func newTestStore() (*statusStore, *config) {
 	return newStatusStore([]*config{cfg}), cfg
 }
 
+func TestFormatBytes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		n    int64
+		want string
+	}{
+		{0, "0 B"},
+		{1, "1 B"},
+		{1023, "1023 B"},
+		{1024, "1.0 KiB"},
+		{1536, "1.5 KiB"},
+		{1024 * 1024, "1.0 MiB"},
+		{1024 * 1024 * 1024, "1.0 GiB"},
+	}
+
+	for _, tt := range tests {
+		if got := formatBytes(tt.n); got != tt.want {
+			t.Errorf("formatBytes(%d) = %q, want %q", tt.n, got, tt.want)
+		}
+	}
+}
+
 func TestNewStatusStoreStartsIdle(t *testing.T) {
 	t.Parallel()
 
@@ -53,7 +76,7 @@ func TestStatusStoreLifecycleSuccess(t *testing.T) {
 	store.starting("test")
 	store.targetDone("test", 0, nil)
 	store.targetDone("test", 1, nil)
-	store.finished("test", nil)
+	store.finished("test", nil, 2048)
 
 	snap := store.snapshot()[0]
 
@@ -63,6 +86,10 @@ func TestStatusStoreLifecycleSuccess(t *testing.T) {
 
 	if snap.Duration == "" {
 		t.Error("job Duration is empty after finished()")
+	}
+
+	if snap.Size != "2.0 KiB" {
+		t.Errorf("job Size = %q, want %q", snap.Size, "2.0 KiB")
 	}
 
 	for i, tgt := range snap.Targets {
@@ -81,12 +108,16 @@ func TestStatusStoreLifecycleFailure(t *testing.T) {
 	store.starting("test")
 	store.targetDone("test", 0, nil)
 	store.targetDone("test", 1, boom)
-	store.finished("test", boom)
+	store.finished("test", boom, 0)
 
 	snap := store.snapshot()[0]
 
 	if snap.State != stateFailed || snap.Error != "boom" {
 		t.Errorf("job = {state: %q, error: %q}, want {failed, boom}", snap.State, snap.Error)
+	}
+
+	if snap.Size != "" {
+		t.Errorf("job Size = %q after a failed run, want empty (no successful write to report)", snap.Size)
 	}
 
 	if snap.Targets[0].State != stateOK {
@@ -106,7 +137,7 @@ func TestStatusStoreStartingResetsPriorError(t *testing.T) {
 
 	store.starting("test")
 	store.targetDone("test", 0, boom)
-	store.finished("test", boom)
+	store.finished("test", boom, 0)
 
 	store.starting("test")
 
@@ -131,11 +162,113 @@ func TestStatusStoreUnknownJobAndTargetAreNoOps(t *testing.T) {
 	store.targetDone("nope", 0, nil)
 	store.targetDone("test", 99, nil)
 	store.targetDone("test", -1, nil)
-	store.finished("nope", nil)
+	store.finished("nope", nil, 0)
 
 	snap := store.snapshot()[0]
 	if snap.State != stateIdle {
 		t.Errorf("job State = %q after no-op calls, want idle", snap.State)
+	}
+}
+
+func TestNewStatusStoreInitializesNextRunFromStartTime(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+	cfg := &config{name: "test", interval: time.Hour, startTime: start}
+
+	store := newStatusStore([]*config{cfg})
+
+	if got := store.snapshot()[0].NextRun; !got.Equal(start) {
+		t.Errorf("snapshot()[0].NextRun = %v, want %v", got, start)
+	}
+}
+
+func TestNewStatusStoreNextRunZeroWithoutStartTime(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore()
+
+	if got := store.snapshot()[0].NextRun; !got.IsZero() {
+		t.Errorf("snapshot()[0].NextRun = %v, want zero", got)
+	}
+}
+
+func TestStatusStoreSetNextRun(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore()
+
+	want := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+	store.setNextRun("test", want)
+
+	if got := store.snapshot()[0].NextRun; !got.Equal(want) {
+		t.Errorf("snapshot()[0].NextRun = %v, want %v", got, want)
+	}
+
+	// Unknown job name must not panic and must not create an entry.
+	store.setNextRun("nope", want)
+}
+
+func TestStatusStoreSeedLastRunSuccess(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore()
+
+	start := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+	end := start.Add(5 * time.Second)
+
+	store.seedLastRun("test", lastRun{Start: start, End: end, State: stateOK, Size: 2048})
+
+	snap := store.snapshot()[0]
+
+	if snap.State != stateOK {
+		t.Errorf("job State = %q, want ok", snap.State)
+	}
+
+	if !snap.LastStart.Equal(start) || !snap.LastEnd.Equal(end) {
+		t.Errorf("job LastStart/LastEnd = %v/%v, want %v/%v", snap.LastStart, snap.LastEnd, start, end)
+	}
+
+	if snap.Duration != "5s" {
+		t.Errorf("job Duration = %q, want %q", snap.Duration, "5s")
+	}
+
+	if snap.Size != "2.0 KiB" {
+		t.Errorf("job Size = %q, want %q", snap.Size, "2.0 KiB")
+	}
+}
+
+func TestStatusStoreSeedLastRunFailure(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore()
+
+	start := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+	end := start.Add(time.Second)
+
+	store.seedLastRun("test", lastRun{Start: start, End: end, State: stateFailed, Error: "boom"})
+
+	snap := store.snapshot()[0]
+
+	if snap.State != stateFailed || snap.Error != "boom" {
+		t.Errorf("job = {state: %q, error: %q}, want {failed, boom}", snap.State, snap.Error)
+	}
+
+	if snap.Size != "" {
+		t.Errorf("job Size = %q after seeding a failed run, want empty", snap.Size)
+	}
+}
+
+func TestStatusStoreSeedLastRunUnknownJobIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore()
+
+	store.seedLastRun("nope", lastRun{State: stateOK})
+
+	snap := store.snapshot()[0]
+	if snap.State != stateIdle {
+		t.Errorf("job State = %q after seeding an unknown job, want idle", snap.State)
 	}
 }
 

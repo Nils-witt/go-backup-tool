@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -65,8 +66,29 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 
 	sweepStartupRetention(ctx, rc.jobs, stderr)
 
+	var stateDB *sql.DB
+
+	// Opened whenever a job needs it for catch-up scheduling, or whenever
+	// the web UI is up to show it: without listen: set, nothing reads the
+	// persisted last-run info, so skip the file entirely for a plain CLI
+	// run.
+	if needsScheduleState(rc.jobs) || rc.listen != "" {
+		db, err := openScheduleStateDB(ctx, scheduleStateDBPath(rc.configPath))
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, "warning: opening job state db:", err)
+		} else {
+			stateDB = db
+			defer func() { _ = db.Close() }()
+		}
+	}
+
 	store := newStatusStore(rc.jobs)
-	r := &runner{stderr: stderr, store: store}
+
+	if stateDB != nil {
+		seedStatusFromState(ctx, stateDB, rc.jobs, store, stderr)
+	}
+
+	r := &runner{stderr: stderr, store: store, stateDB: stateDB}
 
 	var srv *webUIServer
 	if rc.listen != "" {
@@ -105,31 +127,208 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 // runner tracks whether any job run has failed across the concurrently
 // scheduled jobs.
 type runner struct {
-	stderr io.Writer
-	store  *statusStore
-	failed atomic.Bool
+	stderr  io.Writer
+	store   *statusStore
+	stateDB *sql.DB // nil if no job uses start-time, or the db couldn't be opened
+	failed  atomic.Bool
 }
 
-// schedule runs job once immediately, then, if job.interval > 0, keeps
-// re-running it every interval until ctx is done.
-func (r *runner) schedule(ctx context.Context, job *config) {
-	r.runOnce(ctx, job)
+// seedStatusFromState initializes store's jobs from previously persisted
+// last-run info (see readLastRun), so a restart's web UI can still show
+// when each job last ran instead of every job reverting to "never" until it
+// next runs. Called once at startup, before the jobs' own goroutines start.
+func seedStatusFromState(ctx context.Context, db *sql.DB, jobs []*config, store *statusStore, stderr io.Writer) {
+	for _, j := range jobs {
+		run, ok, err := readLastRun(ctx, db, j.name)
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, "warning:", err)
+			continue
+		}
 
-	if job.interval <= 0 {
+		if !ok {
+			continue
+		}
+
+		store.seedLastRun(j.name, run)
+	}
+}
+
+// needsScheduleState reports whether any job sets start-time, i.e. whether
+// the state db needs to be opened at all.
+func needsScheduleState(jobs []*config) bool {
+	for _, j := range jobs {
+		if !j.startTime.IsZero() {
+			return true
+		}
+	}
+
+	return false
+}
+
+// lastJobSuccess returns job name's last recorded successful run, or the
+// zero Time if none is recorded (or state tracking is unavailable) — which
+// correctly makes an unknown job look due for a catch-up run.
+func (r *runner) lastJobSuccess(ctx context.Context, name string) time.Time {
+	if r.stateDB == nil {
+		return time.Time{}
+	}
+
+	t, ok, err := readLastSuccess(ctx, r.stateDB, name)
+	if err != nil {
+		_, _ = fmt.Fprintln(r.stderr, "warning:", err)
+		return time.Time{}
+	}
+
+	if !ok {
+		return time.Time{}
+	}
+
+	return t
+}
+
+// recordJobSuccess persists that job name just completed successfully, so a
+// future restart can tell this run's grid slot isn't missed.
+func (r *runner) recordJobSuccess(ctx context.Context, name string) {
+	if r.stateDB == nil {
 		return
 	}
 
-	ticker := time.NewTicker(job.interval)
-	defer ticker.Stop()
+	if err := writeLastSuccess(ctx, r.stateDB, name, time.Now()); err != nil {
+		_, _ = fmt.Fprintln(r.stderr, "warning:", err)
+	}
+}
 
-	for {
-		select {
-		case <-ctx.Done():
+// recordLastRun persists job name's just-finished run (whether it succeeded
+// or failed, and regardless of whether it uses start-time), so a future
+// restart's web UI can still show it via seedStatusFromState — unlike
+// recordJobSuccess, which only tracks successes and only matters for
+// start-time-anchored jobs' catch-up scheduling.
+func (r *runner) recordLastRun(ctx context.Context, name string, start time.Time, err error, size int64) {
+	if r.stateDB == nil {
+		return
+	}
+
+	run := lastRun{Start: start, End: time.Now(), State: stateOK, Size: size}
+
+	if err != nil {
+		run.State = stateFailed
+		run.Error = err.Error()
+		run.Size = 0
+	}
+
+	if err := writeLastRun(ctx, r.stateDB, name, run); err != nil {
+		_, _ = fmt.Fprintln(r.stderr, "warning:", err)
+	}
+}
+
+// schedule runs job on its configured cadence until ctx is done.
+//
+// A job with no start-time runs once immediately, then, if job.interval > 0,
+// keeps re-running it every interval — the original behavior, unchanged.
+//
+// A job with start-time set runs on the start-time, start-time+interval,
+// start-time+2*interval, ... grid. If the most recent due grid slot has no
+// recorded successful run (see lastJobSuccess), it's a genuinely missed run
+// (e.g. the process was down through it) and schedule catches up with a
+// single immediate run; otherwise it just waits for the next future slot.
+// Every subsequent run recomputes its next slot from start-time rather than
+// accumulating +interval, so the schedule stays exactly grid-aligned
+// regardless of how long a run takes.
+func (r *runner) schedule(ctx context.Context, job *config) {
+	if job.startTime.IsZero() {
+		r.runOnce(ctx, job)
+
+		if job.interval <= 0 {
 			return
-		case <-ticker.C:
-			r.runOnce(ctx, job)
+		}
+
+		r.store.setNextRun(job.name, time.Now().Add(job.interval))
+
+		ticker := time.NewTicker(job.interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				r.runOnce(ctx, job)
+				r.store.setNextRun(job.name, time.Now().Add(job.interval))
+			}
 		}
 	}
+
+	next := job.startTime
+
+	if due, ok := lastDueSlot(job.startTime, job.interval, time.Now()); ok &&
+		!r.lastJobSuccess(ctx, job.name).Before(due) {
+		// The most recent due slot is already covered by a recorded
+		// success (e.g. we restarted moments after an on-time run) — no
+		// run was actually missed, so don't fire an extra one now.
+		next = nextGridTime(job.startTime, job.interval, time.Now())
+	}
+
+	r.store.setNextRun(job.name, next)
+
+	for {
+		if !waitUntil(ctx, next) {
+			return
+		}
+
+		r.runOnce(ctx, job)
+
+		next = nextGridTime(job.startTime, job.interval, time.Now())
+		r.store.setNextRun(job.name, next)
+	}
+}
+
+// waitUntil blocks until t, or ctx is done (returning false). Returns
+// immediately (true) if t is already in the past — this is what lets a
+// start-time-anchored job catch up a missed run on startup instead of
+// waiting out a full interval.
+func waitUntil(ctx context.Context, t time.Time) bool {
+	d := time.Until(t)
+	if d <= 0 {
+		return true
+	}
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// lastDueSlot returns the most recent grid slot (start, start+interval, ...)
+// that is <= now, and false if start itself hasn't arrived yet.
+func lastDueSlot(start time.Time, interval time.Duration, now time.Time) (time.Time, bool) {
+	if now.Before(start) {
+		return time.Time{}, false
+	}
+
+	steps := int64(now.Sub(start) / interval)
+
+	return start.Add(interval * time.Duration(steps)), true
+}
+
+// nextGridTime returns the earliest time strictly after now that lies on
+// start's interval grid (start, start+interval, start+2*interval, ...).
+// Recomputing from start on every call (rather than accumulating
+// next+interval) keeps a start-time-anchored job's repeats exactly aligned
+// to that grid regardless of how long a run took or how late a catch-up run
+// fired.
+func nextGridTime(start time.Time, interval time.Duration, now time.Time) time.Time {
+	if !now.After(start) {
+		return start.Add(interval)
+	}
+
+	steps := int64(now.Sub(start)/interval) + 1
+
+	return start.Add(interval * time.Duration(steps))
 }
 
 // runOnce runs job a single time, resolving a fresh {time} timestamp in its
@@ -139,11 +338,14 @@ func (r *runner) runOnce(ctx context.Context, job *config) {
 	run := *job
 	run.key = substituteKeyTime(job.key)
 
+	start := time.Now()
+
 	r.store.starting(job.name)
 
-	targetErrs, err := runPipeline(ctx, &run)
+	targetErrs, bytesWritten, err := runPipeline(ctx, &run)
 	r.recordTargetResults(job.name, run.targets, targetErrs, err)
-	r.store.finished(job.name, err)
+	r.store.finished(job.name, err, bytesWritten)
+	r.recordLastRun(ctx, job.name, start, err, bytesWritten)
 
 	if err != nil {
 		r.failed.Store(true)
@@ -151,6 +353,10 @@ func (r *runner) runOnce(ctx context.Context, job *config) {
 		_, _ = fmt.Fprintln(r.stderr, "error:", jobError(job, err))
 
 		return
+	}
+
+	if !job.startTime.IsZero() {
+		r.recordJobSuccess(ctx, job.name)
 	}
 
 	// Status/diagnostic message, not program output, so it goes to

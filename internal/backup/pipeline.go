@@ -53,7 +53,12 @@ func environWithout(names ...string) []string {
 // mean that target succeeded), for callers such as the web UI's status
 // store that need per-target outcomes rather than just the combined error;
 // it's nil if the pipeline failed before reaching the upload stage.
-func runPipeline(ctx context.Context, cfg *config) (targetErrs []error, err error) {
+//
+// bytesWritten is the size of the encrypted object written to every target
+// (they all receive the same byte stream via the fan-out in
+// uploadToTargets), for callers that want to report the backup's size; it's
+// 0 if the pipeline failed before reaching the upload stage.
+func runPipeline(ctx context.Context, cfg *config) (targetErrs []error, bytesWritten int64, err error) {
 	sourceCmd := exec.CommandContext(ctx, "sh", "-c", cfg.cmd) //nolint:gosec // cfg.cmd is operator-supplied CLI config, not untrusted input; see comment above
 	sourceCmd.Stderr = os.Stderr
 	// The backup command may be arbitrary and its output/behavior is
@@ -63,12 +68,12 @@ func runPipeline(ctx context.Context, cfg *config) (targetErrs []error, err erro
 
 	sourceOut, err := sourceCmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("wiring command output: %w", err)
+		return nil, 0, fmt.Errorf("wiring command output: %w", err)
 	}
 
 	gpgCmd, passphraseWriter, passphraseReadEnd, err := buildGPGCommand(ctx, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("building gpg command: %w", err)
+		return nil, 0, fmt.Errorf("building gpg command: %w", err)
 	}
 
 	gpgCmd.Stdin = sourceOut
@@ -78,15 +83,15 @@ func runPipeline(ctx context.Context, cfg *config) (targetErrs []error, err erro
 
 	gpgOut, err := gpgCmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("wiring gpg output: %w", err)
+		return nil, 0, fmt.Errorf("wiring gpg output: %w", err)
 	}
 
 	if err := sourceCmd.Start(); err != nil {
-		return nil, fmt.Errorf("starting command %q: %w", cfg.cmd, err)
+		return nil, 0, fmt.Errorf("starting command %q: %w", cfg.cmd, err)
 	}
 
 	if err := gpgCmd.Start(); err != nil {
-		return nil, fmt.Errorf("starting gpg: %w", err)
+		return nil, 0, fmt.Errorf("starting gpg: %w", err)
 	}
 
 	if passphraseReadEnd != nil {
@@ -99,11 +104,11 @@ func runPipeline(ctx context.Context, cfg *config) (targetErrs []error, err erro
 
 	if passphraseWriter != nil {
 		if err := writePassphrase(passphraseWriter, cfg.passphrase); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
 
-	targetErrs, uploadErr := uploadToTargets(ctx, cfg, gpgOut)
+	targetErrs, bytesWritten, uploadErr := uploadToTargets(ctx, cfg, gpgOut)
 
 	// gpgOut must be fully drained (which uploadToTargets does) before Wait,
 	// per exec.Cmd.StdoutPipe's documented contract.
@@ -112,7 +117,7 @@ func runPipeline(ctx context.Context, cfg *config) (targetErrs []error, err erro
 
 	cleanupPartialUpload(ctx, cfg, sourceErr, gpgErr, targetErrs)
 
-	return targetErrs, firstPipelineError(cfg.cmd, sourceErr, gpgErr, uploadErr)
+	return targetErrs, bytesWritten, firstPipelineError(cfg.cmd, sourceErr, gpgErr, uploadErr)
 }
 
 // writePassphrase writes the gpg symmetric-encryption passphrase into w and
@@ -302,13 +307,15 @@ func newS3Client(ctx context.Context, t *target) (*s3.Client, error) {
 // without spooling it to disk or memory first.
 //
 // It returns one error per target, index-aligned with cfg.targets (nil
-// means that target's upload succeeded), plus the combined error via
-// errors.Join for callers that just want to know if anything failed.
+// means that target's upload succeeded), the number of bytes read from r
+// (and so written to every target, since they all receive the same fanned-
+// out stream), plus the combined error via errors.Join for callers that
+// just want to know if anything failed.
 //
 // r is always fully drained before this returns, even if every target fails
 // (e.g. because its client couldn't be set up) — callers such as
 // runPipeline rely on that per exec.Cmd.StdoutPipe's documented contract.
-func uploadToTargets(ctx context.Context, cfg *config, r io.Reader) (targetErrs []error, joined error) {
+func uploadToTargets(ctx context.Context, cfg *config, r io.Reader) (targetErrs []error, bytesWritten int64, joined error) {
 	targetErrs = make([]error, len(cfg.targets))
 	// uploaders[i] streams its target's share of the fan-out to wherever
 	// cfg.targets[i] belongs (S3 or local filesystem); nil means that
@@ -377,7 +384,7 @@ func uploadToTargets(ctx context.Context, cfg *config, r io.Reader) (targetErrs 
 
 	// With zero writers (every client failed), MultiWriter still drains r:
 	// its Write is a no-op loop over an empty writer list.
-	_, copyErr := io.Copy(io.MultiWriter(writers...), r)
+	bytesWritten, copyErr := io.Copy(io.MultiWriter(writers...), r)
 
 	for _, pw := range pipeWriters {
 		_ = pw.CloseWithError(copyErr)
@@ -387,7 +394,7 @@ func uploadToTargets(ctx context.Context, cfg *config, r io.Reader) (targetErrs 
 
 	allErrs := append(append([]error(nil), targetErrs...), copyErr)
 
-	return targetErrs, errors.Join(allErrs...)
+	return targetErrs, bytesWritten, errors.Join(allErrs...)
 }
 
 // uploadToS3 streams r as the body of an S3 object at target t using a

@@ -116,6 +116,10 @@ go.work.sum
 # local config (see config.example.yaml)
 /config.yaml
 
+# start-time job scheduling state (see internal/backup/schedule_state.go),
+# written next to whatever -config file is in use
+.go-backup-tool-state.db
+
 # Node (Husky dev-only tooling for git hooks; package-lock.json is still
 # committed for reproducible `npm ci`)
 /node_modules

@@ -230,13 +230,15 @@ const dashboardHTML = `<!doctype html>
 <div class="grid" id="jobs"></div>
 
 <script>
+// The Go zero time.Time serializes as "0001-01-01T00:00:00Z" rather than an
+// empty/omitted field.
+function hasTime(s) {
+  return !!s && new Date(s).getUTCFullYear() > 1;
+}
+
 function fmtTime(s) {
-  if (!s) return "never";
-  const d = new Date(s);
-  // The Go zero time.Time serializes as "0001-01-01T00:00:00Z" for a job
-  // that has never run, rather than an empty/omitted field.
-  if (d.getUTCFullYear() <= 1) return "never";
-  return d.toLocaleString();
+  if (!hasTime(s)) return "never";
+  return new Date(s).toLocaleString();
 }
 
 function badge(state) {
@@ -260,10 +262,12 @@ function render(jobs) {
     const err = j.error ? '<p class="err">' + j.error + '</p>' : '';
     const interval = j.interval ? ('every ' + j.interval) : 'runs once';
     const duration = j.duration ? (' &middot; took ' + j.duration) : '';
+    const size = j.size ? (' &middot; ' + j.size) : '';
+    const nextRun = hasTime(j.next_run) ? (' &middot; next run: ' + fmtTime(j.next_run)) : '';
 
     return '<div class="card">' +
       '<div class="card-head"><span class="job-name">' + j.name + '</span>' + badge(j.state) + '</div>' +
-      '<div class="meta">' + interval + ' &middot; last run: ' + fmtTime(j.last_start) + duration + '</div>' +
+      '<div class="meta">' + interval + ' &middot; last run: ' + fmtTime(j.last_start) + duration + size + nextRun + '</div>' +
       err +
       '<ul class="targets">' + targets + '</ul>' +
       '</div>';

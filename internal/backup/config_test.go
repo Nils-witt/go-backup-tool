@@ -1180,3 +1180,103 @@ jobs:
 		t.Fatal("parseFlags() expected error for invalid config file interval, got nil")
 	}
 }
+
+func TestParseFlagsStartTime(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+    interval: 1h
+    start-time: "2026-01-01T03:00:00Z"
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	cfg := singleJob(t, rc)
+
+	want := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+	if !cfg.startTime.Equal(want) {
+		t.Errorf("cfg.startTime = %v, want %v", cfg.startTime, want)
+	}
+}
+
+func TestParseFlagsStartTimeDefaultsToZero(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	if cfg := singleJob(t, rc); !cfg.startTime.IsZero() {
+		t.Errorf("cfg.startTime = %v, want zero", cfg.startTime)
+	}
+}
+
+func TestParseFlagsStartTimeBadFileValue(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+    interval: 1h
+    start-time: "not-a-timestamp"
+`)
+
+	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("parseFlags() expected error for invalid config file start-time, got nil")
+	}
+}
+
+func TestParseFlagsStartTimeRequiresInterval(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+    start-time: "2026-01-01T03:00:00Z"
+`)
+
+	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "start-time requires interval") {
+		t.Fatalf("parseFlags() error = %v, want substring %q", err, "start-time requires interval")
+	}
+}

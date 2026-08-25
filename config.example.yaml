@@ -89,6 +89,15 @@ jobs:
     # gpg-bin: gpg
     # gpg-homedir: ""
     interval: 6h # this job repeats every 6h; go-backup-tool keeps running instead of exiting
+    # start-time: "2026-01-01T03:00:00Z" # anchors the repeat grid: with
+    # interval: 6h set, runs land at 03:00, 09:00, 15:00, 21:00 UTC every
+    # day, not just "whenever 6h have passed since the process started".
+    # Requires interval: to also be set. Each job's last successful run is
+    # tracked in a small sqlite database next to this config file
+    # (.go-backup-tool-state.db), so if go-backup-tool was down through one
+    # or more of these times, it catches up with a single run on the next
+    # startup, then resumes the correctly aligned grid — it won't replay
+    # every individually missed slot.
   - name: uploads
     cmd: "tar czf - /srv/uploads"
     key: "uploads-{time}.gpg"

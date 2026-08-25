@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -33,7 +34,9 @@ type jobSnapshot struct {
 	State     runState         `json:"state"`
 	LastStart time.Time        `json:"last_start"`
 	LastEnd   time.Time        `json:"last_end"`
+	NextRun   time.Time        `json:"next_run"` // zero if not (yet) scheduled, e.g. a one-shot job that already ran
 	Duration  string           `json:"duration,omitempty"`
+	Size      string           `json:"size,omitempty"` // encrypted object size from the last successful run; sticky across a later failure
 	Error     string           `json:"error,omitempty"`
 	Targets   []targetSnapshot `json:"targets"`
 }
@@ -59,7 +62,12 @@ func newStatusStore(jobs []*config) *statusStore {
 			targets[i] = targetSnapshot{Server: t.serverName, Bucket: t.bucket, Kind: string(t.kind), State: stateIdle}
 		}
 
-		s.jobs[j.name] = &jobSnapshot{Name: j.name, Interval: intervalString(j.interval), State: stateIdle, Targets: targets}
+		snap := &jobSnapshot{Name: j.name, Interval: intervalString(j.interval), State: stateIdle, Targets: targets}
+		if !j.startTime.IsZero() {
+			snap.NextRun = j.startTime
+		}
+
+		s.jobs[j.name] = snap
 		s.order = append(s.order, j.name)
 	}
 
@@ -73,6 +81,25 @@ func intervalString(d time.Duration) string {
 	}
 
 	return d.String()
+}
+
+// formatBytes renders n as a human-readable, binary (1024-based) size, e.g.
+// "12.3 MB", matching the convention tools like du/ls -lh use.
+func formatBytes(n int64) string {
+	const unit = 1024
+
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+
+	div, exp := int64(unit), 0
+
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 // starting marks name as running, resetting its (and its targets') last
@@ -118,9 +145,28 @@ func (s *statusStore) targetDone(name string, index int, err error) {
 	j.Targets[index].Error = ""
 }
 
+// setNextRun records job name's next scheduled run time, for display in the
+// web UI. Called by runner.schedule whenever it computes (or recomputes) the
+// time it's about to wait for.
+func (s *statusStore) setNextRun(name string, next time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	j, ok := s.jobs[name]
+	if !ok {
+		return
+	}
+
+	j.NextRun = next
+}
+
 // finished records job name's overall outcome and duration once its run
 // completes.
-func (s *statusStore) finished(name string, err error) {
+// size is the encrypted object's byte count; it's only recorded on success
+// (0 or partial on failure would misrepresent a rolled-back write as a real
+// file), so Size stays showing the last successful run's size across a
+// later failure.
+func (s *statusStore) finished(name string, err error, size int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -140,6 +186,32 @@ func (s *statusStore) finished(name string, err error) {
 	}
 
 	j.State = stateOK
+	j.Size = formatBytes(size)
+}
+
+// seedLastRun initializes job name's snapshot from a previously persisted
+// run (see readLastRun in schedule_state.go), so a restart's web UI can
+// still show when the job last ran instead of reverting to "never" until it
+// next runs. Called once at startup, before any job's own goroutine can
+// call starting/finished, so it never races an actual run.
+func (s *statusStore) seedLastRun(name string, run lastRun) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	j, ok := s.jobs[name]
+	if !ok {
+		return
+	}
+
+	j.State = run.State
+	j.LastStart = run.Start
+	j.LastEnd = run.End
+	j.Duration = run.End.Sub(run.Start).Round(time.Millisecond).String()
+	j.Error = run.Error
+
+	if run.State == stateOK {
+		j.Size = formatBytes(run.Size)
+	}
 }
 
 // snapshot returns every job's current status, in config-file order, each a
