@@ -2,15 +2,22 @@ package backup
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"html"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,8 +41,11 @@ type webUIServer struct {
 // this run rather than failing the whole process over a dashboard. db is the
 // shared state/retention db (see schedule_state.go and retention.go), used
 // by the receiver API's handlers to track retention on incoming writes; nil
-// disables that tracking (see recordLocalWrite).
-func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB) *webUIServer {
+// disables that tracking (see recordLocalWrite). downloadToken gates the
+// dashboard's per-receiver file download links (see handleLogin/
+// handleDownloadFile); empty disables downloading files through the
+// dashboard entirely.
+func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB, downloadToken string) *webUIServer {
 	var lc net.ListenConfig
 
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
@@ -45,12 +55,17 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 	}
 
 	receiverStore := newReceiverStatusStore(receivers)
+	sessions := newDownloadSessionStore()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", handleDashboard)
 	mux.HandleFunc("GET /api/status", handleStatus(store))
 	mux.HandleFunc("GET /api/receivers", handleReceiverStatus(receivers, receiverStore, log))
 	mux.HandleFunc("GET /api/receivers/{id}/files", handleReceiverFiles(receivers, log))
+	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", handleDownloadFile(receivers, sessions, log))
+	mux.HandleFunc("GET /login", handleLogin(downloadToken, sessions))
+	mux.HandleFunc("POST /login", handleLogin(downloadToken, sessions))
+	mux.HandleFunc("GET /logout", handleLogout(sessions))
 	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, receiverStore, log, db))
 	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, receiverStore, log, db))
 
@@ -198,6 +213,301 @@ func handleReceiverFiles(receivers map[string]resolvedReceiver, log *slog.Logger
 
 		if err := json.NewEncoder(w).Encode(files); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}
+}
+
+// downloadSessionCookie is the cookie a successful dashboard login (see
+// handleLogin) sets; its value is an opaque, randomly generated session id
+// rather than the configured download-token itself, so the token never
+// needs to be re-sent (or stored client-side) once logged in.
+const downloadSessionCookie = "gbt_download_session"
+
+// downloadSessionTTL is how long a dashboard login remains valid before its
+// session expires and downloading a file requires logging in again.
+const downloadSessionTTL = 12 * time.Hour
+
+// downloadSessionStore tracks currently valid dashboard-login sessions for
+// the file-download feature (see handleLogin/requireDownloadSession), each
+// mapped to its expiry. Sessions live only in this process's memory: a
+// restart invalidates every session, same as it does the receiver status
+// store. Safe for concurrent use, since login and download requests can
+// arrive concurrently.
+type downloadSessionStore struct {
+	mu   sync.Mutex
+	byID map[string]time.Time
+}
+
+// newDownloadSessionStore returns an empty downloadSessionStore.
+func newDownloadSessionStore() *downloadSessionStore {
+	return &downloadSessionStore{byID: make(map[string]time.Time)}
+}
+
+// create starts a new session, valid for downloadSessionTTL, and returns its
+// id.
+func (s *downloadSessionStore) create() (string, error) {
+	id, err := randomSessionID()
+	if err != nil {
+		return "", err
+	}
+
+	s.mu.Lock()
+	s.byID[id] = time.Now().Add(downloadSessionTTL)
+	s.mu.Unlock()
+
+	return id, nil
+}
+
+// valid reports whether id names a currently unexpired session, evicting it
+// first if it has expired.
+func (s *downloadSessionStore) valid(id string) bool {
+	if id == "" {
+		return false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	exp, ok := s.byID[id]
+	if !ok {
+		return false
+	}
+
+	if time.Now().After(exp) {
+		delete(s.byID, id)
+		return false
+	}
+
+	return true
+}
+
+// revoke ends session id (a no-op if it doesn't exist), used by handleLogout.
+func (s *downloadSessionStore) revoke(id string) {
+	s.mu.Lock()
+	delete(s.byID, id)
+	s.mu.Unlock()
+}
+
+// randomSessionID returns a 256-bit random value hex-encoded, unguessable
+// enough to serve as a bearer session id.
+func randomSessionID() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(b), nil
+}
+
+// requireDownloadSession reports whether r carries a currently valid
+// download session cookie (see downloadSessionStore).
+func requireDownloadSession(sessions *downloadSessionStore, r *http.Request) bool {
+	c, err := r.Cookie(downloadSessionCookie)
+	if err != nil {
+		return false
+	}
+
+	return sessions.valid(c.Value)
+}
+
+// safeNextPath validates a login redirect target (the next= query/form
+// value handleLogin and handleDownloadFile pass around): it must be a
+// same-site path, never an absolute URL or protocol-relative "//host/..."
+// one, so a crafted link can't use this instance's own login page to
+// redirect a browser off-site after a successful login. Anything else falls
+// back to "/".
+func safeNextPath(next string) string {
+	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
+		return "/"
+	}
+
+	return next
+}
+
+// handleLogin serves the dashboard's download-token login form (GET
+// /login) and its submission (POST /login). A successful submission starts
+// a session (see downloadSessionStore) and sets downloadSessionCookie so
+// handleDownloadFile lets the browser back in without asking for the token
+// on every file; it then redirects to next (see safeNextPath), typically
+// the download link that sent the browser here in the first place. An
+// empty downloadToken (download-token: unset in the config file) always
+// fails, reporting the feature as unconfigured rather than accepting a
+// blank submitted token as a match.
+func handleLogin(downloadToken string, sessions *downloadSessionStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		next := safeNextPath(r.FormValue("next"))
+
+		if r.Method == http.MethodGet {
+			writeLoginPage(w, "", next)
+			return
+		}
+
+		if downloadToken == "" {
+			writeLoginPage(w, "downloads are not configured on this server (set download-token in the config file)", next)
+			return
+		}
+
+		// subtle.ConstantTimeCompare, rather than ==, so a mismatch can't be
+		// timed to learn how many leading bytes of the token were guessed
+		// correctly (mirrors authorizeReceiver's own token check).
+		if subtle.ConstantTimeCompare([]byte(r.FormValue("token")), []byte(downloadToken)) != 1 {
+			writeLoginPage(w, "incorrect token", next)
+			return
+		}
+
+		id, err := sessions.create()
+		if err != nil {
+			http.Error(w, "starting session failed", http.StatusInternalServerError)
+			return
+		}
+
+		http.SetCookie(w, sessionCookie(id, downloadSessionTTL, r.TLS != nil))
+		http.Redirect(w, r, next, http.StatusSeeOther)
+	}
+}
+
+// handleLogout serves GET /logout: it revokes the requesting browser's
+// download session, if any, clears its cookie, and sends it back to the
+// dashboard.
+func handleLogout(sessions *downloadSessionStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if c, err := r.Cookie(downloadSessionCookie); err == nil {
+			sessions.revoke(c.Value)
+		}
+
+		http.SetCookie(w, sessionCookie("", -1, r.TLS != nil))
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	}
+}
+
+// sessionCookie builds the download-session cookie: ttl <= 0 clears it
+// (MaxAge: -1) instead of setting value/expiry, for handleLogout. Secure is
+// only set when the request itself arrived over TLS (r.TLS != nil): this
+// process never terminates TLS on its own listen: address (see
+// startWebUI), but a reverse proxy in front of it might, in which case Go's
+// net/http sets r.TLS for the connection it accepted from that proxy.
+// HttpOnly and SameSite=Lax are always set, so the session id is never
+// readable from JavaScript and is only ever sent on same-site navigations.
+func sessionCookie(value string, ttl time.Duration, secure bool) *http.Cookie {
+	c := &http.Cookie{ //nolint:gosec // Secure is intentionally conditional (see doc comment above), not a literal true, so gosec can't verify it statically
+		Name:     downloadSessionCookie,
+		Value:    value,
+		Path:     "/",
+		Secure:   secure,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
+
+	if ttl <= 0 {
+		c.MaxAge = -1
+	} else {
+		c.Expires = time.Now().Add(ttl)
+	}
+
+	return c
+}
+
+// writeLoginPage renders the login form to w, with errMsg (if any) shown
+// above it and next carried through as a hidden field so the form's POST
+// still knows where to send the browser afterward.
+func writeLoginPage(w http.ResponseWriter, errMsg, next string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = io.WriteString(w, renderLoginPage(errMsg, next))
+}
+
+// renderLoginPage builds the login form page's HTML. errMsg and next are
+// both escaped before being embedded, since errMsg can echo back
+// invalid-token attempts and next comes directly from the request.
+func renderLoginPage(errMsg, next string) string {
+	errHTML := ""
+	if errMsg != "" {
+		errHTML = `<p class="err">` + html.EscapeString(errMsg) + `</p>`
+	}
+
+	return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>go-backup-tool &middot; log in</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f7f7f8; --fg:#1c1c1e; --muted:#6b6b70; --card:#fff; --border:#e2e2e5; --failed:#b3261e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#17171a; --fg:#eaeaec; --muted:#9a9aa0; --card:#202024; --border:#313136; --failed:#ff7b72; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  form { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:1.5rem; width:100%; max-width:320px; }
+  h1 { font-size:1.1rem; margin:0 0 1rem; }
+  input[type=password] { width:100%; padding:.5rem .6rem; margin:.4rem 0 1rem; border:1px solid var(--border); border-radius:6px; background:var(--bg); color:var(--fg); font-size:.9rem; }
+  button { width:100%; padding:.5rem; border:none; border-radius:6px; background:var(--fg); color:var(--bg); font-weight:600; cursor:pointer; }
+  .err { color:var(--failed); font-size:.85rem; margin:0 0 .8rem; }
+  label { font-size:.85rem; color:var(--muted); }
+</style>
+</head>
+<body>
+<form method="post" action="/login">
+<h1>go-backup-tool</h1>
+` + errHTML + `<label for="token">Download token</label>
+<input type="password" id="token" name="token" autofocus required>
+<input type="hidden" name="next" value="` + html.EscapeString(next) + `">
+<button type="submit">Log in</button>
+</form>
+</body>
+</html>
+`
+}
+
+// handleDownloadFile serves GET /api/receivers/{id}/download/{key...}: the
+// actual content of one object currently stored under receiver {id}'s path,
+// for a person to save from the dashboard's file listing (see
+// listReceiverFiles/handleReceiverFiles for the metadata-only listing this
+// complements). Unlike the receiver API's own per-receiver token auth (see
+// authorizeReceiver), this checks the single dashboard-wide download-token:
+// via requireDownloadSession's session cookie, since the audience here is a
+// person clicking a link in a browser rather than another go-backup-tool
+// instance; an unauthenticated request is redirected to /login with next=
+// set back to the download URL, so logging in returns the browser straight
+// to the file.
+func handleDownloadFile(receivers map[string]resolvedReceiver, sessions *downloadSessionStore, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireDownloadSession(sessions, r) {
+			http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
+			return
+		}
+
+		recv, ok := receivers[r.PathValue("id")]
+		if !ok {
+			http.Error(w, "unknown receiver id", http.StatusNotFound)
+			return
+		}
+
+		key, err := sanitizeObjectKey(r.PathValue("key"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		path := filepath.Join(recv.path, filepath.FromSlash(key))
+
+		f, err := os.Open(path) //nolint:gosec // key is sanitized by sanitizeObjectKey and joined under recv.path, not attacker-controlled beyond that
+		if err != nil {
+			if os.IsNotExist(err) {
+				http.Error(w, "not found", http.StatusNotFound)
+			} else {
+				log.Warn("download: opening file failed", "id", recv.id, "key", key, "err", err)
+				http.Error(w, "opening file failed", http.StatusInternalServerError)
+			}
+
+			return
+		}
+		defer func() { _ = f.Close() }()
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(key)+`"`)
+
+		if _, err := io.Copy(w, f); err != nil {
+			log.Warn("download: streaming file failed", "id", recv.id, "key", key, "err", err)
 		}
 	}
 }
@@ -605,14 +915,24 @@ function escapeHtml(s) {
   });
 }
 
+// encodePathKey percent-encodes each segment of a "/"-separated file key on
+// its own, so the download link's URL keeps the key's directory structure
+// (matching the server's {key...} wildcard route) while still escaping
+// anything else that needs it.
+function encodePathKey(key) {
+  return key.split("/").map(encodeURIComponent).join("/");
+}
+
 function renderFileList(id) {
   const files = receiverFilesCache[id];
   if (!files) return '<p class="meta">loading&hellip;</p>';
   if (!files.length) return '<p class="meta">no files stored</p>';
 
   return '<ul class="files">' + files.map(function (f) {
+    const href = "/api/receivers/" + encodeURIComponent(id) + "/download/" + encodePathKey(f.key);
     return '<li><span class="file-key">' + escapeHtml(f.key) + '</span>' +
-      '<span class="file-meta">' + fmtSize(f.size) + ' &middot; ' + fmtTime(f.mod_time) + '</span></li>';
+      '<span class="file-meta">' + fmtSize(f.size) + ' &middot; ' + fmtTime(f.mod_time) +
+      ' &middot; <a href="' + href + '">download</a></span></li>';
   }).join("") + '</ul>';
 }
 

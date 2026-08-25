@@ -121,6 +121,14 @@ servers:
 # has finished its (possibly one-shot) run, until stopped (Ctrl-C/SIGTERM)
 # or the config file's timeout elapses.
 
+# download-token: "replace-with-a-long-random-secret" # lets a person log in
+# (at /login, from the "download" link next to a file in a receiver's file
+# list on the dashboard) to download that file's contents. Unset (the
+# default) disables downloading files through the dashboard entirely — the
+# dashboard still lists receivers' files, there's just no way to fetch one.
+# A successful login is remembered for 12h via a session cookie, so the
+# token itself only needs to be entered again once that expires.
+
 jobs:
   - name: database
     cmd: "mysqldump --single-transaction mydb | gzip"

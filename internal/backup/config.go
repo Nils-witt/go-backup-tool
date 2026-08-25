@@ -179,6 +179,13 @@ type runConfig struct {
 	configPath string // where the config file was loaded from; state db lives alongside it
 	logLevel   slog.Level
 	receivers  map[string]resolvedReceiver // this instance's receiver API entries, keyed by id; see receiver.go
+
+	// downloadToken gates the web UI's file-download links (see
+	// handleLogin/handleDownloadFile in webui.go): a browser must log in
+	// with this token before it can download a receiver's stored files.
+	// Empty disables the feature entirely (handleLogin always reports it as
+	// unconfigured rather than accepting an empty submitted token).
+	downloadToken string
 }
 
 // Built-in defaults for fields a job's or server's config file entry
@@ -281,6 +288,13 @@ type fileConfig struct {
 	Servers   []fileServer   `yaml:"servers"`
 	Jobs      []fileJob      `yaml:"jobs"`
 	Receivers []fileReceiver `yaml:"receivers"`
+
+	// DownloadToken, if set, is the token a browser must log in with (see
+	// handleLogin in webui.go) before the web UI's per-receiver file lists
+	// will serve a download link for their contents. Unset disables
+	// downloads: the dashboard still lists files, but there's no way to log
+	// in and fetch one.
+	DownloadToken string `yaml:"download-token"`
 }
 
 // parseFlags parses args (typically os.Args[1:]) into a runConfig, writing
@@ -367,12 +381,13 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 	}
 
 	return &runConfig{
-		jobs:       jobs,
-		timeout:    timeout,
-		listen:     strings.TrimSpace(fileCfg.Listen),
-		configPath: configPath,
-		logLevel:   level,
-		receivers:  receivers,
+		jobs:          jobs,
+		timeout:       timeout,
+		listen:        strings.TrimSpace(fileCfg.Listen),
+		configPath:    configPath,
+		logLevel:      level,
+		receivers:     receivers,
+		downloadToken: strings.TrimSpace(fileCfg.DownloadToken),
 	}, nil
 }
 

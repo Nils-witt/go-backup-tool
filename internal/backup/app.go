@@ -121,7 +121,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	if rc.listen != "" {
 		sweepStartupReceiverRetention(ctx, stateDB, rc.receivers, log)
 
-		srv = startWebUI(rc.listen, store, rc.receivers, log, stateDB)
+		srv = startWebUI(rc.listen, store, rc.receivers, log, stateDB, rc.downloadToken)
 
 		go monitorStaleReceivers(ctx, rc.receivers, log)
 	}

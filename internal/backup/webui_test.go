@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,7 +142,7 @@ func TestStartWebUIServesRequests(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil)
+	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, "")
 	if srv == nil {
 		t.Fatal("startWebUI() = nil, want a running server")
 	}
@@ -214,9 +215,171 @@ func TestStartWebUIBadAddrReturnsNil(t *testing.T) {
 	store, _ := newTestStore()
 
 	// Port 0 is valid (means "pick one"); an unparseable address is not.
-	srv := startWebUI("not-a-valid-address", store, nil, discardLogger, nil)
+	srv := startWebUI("not-a-valid-address", store, nil, discardLogger, nil, "")
 	if srv != nil {
 		t.Cleanup(srv.shutdown)
 		t.Fatal("startWebUI() with an invalid address = non-nil, want nil")
+	}
+}
+
+func TestHandleDownloadFileWithoutSessionRedirectsToLogin(t *testing.T) {
+	t.Parallel()
+
+	receivers := map[string]resolvedReceiver{"a": {id: "a", path: t.TempDir()}}
+	sessions := newDownloadSessionStore()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/backup.gpg", nil)
+	req.SetPathValue("id", "a")
+	req.SetPathValue("key", "backup.gpg")
+
+	rec := httptest.NewRecorder()
+
+	handleDownloadFile(receivers, sessions, discardLogger)(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+	}
+
+	if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, "/login?next=") {
+		t.Errorf("Location = %q, want a /login?next=... redirect", loc)
+	}
+}
+
+func TestHandleDownloadFileWithSessionServesContent(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "backup.gpg"), "secret data")
+
+	receivers := map[string]resolvedReceiver{"a": {id: "a", path: root}}
+	sessions := newDownloadSessionStore()
+
+	id, err := sessions.create()
+	if err != nil {
+		t.Fatalf("sessions.create(): %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/backup.gpg", nil)
+	req.SetPathValue("id", "a")
+	req.SetPathValue("key", "backup.gpg")
+	req.AddCookie(&http.Cookie{Name: downloadSessionCookie, Value: id}) //nolint:gosec // a request Cookie header, not a Set-Cookie response; Secure/HttpOnly/SameSite don't apply
+
+	rec := httptest.NewRecorder()
+
+	handleDownloadFile(receivers, sessions, discardLogger)(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	if rec.Body.String() != "secret data" {
+		t.Errorf("body = %q, want %q", rec.Body.String(), "secret data")
+	}
+
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, `filename="backup.gpg"`) {
+		t.Errorf("Content-Disposition = %q, want it to name backup.gpg", cd)
+	}
+}
+
+func TestHandleLoginWrongTokenDoesNotStartSession(t *testing.T) {
+	t.Parallel()
+
+	sessions := newDownloadSessionStore()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader("token=wrong"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+
+	handleLogin("correct-token", sessions)(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (re-rendered form)", rec.Code)
+	}
+
+	if !strings.Contains(rec.Body.String(), "incorrect token") {
+		t.Error("response body doesn't mention the incorrect token")
+	}
+
+	if len(rec.Result().Cookies()) != 0 {
+		t.Error("a session cookie was set despite the wrong token")
+	}
+}
+
+func TestHandleLoginEmptyDownloadTokenIsAlwaysUnconfigured(t *testing.T) {
+	t.Parallel()
+
+	sessions := newDownloadSessionStore()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader("token="))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+
+	handleLogin("", sessions)(rec, req)
+
+	if !strings.Contains(rec.Body.String(), "not configured") {
+		t.Error("response body doesn't report downloads as unconfigured")
+	}
+
+	if len(rec.Result().Cookies()) != 0 {
+		t.Error("a session cookie was set despite download-token being unset")
+	}
+}
+
+func TestHandleLoginCorrectTokenStartsSessionAndRedirects(t *testing.T) {
+	t.Parallel()
+
+	sessions := newDownloadSessionStore()
+
+	form := url.Values{"token": {"correct-token"}, "next": {"/api/receivers/a/download/backup.gpg"}}
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+
+	handleLogin("correct-token", sessions)(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+	}
+
+	if loc := rec.Header().Get("Location"); loc != "/api/receivers/a/download/backup.gpg" {
+		t.Errorf("Location = %q, want the requested next path", loc)
+	}
+
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != downloadSessionCookie {
+		t.Fatalf("cookies = %+v, want one %s cookie", cookies, downloadSessionCookie)
+	}
+
+	if !sessions.valid(cookies[0].Value) {
+		t.Error("the session cookie's value isn't a valid session")
+	}
+}
+
+func TestHandleLogoutRevokesSession(t *testing.T) {
+	t.Parallel()
+
+	sessions := newDownloadSessionStore()
+
+	id, err := sessions.create()
+	if err != nil {
+		t.Fatalf("sessions.create(): %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/logout", nil)
+	req.AddCookie(&http.Cookie{Name: downloadSessionCookie, Value: id}) //nolint:gosec // a request Cookie header, not a Set-Cookie response; Secure/HttpOnly/SameSite don't apply
+
+	rec := httptest.NewRecorder()
+
+	handleLogout(sessions)(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+	}
+
+	if sessions.valid(id) {
+		t.Error("session is still valid after logout")
 	}
 }
