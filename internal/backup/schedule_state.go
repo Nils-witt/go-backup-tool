@@ -61,6 +61,27 @@ func openScheduleStateDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
 	}
 
+	// target_runs records each job target's most recently completed
+	// success/failure, one level below job_runs, so a restart's web UI can
+	// also show a target's last outcome instead of every target reverting
+	// to "idle" until it next runs (see runner.persistTargetRun /
+	// statusStore.seedTargetRun). target_idx is index-aligned with the
+	// job's targets: as configured, matching statusStore.targetDone's
+	// existing index-alignment assumption.
+	const targetSchema = `CREATE TABLE IF NOT EXISTS target_runs (
+		job_name   TEXT NOT NULL,
+		target_idx INTEGER NOT NULL,
+		run_at     TIMESTAMP NOT NULL,
+		state      TEXT NOT NULL,
+		error      TEXT,
+		PRIMARY KEY (job_name, target_idx)
+	)`
+
+	if _, err := db.ExecContext(ctx, targetSchema); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
+	}
+
 	return db, nil
 }
 
@@ -158,4 +179,62 @@ func readLastRun(ctx context.Context, db *sql.DB, name string) (lastRun, bool, e
 		Error: errText.String,
 		Size:  size.Int64,
 	}, true, nil
+}
+
+// writeTargetRun records job name's target at index's just-finished
+// success/failure, overwriting whatever was recorded for that target's
+// previous run. Called for every target of every run, mirroring
+// writeLastRun's per-job persistence one level down.
+func writeTargetRun(ctx context.Context, db *sql.DB, name string, index int, state runState, errText string, at time.Time) error {
+	const upsert = `INSERT INTO target_runs (job_name, target_idx, run_at, state, error) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(job_name, target_idx) DO UPDATE SET
+			run_at = excluded.run_at,
+			state  = excluded.state,
+			error  = excluded.error`
+
+	if _, err := db.ExecContext(ctx, upsert, name, index, at.UTC(), string(state), errText); err != nil {
+		return fmt.Errorf("recording job %q target %d run: %w", name, index, err)
+	}
+
+	return nil
+}
+
+// targetRun is one job target's most recently persisted success/failure, as
+// returned by readTargetRuns.
+type targetRun struct {
+	Index int
+	State runState
+	Error string
+}
+
+// readTargetRuns returns every target run persisted for job name, one entry
+// per target index that has completed at least once.
+func readTargetRuns(ctx context.Context, db *sql.DB, name string) ([]targetRun, error) {
+	rows, err := db.QueryContext(ctx, `SELECT target_idx, state, error FROM target_runs WHERE job_name = ?`, name)
+	if err != nil {
+		return nil, fmt.Errorf("reading job %q target runs: %w", name, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []targetRun
+
+	for rows.Next() {
+		var (
+			index   int
+			state   string
+			errText sql.NullString
+		)
+
+		if err := rows.Scan(&index, &state, &errText); err != nil {
+			return nil, fmt.Errorf("reading job %q target runs: %w", name, err)
+		}
+
+		out = append(out, targetRun{Index: index, State: runState(state), Error: errText.String})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading job %q target runs: %w", name, err)
+	}
+
+	return out, nil
 }

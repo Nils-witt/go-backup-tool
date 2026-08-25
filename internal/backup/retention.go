@@ -43,11 +43,18 @@ func openRetentionDB(ctx context.Context, path string) (*sql.DB, error) {
 
 	db.SetMaxOpenConns(1)
 
+	// retention_seconds records the retention duration in effect when each
+	// object was written, so a later config change to a server's retention:
+	// doesn't retroactively change how long already-written objects are
+	// kept (see sweepRetention). It defaults to 0 ("unknown") so rows from
+	// before this column existed keep sweeping under the target's current
+	// retention, exactly as they did before it was added.
 	const schema = `CREATE TABLE IF NOT EXISTS objects (
-		server     TEXT NOT NULL,
-		bucket     TEXT NOT NULL,
-		path       TEXT NOT NULL PRIMARY KEY,
-		written_at TIMESTAMP NOT NULL
+		server            TEXT NOT NULL,
+		bucket            TEXT NOT NULL,
+		path              TEXT NOT NULL PRIMARY KEY,
+		written_at        TIMESTAMP NOT NULL,
+		retention_seconds INTEGER NOT NULL DEFAULT 0
 	)`
 
 	if _, err := db.ExecContext(ctx, schema); err != nil {
@@ -55,7 +62,58 @@ func openRetentionDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("initializing retention db %q: %w", path, err)
 	}
 
+	if err := ensureRetentionSecondsColumn(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrating retention db %q: %w", path, err)
+	}
+
 	return db, nil
+}
+
+// ensureRetentionSecondsColumn adds the retention_seconds column to objects
+// if it's missing, for a retention db created before that column existed.
+// CREATE TABLE IF NOT EXISTS above is a no-op against such a db, so the
+// column has to be added explicitly.
+func ensureRetentionSecondsColumn(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(objects)`)
+	if err != nil {
+		return fmt.Errorf("reading objects table schema: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var found bool
+
+	for rows.Next() {
+		var (
+			cid           int
+			name, colType string
+			notNull, pk   int
+			defaultValue  sql.NullString
+		)
+
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk); err != nil {
+			return fmt.Errorf("reading objects table schema: %w", err)
+		}
+
+		if name == "retention_seconds" {
+			found = true
+			break
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("reading objects table schema: %w", err)
+	}
+
+	if found {
+		return nil
+	}
+
+	if _, err := db.ExecContext(ctx, `ALTER TABLE objects ADD COLUMN retention_seconds INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("adding retention_seconds column: %w", err)
+	}
+
+	return nil
 }
 
 // recordLocalWrite records, in t's server's retention database, that cfg's
@@ -76,10 +134,12 @@ func recordLocalWrite(ctx context.Context, cfg *config, t *target, log *slog.Log
 
 	path := localObjectPath(cfg, t)
 
-	const upsert = `INSERT INTO objects (server, bucket, path, written_at) VALUES (?, ?, ?, ?)
-		ON CONFLICT(path) DO UPDATE SET written_at = excluded.written_at`
+	const upsert = `INSERT INTO objects (server, bucket, path, written_at, retention_seconds) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(path) DO UPDATE SET written_at = excluded.written_at, retention_seconds = excluded.retention_seconds`
 
-	if _, err := db.ExecContext(ctx, upsert, t.serverName, t.bucket, path, time.Now().UTC()); err != nil {
+	retentionSeconds := int64(t.retention / time.Second)
+
+	if _, err := db.ExecContext(ctx, upsert, t.serverName, t.bucket, path, time.Now().UTC(), retentionSeconds); err != nil {
 		return fmt.Errorf("recording write to retention db %q: %w", retentionDBPath(t.localPath), err)
 	}
 
@@ -127,24 +187,29 @@ func sweepRetentionForTarget(ctx context.Context, t *target, log *slog.Logger) e
 	return sweepRetention(ctx, db, t, log)
 }
 
-// sweepRetention deletes every file tracked in db for t's server whose
-// written_at is older than t.retention, along with its db record. A file
-// already missing from disk is not an error: its record is still removed.
-// Errors are collected per file and returned joined, so one bad entry
-// doesn't stop the rest of the sweep.
+// sweepRetention deletes every file tracked in db for t's server that's past
+// its retention window, along with its db record. Each row expires against
+// the retention_seconds recorded for it at write time (see recordLocalWrite)
+// rather than t.retention, so a later change to a server's retention: only
+// affects objects written after the change; a row from before that column
+// existed has retention_seconds == 0 ("unknown") and falls back to
+// t.retention, matching its pre-migration behavior. A file already missing
+// from disk is not an error: its record is still removed. Errors are
+// collected per file and returned joined, so one bad entry doesn't stop the
+// rest of the sweep.
 func sweepRetention(ctx context.Context, db *sql.DB, t *target, log *slog.Logger) error {
 	if t.retention <= 0 {
 		return nil
 	}
 
-	cutoff := time.Now().UTC().Add(-t.retention)
+	now := time.Now().UTC()
 
-	expired, err := expiredRetentionPaths(ctx, db, t.serverName, cutoff)
+	expired, err := expiredRetentionPaths(ctx, db, t.serverName, now, t.retention)
 	if err != nil {
 		return err
 	}
 
-	log.Debug("retention sweep", "server", t.serverName, "cutoff", cutoff, "expired", len(expired))
+	log.Debug("retention sweep", "server", t.serverName, "now", now, "expired", len(expired))
 
 	var errs []error
 
@@ -165,22 +230,37 @@ func sweepRetention(ctx context.Context, db *sql.DB, t *target, log *slog.Logger
 	return errors.Join(errs...)
 }
 
-// expiredRetentionPaths returns the tracked paths for server whose
-// written_at is older than cutoff.
-func expiredRetentionPaths(ctx context.Context, db *sql.DB, server string, cutoff time.Time) (paths []string, err error) {
-	rows, err := db.QueryContext(ctx, `SELECT path FROM objects WHERE server = ? AND written_at < ?`, server, cutoff)
+// expiredRetentionPaths returns the tracked paths for server that are past
+// their retention window as of now. Each row's own retention_seconds is
+// used when set (> 0); rows recorded before that column existed have it as
+// 0 and fall back to fallbackRetention (the calling target's current
+// retention).
+func expiredRetentionPaths(ctx context.Context, db *sql.DB, server string, now time.Time, fallbackRetention time.Duration) (paths []string, err error) {
+	rows, err := db.QueryContext(ctx, `SELECT path, written_at, retention_seconds FROM objects WHERE server = ?`, server)
 	if err != nil {
 		return nil, fmt.Errorf("querying retention db: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
-		var p string
-		if err := rows.Scan(&p); err != nil {
+		var (
+			p                string
+			writtenAt        time.Time
+			retentionSeconds int64
+		)
+
+		if err := rows.Scan(&p, &writtenAt, &retentionSeconds); err != nil {
 			return nil, fmt.Errorf("reading retention db: %w", err)
 		}
 
-		paths = append(paths, p)
+		retention := time.Duration(retentionSeconds) * time.Second
+		if retention <= 0 {
+			retention = fallbackRetention
+		}
+
+		if writtenAt.Add(retention).Before(now) {
+			paths = append(paths, p)
+		}
 	}
 
 	if err := rows.Err(); err != nil {

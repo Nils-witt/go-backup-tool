@@ -150,6 +150,60 @@ func TestUploadToTargetsLocal(t *testing.T) {
 	}
 }
 
+// TestUploadToTargetsContinuesAfterOneTargetFails verifies that a failure
+// writing to one target (here, a local target whose destination directory
+// path is occupied by a file, so os.MkdirAll for it errors) doesn't stop
+// uploadToTargets from finishing the other targets: they should still
+// receive the full stream and succeed independently.
+func TestUploadToTargetsContinuesAfterOneTargetFails(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	// Make the "bad" target's parent directory path a regular file, so
+	// writeLocalObject's os.MkdirAll for it fails.
+	badParent := filepath.Join(dir, "blocked")
+	if err := os.WriteFile(badParent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("setting up blocked path: %v", err)
+	}
+
+	cfg := &config{
+		key: "backup.gpg",
+		targets: []target{
+			{serverName: "bad", kind: serverKindLocal, bucket: "blocked/sub", localPath: dir},
+			{serverName: "good", kind: serverKindLocal, bucket: "sub", localPath: dir},
+		},
+	}
+
+	const content = "hello from the pipeline"
+
+	targetErrs, bytesWritten, err := uploadToTargets(t.Context(), cfg, strings.NewReader(content), discardLogger)
+	if err == nil {
+		t.Fatal("uploadToTargets() error = nil, want non-nil because the bad target failed")
+	}
+
+	if len(targetErrs) != 2 || targetErrs[0] == nil {
+		t.Fatalf("uploadToTargets() targetErrs = %v, want [<err>, nil]", targetErrs)
+	}
+
+	if targetErrs[1] != nil {
+		t.Errorf("uploadToTargets() good target err = %v, want nil (other target's failure shouldn't affect it)", targetErrs[1])
+	}
+
+	if bytesWritten != int64(len(content)) {
+		t.Errorf("uploadToTargets() bytesWritten = %d, want %d", bytesWritten, len(content))
+	}
+
+	got, err := os.ReadFile(localObjectPath(cfg, &cfg.targets[1]))
+	if err != nil {
+		t.Fatalf("reading good target's written file: %v", err)
+	}
+
+	if string(got) != content {
+		t.Errorf("good target written content = %q, want %q", got, content)
+	}
+}
+
 func TestBuildGPGCommand(t *testing.T) {
 	t.Parallel()
 

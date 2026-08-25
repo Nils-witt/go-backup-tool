@@ -185,6 +185,18 @@ func seedStatusFromState(ctx context.Context, db *sql.DB, jobs []*config, store 
 
 		store.seedLastRun(j.name, run)
 	}
+
+	for _, j := range jobs {
+		targetRuns, err := readTargetRuns(ctx, db, j.name)
+		if err != nil {
+			log.Warn("reading target runs from state db", "job", j.name, "err", err)
+			continue
+		}
+
+		for _, tr := range targetRuns {
+			store.seedTargetRun(j.name, tr.Index, tr.State, tr.Error)
+		}
+	}
 }
 
 // needsScheduleState reports whether any job sets start-time, i.e. whether
@@ -390,7 +402,7 @@ func (r *runner) runOnce(ctx context.Context, job *config) {
 	targetErrs, bytesWritten, err := runPipeline(ctx, &run, log)
 	duration := time.Since(start)
 
-	r.recordTargetResults(job.name, run.targets, targetErrs, err)
+	r.recordTargetResults(ctx, job.name, run.targets, targetErrs, err)
 	r.store.finished(job.name, err, bytesWritten)
 	r.recordLastRun(ctx, job.name, start, err, bytesWritten)
 
@@ -423,14 +435,17 @@ func (r *runner) runOnce(ctx context.Context, job *config) {
 }
 
 // recordTargetResults updates the status store's per-target state for a
-// finished run. targetErrs is index-aligned with targets when runPipeline
-// reached the upload stage; if it failed earlier (e.g. the source command
-// never started), targetErrs is empty and every target is instead marked
-// with the run's overall error, since no target-specific detail exists.
-func (r *runner) recordTargetResults(jobName string, targets []target, targetErrs []error, err error) {
+// finished run, and persists each target's success/failure to the state db
+// (see persistTargetRun) so it survives a restart. targetErrs is
+// index-aligned with targets when runPipeline reached the upload stage; if
+// it failed earlier (e.g. the source command never started), targetErrs is
+// empty and every target is instead marked with the run's overall error,
+// since no target-specific detail exists.
+func (r *runner) recordTargetResults(ctx context.Context, jobName string, targets []target, targetErrs []error, err error) {
 	if len(targetErrs) == len(targets) {
 		for i, terr := range targetErrs {
 			r.store.targetDone(jobName, i, terr)
+			r.persistTargetRun(ctx, jobName, i, terr)
 		}
 
 		return
@@ -439,7 +454,27 @@ func (r *runner) recordTargetResults(jobName string, targets []target, targetErr
 	if err != nil {
 		for i := range targets {
 			r.store.targetDone(jobName, i, err)
+			r.persistTargetRun(ctx, jobName, i, err)
 		}
+	}
+}
+
+// persistTargetRun records target index's just-finished success/failure to
+// the state db, mirroring recordLastRun's per-job persistence one level
+// down. Best-effort: a db hiccup here shouldn't fail the run, matching
+// recordLastRun's own reasoning.
+func (r *runner) persistTargetRun(ctx context.Context, jobName string, index int, terr error) {
+	if r.stateDB == nil {
+		return
+	}
+
+	state, errText := stateOK, ""
+	if terr != nil {
+		state, errText = stateFailed, terr.Error()
+	}
+
+	if err := writeTargetRun(ctx, r.stateDB, jobName, index, state, errText, time.Now()); err != nil {
+		r.log.Warn("recording target run to state db", "job", jobName, "target", index, "err", err)
 	}
 }
 

@@ -214,6 +214,25 @@ func (s *statusStore) seedLastRun(name string, run lastRun) {
 	}
 }
 
+// seedTargetRun initializes job name's target at index from a previously
+// persisted result (see readTargetRuns in schedule_state.go), mirroring
+// seedLastRun's reasoning one level down: a restart's web UI can still show
+// each target's last outcome instead of every target reverting to "idle"
+// until it next runs. Called once at startup, before any job's own goroutine
+// can call starting/targetDone, so it never races an actual run.
+func (s *statusStore) seedTargetRun(name string, index int, state runState, errText string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	j, ok := s.jobs[name]
+	if !ok || index < 0 || index >= len(j.Targets) {
+		return
+	}
+
+	j.Targets[index].State = state
+	j.Targets[index].Error = errText
+}
+
 // snapshot returns every job's current status, in config-file order, each a
 // copy safe to serialize (or otherwise use) without holding s.mu.
 func (s *statusStore) snapshot() []jobSnapshot {

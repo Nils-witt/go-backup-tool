@@ -213,7 +213,8 @@ type fileConfig struct {
 	fileJob `yaml:",inline"`
 
 	Timeout   string         `yaml:"timeout"`
-	Listen    string         `yaml:"listen"` // e.g. ":8080"; empty (the default) disables the web UI
+	Listen    string         `yaml:"listen"`    // e.g. ":8080"; empty (the default) disables the web UI
+	LogLevel  string         `yaml:"log-level"` // debug, info, warn, or error; overridden by -log-level when that flag is explicitly given
 	Servers   []fileServer   `yaml:"servers"`
 	Jobs      []fileJob      `yaml:"jobs"`
 	Receivers []fileReceiver `yaml:"receivers"`
@@ -229,7 +230,8 @@ type fileConfig struct {
 // is defined under the config file's jobs: list; -job selects a single one
 // to run, or every job runs (in order) when -job isn't given. -log-level
 // (debug, info, warn, or error; default info) controls diagnostic log
-// verbosity.
+// verbosity; it can also be set via the config file's top-level log-level:,
+// which -log-level overrides when explicitly given on the command line.
 //
 // Each job's key keeps any {time} placeholder unresolved: it's substituted
 // fresh by the caller immediately before every run (see substituteKeyTime),
@@ -247,24 +249,13 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 
 	fs.StringVar(&configPath, "config", defaultConfigPath, "path to the YAML config file")
 	fs.StringVar(&jobFilter, "job", "", "run only the named job from the config file's jobs: list")
-	fs.StringVar(&logLevel, "log-level", "info", "log verbosity: debug, info, warn, or error")
+	fs.StringVar(&logLevel, "log-level", "info", "log verbosity: debug, info, warn, or error (overrides the config file's log-level:)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
 
-	level, err := parseLogLevel(logLevel)
-	if err != nil {
-		return nil, err
-	}
-
-	configExplicit := false
-
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "config" {
-			configExplicit = true
-		}
-	})
+	configExplicit, logLevelExplicit := explicitFlags(fs)
 
 	fileCfg, err := loadFileConfig(configPath, configExplicit)
 	if err != nil {
@@ -273,6 +264,11 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 
 	if fileCfg == nil {
 		return nil, fmt.Errorf("no config file found at %q; create one (see config.example.yaml) or pass -config <path>", configPath)
+	}
+
+	level, err := parseLogLevel(effectiveLogLevel(logLevel, fileCfg.LogLevel, logLevelExplicit))
+	if err != nil {
+		return nil, err
 	}
 
 	jobs, err := resolveJobs(fileCfg)
@@ -333,13 +329,40 @@ func parseConfigTimeout(s string) (time.Duration, error) {
 	return d, nil
 }
 
-// parseLogLevel parses the -log-level flag's value into a slog.Level,
-// accepting the same case-insensitive names slog itself recognizes
-// (debug, info, warn, error).
+// explicitFlags reports whether -config and -log-level were explicitly
+// given on the command line (as opposed to holding their default values),
+// so callers can tell a deliberate override from an unset flag.
+func explicitFlags(fs *flag.FlagSet) (configExplicit, logLevelExplicit bool) {
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "config":
+			configExplicit = true
+		case "log-level":
+			logLevelExplicit = true
+		}
+	})
+
+	return configExplicit, logLevelExplicit
+}
+
+// effectiveLogLevel resolves the log level string to parse: the config
+// file's log-level: (fileLevel), unless flagLevel was explicitly given on
+// the command line, which always wins.
+func effectiveLogLevel(flagLevel, fileLevel string, flagExplicit bool) string {
+	if !flagExplicit && strings.TrimSpace(fileLevel) != "" {
+		return fileLevel
+	}
+
+	return flagLevel
+}
+
+// parseLogLevel parses a log level string (from the -log-level flag or the
+// config file's log-level:) into a slog.Level, accepting the same
+// case-insensitive names slog itself recognizes (debug, info, warn, error).
 func parseLogLevel(s string) (slog.Level, error) {
 	var level slog.Level
 	if err := level.UnmarshalText([]byte(s)); err != nil {
-		return 0, fmt.Errorf("parsing -log-level %q: %w", s, err)
+		return 0, fmt.Errorf("parsing log level %q: %w", s, err)
 	}
 
 	return level, nil

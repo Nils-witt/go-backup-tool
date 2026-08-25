@@ -125,6 +125,85 @@ func TestWriteReadLastRunRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWriteReadTargetRunRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	ctx := context.Background()
+
+	at := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+
+	if err := writeTargetRun(ctx, db, "job-a", 0, stateOK, "", at); err != nil {
+		t.Fatalf("writeTargetRun() target 0 error: %v", err)
+	}
+
+	if err := writeTargetRun(ctx, db, "job-a", 1, stateFailed, "boom", at); err != nil {
+		t.Fatalf("writeTargetRun() target 1 error: %v", err)
+	}
+
+	got, err := readTargetRuns(ctx, db, "job-a")
+	if err != nil {
+		t.Fatalf("readTargetRuns() error: %v", err)
+	}
+
+	want := map[int]targetRun{
+		0: {Index: 0, State: stateOK, Error: ""},
+		1: {Index: 1, State: stateFailed, Error: "boom"},
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("readTargetRuns() = %+v, want %d entries", got, len(want))
+	}
+
+	for _, tr := range got {
+		if w, ok := want[tr.Index]; !ok || tr != w {
+			t.Errorf("readTargetRuns() entry %+v, want %+v", tr, want[tr.Index])
+		}
+	}
+}
+
+func TestReadTargetRunsUnknownJob(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+
+	got, err := readTargetRuns(context.Background(), db, "no-such-job")
+	if err != nil {
+		t.Fatalf("readTargetRuns() error: %v", err)
+	}
+
+	if len(got) != 0 {
+		t.Errorf("readTargetRuns() = %+v, want none for unknown job", got)
+	}
+}
+
+func TestWriteTargetRunUpsert(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	ctx := context.Background()
+
+	first := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+	second := time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)
+
+	if err := writeTargetRun(ctx, db, "job-a", 0, stateOK, "", first); err != nil {
+		t.Fatalf("writeTargetRun() first error: %v", err)
+	}
+
+	if err := writeTargetRun(ctx, db, "job-a", 0, stateFailed, "boom", second); err != nil {
+		t.Fatalf("writeTargetRun() second error: %v", err)
+	}
+
+	got, err := readTargetRuns(ctx, db, "job-a")
+	if err != nil {
+		t.Fatalf("readTargetRuns() error: %v", err)
+	}
+
+	if len(got) != 1 || got[0].State != stateFailed || got[0].Error != "boom" {
+		t.Errorf("readTargetRuns() = %+v, want a single failed entry (second write should overwrite first)", got)
+	}
+}
+
 func TestReadLastRunUnknownJob(t *testing.T) {
 	t.Parallel()
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"flag"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -302,6 +303,83 @@ jobs:
 
 	if rc.listen != "" {
 		t.Errorf("rc.listen = %q, want empty (web UI disabled by default)", rc.listen)
+	}
+}
+
+func TestParseFlagsConfigFileLogLevel(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+log-level: debug
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	if rc.logLevel != slog.LevelDebug {
+		t.Errorf("rc.logLevel = %v, want %v", rc.logLevel, slog.LevelDebug)
+	}
+}
+
+func TestParseFlagsLogLevelFlagOverridesConfigFile(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+log-level: debug
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path, "-log-level", "error"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	if rc.logLevel != slog.LevelError {
+		t.Errorf("rc.logLevel = %v, want %v (explicit -log-level should win)", rc.logLevel, slog.LevelError)
+	}
+}
+
+func TestParseFlagsConfigFileBadLogLevel(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+log-level: "not-a-level"
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("parseFlags() expected error for invalid config file log-level, got nil")
 	}
 }
 

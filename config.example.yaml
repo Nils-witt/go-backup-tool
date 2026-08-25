@@ -3,7 +3,9 @@
 # way to configure a job: go-backup-tool has no CLI flags for cmd, targets,
 # recipients, etc. — only -config (this file's path), -job (see below), and
 # -log-level (debug, info, warn, or error; default info — debug adds
-# per-stage pipeline detail useful when troubleshooting a run).
+# per-stage pipeline detail useful when troubleshooting a run). Log level can
+# also be set via this file's top-level log-level: (see below), which
+# -log-level overrides when explicitly passed.
 #
 # On Windows, go-backup-tool.exe can also run as a Windows service instead
 # of an interactive console process:
@@ -83,6 +85,9 @@ servers:
 # the whole run (every job), not per job.
 
 # timeout: 30m # applies to the whole run (every job), not per job
+
+# log-level: info # debug, info, warn, or error (default info); the
+# -log-level flag overrides this when explicitly given on the command line.
 
 # listen: ":8080" # enables a web UI dashboard (http://host:port/) showing
 # every job's and target's live status (idle/running/ok/failed, last run
