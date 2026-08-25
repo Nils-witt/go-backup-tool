@@ -1,0 +1,15 @@
+#!/usr/bin/env sh
+set -e
+
+echo "pre-commit: go vet"
+go vet ./...
+
+if command -v golangci-lint >/dev/null 2>&1; then
+  echo "pre-commit: golangci-lint"
+  golangci-lint run --timeout 5m
+else
+  echo "pre-commit: golangci-lint not found on PATH, skipping (install: https://golangci-lint.run/welcome/install/)" >&2
+fi
+
+echo "pre-commit: go test"
+go test ./...

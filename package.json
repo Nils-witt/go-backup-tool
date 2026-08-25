@@ -1,0 +1,11 @@
+{
+  "name": "go-backup-tool",
+  "private": true,
+  "description": "Dev-only tooling for go-backup-tool (a Go CLI): manages git hooks via Husky. No JavaScript is shipped by this project.",
+  "scripts": {
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7"
+  }
+}
