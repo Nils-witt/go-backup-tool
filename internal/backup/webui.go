@@ -49,7 +49,7 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", handleDashboard)
 	mux.HandleFunc("GET /api/status", handleStatus(store))
-	mux.HandleFunc("GET /api/receivers", handleReceiverStatus(receiverStore))
+	mux.HandleFunc("GET /api/receivers", handleReceiverStatus(receivers, receiverStore, log))
 	mux.HandleFunc("GET /api/receivers/{id}/files", handleReceiverFiles(receivers, log))
 	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, receiverStore, log, db))
 	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, receiverStore, log, db))
@@ -129,15 +129,48 @@ func handleStatus(store *statusStore) http.HandlerFunc {
 	}
 }
 
-// handleReceiverStatus serves store's current receiver statuses as JSON.
-func handleReceiverStatus(store *receiverStatusStore) http.HandlerFunc {
+// handleReceiverStatus serves store's current receiver statuses as JSON,
+// annotated with each receiver's live staleness (see
+// annotateReceiverStaleness) for any entry in receivers with stale-after:
+// set.
+func handleReceiverStatus(receivers map[string]resolvedReceiver, store *receiverStatusStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
+		snapshots := store.snapshot()
+
+		for i := range snapshots {
+			annotateReceiverStaleness(&snapshots[i], receivers[snapshots[i].ID], log)
+		}
+
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
-		if err := json.NewEncoder(w).Encode(store.snapshot()); err != nil {
+		if err := json.NewEncoder(w).Encode(snapshots); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	}
+}
+
+// annotateReceiverStaleness fills snap's StaleAfter/Stale fields from recv's
+// current state on disk, for a receiver with stale-after: set; a no-op
+// otherwise. Stale mirrors staleReceiverMonitor.check's own condition — at
+// least one file received, and the most recent one older than
+// recv.staleAfter — so the dashboard never disagrees with what actually
+// fires the webhook. A lastReceivedAt failure is logged and leaves Stale
+// false rather than failing the whole /api/receivers response over one
+// receiver's directory listing.
+func annotateReceiverStaleness(snap *receiverSnapshot, recv resolvedReceiver, log *slog.Logger) {
+	if recv.staleAfter <= 0 {
+		return
+	}
+
+	snap.StaleAfter = recv.staleAfter.String()
+
+	lastSeen, ok, err := lastReceivedAt(recv)
+	if err != nil {
+		log.Warn("receiver: checking staleness failed", "id", recv.id, "err", err)
+		return
+	}
+
+	snap.Stale = ok && time.Since(lastSeen) > recv.staleAfter
 }
 
 // handleReceiverFiles serves GET /api/receivers/{id}/files: the objects
@@ -379,6 +412,11 @@ const dashboardHTML = `<!doctype html>
     font-weight: 600;
     font-size: 1rem;
   }
+  .badges {
+    display: flex;
+    align-items: baseline;
+    gap: .35rem;
+  }
   .meta {
     color: var(--muted);
     font-size: .8rem;
@@ -503,8 +541,8 @@ function fmtTime(s) {
   return new Date(s).toLocaleString();
 }
 
-function badge(state) {
-  return '<span class="badge ' + state + '">' + state + '</span>';
+function badge(state, label) {
+  return '<span class="badge ' + state + '">' + (label || state) + '</span>';
 }
 
 function render(jobs) {
@@ -612,6 +650,8 @@ function renderReceivers(receivers) {
   document.getElementById("receivers").innerHTML = receivers.map(function (rcv) {
     const err = rcv.error ? '<p class="err">' + rcv.error + '</p>' : '';
     const retention = rcv.retention ? (' &middot; retention ' + rcv.retention) : '';
+    const staleAfter = rcv.stale_after ? (' &middot; stale after ' + rcv.stale_after) : '';
+    const staleBadge = rcv.stale ? badge('failed', 'stale') : '';
     const lastSeen = hasTime(rcv.last_seen)
       ? ('last received: ' + fmtTime(rcv.last_seen) + (rcv.last_key ? ' (' + rcv.last_key + ')' : ''))
       : 'no objects received yet';
@@ -619,8 +659,10 @@ function renderReceivers(receivers) {
     const filesSection = expanded ? '<div class="files-wrap">' + renderFileList(rcv.id) + '</div>' : '';
 
     return '<div class="card">' +
-      '<div class="card-head"><span class="job-name">' + rcv.id + '</span>' + badge(rcv.state) + '</div>' +
-      '<div class="meta">' + rcv.path + retention + '</div>' +
+      '<div class="card-head"><span class="job-name">' + rcv.id + '</span>' +
+        '<span class="badges">' + badge(rcv.state) + staleBadge + '</span>' +
+      '</div>' +
+      '<div class="meta">' + rcv.path + retention + staleAfter + '</div>' +
       '<div class="meta">' + lastSeen + '</div>' +
       err +
       '<button type="button" class="files-toggle" data-id="' + rcv.id + '">' +

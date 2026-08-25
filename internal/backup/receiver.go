@@ -322,14 +322,20 @@ func lastReceivedAt(recv resolvedReceiver) (t time.Time, ok bool, err error) {
 
 // receiverSnapshot is one configured receiver's current status, as reported
 // over /api/receivers, for display in the web UI dashboard (see webui.go).
+// StaleAfter and Stale are filled in by handleReceiverStatus (see
+// annotateReceiverStaleness), not newReceiverStatusStore/record below, since
+// they reflect what's actually on disk (like lastReceivedAt) rather than
+// live state this process tracks as requests come in.
 type receiverSnapshot struct {
-	ID        string    `json:"id"`
-	Path      string    `json:"path"`
-	Retention string    `json:"retention,omitempty"`
-	State     runState  `json:"state"` // idle until the first object is received
-	LastKey   string    `json:"last_key,omitempty"`
-	LastSeen  time.Time `json:"last_seen"` // zero if nothing has been received yet
-	Error     string    `json:"error,omitempty"`
+	ID         string    `json:"id"`
+	Path       string    `json:"path"`
+	Retention  string    `json:"retention,omitempty"`
+	State      runState  `json:"state"` // idle until the first object is received
+	LastKey    string    `json:"last_key,omitempty"`
+	LastSeen   time.Time `json:"last_seen"` // zero if nothing has been received yet
+	Error      string    `json:"error,omitempty"`
+	StaleAfter string    `json:"stale_after,omitempty"` // set only when this receiver has stale-after: configured
+	Stale      bool      `json:"stale,omitempty"`       // true once the most recent file is older than StaleAfter; always false when StaleAfter is unset
 }
 
 // receiverStatusStore tracks the live state of every configured receiver,

@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHandleDashboardServesHTML(t *testing.T) {
@@ -48,6 +50,89 @@ func TestHandleStatusServesJSON(t *testing.T) {
 
 	if len(jobs) != 1 || jobs[0].Name != "test" || jobs[0].State != stateRunning {
 		t.Errorf("jobs = %+v, want one running job named test", jobs)
+	}
+}
+
+func TestHandleReceiverStatusIncludesStaleness(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	stale := filepath.Join(root, "old.gpg")
+	writeFile(t, stale, "a")
+
+	staleTime := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(stale, staleTime, staleTime); err != nil {
+		t.Fatalf("Chtimes(%q): %v", stale, err)
+	}
+
+	receivers := map[string]resolvedReceiver{
+		"a": {id: "a", path: root, staleAfter: time.Hour, webhook: resolvedWebhook{url: "https://example.com/hook", method: http.MethodPost}},
+	}
+	store := newReceiverStatusStore(receivers)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers", nil)
+	rec := httptest.NewRecorder()
+
+	handleReceiverStatus(receivers, store, discardLogger)(rec, req)
+
+	var snapshots []receiverSnapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &snapshots); err != nil {
+		t.Fatalf("decoding response body: %v", err)
+	}
+
+	if len(snapshots) != 1 {
+		t.Fatalf("snapshots = %+v, want 1 entry", snapshots)
+	}
+
+	if snapshots[0].StaleAfter != time.Hour.String() || !snapshots[0].Stale {
+		t.Errorf("snapshots[0] = %+v, want stale_after %q and stale true", snapshots[0], time.Hour.String())
+	}
+}
+
+func TestHandleReceiverStatusFreshFileIsNotStale(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "recent.gpg"), "a")
+
+	receivers := map[string]resolvedReceiver{
+		"a": {id: "a", path: root, staleAfter: time.Hour, webhook: resolvedWebhook{url: "https://example.com/hook", method: http.MethodPost}},
+	}
+	store := newReceiverStatusStore(receivers)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers", nil)
+	rec := httptest.NewRecorder()
+
+	handleReceiverStatus(receivers, store, discardLogger)(rec, req)
+
+	var snapshots []receiverSnapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &snapshots); err != nil {
+		t.Fatalf("decoding response body: %v", err)
+	}
+
+	if len(snapshots) != 1 || snapshots[0].StaleAfter != time.Hour.String() || snapshots[0].Stale {
+		t.Errorf("snapshots = %+v, want stale_after %q and stale false", snapshots, time.Hour.String())
+	}
+}
+
+func TestHandleReceiverStatusWithoutStaleAfterOmitsStaleness(t *testing.T) {
+	t.Parallel()
+
+	receivers := map[string]resolvedReceiver{"a": {id: "a", path: t.TempDir()}}
+	store := newReceiverStatusStore(receivers)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers", nil)
+	rec := httptest.NewRecorder()
+
+	handleReceiverStatus(receivers, store, discardLogger)(rec, req)
+
+	var snapshots []receiverSnapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &snapshots); err != nil {
+		t.Fatalf("decoding response body: %v", err)
+	}
+
+	if len(snapshots) != 1 || snapshots[0].StaleAfter != "" || snapshots[0].Stale {
+		t.Errorf("snapshots = %+v, want empty stale_after and stale false", snapshots)
 	}
 }
 
