@@ -46,6 +46,13 @@ servers:
 
 # timeout: 30m # applies to the whole run (every job), not per job
 
+# listen: ":8080" # enables a web UI dashboard (http://host:port/) showing
+# every job's and target's live status (idle/running/ok/failed, last run
+# time, duration, error). Unset (the default) disables it. When set, the
+# process stays alive to keep serving the dashboard even after every job
+# has finished its (possibly one-shot) run, until stopped (Ctrl-C/SIGTERM)
+# or the config file's timeout elapses.
+
 jobs:
   - name: database
     cmd: "mysqldump --single-transaction mydb | gzip"

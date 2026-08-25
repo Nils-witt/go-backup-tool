@@ -233,6 +233,7 @@ func TestParseFlagsConfigFile(t *testing.T) {
 
 	path := writeConfigFile(t, `
 timeout: 5m
+listen: ":8080"
 
 servers:
   - name: primary
@@ -268,6 +269,35 @@ jobs:
 
 	if rc.timeout != 5*time.Minute {
 		t.Errorf("rc.timeout = %v, want 5m", rc.timeout)
+	}
+
+	if rc.listen != ":8080" {
+		t.Errorf("rc.listen = %q, want %q", rc.listen, ":8080")
+	}
+}
+
+func TestParseFlagsConfigFileListenUnset(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	if rc.listen != "" {
+		t.Errorf("rc.listen = %q, want empty (web UI disabled by default)", rc.listen)
 	}
 }
 

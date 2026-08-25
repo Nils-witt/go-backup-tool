@@ -48,7 +48,12 @@ func environWithout(names ...string) []string {
 // shell pipeline (e.g. "mysqldump db | gzip") as the backup source. cfg.cmd
 // is operator-supplied CLI configuration, not untrusted external input, so
 // this is the intended behavior rather than a command-injection risk.
-func runPipeline(ctx context.Context, cfg *config) error {
+//
+// The returned targetErrs is index-aligned with cfg.targets (nil entries
+// mean that target succeeded), for callers such as the web UI's status
+// store that need per-target outcomes rather than just the combined error;
+// it's nil if the pipeline failed before reaching the upload stage.
+func runPipeline(ctx context.Context, cfg *config) (targetErrs []error, err error) {
 	sourceCmd := exec.CommandContext(ctx, "sh", "-c", cfg.cmd) //nolint:gosec // cfg.cmd is operator-supplied CLI config, not untrusted input; see comment above
 	sourceCmd.Stderr = os.Stderr
 	// The backup command may be arbitrary and its output/behavior is
@@ -58,12 +63,12 @@ func runPipeline(ctx context.Context, cfg *config) error {
 
 	sourceOut, err := sourceCmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("wiring command output: %w", err)
+		return nil, fmt.Errorf("wiring command output: %w", err)
 	}
 
 	gpgCmd, passphraseWriter, passphraseReadEnd, err := buildGPGCommand(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("building gpg command: %w", err)
+		return nil, fmt.Errorf("building gpg command: %w", err)
 	}
 
 	gpgCmd.Stdin = sourceOut
@@ -73,15 +78,15 @@ func runPipeline(ctx context.Context, cfg *config) error {
 
 	gpgOut, err := gpgCmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("wiring gpg output: %w", err)
+		return nil, fmt.Errorf("wiring gpg output: %w", err)
 	}
 
 	if err := sourceCmd.Start(); err != nil {
-		return fmt.Errorf("starting command %q: %w", cfg.cmd, err)
+		return nil, fmt.Errorf("starting command %q: %w", cfg.cmd, err)
 	}
 
 	if err := gpgCmd.Start(); err != nil {
-		return fmt.Errorf("starting gpg: %w", err)
+		return nil, fmt.Errorf("starting gpg: %w", err)
 	}
 
 	if passphraseReadEnd != nil {
@@ -94,7 +99,7 @@ func runPipeline(ctx context.Context, cfg *config) error {
 
 	if passphraseWriter != nil {
 		if err := writePassphrase(passphraseWriter, cfg.passphrase); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -107,7 +112,7 @@ func runPipeline(ctx context.Context, cfg *config) error {
 
 	cleanupPartialUpload(ctx, cfg, sourceErr, gpgErr, targetErrs)
 
-	return firstPipelineError(cfg.cmd, sourceErr, gpgErr, uploadErr)
+	return targetErrs, firstPipelineError(cfg.cmd, sourceErr, gpgErr, uploadErr)
 }
 
 // writePassphrase writes the gpg symmetric-encryption passphrase into w and
@@ -137,6 +142,13 @@ func writePassphrase(w io.WriteCloser, passphrase string) error {
 // object successfully written, since gpg happily finalizes encryption of
 // whatever partial input it received before the pipe closed. Treat that as
 // corrupt and remove it rather than leaving a silent partial backup behind.
+//
+// It overwrites targetErrs[i] for every target it processes here, even when
+// the removal itself succeeds: a target that gets to this loop had a
+// successful upload rolled back, so nil (meaning "succeeded") would no
+// longer be true — callers such as the web UI's status store rely on
+// targetErrs reflecting the pipeline's final outcome, not just the upload
+// stage's.
 func cleanupPartialUpload(ctx context.Context, cfg *config, sourceErr, gpgErr error, targetErrs []error) {
 	if sourceErr == nil && gpgErr == nil {
 		return
@@ -152,7 +164,12 @@ func cleanupPartialUpload(ctx context.Context, cfg *config, sourceErr, gpgErr er
 		if t.kind == serverKindLocal {
 			if delErr := deleteLocalObject(cfg, t); delErr != nil {
 				fmt.Fprintf(os.Stderr, "warning: failed to remove partial write %s (%s): %v\n", localObjectPath(cfg, t), targetLabel(t), delErr)
+				targetErrs[i] = fmt.Errorf("upload rolled back after pipeline failure, and removing the partial write also failed: %w", delErr)
+
+				continue
 			}
+
+			targetErrs[i] = errors.New("upload rolled back after pipeline failure")
 
 			continue
 		}
@@ -160,12 +177,19 @@ func cleanupPartialUpload(ctx context.Context, cfg *config, sourceErr, gpgErr er
 		client, err := newS3Client(ctx, t)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to set up s3 client to remove partial upload s3://%s/%s (%s): %v\n", t.bucket, cfg.key, targetLabel(t), err)
+			targetErrs[i] = fmt.Errorf("upload rolled back after pipeline failure, and setting up the s3 client to remove it also failed: %w", err)
+
 			continue
 		}
 
 		if delErr := deleteS3Object(ctx, client, cfg, t); delErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to remove partial upload s3://%s/%s (%s): %v\n", t.bucket, cfg.key, targetLabel(t), delErr)
+			targetErrs[i] = fmt.Errorf("upload rolled back after pipeline failure, and removing it also failed: %w", delErr)
+
+			continue
 		}
+
+		targetErrs[i] = errors.New("upload rolled back after pipeline failure")
 	}
 }
 

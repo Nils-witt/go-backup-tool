@@ -27,6 +27,11 @@ import (
 // run concurrently with each other, each on its own schedule. A job failing
 // doesn't stop the others: the remaining jobs, and any later repeats, still
 // get a chance to complete, since a partial backup run is better than none.
+//
+// If the config file sets listen:, Run also serves a web UI dashboard of
+// every job's and target's live status (see webui.go) and, even once every
+// job is a one-shot run that has already finished, keeps running to keep
+// that dashboard reachable until ctx is canceled.
 func Run(args []string, stderr io.Writer) int {
 	rc, err := parseFlags(args, stderr)
 	if err != nil {
@@ -49,7 +54,13 @@ func Run(args []string, stderr io.Writer) int {
 		defer cancel()
 	}
 
-	r := &runner{stderr: stderr}
+	store := newStatusStore(rc.jobs)
+	r := &runner{stderr: stderr, store: store}
+
+	var srv *webUIServer
+	if rc.listen != "" {
+		srv = startWebUI(rc.listen, store, stderr)
+	}
 
 	var wg sync.WaitGroup
 
@@ -63,6 +74,16 @@ func Run(args []string, stderr io.Writer) int {
 
 	wg.Wait()
 
+	if srv != nil {
+		// One-shot jobs (no interval) finish as soon as wg.Wait returns
+		// above; keep the dashboard reachable until the user stops the
+		// process instead of tearing it down the instant the backups
+		// complete. A job with an interval already keeps schedule (and so
+		// wg.Wait) running until ctx is done, so this is a no-op then.
+		<-ctx.Done()
+		srv.shutdown()
+	}
+
 	if r.failed.Load() {
 		return 1
 	}
@@ -74,6 +95,7 @@ func Run(args []string, stderr io.Writer) int {
 // scheduled jobs.
 type runner struct {
 	stderr io.Writer
+	store  *statusStore
 	failed atomic.Bool
 }
 
@@ -106,7 +128,13 @@ func (r *runner) runOnce(ctx context.Context, job *config) {
 	run := *job
 	run.key = substituteKeyTime(job.key)
 
-	if err := runPipeline(ctx, &run); err != nil {
+	r.store.starting(job.name)
+
+	targetErrs, err := runPipeline(ctx, &run)
+	r.recordTargetResults(job.name, run.targets, targetErrs, err)
+	r.store.finished(job.name, err)
+
+	if err != nil {
 		r.failed.Store(true)
 
 		_, _ = fmt.Fprintln(r.stderr, "error:", jobError(job, err))
@@ -125,6 +153,27 @@ func (r *runner) runOnce(ctx context.Context, job *config) {
 		}
 
 		_, _ = fmt.Fprintf(r.stderr, "%suploaded s3://%s/%s (server %q)\n", jobLabel(job), t.bucket, run.key, t.serverName)
+	}
+}
+
+// recordTargetResults updates the status store's per-target state for a
+// finished run. targetErrs is index-aligned with targets when runPipeline
+// reached the upload stage; if it failed earlier (e.g. the source command
+// never started), targetErrs is empty and every target is instead marked
+// with the run's overall error, since no target-specific detail exists.
+func (r *runner) recordTargetResults(jobName string, targets []target, targetErrs []error, err error) {
+	if len(targetErrs) == len(targets) {
+		for i, terr := range targetErrs {
+			r.store.targetDone(jobName, i, terr)
+		}
+
+		return
+	}
+
+	if err != nil {
+		for i := range targets {
+			r.store.targetDone(jobName, i, err)
+		}
 	}
 }
 

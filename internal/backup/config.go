@@ -102,10 +102,11 @@ type target struct {
 }
 
 // runConfig is the result of parseFlags: one or more jobs to run, plus the
-// overall run timeout.
+// overall run timeout and the optional web UI listen address.
 type runConfig struct {
 	jobs    []*config
 	timeout time.Duration
+	listen  string // empty disables the web UI; see fileConfig.Listen
 }
 
 // Built-in defaults for fields a job's or server's config file entry
@@ -173,6 +174,7 @@ type fileConfig struct {
 	fileJob `yaml:",inline"`
 
 	Timeout string       `yaml:"timeout"`
+	Listen  string       `yaml:"listen"` // e.g. ":8080"; empty (the default) disables the web UI
 	Servers []fileServer `yaml:"servers"`
 	Jobs    []fileJob    `yaml:"jobs"`
 }
@@ -255,7 +257,7 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 		}
 	}
 
-	return &runConfig{jobs: jobs, timeout: timeout}, nil
+	return &runConfig{jobs: jobs, timeout: timeout, listen: strings.TrimSpace(fileCfg.Listen)}, nil
 }
 
 // resolveJobs builds the list of jobs to run from fileCfg's jobs: list,
