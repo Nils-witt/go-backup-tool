@@ -2,12 +2,14 @@ package backup
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -20,13 +22,14 @@ type webUIServer struct {
 }
 
 // startWebUI binds addr and starts an HTTP server serving a live dashboard
-// of store's job/target statuses (see dashboardHTML and handleStatus),
-// reporting it (and any later failure) to log. Binding happens
-// synchronously so a bad address is reported immediately and callers can
-// rely on the server being reachable as soon as this returns; it returns nil
-// if addr couldn't be bound, leaving the web UI disabled for this run rather
-// than failing the whole process over a dashboard.
-func startWebUI(addr string, store *statusStore, log *slog.Logger) *webUIServer {
+// of store's job/target statuses (see dashboardHTML and handleStatus), plus
+// the receiver API (see handleReceiveObject/handleDeleteObject) for any
+// entries in receivers, reporting it (and any later failure) to log. Binding
+// happens synchronously so a bad address is reported immediately and callers
+// can rely on the server being reachable as soon as this returns; it returns
+// nil if addr couldn't be bound, leaving the web UI disabled for this run
+// rather than failing the whole process over a dashboard.
+func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger) *webUIServer {
 	var lc net.ListenConfig
 
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
@@ -38,6 +41,8 @@ func startWebUI(addr string, store *statusStore, log *slog.Logger) *webUIServer 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", handleDashboard)
 	mux.HandleFunc("GET /api/status", handleStatus(store))
+	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, log))
+	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, log))
 
 	srv := &webUIServer{
 		http: &http.Server{Handler: logRequests(log, mux), ReadHeaderTimeout: 10 * time.Second},
@@ -112,6 +117,115 @@ func handleStatus(store *statusStore) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	}
+}
+
+// handleReceiveObject serves PUT /api/v1/objects/{id}/{key...}: after
+// authorizing the request against receivers (see authorizeReceiver), it
+// writes the request body to disk exactly as a type: local target would
+// (see receiverTarget in receiver.go), so a remote target's PUT and this
+// instance's own local-target writes share the same on-disk behavior
+// (atomic temp-file-then-rename) and retention tracking.
+func handleReceiveObject(receivers map[string]resolvedReceiver, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		recv, ok := authorizeReceiver(w, r, receivers)
+		if !ok {
+			return
+		}
+
+		key, err := sanitizeObjectKey(r.PathValue("key"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		cfg := &config{key: key}
+		t := receiverTarget(recv)
+
+		if err := writeLocalObject(cfg, t, r.Body); err != nil {
+			log.Warn("receiver: writing object failed", "id", recv.id, "key", key, "err", err)
+			http.Error(w, "writing object failed", http.StatusInternalServerError)
+
+			return
+		}
+
+		if err := recordLocalWrite(r.Context(), cfg, t, log); err != nil {
+			log.Warn("receiver: retention tracking failed", "id", recv.id, "key", key, "err", err)
+		}
+
+		log.Info("receiver: object written", "id", recv.id, "key", key, "path", localObjectPath(cfg, t))
+		w.WriteHeader(http.StatusCreated)
+	}
+}
+
+// handleDeleteObject serves DELETE /api/v1/objects/{id}/{key...}, used by a
+// sending instance's cleanupPartialUpload to roll back a partial upload
+// after a mid-stream pipeline failure.
+func handleDeleteObject(receivers map[string]resolvedReceiver, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		recv, ok := authorizeReceiver(w, r, receivers)
+		if !ok {
+			return
+		}
+
+		key, err := sanitizeObjectKey(r.PathValue("key"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		cfg := &config{key: key}
+		t := receiverTarget(recv)
+
+		if err := deleteLocalObject(cfg, t); err != nil {
+			log.Warn("receiver: deleting object failed", "id", recv.id, "key", key, "err", err)
+			http.Error(w, "deleting object failed", http.StatusInternalServerError)
+
+			return
+		}
+
+		if err := removeRetentionRecord(r.Context(), cfg, t); err != nil {
+			log.Warn("receiver: removing retention record failed", "id", recv.id, "key", key, "err", err)
+		}
+
+		log.Info("receiver: object deleted", "id", recv.id, "key", key, "path", localObjectPath(cfg, t))
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// authorizeReceiver looks up the receiver named by the request's {id} path
+// value and checks its Authorization: Bearer <token> header, writing an
+// error response and returning ok=false if either the id is unknown or the
+// token doesn't match.
+func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers map[string]resolvedReceiver) (recv resolvedReceiver, ok bool) {
+	recv, exists := receivers[r.PathValue("id")]
+	if !exists {
+		http.Error(w, "unknown receiver id", http.StatusNotFound)
+		return resolvedReceiver{}, false
+	}
+
+	token, hasToken := bearerToken(r)
+	// subtle.ConstantTimeCompare, rather than ==, so a mismatch can't be
+	// timed to learn how many leading bytes of the token were guessed
+	// correctly.
+	if !hasToken || subtle.ConstantTimeCompare([]byte(token), []byte(recv.token)) != 1 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return resolvedReceiver{}, false
+	}
+
+	return recv, true
+}
+
+// bearerToken extracts the token from an "Authorization: Bearer <token>"
+// request header, reporting false if the header is missing or malformed.
+func bearerToken(r *http.Request) (string, bool) {
+	const prefix = "Bearer "
+
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, prefix) {
+		return "", false
+	}
+
+	return strings.TrimPrefix(auth, prefix), true
 }
 
 // handleDashboard serves the static dashboard page, which polls

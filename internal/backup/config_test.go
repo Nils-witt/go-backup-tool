@@ -1280,3 +1280,200 @@ jobs:
 		t.Fatalf("parseFlags() error = %v, want substring %q", err, "start-time requires interval")
 	}
 }
+
+func TestParseFlagsRemoteServer(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: sibling
+    type: remote
+    endpoint: "https://backup2.example.com:8443"
+    token: "shared-secret"
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: sibling, bucket: from-primary}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	cfg := singleJob(t, rc)
+
+	want := target{
+		serverName: "sibling",
+		kind:       serverKindRemote,
+		bucket:     "from-primary",
+		endpoint:   "https://backup2.example.com:8443",
+		token:      "shared-secret",
+	}
+	if len(cfg.targets) != 1 || cfg.targets[0] != want {
+		t.Errorf("cfg.targets = %+v, want [%+v]", cfg.targets, want)
+	}
+}
+
+func TestParseFlagsRemoteServerRequiresEndpoint(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: sibling
+    type: remote
+    token: "shared-secret"
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: sibling, bucket: from-primary}]
+    recipients: [me@example.com]
+`)
+
+	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "endpoint is required for type: remote") {
+		t.Fatalf("parseFlags() error = %v, want substring %q", err, "endpoint is required for type: remote")
+	}
+}
+
+func TestParseFlagsRemoteServerRequiresToken(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: sibling
+    type: remote
+    endpoint: "https://backup2.example.com:8443"
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: sibling, bucket: from-primary}]
+    recipients: [me@example.com]
+`)
+
+	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "token is required for type: remote") {
+		t.Fatalf("parseFlags() error = %v, want substring %q", err, "token is required for type: remote")
+	}
+}
+
+func TestParseFlagsRemoteServerRejectsOtherFields(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: sibling
+    type: remote
+    endpoint: "https://backup2.example.com:8443"
+    token: "shared-secret"
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: sibling, bucket: from-primary}]
+    recipients: [me@example.com]
+`)
+
+	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "are not valid for type: remote") {
+		t.Fatalf("parseFlags() error = %v, want substring %q", err, "are not valid for type: remote")
+	}
+}
+
+func TestParseFlagsReceivers(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    region: us-east-1
+
+receivers:
+  - id: from-primary
+    token: "shared-secret"
+    path: `+dir+`
+    retention: 30d
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	recv, ok := rc.receivers["from-primary"]
+	if !ok {
+		t.Fatalf("rc.receivers = %+v, want an entry for %q", rc.receivers, "from-primary")
+	}
+
+	want := resolvedReceiver{id: "from-primary", token: "shared-secret", path: dir, retention: 30 * 24 * time.Hour}
+	if recv != want {
+		t.Errorf("rc.receivers[%q] = %+v, want %+v", "from-primary", recv, want)
+	}
+}
+
+func TestParseFlagsReceiverRequiresToken(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    region: us-east-1
+
+receivers:
+  - id: from-primary
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), `receiver "from-primary": token is required`) {
+		t.Fatalf("parseFlags() error = %v, want substring %q", err, `receiver "from-primary": token is required`)
+	}
+}
+
+func TestParseFlagsReceiverDuplicateID(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    region: us-east-1
+
+receivers:
+  - id: dup
+    token: "a"
+    path: /mnt/a
+  - id: dup
+    token: "b"
+    path: /mnt/b
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), `duplicate receiver id "dup"`) {
+		t.Fatalf("parseFlags() error = %v, want substring %q", err, `duplicate receiver id "dup"`)
+	}
+}

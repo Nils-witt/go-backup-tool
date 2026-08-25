@@ -24,11 +24,15 @@
 # many jobs.
 #
 # type: selects the destination kind: "s3" (the default, so it can be
-# omitted) for an S3 (or S3-compatible) bucket, or "local" for a directory
+# omitted) for an S3 (or S3-compatible) bucket, "local" for a directory
 # on the local filesystem (e.g. a mounted NFS share, external disk, or
-# another backup tool's watched directory). A local server only needs path;
-# a target's bucket is still required and is used as a subdirectory under
-# it, so the object ends up at path/bucket/key.
+# another backup tool's watched directory), or "remote" for another
+# go-backup-tool instance's receiver API (see receivers: below). A local
+# server only needs path; a target's bucket is still required and is used
+# as a subdirectory under it, so the object ends up at path/bucket/key. A
+# remote server only needs endpoint and token; a target's bucket is still
+# required and is sent as the id identifying which of the destination
+# instance's receivers: entries to write to.
 #
 # A local server may also set retention: (e.g. "7d" for 7 days, "168h",
 # "90m" for 90 minutes — "d" for days works alongside every unit Go's
@@ -38,6 +42,8 @@
 # path/.go-backup-tool-retention.db so it only ever deletes objects it
 # wrote itself; retention is swept after every write to that server, and
 # once at startup. Omit retention (the default) to keep objects forever.
+# A remote server has no retention: of its own — that's configured on the
+# destination instance's matching receivers: entry instead.
 servers:
   - name: primary
     region: us-east-1
@@ -59,6 +65,14 @@ servers:
     type: local
     path: /mnt/backups
     retention: 7d # delete objects here once they're older than 7 days
+  - name: sibling-instance
+    type: remote
+    endpoint: "https://backup2.example.com:8443"
+    # token authenticates to the destination instance's receiver API (see
+    # its own receivers: entry below); unlike access-key-env/secret-key-env
+    # above, it's written directly here rather than read from the
+    # environment, so protect this file's permissions accordingly.
+    token: "replace-with-a-long-random-shared-secret"
 
 # Every job is defined under jobs:, one entry per backup; run all jobs (in
 # order) with no -job flag, or one with -job <name>. Every key below is
@@ -109,7 +123,10 @@ jobs:
     # more than one entry under targets:. Every target uploads the same
     # encrypted object (same key), so only the server and bucket differ.
     # A local server works the same way (see "nas" above): the object is
-    # written to /mnt/backups/my-backup-bucket-local/uploads-<time>.gpg.
+    # written to /mnt/backups/my-backup-bucket-local/uploads-<time>.gpg. A
+    # remote server (see "sibling-instance" above) sends bucket as the id
+    # naming which of the destination instance's receivers: entries to
+    # write to.
     targets:
       - server: primary
         bucket: my-backup-bucket
@@ -117,8 +134,26 @@ jobs:
         bucket: my-backup-bucket-offsite
       - server: nas
         bucket: my-backup-bucket-local
+      - server: sibling-instance
+        bucket: from-primary # = id of a receivers: entry on sibling-instance
     # no interval: this job runs once and doesn't repeat, even though
     # "database" above keeps the whole process alive
+
+# receivers: configures this instance's own receiver API — the destination
+# side of another go-backup-tool instance's type: remote target above. Only
+# reachable when listen: is set (the receiver API is served by the same
+# HTTP server as the dashboard). Each entry's id is what a sender's target
+# names as its bucket; token must match the value the sender configured on
+# its own servers: entry (see "sibling-instance" above); path is the root
+# directory incoming objects for this id are written under (object ends up
+# at path/key, mirroring a local server's path/bucket/key); retention (
+# optional, same syntax as a local server's) deletes objects here once
+# they're older than that.
+# receivers:
+#   - id: from-primary
+#     token: "replace-with-a-long-random-shared-secret"
+#     path: /mnt/remote-backups/from-primary
+#     retention: 30d
 
 # A job's key keeps its {time} placeholder each time it (re-)runs, so a
 # repeating job gets a fresh object on every run instead of overwriting the

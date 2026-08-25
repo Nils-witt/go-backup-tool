@@ -114,8 +114,11 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	r := &runner{log: log, store: store, stateDB: stateDB}
 
 	var srv *webUIServer
+
 	if rc.listen != "" {
-		srv = startWebUI(rc.listen, store, log)
+		sweepStartupReceiverRetention(ctx, rc.receivers, log)
+
+		srv = startWebUI(rc.listen, store, rc.receivers, log)
 	}
 
 	var wg sync.WaitGroup
@@ -408,12 +411,14 @@ func (r *runner) runOnce(ctx context.Context, job *config) {
 	for i := range run.targets {
 		t := &run.targets[i]
 
-		if t.kind == serverKindLocal {
+		switch t.kind {
+		case serverKindLocal:
 			log.Info("wrote target", "target", targetLabel(t), "path", localObjectPath(&run, t))
-			continue
+		case serverKindRemote:
+			log.Info("uploaded target", "target", targetLabel(t), "url", remoteObjectURL(t, run.key))
+		case serverKindS3:
+			log.Info("uploaded target", "target", targetLabel(t), "url", fmt.Sprintf("s3://%s/%s", t.bucket, run.key))
 		}
-
-		log.Info("uploaded target", "target", targetLabel(t), "url", fmt.Sprintf("s3://%s/%s", t.bucket, run.key))
 	}
 }
 

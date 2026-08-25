@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +22,13 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
+
+// remoteHTTPClient is shared by every remote target's upload/delete
+// requests. It sets no client-side timeout: the request's context (derived
+// from the run's overall -timeout, if any) governs cancellation instead,
+// consistent with how the S3 SDK client and local filesystem writes are
+// bounded only by ctx.
+var remoteHTTPClient = &http.Client{}
 
 // environWithout returns the current process environment with the given
 // variable names removed, for handing to a child process that must not
@@ -42,9 +51,10 @@ func environWithout(names ...string) []string {
 //
 //	shell command  --(stdout)-->  gpg encrypt  --(stdout)-->  upload/write to targets
 //
-// Each target is either an S3 (or S3-compatible) bucket or a directory on
-// the local filesystem. Data never touches disk on the source/gpg legs and
-// is never fully buffered in memory.
+// Each target is either an S3 (or S3-compatible) bucket, a directory on the
+// local filesystem, or another go-backup-tool instance's receiver API. Data
+// never touches disk on the source/gpg legs and is never fully buffered in
+// memory.
 //
 // cfg.cmd is run via "sh -c" deliberately: it lets an operator pass a full
 // shell pipeline (e.g. "mysqldump db | gzip") as the backup source. cfg.cmd
@@ -176,7 +186,8 @@ func cleanupPartialUpload(ctx context.Context, cfg *config, sourceErr, gpgErr er
 
 		t := &cfg.targets[i]
 
-		if t.kind == serverKindLocal {
+		switch t.kind {
+		case serverKindLocal:
 			if delErr := deleteLocalObject(cfg, t); delErr != nil {
 				log.Warn("failed to remove partial write", "path", localObjectPath(cfg, t), "target", targetLabel(t), "err", delErr)
 				targetErrs[i] = fmt.Errorf("upload rolled back after pipeline failure, and removing the partial write also failed: %w", delErr)
@@ -192,27 +203,38 @@ func cleanupPartialUpload(ctx context.Context, cfg *config, sourceErr, gpgErr er
 
 			targetErrs[i] = errors.New("upload rolled back after pipeline failure")
 
-			continue
+		case serverKindRemote:
+			if delErr := deleteRemoteObject(ctx, cfg, t); delErr != nil {
+				log.Warn("failed to remove partial upload", "url", remoteObjectURL(t, cfg.key), "target", targetLabel(t), "err", delErr)
+				targetErrs[i] = fmt.Errorf("upload rolled back after pipeline failure, and removing it also failed: %w", delErr)
+
+				continue
+			}
+
+			log.Info("rolled back partial upload", "url", remoteObjectURL(t, cfg.key), "target", targetLabel(t))
+
+			targetErrs[i] = errors.New("upload rolled back after pipeline failure")
+
+		case serverKindS3:
+			client, err := newS3Client(ctx, t)
+			if err != nil {
+				log.Warn("failed to set up s3 client to remove partial upload", "bucket", t.bucket, "key", cfg.key, "target", targetLabel(t), "err", err)
+				targetErrs[i] = fmt.Errorf("upload rolled back after pipeline failure, and setting up the s3 client to remove it also failed: %w", err)
+
+				continue
+			}
+
+			if delErr := deleteS3Object(ctx, client, cfg, t); delErr != nil {
+				log.Warn("failed to remove partial upload", "bucket", t.bucket, "key", cfg.key, "target", targetLabel(t), "err", delErr)
+				targetErrs[i] = fmt.Errorf("upload rolled back after pipeline failure, and removing it also failed: %w", delErr)
+
+				continue
+			}
+
+			log.Info("rolled back partial upload", "bucket", t.bucket, "key", cfg.key, "target", targetLabel(t))
+
+			targetErrs[i] = errors.New("upload rolled back after pipeline failure")
 		}
-
-		client, err := newS3Client(ctx, t)
-		if err != nil {
-			log.Warn("failed to set up s3 client to remove partial upload", "bucket", t.bucket, "key", cfg.key, "target", targetLabel(t), "err", err)
-			targetErrs[i] = fmt.Errorf("upload rolled back after pipeline failure, and setting up the s3 client to remove it also failed: %w", err)
-
-			continue
-		}
-
-		if delErr := deleteS3Object(ctx, client, cfg, t); delErr != nil {
-			log.Warn("failed to remove partial upload", "bucket", t.bucket, "key", cfg.key, "target", targetLabel(t), "err", delErr)
-			targetErrs[i] = fmt.Errorf("upload rolled back after pipeline failure, and removing it also failed: %w", delErr)
-
-			continue
-		}
-
-		log.Info("rolled back partial upload", "bucket", t.bucket, "key", cfg.key, "target", targetLabel(t))
-
-		targetErrs[i] = errors.New("upload rolled back after pipeline failure")
 	}
 }
 
@@ -339,7 +361,8 @@ func uploadToTargets(ctx context.Context, cfg *config, r io.Reader, log *slog.Lo
 	for i := range cfg.targets {
 		t := &cfg.targets[i]
 
-		if t.kind == serverKindLocal {
+		switch t.kind {
+		case serverKindLocal:
 			uploaders[i] = func(r io.Reader) error {
 				if err := writeLocalObject(cfg, t, r); err != nil {
 					return err
@@ -355,17 +378,21 @@ func uploadToTargets(ctx context.Context, cfg *config, r io.Reader, log *slog.Lo
 				return nil
 			}
 
-			continue
-		}
+		case serverKindRemote:
+			uploaders[i] = func(r io.Reader) error {
+				return uploadToRemote(ctx, cfg, t, r)
+			}
 
-		client, err := newS3Client(ctx, t)
-		if err != nil {
-			targetErrs[i] = fmt.Errorf("target (%s): setting up s3 client: %w", targetLabel(t), err)
-			continue
-		}
+		case serverKindS3:
+			client, err := newS3Client(ctx, t)
+			if err != nil {
+				targetErrs[i] = fmt.Errorf("target (%s): setting up s3 client: %w", targetLabel(t), err)
+				continue
+			}
 
-		uploaders[i] = func(r io.Reader) error {
-			return uploadToS3(ctx, client, cfg, t, r)
+			uploaders[i] = func(r io.Reader) error {
+				return uploadToS3(ctx, client, cfg, t, r)
+			}
 		}
 	}
 
@@ -520,4 +547,74 @@ func deleteLocalObject(cfg *config, t *target) error {
 	}
 
 	return nil
+}
+
+// remoteObjectURL returns the URL a remote target (t.kind ==
+// serverKindRemote) uploads/deletes key at: t.endpoint's
+// /api/v1/objects/{bucket}/{key}, where t.bucket is the id identifying the
+// destination instance's storage path (see receiver.go) and key is
+// path-escaped since it may contain characters not otherwise safe in a URL
+// path segment.
+func remoteObjectURL(t *target, key string) string {
+	return fmt.Sprintf("%s/api/v1/objects/%s/%s",
+		strings.TrimSuffix(t.endpoint, "/"), url.PathEscape(t.bucket), url.PathEscape(key))
+}
+
+// uploadToRemote streams r as the body of a PUT request to another
+// go-backup-tool instance's receiver API (target t, kind ==
+// serverKindRemote), authenticated with t.token as a bearer token. r is
+// streamed directly as the request body, never buffered.
+func uploadToRemote(ctx context.Context, cfg *config, t *target, r io.Reader) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, remoteObjectURL(t, cfg.key), r)
+	if err != nil {
+		return fmt.Errorf("building request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+t.token)
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	resp, err := remoteHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("sending request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return remoteResponseError(resp)
+	}
+
+	return nil
+}
+
+// deleteRemoteObject removes the object at target t's destination instance
+// (bucket as id, cfg.key as key), used to clean up a partial upload after a
+// mid-stream failure.
+func deleteRemoteObject(ctx context.Context, cfg *config, t *target) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, remoteObjectURL(t, cfg.key), nil)
+	if err != nil {
+		return fmt.Errorf("building request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+t.token)
+
+	resp, err := remoteHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("sending request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return remoteResponseError(resp)
+	}
+
+	return nil
+}
+
+// remoteResponseError builds an error from a non-2xx response, including a
+// bounded read of the response body so a misbehaving or malicious server
+// can't exhaust memory via an unbounded response.
+func remoteResponseError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+
+	return fmt.Errorf("remote instance returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 }

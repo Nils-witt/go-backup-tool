@@ -1,7 +1,7 @@
 // Package backup implements go-backup-tool's pipeline: run a shell command,
 // encrypt its stdout with gpg, and stream the ciphertext to one or more
-// targets: an S3 (or S3-compatible) bucket, or a directory on the local
-// filesystem.
+// targets: an S3 (or S3-compatible) bucket, a directory on the local
+// filesystem, or another go-backup-tool instance's receiver API.
 package backup
 
 import (
@@ -58,8 +58,9 @@ type jobTargetRef struct {
 type serverKind string
 
 const (
-	serverKindS3    serverKind = ""      // default; type: s3 also selects this
-	serverKindLocal serverKind = "local" // type: local
+	serverKindS3     serverKind = ""       // default; type: s3 also selects this
+	serverKindLocal  serverKind = "local"  // type: local
+	serverKindRemote serverKind = "remote" // type: remote
 )
 
 // parseServerKind validates a fileServer's Type field, defaulting an unset
@@ -70,8 +71,10 @@ func parseServerKind(t string) (serverKind, error) {
 		return serverKindS3, nil
 	case string(serverKindLocal):
 		return serverKindLocal, nil
+	case string(serverKindRemote):
+		return serverKindRemote, nil
 	default:
-		return "", fmt.Errorf("unknown type %q (want \"s3\" or %q)", t, serverKindLocal)
+		return "", fmt.Errorf("unknown type %q (want \"s3\", %q, or %q)", t, serverKindLocal, serverKindRemote)
 	}
 }
 
@@ -80,7 +83,8 @@ func parseServerKind(t string) (serverKind, error) {
 // object to every one of its targets. Its kind determines which of the
 // fields below apply: s3 (the default) uses bucket/region/endpoint/
 // pathStyle/credentials; local uses only bucket (as a subdirectory of
-// localPath) and localPath itself.
+// localPath) and localPath itself; remote uses bucket (as the id sent to
+// the destination instance), endpoint, and token.
 type target struct {
 	serverName string // the servers: entry this came from, for diagnostics
 	kind       serverKind
@@ -109,6 +113,12 @@ type target struct {
 	// kind == serverKindLocal). Zero means no automatic expiry. See
 	// retention.go.
 	retention time.Duration
+
+	// token authenticates to a remote target's destination instance (only
+	// set when kind == serverKindRemote), sent as a bearer token. Unlike
+	// accessKey/secretKey, it's read directly from the config file's
+	// token: field rather than an environment variable.
+	token string
 }
 
 // runConfig is the result of parseFlags: one or more jobs to run, plus the
@@ -119,6 +129,7 @@ type runConfig struct {
 	listen     string // empty disables the web UI; see fileConfig.Listen
 	configPath string // where the config file was loaded from; state db lives alongside it
 	logLevel   slog.Level
+	receivers  map[string]resolvedReceiver // this instance's receiver API entries, keyed by id; see receiver.go
 }
 
 // Built-in defaults for fields a job's or server's config file entry
@@ -162,20 +173,26 @@ type fileJobTarget struct {
 // fileServer is one top-level servers: entry, defined once and referenced by
 // name from any job's targets: list. type: selects the destination kind:
 // "s3" (the default) for an S3 (or S3-compatible) endpoint, using
-// region/endpoint/path-style/access-key-env/secret-key-env; or "local" for a
-// directory on the local filesystem, using only path. AccessKeyEnv/
-// SecretKeyEnv name environment variables to read static credentials from
-// (both required together, or neither); like GPG_PASSPHRASE, credentials
-// are never read directly out of the config file itself. When neither is
-// set, an s3 server falls back to the AWS SDK's default credential chain
-// (env vars, shared config, IAM role, ...). Retention (local only) is a
-// duration string (e.g. "7d" or "168h" for 7 days, "30m" for 30 minutes) —
-// like time.ParseDuration but with "d" also accepted for days (parsed by
-// parseDayDuration, since the standard library has no day unit; "m" is
-// already minutes in time.ParseDuration, not months); when set, any object
-// this tool writes under path is deleted once it's older than that, tracked
-// via a small sqlite database at path/.go-backup-tool-retention.db (see
-// retention.go). Unset or "0" disables automatic cleanup.
+// region/endpoint/path-style/access-key-env/secret-key-env; "local" for a
+// directory on the local filesystem, using only path; or "remote" for
+// another go-backup-tool instance's receiver API, using endpoint and token.
+// AccessKeyEnv/SecretKeyEnv name environment variables to read static S3
+// credentials from (both required together, or neither); like
+// GPG_PASSPHRASE, they are never read directly out of the config file
+// itself. When neither is set, an s3 server falls back to the AWS SDK's
+// default credential chain (env vars, shared config, IAM role, ...).
+// Retention (local only) is a duration string (e.g. "7d" or "168h" for 7
+// days, "30m" for 30 minutes) — like time.ParseDuration but with "d" also
+// accepted for days (parsed by parseDayDuration, since the standard library
+// has no day unit; "m" is already minutes in time.ParseDuration, not
+// months); when set, any object this tool writes under path is deleted once
+// it's older than that, tracked via a small sqlite database at
+// path/.go-backup-tool-retention.db (see retention.go). Unset or "0"
+// disables automatic cleanup. Token (remote only) is the bearer token sent
+// to the destination instance's receiver API, matching one of its
+// receivers: entries' own token — unlike access-key-env/secret-key-env,
+// this is written directly in the config file rather than read from the
+// environment.
 type fileServer struct {
 	Name         string `yaml:"name"`
 	Type         string `yaml:"type"`
@@ -186,6 +203,7 @@ type fileServer struct {
 	SecretKeyEnv string `yaml:"secret-key-env"`
 	Path         string `yaml:"path"`      // local only: root directory backups are written under
 	Retention    string `yaml:"retention"` // local only: e.g. "7d" or "168h"; unset/"0" keeps objects forever
+	Token        string `yaml:"token"`     // remote only: bearer token for the destination instance's receiver API
 }
 
 // fileConfig is the top-level shape of the YAML config file. Its embedded
@@ -194,10 +212,11 @@ type fileServer struct {
 type fileConfig struct {
 	fileJob `yaml:",inline"`
 
-	Timeout string       `yaml:"timeout"`
-	Listen  string       `yaml:"listen"` // e.g. ":8080"; empty (the default) disables the web UI
-	Servers []fileServer `yaml:"servers"`
-	Jobs    []fileJob    `yaml:"jobs"`
+	Timeout   string         `yaml:"timeout"`
+	Listen    string         `yaml:"listen"` // e.g. ":8080"; empty (the default) disables the web UI
+	Servers   []fileServer   `yaml:"servers"`
+	Jobs      []fileJob      `yaml:"jobs"`
+	Receivers []fileReceiver `yaml:"receivers"`
 }
 
 // parseFlags parses args (typically os.Args[1:]) into a runConfig, writing
@@ -278,16 +297,40 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 		return nil, err
 	}
 
-	var timeout time.Duration
-
-	if fileCfg.Timeout != "" {
-		timeout, err = time.ParseDuration(fileCfg.Timeout)
-		if err != nil {
-			return nil, fmt.Errorf("parsing config file timeout %q: %w", fileCfg.Timeout, err)
-		}
+	receivers, err := buildReceivers(fileCfg.Receivers)
+	if err != nil {
+		return nil, err
 	}
 
-	return &runConfig{jobs: jobs, timeout: timeout, listen: strings.TrimSpace(fileCfg.Listen), configPath: configPath, logLevel: level}, nil
+	timeout, err := parseConfigTimeout(fileCfg.Timeout)
+	if err != nil {
+		return nil, err
+	}
+
+	return &runConfig{
+		jobs:       jobs,
+		timeout:    timeout,
+		listen:     strings.TrimSpace(fileCfg.Listen),
+		configPath: configPath,
+		logLevel:   level,
+		receivers:  receivers,
+	}, nil
+}
+
+// parseConfigTimeout parses the config file's top-level timeout: string, if
+// any, into a time.Duration; an empty string (unset) means no overall run
+// timeout.
+func parseConfigTimeout(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, nil
+	}
+
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("parsing config file timeout %q: %w", s, err)
+	}
+
+	return d, nil
 }
 
 // parseLogLevel parses the -log-level flag's value into a slog.Level,
@@ -394,6 +437,17 @@ func buildServers(fileServers []fileServer) (map[string]resolvedServer, error) {
 			continue
 		}
 
+		if kind == serverKindRemote {
+			server, err := buildRemoteServer(name, &fs)
+			if err != nil {
+				return nil, err
+			}
+
+			servers[name] = server
+
+			continue
+		}
+
 		if fs.Retention != "" {
 			return nil, fmt.Errorf("server %q: retention is not valid for type: s3 (local only)", name)
 		}
@@ -437,6 +491,25 @@ func buildLocalServer(name string, fs *fileServer) (resolvedServer, error) {
 	}
 
 	return resolvedServer{name: name, kind: serverKindLocal, path: fs.Path, retention: retention}, nil
+}
+
+// buildRemoteServer validates and builds a resolvedServer for a type: remote
+// servers: entry, which uses only endpoint and token and none of the
+// S3/local-specific fields.
+func buildRemoteServer(name string, fs *fileServer) (resolvedServer, error) {
+	if strings.TrimSpace(fs.Endpoint) == "" {
+		return resolvedServer{}, fmt.Errorf("server %q: endpoint is required for type: remote", name)
+	}
+
+	if strings.TrimSpace(fs.Token) == "" {
+		return resolvedServer{}, fmt.Errorf("server %q: token is required for type: remote", name)
+	}
+
+	if fs.Region != "" || fs.PathStyle || fs.AccessKeyEnv != "" || fs.SecretKeyEnv != "" || fs.Path != "" || fs.Retention != "" {
+		return resolvedServer{}, fmt.Errorf("server %q: region/path-style/access-key-env/secret-key-env/path/retention are not valid for type: remote", name)
+	}
+
+	return resolvedServer{name: name, kind: serverKindRemote, endpoint: fs.Endpoint, token: fs.Token}, nil
 }
 
 // parseRetention parses a local server's retention: string into a
@@ -534,6 +607,7 @@ type resolvedServer struct {
 	secretKeyEnv string
 	path         string        // local only: root directory backups are written under
 	retention    time.Duration // local only: 0 means no automatic expiry
+	token        string        // remote only: bearer token for the destination instance
 }
 
 // resolveJobTargets resolves cfg's raw target references (targetRefs, from
@@ -572,6 +646,7 @@ func resolveJobTargets(cfg *config, servers map[string]resolvedServer) error {
 			secretKeyEnv: server.secretKeyEnv,
 			localPath:    server.path,
 			retention:    server.retention,
+			token:        server.token,
 		}
 	}
 
