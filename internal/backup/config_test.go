@@ -817,6 +817,131 @@ jobs:
 	}
 }
 
+func TestParseFlagsJobTargetRetention(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		retentionLine string // "retention: ..." line under the job's targets: entry, or "" to omit it
+		wantRetention time.Duration
+	}{
+		{
+			name:          "overrides the server's own retention",
+			retentionLine: "retention: 30d",
+			wantRetention: 30 * 24 * time.Hour,
+		},
+		{
+			name:          "unset falls back to the server's retention",
+			wantRetention: 7 * 24 * time.Hour,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+
+			path := writeConfigFile(t, `
+servers:
+  - name: nas
+    type: local
+    path: `+dir+`
+    retention: 7d
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: nas, bucket: b, `+tt.retentionLine+`}]
+    recipients: [me@example.com]
+`)
+
+			rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+			if err != nil {
+				t.Fatalf("parseFlags() unexpected error: %v", err)
+			}
+
+			cfg := singleJob(t, rc)
+
+			want := target{serverName: "nas", kind: serverKindLocal, bucket: "b", localPath: dir, retention: tt.wantRetention}
+			if len(cfg.targets) != 1 || cfg.targets[0] != want {
+				t.Errorf("cfg.targets = %+v, want [%+v]", cfg.targets, want)
+			}
+		})
+	}
+}
+
+func TestParseFlagsJobTargetRetentionErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "negative duration",
+			yaml: `
+servers:
+  - name: nas
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: nas, bucket: b, retention: -1h}]
+    recipients: [me@example.com]
+`,
+			wantErr: "retention must not be negative",
+		},
+		{
+			name: "s3 server",
+			yaml: `
+servers:
+  - name: s
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: s, bucket: b, retention: 168h}]
+    recipients: [me@example.com]
+`,
+			wantErr: `retention is not valid for server "s" (type s3; local only)`,
+		},
+		{
+			name: "remote server",
+			yaml: `
+servers:
+  - name: sib
+    type: remote
+    endpoint: "https://backup2.example.com:8443"
+    token: shared-secret
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: sib, bucket: b, retention: 168h}]
+    recipients: [me@example.com]
+`,
+			wantErr: `retention is not valid for server "sib" (type remote; local only)`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := writeConfigFile(t, tt.yaml)
+
+			_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("parseFlags() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestParseFlagsLocalServerRejectsS3Fields(t *testing.T) {
 	t.Parallel()
 

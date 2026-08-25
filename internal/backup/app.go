@@ -244,21 +244,28 @@ func (r *runner) recordJobSuccess(ctx context.Context, name string) {
 	}
 }
 
-// recordLastRun persists job name's just-finished run (whether it succeeded
-// or failed, and regardless of whether it uses start-time), so a future
-// restart's web UI can still show it via seedStatusFromState — unlike
-// recordJobSuccess, which only tracks successes and only matters for
-// start-time-anchored jobs' catch-up scheduling.
-func (r *runner) recordLastRun(ctx context.Context, name string, start time.Time, err error, size int64) {
+// recordLastRun persists job name's just-finished run (whether it fully
+// succeeded, partly succeeded, or failed outright, and regardless of
+// whether it uses start-time), so a future restart's web UI can still show
+// it via seedStatusFromState — unlike recordJobSuccess, which only tracks
+// full successes and only matters for start-time-anchored jobs' catch-up
+// scheduling. state is whatever statusStore.finished just computed and
+// recorded live, so the persisted summary matches it rather than
+// re-deriving its own (possibly inconsistent) view from err alone.
+func (r *runner) recordLastRun(ctx context.Context, name string, start time.Time, state runState, err error, size int64) {
 	if r.stateDB == nil {
 		return
 	}
 
-	run := lastRun{Start: start, End: time.Now(), State: stateOK, Size: size}
+	run := lastRun{Start: start, End: time.Now(), State: state, Size: size}
 
 	if err != nil {
-		run.State = stateFailed
 		run.Error = err.Error()
+	}
+
+	if state == stateFailed {
+		// No target got a copy of the backup, so there's no size worth
+		// reporting (unlike stateIncomplete, where at least one did).
 		run.Size = 0
 	}
 
@@ -411,13 +418,19 @@ func (r *runner) runOnce(ctx context.Context, job *config) {
 	bytesWritten, err := runPipeline(ctx, &run, log, onTargetDone)
 	duration := time.Since(start)
 
-	r.store.finished(job.name, err, bytesWritten)
-	r.recordLastRun(ctx, job.name, start, err, bytesWritten)
+	state := r.store.finished(job.name, err, bytesWritten)
+	r.recordLastRun(ctx, job.name, start, state, err, bytesWritten)
 
 	if err != nil {
 		r.failed.Store(true)
 
-		log.Error("job failed", "duration", duration, "err", jobError(job, err))
+		if state == stateIncomplete {
+			// Some targets got the backup and some didn't — worth flagging,
+			// but distinct from (and less severe than) every target failing.
+			log.Warn("job incomplete: some targets failed", "duration", duration, "err", jobError(job, err))
+		} else {
+			log.Error("job failed", "duration", duration, "err", jobError(job, err))
+		}
 
 		return
 	}

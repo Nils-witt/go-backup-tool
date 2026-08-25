@@ -171,6 +171,92 @@ func TestRunOnceRefreshesEachTargetIndependently(t *testing.T) {
 	}
 }
 
+// TestRunOnceReportsIncompleteWhenSomeTargetsFail is an end-to-end check
+// (real gpg, real runOnce) that a run where one target succeeds and one
+// fails is reported as incomplete rather than failed, in both the live
+// status store and the persisted state db — and that it still counts
+// toward the process's overall exit code, since a partial backup still
+// warrants attention.
+func TestRunOnceReportsIncompleteWhenSomeTargetsFail(t *testing.T) {
+	if _, err := exec.LookPath("gpg"); err != nil {
+		t.Skip("gpg not found in PATH, skipping")
+	}
+
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	// Make the "bad" target's parent directory path a regular file, so
+	// writeLocalObject's os.MkdirAll for it fails deterministically.
+	badParent := filepath.Join(dir, "blocked")
+	if err := os.WriteFile(badParent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("setting up blocked path: %v", err)
+	}
+
+	job := &config{
+		name:       "test",
+		cmd:        "echo hi",
+		key:        "backup-{time}.gpg",
+		symmetric:  true,
+		passphrase: "unit-test-passphrase",
+		gpgBin:     "gpg",
+		targets: []target{
+			{serverName: "bad", kind: serverKindLocal, bucket: "blocked/sub", localPath: dir},
+			{serverName: "good", kind: serverKindLocal, bucket: "sub", localPath: dir},
+		},
+	}
+
+	stateDB, err := openScheduleStateDB(context.Background(), filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatalf("openScheduleStateDB() error: %v", err)
+	}
+
+	t.Cleanup(func() { _ = stateDB.Close() })
+
+	store := newStatusStore([]*config{job})
+	r := &runner{log: discardLogger, store: store, stateDB: stateDB}
+
+	r.runOnce(context.Background(), job)
+
+	snap := store.snapshot()[0]
+	if snap.State != stateIncomplete {
+		t.Errorf("job State = %q, want incomplete", snap.State)
+	}
+
+	if snap.Size == "" {
+		t.Error("job Size is empty, want the backup's size (the good target got a complete copy)")
+	}
+
+	if snap.Targets[0].State != stateFailed {
+		t.Errorf("bad target state = %q, want failed", snap.Targets[0].State)
+	}
+
+	if snap.Targets[1].State != stateOK {
+		t.Errorf("good target state = %q, want ok", snap.Targets[1].State)
+	}
+
+	if !r.failed.Load() {
+		t.Error("r.failed = false, want true (an incomplete run still fails the process's exit code)")
+	}
+
+	run, ok, err := readLastRun(context.Background(), stateDB, job.name)
+	if err != nil {
+		t.Fatalf("readLastRun() error: %v", err)
+	}
+
+	if !ok {
+		t.Fatal("readLastRun() ok = false, want true")
+	}
+
+	if run.State != stateIncomplete {
+		t.Errorf("persisted run.State = %q, want incomplete", run.State)
+	}
+
+	if run.Size == 0 {
+		t.Error("persisted run.Size = 0, want the backup's actual size")
+	}
+}
+
 // TestSeedStatusFromStateAcrossRestart simulates a restart: a first runner
 // (with its own statusStore) runs a job and persists its outcome; a second,
 // independent statusStore — standing in for the fresh one a restarted

@@ -17,8 +17,10 @@ import (
 // every local server with retention: set, tracking what it has written there
 // so a later sweep knows what's eligible for automatic deletion. It lives
 // alongside the buckets it tracks rather than e.g. under the job's own
-// config, since a local server (and so its retention policy) may be shared
-// by several jobs.
+// config, since a local server may be shared by several jobs, each of which
+// may write under a different retention (see jobTargetRef.retention) — the
+// per-row retention_seconds column below is what actually makes that work,
+// not this database's location.
 const retentionDBName = ".go-backup-tool-retention.db"
 
 // retentionDBPath returns the sqlite database path for a local server whose

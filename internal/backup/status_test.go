@@ -42,6 +42,41 @@ func TestFormatBytes(t *testing.T) {
 	}
 }
 
+func TestOverallState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		states []runState
+		want   runState
+	}{
+		{"all ok", []runState{stateOK, stateOK}, stateOK},
+		{"all failed", []runState{stateFailed, stateFailed}, stateFailed},
+		{"mixed", []runState{stateOK, stateFailed}, stateIncomplete},
+		{"single ok", []runState{stateOK}, stateOK},
+		{"single failed", []runState{stateFailed}, stateFailed},
+		// A target still running counts the same as failed here: only a
+		// state of stateOK counts as succeeded, so overallState never
+		// reports ok or incomplete for a job that isn't actually done yet.
+		{"one running, one ok", []runState{stateRunning, stateOK}, stateIncomplete},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			targets := make([]targetSnapshot, len(tt.states))
+			for i, s := range tt.states {
+				targets[i] = targetSnapshot{State: s}
+			}
+
+			if got := overallState(targets); got != tt.want {
+				t.Errorf("overallState(%v) = %q, want %q", tt.states, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNewStatusStoreStartsIdle(t *testing.T) {
 	t.Parallel()
 
@@ -76,7 +111,10 @@ func TestStatusStoreLifecycleSuccess(t *testing.T) {
 	store.starting("test")
 	store.targetDone("test", 0, nil)
 	store.targetDone("test", 1, nil)
-	store.finished("test", nil, 2048)
+
+	if got := store.finished("test", nil, 2048); got != stateOK {
+		t.Errorf("finished() = %q, want ok", got)
+	}
 
 	snap := store.snapshot()[0]
 
@@ -99,7 +137,12 @@ func TestStatusStoreLifecycleSuccess(t *testing.T) {
 	}
 }
 
-func TestStatusStoreLifecycleFailure(t *testing.T) {
+// TestStatusStoreLifecycleIncomplete verifies that a run where some targets
+// succeeded and others failed is reported as incomplete, not failed — the
+// backup did land somewhere, so that's worth distinguishing from a total
+// failure. Size is still recorded too, since staging must have produced a
+// complete file for the successful target to have gotten a copy of it.
+func TestStatusStoreLifecycleIncomplete(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore()
@@ -108,16 +151,19 @@ func TestStatusStoreLifecycleFailure(t *testing.T) {
 	store.starting("test")
 	store.targetDone("test", 0, nil)
 	store.targetDone("test", 1, boom)
-	store.finished("test", boom, 0)
+
+	if got := store.finished("test", boom, 2048); got != stateIncomplete {
+		t.Errorf("finished() = %q, want incomplete", got)
+	}
 
 	snap := store.snapshot()[0]
 
-	if snap.State != stateFailed || snap.Error != "boom" {
-		t.Errorf("job = {state: %q, error: %q}, want {failed, boom}", snap.State, snap.Error)
+	if snap.State != stateIncomplete || snap.Error != "boom" {
+		t.Errorf("job = {state: %q, error: %q}, want {incomplete, boom}", snap.State, snap.Error)
 	}
 
-	if snap.Size != "" {
-		t.Errorf("job Size = %q after a failed run, want empty (no successful write to report)", snap.Size)
+	if snap.Size != "2.0 KiB" {
+		t.Errorf("job Size = %q, want %q (one target did get a complete copy)", snap.Size, "2.0 KiB")
 	}
 
 	if snap.Targets[0].State != stateOK {
@@ -126,6 +172,38 @@ func TestStatusStoreLifecycleFailure(t *testing.T) {
 
 	if snap.Targets[1].State != stateFailed || snap.Targets[1].Error != "boom" {
 		t.Errorf("target[1] = {state: %q, error: %q}, want {failed, boom}", snap.Targets[1].State, snap.Targets[1].Error)
+	}
+}
+
+// TestStatusStoreLifecycleTotalFailure verifies that a run where every
+// target failed is still reported as failed (not incomplete), with no size
+// reported since nothing succeeded.
+func TestStatusStoreLifecycleTotalFailure(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore()
+	boom := errors.New("boom")
+
+	store.starting("test")
+	store.targetDone("test", 0, boom)
+	store.targetDone("test", 1, boom)
+
+	if got := store.finished("test", boom, 0); got != stateFailed {
+		t.Errorf("finished() = %q, want failed", got)
+	}
+
+	snap := store.snapshot()[0]
+
+	if snap.State != stateFailed || snap.Error != "boom" {
+		t.Errorf("job = {state: %q, error: %q}, want {failed, boom}", snap.State, snap.Error)
+	}
+
+	if snap.Size != "" {
+		t.Errorf("job Size = %q after every target failed, want empty (no successful write to report)", snap.Size)
+	}
+
+	if snap.Targets[0].State != stateFailed || snap.Targets[1].State != stateFailed {
+		t.Errorf("targets = %+v, want both failed", snap.Targets)
 	}
 }
 
@@ -256,6 +334,27 @@ func TestStatusStoreSeedLastRunFailure(t *testing.T) {
 
 	if snap.Size != "" {
 		t.Errorf("job Size = %q after seeding a failed run, want empty", snap.Size)
+	}
+}
+
+func TestStatusStoreSeedLastRunIncomplete(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore()
+
+	start := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+	end := start.Add(time.Second)
+
+	store.seedLastRun("test", lastRun{Start: start, End: end, State: stateIncomplete, Error: "boom", Size: 2048})
+
+	snap := store.snapshot()[0]
+
+	if snap.State != stateIncomplete || snap.Error != "boom" {
+		t.Errorf("job = {state: %q, error: %q}, want {incomplete, boom}", snap.State, snap.Error)
+	}
+
+	if snap.Size != "2.0 KiB" {
+		t.Errorf("job Size = %q, want %q (an incomplete run still had a complete backup)", snap.Size, "2.0 KiB")
 	}
 }
 

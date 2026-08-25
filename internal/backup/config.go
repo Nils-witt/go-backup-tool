@@ -69,6 +69,14 @@ type config struct {
 type jobTargetRef struct {
 	server string
 	bucket string
+
+	// retention overrides, for this job's writes to this target only, the
+	// retention its server (a local server only — see resolveJobTargets)
+	// would otherwise apply. Zero means no override: the server's
+	// retention: applies unchanged. There's no way to override retention:
+	// to "keep forever" for one job while the server keeps a retention: of
+	// its own; that's not expected to be a common need.
+	retention time.Duration
 }
 
 // serverKind distinguishes a servers: entry's destination type. The zero
@@ -95,6 +103,16 @@ func parseServerKind(t string) (serverKind, error) {
 	default:
 		return "", fmt.Errorf("unknown type %q (want \"s3\", %q, or %q)", t, serverKindLocal, serverKindRemote)
 	}
+}
+
+// serverKindLabel names kind for an error message, since serverKindS3's
+// zero value ("") is never what a config file author actually wrote.
+func serverKindLabel(kind serverKind) string {
+	if kind == serverKindS3 {
+		return "s3"
+	}
+
+	return string(kind)
 }
 
 // target is one upload destination for a job, fully resolved from a
@@ -129,7 +147,10 @@ type target struct {
 
 	// retention is how long a local target's written objects are kept
 	// before they're deleted automatically (only set when
-	// kind == serverKindLocal). Zero means no automatic expiry. See
+	// kind == serverKindLocal). Zero means no automatic expiry. Normally
+	// the server's retention:, but a job's targets: entry may override it
+	// for that job's own writes (see resolveJobTargets); either way, this
+	// resolved value is what recordLocalWrite stamps on each write. See
 	// retention.go.
 	retention time.Duration
 
@@ -170,7 +191,9 @@ const (
 // A job names its upload destination(s) via targets:, each entry a
 // {server, bucket} pair referencing a servers: entry defined at the top
 // level (see fileServer) — server connection details (region, endpoint,
-// path-style, credentials) live there, not on the job.
+// path-style, credentials) live there, not on the job. A targets: entry may
+// also set its own retention: (local servers only), overriding the
+// server's for that job's writes to that target — see fileJobTarget.
 type fileJob struct {
 	Name       string          `yaml:"name"`
 	Cmd        string          `yaml:"cmd"`
@@ -188,10 +211,16 @@ type fileJob struct {
 	RetryDelay string          `yaml:"retry-delay"`
 }
 
-// fileJobTarget mirrors jobTargetRef for YAML unmarshaling.
+// fileJobTarget mirrors jobTargetRef for YAML unmarshaling. Retention (local
+// servers only) overrides, for this job's writes to this target, the
+// retention its server otherwise applies — same duration syntax as a
+// server's own retention: (see fileServer). Unset keeps the server's
+// retention: unchanged; it's an error to set it against a target whose
+// server isn't type: local.
 type fileJobTarget struct {
-	Server string `yaml:"server"`
-	Bucket string `yaml:"bucket"`
+	Server    string `yaml:"server"`
+	Bucket    string `yaml:"bucket"`
+	Retention string `yaml:"retention"`
 }
 
 // fileServer is one top-level servers: entry, defined once and referenced by
@@ -686,6 +715,16 @@ func resolveJobTargets(cfg *config, servers map[string]resolvedServer) error {
 			return fmt.Errorf("targets[%d]: no server named %q defined under servers", i, ref.server)
 		}
 
+		retention := server.retention
+
+		if ref.retention > 0 {
+			if server.kind != serverKindLocal {
+				return fmt.Errorf("targets[%d]: retention is not valid for server %q (type %s; local only)", i, ref.server, serverKindLabel(server.kind))
+			}
+
+			retention = ref.retention
+		}
+
 		cfg.targets[i] = target{
 			serverName:   server.name,
 			kind:         server.kind,
@@ -696,7 +735,7 @@ func resolveJobTargets(cfg *config, servers map[string]resolvedServer) error {
 			accessKeyEnv: server.accessKeyEnv,
 			secretKeyEnv: server.secretKeyEnv,
 			localPath:    server.path,
-			retention:    server.retention,
+			retention:    retention,
 			token:        server.token,
 		}
 	}
@@ -906,8 +945,14 @@ func applyFileJob(cfg *config, fj *fileJob) error {
 
 	if len(fj.Targets) > 0 {
 		cfg.targetRefs = make([]jobTargetRef, len(fj.Targets))
+
 		for i, t := range fj.Targets {
-			cfg.targetRefs[i] = jobTargetRef{server: t.Server, bucket: t.Bucket}
+			retention, err := parseRetention(t.Retention)
+			if err != nil {
+				return fmt.Errorf("targets[%d]: %w", i, err)
+			}
+
+			cfg.targetRefs[i] = jobTargetRef{server: t.Server, bucket: t.Bucket, retention: retention}
 		}
 	}
 

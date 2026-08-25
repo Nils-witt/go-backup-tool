@@ -280,6 +280,8 @@ const dashboardHTML = `<!doctype html>
     --failed-bg: #fdeceb;
     --running: #9a6700;
     --running-bg: #fff6dc;
+    --incomplete: #bf5b04;
+    --incomplete-bg: #fff0e0;
     --idle: #6b6b70;
     --idle-bg: #eeeef0;
   }
@@ -296,6 +298,8 @@ const dashboardHTML = `<!doctype html>
       --failed-bg: #3a1414;
       --running: #e3b341;
       --running-bg: #3a2e0a;
+      --incomplete: #ffa657;
+      --incomplete-bg: #3a2410;
       --idle: #9a9aa0;
       --idle-bg: #2a2a2e;
     }
@@ -359,6 +363,7 @@ const dashboardHTML = `<!doctype html>
   .badge.ok { color: var(--ok); background: var(--ok-bg); }
   .badge.failed { color: var(--failed); background: var(--failed-bg); }
   .badge.running { color: var(--running); background: var(--running-bg); }
+  .badge.incomplete { color: var(--incomplete); background: var(--incomplete-bg); }
   .badge.idle { color: var(--idle); background: var(--idle-bg); }
   .targets {
     list-style: none;

@@ -7,14 +7,17 @@ import (
 )
 
 // runState is the lifecycle state of a job or target as shown in the web UI
-// (see webui.go).
+// (see webui.go). A target's own state is always one of idle/running/ok/
+// failed — stateIncomplete only ever applies at the job level, summarizing
+// a run where its targets disagreed (see overallState).
 type runState string
 
 const (
-	stateIdle    runState = "idle"    // configured, never run yet (or waiting for its next interval)
-	stateRunning runState = "running" // currently executing
-	stateOK      runState = "ok"      // last run succeeded
-	stateFailed  runState = "failed"  // last run failed
+	stateIdle       runState = "idle"       // configured, never run yet (or waiting for its next interval)
+	stateRunning    runState = "running"    // currently executing
+	stateOK         runState = "ok"         // last run succeeded (every target succeeded)
+	stateIncomplete runState = "incomplete" // job only: last run succeeded on some targets but not all
+	stateFailed     runState = "failed"     // last run failed (every target failed, or the run never reached the targets at all)
 )
 
 // targetSnapshot is one job target's current status, as reported over
@@ -161,32 +164,66 @@ func (s *statusStore) setNextRun(name string, next time.Time) {
 }
 
 // finished records job name's overall outcome and duration once its run
-// completes.
-// size is the encrypted object's byte count; it's only recorded on success
-// (0 or partial on failure would misrepresent a rolled-back write as a real
-// file), so Size stays showing the last successful run's size across a
-// later failure.
-func (s *statusStore) finished(name string, err error, size int64) {
+// completes, deriving the overall state from each target's own already-
+// recorded outcome (see targetDone) rather than solely from err != nil: a
+// job whose targets succeeded and failed in a mix is reported as
+// incomplete, not failed — the backup did land somewhere. It returns the
+// state it recorded (or "" if name is unknown), so a caller that persists
+// its own summary of the run (see runner.recordLastRun) can stay
+// consistent with the live store without re-deriving it.
+//
+// size is the encrypted object's byte count; it's recorded whenever at
+// least one target succeeded (ok or incomplete), since staging must have
+// produced one complete file of exactly that size for any target to have
+// gotten a copy of it — a run that reached no target at all (every target
+// failed, or the pipeline never got that far) leaves Size showing the last
+// successful run's size instead of misrepresenting 0 or a partial count as
+// a real file.
+func (s *statusStore) finished(name string, err error, size int64) runState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	j, ok := s.jobs[name]
 	if !ok {
-		return
+		return ""
 	}
 
 	j.LastEnd = time.Now()
 	j.Duration = j.LastEnd.Sub(j.LastStart).Round(time.Millisecond).String()
+	j.State = overallState(j.Targets)
 
+	j.Error = ""
 	if err != nil {
-		j.State = stateFailed
 		j.Error = err.Error()
-
-		return
 	}
 
-	j.State = stateOK
-	j.Size = formatBytes(size)
+	if j.State == stateOK || j.State == stateIncomplete {
+		j.Size = formatBytes(size)
+	}
+
+	return j.State
+}
+
+// overallState summarizes targets (a job's current per-target states) into
+// one job-level runState: ok if every target succeeded, failed if none did,
+// incomplete if some but not all did.
+func overallState(targets []targetSnapshot) runState {
+	succeeded := 0
+
+	for _, t := range targets {
+		if t.State == stateOK {
+			succeeded++
+		}
+	}
+
+	switch {
+	case succeeded == len(targets):
+		return stateOK
+	case succeeded == 0:
+		return stateFailed
+	default:
+		return stateIncomplete
+	}
 }
 
 // seedLastRun initializes job name's snapshot from a previously persisted
@@ -209,7 +246,7 @@ func (s *statusStore) seedLastRun(name string, run lastRun) {
 	j.Duration = run.End.Sub(run.Start).Round(time.Millisecond).String()
 	j.Error = run.Error
 
-	if run.State == stateOK {
+	if run.State == stateOK || run.State == stateIncomplete {
 		j.Size = formatBytes(run.Size)
 	}
 }

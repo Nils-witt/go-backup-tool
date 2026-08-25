@@ -46,6 +46,12 @@
 # once at startup. Omit retention (the default) to keep objects forever.
 # A remote server has no retention: of its own — that's configured on the
 # destination instance's matching receivers: entry instead.
+#
+# A job's own targets: entry may set retention: too (same syntax, local
+# servers only), overriding the server's retention: for that job's writes
+# to that target — handy when several jobs share one local server but need
+# different retention windows (see the "uploads" job's nas target below).
+# Leave it unset to keep the server's retention: unchanged.
 servers:
   - name: primary
     region: us-east-1
@@ -65,6 +71,7 @@ servers:
     secret-key-env: OFFSITE_S3_SECRET_KEY
   - name: nas
     type: local
+
     path: /mnt/backups
     retention: 7d # delete objects here once they're older than 7 days
   - name: sibling-instance
@@ -156,6 +163,7 @@ jobs:
         bucket: my-backup-bucket-offsite
       - server: nas
         bucket: my-backup-bucket-local
+        retention: 30d # overrides nas's own 7d retention: for this job only
       - server: sibling-instance
         bucket: from-primary # = id of a receivers: entry on sibling-instance
     # no interval: this job runs once and doesn't repeat, even though
