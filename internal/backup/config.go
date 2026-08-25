@@ -348,9 +348,13 @@ func parseLogLevel(s string) (slog.Level, error) {
 // resolveJobs builds the list of jobs to run from fileCfg's jobs: list,
 // layering fileCfg's top-level fields as shared defaults under each entry's
 // own fields, and resolving each job's targets: against fileCfg's servers:.
+//
+// An empty jobs: list is only allowed when listen: is set, since that still
+// leaves the web UI (and receiver API) as a reason to run; otherwise the
+// process would start and immediately have nothing to do.
 func resolveJobs(fileCfg *fileConfig) ([]*config, error) {
-	if len(fileCfg.Jobs) == 0 {
-		return nil, errors.New("config file must define at least one job under a jobs list")
+	if len(fileCfg.Jobs) == 0 && strings.TrimSpace(fileCfg.Listen) == "" {
+		return nil, errors.New("config file must define at least one job under a jobs list, or set listen: to run without any")
 	}
 
 	return buildJobsFromFile(fileCfg)

@@ -48,6 +48,10 @@ func TestParseFlags(t *testing.T) {
 			wantErr: "must define at least one job",
 		},
 		{
+			name: "missing jobs list allowed with listen set",
+			yaml: "listen: :8080\nservers:\n  - name: s\n    region: us-east-1\nrecipients: [me@example.com]\n",
+		},
+		{
 			name:    "missing cmd",
 			yaml:    "servers:\n  - name: s\n    region: us-east-1\njobs:\n  - name: test\n    targets: [{server: s, bucket: b}]\n    recipients: [me@example.com]\n",
 			wantErr: "cmd is required",
