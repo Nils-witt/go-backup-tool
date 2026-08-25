@@ -4,6 +4,7 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -103,10 +104,11 @@ func controlService(cmd string, rest []string) error {
 }
 
 // installService registers the currently running executable as the
-// GoBackupTool Windows service, passed args as its command line, and
-// registers it as an Event Log source for runAsService's log output. The
-// service is created stopped (mgr.CreateService doesn't start it); start it
-// with -service=start or `sc start GoBackupTool`.
+// GoBackupTool Windows service, passed args (with its -config value
+// resolved to an absolute path, see resolveConfigArgAbs) as its command
+// line, and registers it as an Event Log source for runAsService's log
+// output. The service is created stopped (mgr.CreateService doesn't start
+// it); start it with -service=start or `sc start GoBackupTool`.
 func installService(args []string) error {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -116,6 +118,11 @@ func installService(args []string) error {
 	exePath, err = filepath.Abs(exePath)
 	if err != nil {
 		return fmt.Errorf("resolving executable path: %w", err)
+	}
+
+	args, err = resolveConfigArgAbs(args)
+	if err != nil {
+		return err
 	}
 
 	m, err := mgr.Connect()
@@ -146,6 +153,63 @@ func installService(args []string) error {
 	_ = eventlog.InstallAsEventCreate(serviceName, eventlog.Error|eventlog.Warning|eventlog.Info)
 
 	return nil
+}
+
+// resolveConfigArgAbs rewrites args' -config (or --config) value to an
+// absolute path, resolved against the current working directory, appending
+// one (pointing at defaultConfigPath) if args doesn't set -config at all.
+//
+// The Windows Service Control Manager starts services with
+// %SystemRoot%\System32 as their working directory, not the directory the
+// operator ran -service=install from. Without this, a relative -config
+// path — or the relative defaultConfigPath a bare install falls back to —
+// would resolve against the wrong directory once the service actually
+// starts, even though it worked fine from the console at install time.
+func resolveConfigArgAbs(args []string) ([]string, error) {
+	out := make([]string, len(args))
+	copy(out, args)
+
+	for i := 0; i < len(out); i++ {
+		a := out[i]
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+
+		name, value, hasValue := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		if name != "config" {
+			continue
+		}
+
+		valueIdx := i
+		if !hasValue {
+			if i+1 >= len(out) {
+				return nil, errors.New("-config: missing value")
+			}
+
+			valueIdx = i + 1
+			value = out[valueIdx]
+		}
+
+		abs, err := filepath.Abs(value)
+		if err != nil {
+			return nil, fmt.Errorf("resolving -config path: %w", err)
+		}
+
+		if hasValue {
+			out[i] = "-config=" + abs
+		} else {
+			out[valueIdx] = abs
+		}
+
+		return out, nil
+	}
+
+	abs, err := filepath.Abs(defaultConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolving default config path: %w", err)
+	}
+
+	return append(out, "-config="+abs), nil
 }
 
 // uninstallService removes the GoBackupTool service and its Event Log
