@@ -15,6 +15,10 @@ services:
     volumes:
       - ./config.yaml:/data/config.yaml:ro
       - ./data:/data
+      # Public keys for any recipients: in config.yaml (e.g. exported with
+      # `gpg --export --armor me@example.com > keys/me.asc`) are imported
+      # into the container's keychain on every startup; drop them here.
+      - ./keys:/data/keys:ro
       # A "local" target's path (see config.yaml's servers:) also needs to be
       # mounted, e.g.:
       # - /mnt/backups:/mnt/backups
