@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestEnvironWithout(t *testing.T) {
@@ -201,6 +203,62 @@ func TestUploadToTargetsContinuesAfterOneTargetFails(t *testing.T) {
 
 	if string(got) != content {
 		t.Errorf("good target written content = %q, want %q", got, content)
+	}
+}
+
+// TestUploadToTargetsStuckTargetDoesntCorruptOthers reproduces a bug where a
+// remote target whose dial never completes (here, an unreachable address)
+// poisoned every other target once the run's context expired: net/http
+// closes a stuck request's body (the target's pipe reader) when it gives up
+// on it, and that read-side close turned into io.ErrClosedPipe on the
+// shared io.MultiWriter fan-out uploadToTargets used to write to every
+// target at once. That single error was then used to force-close every
+// target's pipe, so a healthy local target failed with "io: read/write on
+// closed pipe" even though nothing was wrong with it and it hadn't even
+// received any data yet (the stuck target was ahead of it in cfg.targets,
+// so it was still waiting its turn under the old sequential MultiWriter).
+func TestUploadToTargetsStuckTargetDoesntCorruptOthers(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	cfg := &config{
+		key: "backup.gpg",
+		targets: []target{
+			{serverName: "sibling-instance", kind: serverKindRemote, endpoint: "http://10.255.255.1:8050", bucket: "from-primary", token: "x"},
+			{serverName: "nas", kind: serverKindLocal, bucket: "my-backup-bucket-local", localPath: dir},
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+
+	content := bytes.Repeat([]byte("x"), 5<<20) // several 32KB chunks, so the stuck target is ahead of the local one when the deadline hits
+
+	targetErrs, bytesWritten, err := uploadToTargets(ctx, cfg, bytes.NewReader(content), discardLogger)
+	if err == nil {
+		t.Fatal("uploadToTargets() error = nil, want non-nil because the remote target failed")
+	}
+
+	if targetErrs[0] == nil {
+		t.Error("uploadToTargets() remote target err = nil, want non-nil")
+	}
+
+	if targetErrs[1] != nil {
+		t.Errorf("uploadToTargets() local target err = %v, want nil (the remote target's failure shouldn't affect it)", targetErrs[1])
+	}
+
+	if bytesWritten != int64(len(content)) {
+		t.Errorf("uploadToTargets() bytesWritten = %d, want %d", bytesWritten, len(content))
+	}
+
+	got, readErr := os.ReadFile(localObjectPath(cfg, &cfg.targets[1]))
+	if readErr != nil {
+		t.Fatalf("reading local target's written file: %v", readErr)
+	}
+
+	if !bytes.Equal(got, content) {
+		t.Error("local target's written content does not match source")
 	}
 }
 

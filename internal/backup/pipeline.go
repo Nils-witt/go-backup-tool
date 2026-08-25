@@ -433,9 +433,9 @@ func uploadToTargets(ctx context.Context, cfg *config, r io.Reader, log *slog.Lo
 		})
 	}
 
-	// With zero writers (every client failed), MultiWriter still drains r:
-	// its Write is a no-op loop over an empty writer list.
-	bytesWritten, copyErr := io.Copy(io.MultiWriter(writers...), r)
+	// With zero writers (every target failed setup), fanOutCopy still drains
+	// r: it just has no writers to fan out to.
+	bytesWritten, copyErr := fanOutCopy(writers, r)
 
 	for _, pw := range pipeWriters {
 		_ = pw.CloseWithError(copyErr)
@@ -446,6 +446,74 @@ func uploadToTargets(ctx context.Context, cfg *config, r io.Reader, log *slog.Lo
 	allErrs := append(append([]error(nil), targetErrs...), copyErr)
 
 	return targetErrs, bytesWritten, errors.Join(allErrs...)
+}
+
+// fanOutCopy streams r to every writer in ws, writing each chunk to all of
+// them concurrently rather than through a single io.MultiWriter.
+//
+// A plain io.MultiWriter writes to its writers one at a time within a
+// single Write call, so a writer that blocks (e.g. a pipe whose reader is
+// still dialing a dead remote) head-of-line-blocks every writer after it,
+// and a writer that errors aborts the whole Write before the remaining
+// writers ever see that chunk. Worse, since every writer here is an
+// *io.PipeWriter, an error on one (including io.ErrClosedPipe, which
+// net/http raises by closing a request's body — our pipe reader — once it
+// gives up on a stuck target) becomes the single copyErr the caller then
+// uses to CloseWithError every pipe, corrupting targets that had nothing
+// wrong with them.
+//
+// fanOutCopy avoids both problems: each writer gets its chunk in its own
+// goroutine, and a writer that errors is dropped (replaced with io.Discard)
+// for the rest of the copy instead of stopping the others. The dropped
+// writer's own error isn't returned here — its target's goroutine in
+// uploadToTargets already captured it via the uploader's own return value,
+// so surfacing it again here would just duplicate it under a less accurate
+// label. The returned error reports only a genuine failure reading r, which
+// legitimately ends the stream for every target.
+func fanOutCopy(ws []io.Writer, r io.Reader) (int64, error) {
+	live := make([]io.Writer, len(ws))
+	copy(live, ws)
+
+	buf := make([]byte, 32*1024)
+
+	var total int64
+
+	for {
+		nr, rerr := r.Read(buf)
+		if nr > 0 {
+			chunk := buf[:nr]
+
+			var wg sync.WaitGroup
+
+			for i, w := range live {
+				if w == io.Discard {
+					continue
+				}
+
+				wg.Add(1)
+
+				go func(i int, w io.Writer) {
+					defer wg.Done()
+
+					if _, err := w.Write(chunk); err != nil {
+						live[i] = io.Discard
+					}
+				}(i, w)
+			}
+
+			wg.Wait()
+
+			total += int64(nr)
+		}
+
+		if rerr != nil {
+			if errors.Is(rerr, io.EOF) {
+				return total, nil
+			}
+
+			return total, rerr
+		}
+	}
 }
 
 // uploadToS3 streams r as the body of an S3 object at target t using a
