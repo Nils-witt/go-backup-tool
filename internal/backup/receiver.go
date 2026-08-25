@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -98,6 +100,92 @@ func receiverTarget(recv resolvedReceiver) *target {
 		localPath:  recv.path,
 		retention:  recv.retention,
 	}
+}
+
+// receiverSnapshot is one configured receiver's current status, as reported
+// over /api/receivers, for display in the web UI dashboard (see webui.go).
+type receiverSnapshot struct {
+	ID        string    `json:"id"`
+	Path      string    `json:"path"`
+	Retention string    `json:"retention,omitempty"`
+	State     runState  `json:"state"` // idle until the first object is received
+	LastKey   string    `json:"last_key,omitempty"`
+	LastSeen  time.Time `json:"last_seen"` // zero if nothing has been received yet
+	Error     string    `json:"error,omitempty"`
+}
+
+// receiverStatusStore tracks the live state of every configured receiver,
+// updated as the receiver API's handlers (see handleReceiveObject/
+// handleDeleteObject in webui.go) serve incoming requests, and read by the
+// web UI's HTTP handlers. Safe for concurrent use, since receiver requests
+// can arrive concurrently with each other and with status requests.
+type receiverStatusStore struct {
+	mu    sync.Mutex
+	byID  map[string]*receiverSnapshot
+	order []string // receiver ids, sorted, for stable UI listing
+}
+
+// newReceiverStatusStore builds a receiverStatusStore with one idle entry
+// per entry in receivers, listed in id order (receivers is keyed by id, so
+// no other ordering survives buildReceivers).
+func newReceiverStatusStore(receivers map[string]resolvedReceiver) *receiverStatusStore {
+	ids := make([]string, 0, len(receivers))
+	for id := range receivers {
+		ids = append(ids, id)
+	}
+
+	sort.Strings(ids)
+
+	s := &receiverStatusStore{byID: make(map[string]*receiverSnapshot, len(receivers)), order: ids}
+
+	for _, id := range ids {
+		recv := receivers[id]
+		s.byID[id] = &receiverSnapshot{ID: id, Path: recv.path, Retention: intervalString(recv.retention), State: stateIdle}
+	}
+
+	return s
+}
+
+// record updates receiver id's status after it just handled a request for
+// key: err nil marks it ok, non-nil marks it failed with err's message,
+// mirroring statusStore.targetDone's success/failure recording for job
+// targets.
+func (s *receiverStatusStore) record(id, key string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	r, ok := s.byID[id]
+	if !ok {
+		return
+	}
+
+	r.LastKey = key
+	r.LastSeen = time.Now()
+
+	if err != nil {
+		r.State = stateFailed
+		r.Error = err.Error()
+
+		return
+	}
+
+	r.State = stateOK
+	r.Error = ""
+}
+
+// snapshot returns every receiver's current status, in id order, each a copy
+// safe to serialize without holding s.mu.
+func (s *receiverStatusStore) snapshot() []receiverSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]receiverSnapshot, 0, len(s.order))
+
+	for _, id := range s.order {
+		out = append(out, *s.byID[id])
+	}
+
+	return out
 }
 
 // sweepStartupReceiverRetention runs one retention sweep, before the web UI

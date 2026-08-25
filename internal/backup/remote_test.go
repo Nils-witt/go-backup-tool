@@ -136,9 +136,11 @@ func TestDeleteRemoteObjectNotFound(t *testing.T) {
 // client (uploadToRemote/deleteRemoteObject) against the real server-side
 // handlers rather than a hand-rolled stand-in.
 func newReceiverMux(receivers map[string]resolvedReceiver) *http.ServeMux {
+	status := newReceiverStatusStore(receivers)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, discardLogger))
-	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, discardLogger))
+	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, status, discardLogger))
+	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, status, discardLogger))
 
 	return mux
 }

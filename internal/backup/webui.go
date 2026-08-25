@@ -24,11 +24,13 @@ type webUIServer struct {
 // startWebUI binds addr and starts an HTTP server serving a live dashboard
 // of store's job/target statuses (see dashboardHTML and handleStatus), plus
 // the receiver API (see handleReceiveObject/handleDeleteObject) for any
-// entries in receivers, reporting it (and any later failure) to log. Binding
-// happens synchronously so a bad address is reported immediately and callers
-// can rely on the server being reachable as soon as this returns; it returns
-// nil if addr couldn't be bound, leaving the web UI disabled for this run
-// rather than failing the whole process over a dashboard.
+// entries in receivers — whose own live status is tracked in a
+// receiverStatusStore and served over /api/receivers (see
+// handleReceiverStatus) — reporting it (and any later failure) to log.
+// Binding happens synchronously so a bad address is reported immediately and
+// callers can rely on the server being reachable as soon as this returns; it
+// returns nil if addr couldn't be bound, leaving the web UI disabled for
+// this run rather than failing the whole process over a dashboard.
 func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger) *webUIServer {
 	var lc net.ListenConfig
 
@@ -38,11 +40,14 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 		return nil
 	}
 
+	receiverStore := newReceiverStatusStore(receivers)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", handleDashboard)
 	mux.HandleFunc("GET /api/status", handleStatus(store))
-	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, log))
-	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, log))
+	mux.HandleFunc("GET /api/receivers", handleReceiverStatus(receiverStore))
+	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, receiverStore, log))
+	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, receiverStore, log))
 
 	srv := &webUIServer{
 		http: &http.Server{Handler: logRequests(log, mux), ReadHeaderTimeout: 10 * time.Second},
@@ -119,13 +124,25 @@ func handleStatus(store *statusStore) http.HandlerFunc {
 	}
 }
 
+// handleReceiverStatus serves store's current receiver statuses as JSON.
+func handleReceiverStatus(store *receiverStatusStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+		if err := json.NewEncoder(w).Encode(store.snapshot()); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}
+}
+
 // handleReceiveObject serves PUT /api/v1/objects/{id}/{key...}: after
 // authorizing the request against receivers (see authorizeReceiver), it
 // writes the request body to disk exactly as a type: local target would
 // (see receiverTarget in receiver.go), so a remote target's PUT and this
 // instance's own local-target writes share the same on-disk behavior
-// (atomic temp-file-then-rename) and retention tracking.
-func handleReceiveObject(receivers map[string]resolvedReceiver, log *slog.Logger) http.HandlerFunc {
+// (atomic temp-file-then-rename) and retention tracking. Every attempt is
+// recorded to status, win or lose, so /api/receivers reflects it.
+func handleReceiveObject(receivers map[string]resolvedReceiver, status *receiverStatusStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := authorizeReceiver(w, r, receivers)
 		if !ok {
@@ -143,6 +160,7 @@ func handleReceiveObject(receivers map[string]resolvedReceiver, log *slog.Logger
 
 		if err := writeLocalObject(cfg, t, r.Body); err != nil {
 			log.Warn("receiver: writing object failed", "id", recv.id, "key", key, "err", err)
+			status.record(recv.id, key, err)
 			http.Error(w, "writing object failed", http.StatusInternalServerError)
 
 			return
@@ -152,6 +170,7 @@ func handleReceiveObject(receivers map[string]resolvedReceiver, log *slog.Logger
 			log.Warn("receiver: retention tracking failed", "id", recv.id, "key", key, "err", err)
 		}
 
+		status.record(recv.id, key, nil)
 		log.Info("receiver: object written", "id", recv.id, "key", key, "path", localObjectPath(cfg, t))
 		w.WriteHeader(http.StatusCreated)
 	}
@@ -159,8 +178,9 @@ func handleReceiveObject(receivers map[string]resolvedReceiver, log *slog.Logger
 
 // handleDeleteObject serves DELETE /api/v1/objects/{id}/{key...}, used by a
 // sending instance's cleanupPartialUpload to roll back a partial upload
-// after a mid-stream pipeline failure.
-func handleDeleteObject(receivers map[string]resolvedReceiver, log *slog.Logger) http.HandlerFunc {
+// after a mid-stream pipeline failure. Every attempt is recorded to status,
+// win or lose, so /api/receivers reflects it.
+func handleDeleteObject(receivers map[string]resolvedReceiver, status *receiverStatusStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := authorizeReceiver(w, r, receivers)
 		if !ok {
@@ -178,6 +198,7 @@ func handleDeleteObject(receivers map[string]resolvedReceiver, log *slog.Logger)
 
 		if err := deleteLocalObject(cfg, t); err != nil {
 			log.Warn("receiver: deleting object failed", "id", recv.id, "key", key, "err", err)
+			status.record(recv.id, key, err)
 			http.Error(w, "deleting object failed", http.StatusInternalServerError)
 
 			return
@@ -187,6 +208,7 @@ func handleDeleteObject(receivers map[string]resolvedReceiver, log *slog.Logger)
 			log.Warn("receiver: removing retention record failed", "id", recv.id, "key", key, "err", err)
 		}
 
+		status.record(recv.id, key, nil)
 		log.Info("receiver: object deleted", "id", recv.id, "key", key, "path", localObjectPath(cfg, t))
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -371,12 +393,22 @@ const dashboardHTML = `<!doctype html>
     text-align: center;
     margin-top: 3rem;
   }
+  .section-title {
+    font-size: 1.05rem;
+    margin: 2.5rem auto 1rem;
+    max-width: 1200px;
+  }
 </style>
 </head>
 <body>
 <h1>go-backup-tool</h1>
 <p class="sub" id="updated">loading&hellip;</p>
 <div class="grid" id="jobs"></div>
+
+<div id="receivers-wrap" hidden>
+  <h2 class="section-title">Receivers</h2>
+  <div class="grid" id="receivers"></div>
+</div>
 
 <script>
 // The Go zero time.Time serializes as "0001-01-01T00:00:00Z" rather than an
@@ -423,16 +455,41 @@ function render(jobs) {
   }).join("");
 }
 
+function renderReceivers(receivers) {
+  const wrap = document.getElementById("receivers-wrap");
+  if (!receivers.length) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+
+  document.getElementById("receivers").innerHTML = receivers.map(function (rcv) {
+    const err = rcv.error ? '<p class="err">' + rcv.error + '</p>' : '';
+    const retention = rcv.retention ? (' &middot; retention ' + rcv.retention) : '';
+    const lastSeen = hasTime(rcv.last_seen)
+      ? ('last received: ' + fmtTime(rcv.last_seen) + (rcv.last_key ? ' (' + rcv.last_key + ')' : ''))
+      : 'no objects received yet';
+
+    return '<div class="card">' +
+      '<div class="card-head"><span class="job-name">' + rcv.id + '</span>' + badge(rcv.state) + '</div>' +
+      '<div class="meta">' + rcv.path + retention + '</div>' +
+      '<div class="meta">' + lastSeen + '</div>' +
+      err +
+      '</div>';
+  }).join("");
+}
+
 function refresh() {
-  fetch("/api/status")
-    .then(function (r) { return r.json(); })
-    .then(function (jobs) {
-      render(jobs);
-      document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
-    })
-    .catch(function (err) {
-      document.getElementById("updated").textContent = "error fetching status: " + err;
-    });
+  Promise.all([
+    fetch("/api/status").then(function (r) { return r.json(); }),
+    fetch("/api/receivers").then(function (r) { return r.json(); })
+  ]).then(function (results) {
+    render(results[0]);
+    renderReceivers(results[1]);
+    document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
+  }).catch(function (err) {
+    document.getElementById("updated").textContent = "error fetching status: " + err;
+  });
 }
 
 refresh();
