@@ -1,7 +1,6 @@
 package backup
 
 import (
-	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -54,7 +53,7 @@ func TestRunOnceRecordsLastRunToStateDB(t *testing.T) { //nolint:paralleltest //
 	t.Cleanup(func() { _ = stateDB.Close() })
 
 	store := newStatusStore([]*config{job})
-	r := &runner{stderr: &bytes.Buffer{}, store: store, stateDB: stateDB}
+	r := &runner{log: discardLogger, store: store, stateDB: stateDB}
 
 	r.runOnce(context.Background(), job)
 
@@ -95,7 +94,7 @@ func TestSeedStatusFromStateAcrossRestart(t *testing.T) { //nolint:paralleltest 
 	t.Cleanup(func() { _ = stateDB.Close() })
 
 	firstStore := newStatusStore([]*config{job})
-	r := &runner{stderr: &bytes.Buffer{}, store: firstStore, stateDB: stateDB}
+	r := &runner{log: discardLogger, store: firstStore, stateDB: stateDB}
 	r.runOnce(context.Background(), job)
 
 	restartedStore := newStatusStore([]*config{job})
@@ -104,7 +103,7 @@ func TestSeedStatusFromStateAcrossRestart(t *testing.T) { //nolint:paralleltest 
 		t.Fatalf("restartedStore before seeding: State = %q, want idle", got)
 	}
 
-	seedStatusFromState(context.Background(), stateDB, []*config{job}, restartedStore, &bytes.Buffer{})
+	seedStatusFromState(context.Background(), stateDB, []*config{job}, restartedStore, discardLogger)
 
 	snap := restartedStore.snapshot()[0]
 	if snap.State != stateOK {
@@ -285,7 +284,7 @@ func TestScheduleStartTimeCatchesUpMissedRun(t *testing.T) { //nolint:parallelte
 	job := startTimeTestJob(t, marker, time.Now().Add(-10*time.Minute), time.Second)
 
 	store := newStatusStore([]*config{job})
-	r := &runner{stderr: &bytes.Buffer{}, store: store}
+	r := &runner{log: discardLogger, store: store}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
@@ -328,7 +327,7 @@ func TestScheduleStartTimeSkipsCatchUpWhenAlreadyRecorded(t *testing.T) { //noli
 	}
 
 	store := newStatusStore([]*config{job})
-	r := &runner{stderr: &bytes.Buffer{}, store: store, stateDB: stateDB}
+	r := &runner{log: discardLogger, store: store, stateDB: stateDB}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()

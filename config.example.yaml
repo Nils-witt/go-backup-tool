@@ -1,7 +1,9 @@
 # Example go-backup-tool config file. Copy to config.yaml (or pass
 # -config <path>) and fill in the values you need. This file is the only
 # way to configure a job: go-backup-tool has no CLI flags for cmd, targets,
-# recipients, etc. — only -config (this file's path) and -job (see below).
+# recipients, etc. — only -config (this file's path), -job (see below), and
+# -log-level (debug, info, warn, or error; default info — debug adds
+# per-stage pipeline detail useful when troubleshooting a run).
 #
 # On Windows, go-backup-tool.exe can also run as a Windows service instead
 # of an interactive console process:

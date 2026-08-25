@@ -127,7 +127,7 @@ func TestUploadToTargetsLocal(t *testing.T) {
 
 	const content = "hello from the pipeline"
 
-	targetErrs, bytesWritten, err := uploadToTargets(t.Context(), cfg, strings.NewReader(content))
+	targetErrs, bytesWritten, err := uploadToTargets(t.Context(), cfg, strings.NewReader(content), discardLogger)
 	if err != nil {
 		t.Fatalf("uploadToTargets() unexpected error: %v", err)
 	}

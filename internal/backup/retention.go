@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -62,7 +63,7 @@ func openRetentionDB(ctx context.Context, path string) (*sql.DB, error) {
 // server for anything now past its retention window. Only called after a
 // successful write to a local target whose server has retention: set;
 // retention == 0 means no tracking (and so nothing to sweep).
-func recordLocalWrite(ctx context.Context, cfg *config, t *target) error {
+func recordLocalWrite(ctx context.Context, cfg *config, t *target, log *slog.Logger) error {
 	if t.retention <= 0 {
 		return nil
 	}
@@ -82,7 +83,9 @@ func recordLocalWrite(ctx context.Context, cfg *config, t *target) error {
 		return fmt.Errorf("recording write to retention db %q: %w", retentionDBPath(t.localPath), err)
 	}
 
-	return sweepRetention(ctx, db, t)
+	log.Debug("recorded write to retention db", "path", path, "server", t.serverName, "retention", t.retention)
+
+	return sweepRetention(ctx, db, t, log)
 }
 
 // removeRetentionRecord removes any retention-db record for the object at
@@ -110,7 +113,7 @@ func removeRetentionRecord(ctx context.Context, cfg *config, t *target) error {
 // sweepRetentionForTarget opens t's server's retention database and sweeps
 // it, for callers (see sweepStartupRetention) that don't already have a
 // *sql.DB open for it.
-func sweepRetentionForTarget(ctx context.Context, t *target) error {
+func sweepRetentionForTarget(ctx context.Context, t *target, log *slog.Logger) error {
 	if t.retention <= 0 {
 		return nil
 	}
@@ -121,7 +124,7 @@ func sweepRetentionForTarget(ctx context.Context, t *target) error {
 	}
 	defer func() { _ = db.Close() }()
 
-	return sweepRetention(ctx, db, t)
+	return sweepRetention(ctx, db, t, log)
 }
 
 // sweepRetention deletes every file tracked in db for t's server whose
@@ -129,7 +132,7 @@ func sweepRetentionForTarget(ctx context.Context, t *target) error {
 // already missing from disk is not an error: its record is still removed.
 // Errors are collected per file and returned joined, so one bad entry
 // doesn't stop the rest of the sweep.
-func sweepRetention(ctx context.Context, db *sql.DB, t *target) error {
+func sweepRetention(ctx context.Context, db *sql.DB, t *target, log *slog.Logger) error {
 	if t.retention <= 0 {
 		return nil
 	}
@@ -141,6 +144,8 @@ func sweepRetention(ctx context.Context, db *sql.DB, t *target) error {
 		return err
 	}
 
+	log.Debug("retention sweep", "server", t.serverName, "cutoff", cutoff, "expired", len(expired))
+
 	var errs []error
 
 	for _, p := range expired {
@@ -151,7 +156,10 @@ func sweepRetention(ctx context.Context, db *sql.DB, t *target) error {
 
 		if _, err := db.ExecContext(ctx, `DELETE FROM objects WHERE path = ?`, p); err != nil {
 			errs = append(errs, fmt.Errorf("removing retention db record for %q: %w", p, err))
+			continue
 		}
+
+		log.Info("removed expired backup", "path", p, "server", t.serverName, "retention", t.retention)
 	}
 
 	return errors.Join(errs...)

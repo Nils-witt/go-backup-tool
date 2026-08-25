@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -21,17 +21,17 @@ type webUIServer struct {
 
 // startWebUI binds addr and starts an HTTP server serving a live dashboard
 // of store's job/target statuses (see dashboardHTML and handleStatus),
-// reporting it (and any later failure) to stderr. Binding happens
+// reporting it (and any later failure) to log. Binding happens
 // synchronously so a bad address is reported immediately and callers can
 // rely on the server being reachable as soon as this returns; it returns nil
 // if addr couldn't be bound, leaving the web UI disabled for this run rather
 // than failing the whole process over a dashboard.
-func startWebUI(addr string, store *statusStore, stderr io.Writer) *webUIServer {
+func startWebUI(addr string, store *statusStore, log *slog.Logger) *webUIServer {
 	var lc net.ListenConfig
 
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "error: web UI: listening on", addr, "-", err)
+		log.Error("web UI: listening", "addr", addr, "err", err)
 		return nil
 	}
 
@@ -40,7 +40,7 @@ func startWebUI(addr string, store *statusStore, stderr io.Writer) *webUIServer 
 	mux.HandleFunc("GET /api/status", handleStatus(store))
 
 	srv := &webUIServer{
-		http: &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second},
+		http: &http.Server{Handler: logRequests(log, mux), ReadHeaderTimeout: 10 * time.Second},
 		done: make(chan struct{}),
 		addr: ln.Addr().String(),
 	}
@@ -49,13 +49,48 @@ func startWebUI(addr string, store *statusStore, stderr io.Writer) *webUIServer 
 		defer close(srv.done)
 
 		if err := srv.http.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			_, _ = fmt.Fprintln(stderr, "error: web UI:", err)
+			log.Error("web UI", "err", err)
 		}
 	}()
 
-	_, _ = fmt.Fprintf(stderr, "web UI listening on %s\n", srv.addr)
+	log.Info("web UI listening", "addr", srv.addr)
 
 	return srv
+}
+
+// logRequests wraps next, logging every request it handles at debug level
+// once it completes: method, path, remote address, response status, and
+// how long it took — the same per-request detail an operator would reach
+// for a proper HTTP access log, without pulling in a logging middleware
+// dependency for a handful of routes.
+func logRequests(log *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+
+		next.ServeHTTP(sw, req)
+
+		log.Debug("web UI request",
+			"method", req.Method,
+			"path", req.URL.Path,
+			"remote", req.RemoteAddr,
+			"status", sw.status,
+			"duration", time.Since(start),
+		)
+	})
+}
+
+// statusWriter wraps an http.ResponseWriter to capture the status code
+// written to it, since http.ResponseWriter doesn't expose that itself once
+// WriteHeader has been called.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
 }
 
 // shutdown gracefully stops the web UI server, waiting for it to finish.

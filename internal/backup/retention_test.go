@@ -49,7 +49,7 @@ func TestRecordLocalWriteNoRetentionIsNoop(t *testing.T) {
 	cfg := &config{key: "backup.gpg"}
 	tgt := &target{serverName: "nas", kind: serverKindLocal, bucket: "sub", localPath: dir}
 
-	if err := recordLocalWrite(t.Context(), cfg, tgt); err != nil {
+	if err := recordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
 		t.Fatalf("recordLocalWrite() unexpected error: %v", err)
 	}
 
@@ -69,7 +69,7 @@ func TestRecordLocalWriteTracksObject(t *testing.T) {
 		t.Fatalf("writeLocalObject() unexpected error: %v", err)
 	}
 
-	if err := recordLocalWrite(t.Context(), cfg, tgt); err != nil {
+	if err := recordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
 		t.Fatalf("recordLocalWrite() unexpected error: %v", err)
 	}
 
@@ -96,7 +96,7 @@ func TestRecordLocalWriteSweepsExpiredObjects(t *testing.T) {
 		t.Fatalf("writeLocalObject() unexpected error: %v", err)
 	}
 
-	if err := recordLocalWrite(t.Context(), oldCfg, tgt); err != nil {
+	if err := recordLocalWrite(t.Context(), oldCfg, tgt, discardLogger); err != nil {
 		t.Fatalf("recordLocalWrite() unexpected error: %v", err)
 	}
 
@@ -110,7 +110,7 @@ func TestRecordLocalWriteSweepsExpiredObjects(t *testing.T) {
 		t.Fatalf("writeLocalObject() unexpected error: %v", err)
 	}
 
-	if err := recordLocalWrite(t.Context(), newCfg, tgt); err != nil {
+	if err := recordLocalWrite(t.Context(), newCfg, tgt, discardLogger); err != nil {
 		t.Fatalf("recordLocalWrite() unexpected error: %v", err)
 	}
 
@@ -139,7 +139,7 @@ func TestSweepRetentionForTargetIgnoresMissingFile(t *testing.T) {
 		t.Fatalf("writeLocalObject() unexpected error: %v", err)
 	}
 
-	if err := recordLocalWrite(t.Context(), cfg, tgt); err != nil {
+	if err := recordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
 		t.Fatalf("recordLocalWrite() unexpected error: %v", err)
 	}
 
@@ -152,7 +152,7 @@ func TestSweepRetentionForTargetIgnoresMissingFile(t *testing.T) {
 		t.Fatalf("removing test file: %v", err)
 	}
 
-	if err := sweepRetentionForTarget(t.Context(), tgt); err != nil {
+	if err := sweepRetentionForTarget(t.Context(), tgt, discardLogger); err != nil {
 		t.Fatalf("sweepRetentionForTarget() unexpected error: %v", err)
 	}
 
@@ -172,7 +172,7 @@ func TestRemoveRetentionRecord(t *testing.T) {
 		t.Fatalf("writeLocalObject() unexpected error: %v", err)
 	}
 
-	if err := recordLocalWrite(t.Context(), cfg, tgt); err != nil {
+	if err := recordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
 		t.Fatalf("recordLocalWrite() unexpected error: %v", err)
 	}
 

@@ -307,8 +307,9 @@ func (h *serviceHandler) Execute(_ []string, r <-chan svc.ChangeRequest, changes
 
 // eventLogWriter adapts an *eventlog.Log to io.Writer so it can be passed
 // as runWithContext's stderr, routing each line to the matching Event Log
-// severity by the same "error:"/"warning:" prefixes Run's own callers write
-// (see app.go and config.go).
+// severity by the level slog's text handler tags every line with (see
+// newLogger in app.go): "level=ERROR", "level=WARN", or otherwise
+// (INFO/DEBUG) treated as informational.
 type eventLogWriter struct {
 	log *eventlog.Log
 }
@@ -322,9 +323,9 @@ func (w *eventLogWriter) Write(p []byte) (int, error) {
 	var err error
 
 	switch {
-	case strings.HasPrefix(msg, "error:"):
+	case strings.Contains(msg, "level=ERROR"):
 		err = w.log.Error(1, msg)
-	case strings.HasPrefix(msg, "warning:"):
+	case strings.Contains(msg, "level=WARN"):
 		err = w.log.Warning(1, msg)
 	default:
 		err = w.log.Info(1, msg)

@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -58,7 +60,7 @@ func environWithout(names ...string) []string {
 // (they all receive the same byte stream via the fan-out in
 // uploadToTargets), for callers that want to report the backup's size; it's
 // 0 if the pipeline failed before reaching the upload stage.
-func runPipeline(ctx context.Context, cfg *config) (targetErrs []error, bytesWritten int64, err error) {
+func runPipeline(ctx context.Context, cfg *config, log *slog.Logger) (targetErrs []error, bytesWritten int64, err error) {
 	sourceCmd := exec.CommandContext(ctx, "sh", "-c", cfg.cmd) //nolint:gosec // cfg.cmd is operator-supplied CLI config, not untrusted input; see comment above
 	sourceCmd.Stderr = os.Stderr
 	// The backup command may be arbitrary and its output/behavior is
@@ -86,9 +88,13 @@ func runPipeline(ctx context.Context, cfg *config) (targetErrs []error, bytesWri
 		return nil, 0, fmt.Errorf("wiring gpg output: %w", err)
 	}
 
+	log.Debug("starting source command", "cmd", cfg.cmd)
+
 	if err := sourceCmd.Start(); err != nil {
 		return nil, 0, fmt.Errorf("starting command %q: %w", cfg.cmd, err)
 	}
+
+	log.Debug("starting gpg", "args", gpgCmd.Args)
 
 	if err := gpgCmd.Start(); err != nil {
 		return nil, 0, fmt.Errorf("starting gpg: %w", err)
@@ -108,14 +114,16 @@ func runPipeline(ctx context.Context, cfg *config) (targetErrs []error, bytesWri
 		}
 	}
 
-	targetErrs, bytesWritten, uploadErr := uploadToTargets(ctx, cfg, gpgOut)
+	log.Debug("streaming to targets", "targets", len(cfg.targets))
+
+	targetErrs, bytesWritten, uploadErr := uploadToTargets(ctx, cfg, gpgOut, log)
 
 	// gpgOut must be fully drained (which uploadToTargets does) before Wait,
 	// per exec.Cmd.StdoutPipe's documented contract.
 	gpgErr := gpgCmd.Wait()
 	sourceErr := sourceCmd.Wait()
 
-	cleanupPartialUpload(ctx, cfg, sourceErr, gpgErr, targetErrs)
+	cleanupPartialUpload(ctx, cfg, sourceErr, gpgErr, targetErrs, log)
 
 	return targetErrs, bytesWritten, firstPipelineError(cfg.cmd, sourceErr, gpgErr, uploadErr)
 }
@@ -154,10 +162,12 @@ func writePassphrase(w io.WriteCloser, passphrase string) error {
 // longer be true — callers such as the web UI's status store rely on
 // targetErrs reflecting the pipeline's final outcome, not just the upload
 // stage's.
-func cleanupPartialUpload(ctx context.Context, cfg *config, sourceErr, gpgErr error, targetErrs []error) {
+func cleanupPartialUpload(ctx context.Context, cfg *config, sourceErr, gpgErr error, targetErrs []error, log *slog.Logger) {
 	if sourceErr == nil && gpgErr == nil {
 		return
 	}
+
+	log.Debug("pipeline failed mid-stream, rolling back completed target uploads", "source_err", sourceErr, "gpg_err", gpgErr)
 
 	for i := range cfg.targets {
 		if targetErrs[i] != nil {
@@ -168,15 +178,17 @@ func cleanupPartialUpload(ctx context.Context, cfg *config, sourceErr, gpgErr er
 
 		if t.kind == serverKindLocal {
 			if delErr := deleteLocalObject(cfg, t); delErr != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to remove partial write %s (%s): %v\n", localObjectPath(cfg, t), targetLabel(t), delErr)
+				log.Warn("failed to remove partial write", "path", localObjectPath(cfg, t), "target", targetLabel(t), "err", delErr)
 				targetErrs[i] = fmt.Errorf("upload rolled back after pipeline failure, and removing the partial write also failed: %w", delErr)
 
 				continue
 			}
 
 			if recErr := removeRetentionRecord(ctx, cfg, t); recErr != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to remove retention db record for %s (%s): %v\n", localObjectPath(cfg, t), targetLabel(t), recErr)
+				log.Warn("failed to remove retention db record", "path", localObjectPath(cfg, t), "target", targetLabel(t), "err", recErr)
 			}
+
+			log.Info("rolled back partial write", "path", localObjectPath(cfg, t), "target", targetLabel(t))
 
 			targetErrs[i] = errors.New("upload rolled back after pipeline failure")
 
@@ -185,18 +197,20 @@ func cleanupPartialUpload(ctx context.Context, cfg *config, sourceErr, gpgErr er
 
 		client, err := newS3Client(ctx, t)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to set up s3 client to remove partial upload s3://%s/%s (%s): %v\n", t.bucket, cfg.key, targetLabel(t), err)
+			log.Warn("failed to set up s3 client to remove partial upload", "bucket", t.bucket, "key", cfg.key, "target", targetLabel(t), "err", err)
 			targetErrs[i] = fmt.Errorf("upload rolled back after pipeline failure, and setting up the s3 client to remove it also failed: %w", err)
 
 			continue
 		}
 
 		if delErr := deleteS3Object(ctx, client, cfg, t); delErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to remove partial upload s3://%s/%s (%s): %v\n", t.bucket, cfg.key, targetLabel(t), delErr)
+			log.Warn("failed to remove partial upload", "bucket", t.bucket, "key", cfg.key, "target", targetLabel(t), "err", delErr)
 			targetErrs[i] = fmt.Errorf("upload rolled back after pipeline failure, and removing it also failed: %w", delErr)
 
 			continue
 		}
+
+		log.Info("rolled back partial upload", "bucket", t.bucket, "key", cfg.key, "target", targetLabel(t))
 
 		targetErrs[i] = errors.New("upload rolled back after pipeline failure")
 	}
@@ -315,7 +329,7 @@ func newS3Client(ctx context.Context, t *target) (*s3.Client, error) {
 // r is always fully drained before this returns, even if every target fails
 // (e.g. because its client couldn't be set up) — callers such as
 // runPipeline rely on that per exec.Cmd.StdoutPipe's documented contract.
-func uploadToTargets(ctx context.Context, cfg *config, r io.Reader) (targetErrs []error, bytesWritten int64, joined error) {
+func uploadToTargets(ctx context.Context, cfg *config, r io.Reader, log *slog.Logger) (targetErrs []error, bytesWritten int64, joined error) {
 	targetErrs = make([]error, len(cfg.targets))
 	// uploaders[i] streams its target's share of the fan-out to wherever
 	// cfg.targets[i] belongs (S3 or local filesystem); nil means that
@@ -331,11 +345,11 @@ func uploadToTargets(ctx context.Context, cfg *config, r io.Reader) (targetErrs 
 					return err
 				}
 
-				if err := recordLocalWrite(ctx, cfg, t); err != nil {
+				if err := recordLocalWrite(ctx, cfg, t, log); err != nil {
 					// Retention tracking is best-effort auxiliary
 					// bookkeeping: the backup itself already succeeded, so a
 					// db hiccup here shouldn't fail the whole target.
-					fmt.Fprintf(os.Stderr, "warning: target (%s): retention tracking: %v\n", targetLabel(t), err)
+					log.Warn("retention tracking failed", "target", targetLabel(t), "err", err)
 				}
 
 				return nil
@@ -370,9 +384,19 @@ func uploadToTargets(ctx context.Context, cfg *config, r io.Reader) (targetErrs 
 		pipeWriters = append(pipeWriters, pw)
 		writers = append(writers, pw)
 
+		t := &cfg.targets[i]
+
+		log.Debug("target upload starting", "target", targetLabel(t))
+
 		wg.Go(func() {
-			if err := uploaders[i](pr); err != nil {
-				targetErrs[i] = fmt.Errorf("target (%s): %w", targetLabel(&cfg.targets[i]), err)
+			start := time.Now()
+
+			err := uploaders[i](pr)
+			if err != nil {
+				targetErrs[i] = fmt.Errorf("target (%s): %w", targetLabel(t), err)
+				log.Warn("target upload failed", "target", targetLabel(t), "duration", time.Since(start), "err", err)
+			} else {
+				log.Debug("target upload finished", "target", targetLabel(t), "duration", time.Since(start))
 			}
 			// Drain any input the uploader didn't consume (e.g. because it
 			// returned early on error) so the fan-out copy below, which

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -15,6 +16,17 @@ import (
 	"syscall"
 	"time"
 )
+
+// newLogger builds the structured logger every subsystem writes its
+// diagnostic output through: timestamped, level-tagged lines to w. level
+// gates verbosity — at the default (info) a run reports what it did (jobs
+// started, objects written, warnings); at debug it additionally reports how
+// (pipeline stage transitions, per-target timing, schedule/catch-up
+// decisions), which is noisy for routine runs but valuable when
+// troubleshooting one that isn't behaving as expected.
+func newLogger(w io.Writer, level slog.Level) *slog.Logger {
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
+}
 
 // Run parses args and executes every configured backup job, writing errors
 // and per-job status messages to stderr. It returns the process exit code:
@@ -52,19 +64,26 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 			return 0
 		}
 
-		_, _ = fmt.Fprintln(stderr, "error:", err)
+		// The desired log level lives in rc, which parsing itself failed to
+		// produce; fall back to the default so this one message still gets
+		// out.
+		newLogger(stderr, slog.LevelInfo).Error("parsing flags", "err", err)
 
 		return 2
 	}
+
+	log := newLogger(stderr, rc.logLevel)
 
 	if rc.timeout > 0 {
 		var cancel context.CancelFunc
 
 		ctx, cancel = context.WithTimeout(ctx, rc.timeout)
 		defer cancel()
+
+		log.Debug("run timeout set", "timeout", rc.timeout)
 	}
 
-	sweepStartupRetention(ctx, rc.jobs, stderr)
+	sweepStartupRetention(ctx, rc.jobs, log)
 
 	var stateDB *sql.DB
 
@@ -73,32 +92,38 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	// persisted last-run info, so skip the file entirely for a plain CLI
 	// run.
 	if needsScheduleState(rc.jobs) || rc.listen != "" {
-		db, err := openScheduleStateDB(ctx, scheduleStateDBPath(rc.configPath))
+		path := scheduleStateDBPath(rc.configPath)
+
+		db, err := openScheduleStateDB(ctx, path)
 		if err != nil {
-			_, _ = fmt.Fprintln(stderr, "warning: opening job state db:", err)
+			log.Warn("opening job state db", "path", path, "err", err)
 		} else {
 			stateDB = db
 			defer func() { _ = db.Close() }()
+
+			log.Debug("opened job state db", "path", path)
 		}
 	}
 
 	store := newStatusStore(rc.jobs)
 
 	if stateDB != nil {
-		seedStatusFromState(ctx, stateDB, rc.jobs, store, stderr)
+		seedStatusFromState(ctx, stateDB, rc.jobs, store, log)
 	}
 
-	r := &runner{stderr: stderr, store: store, stateDB: stateDB}
+	r := &runner{log: log, store: store, stateDB: stateDB}
 
 	var srv *webUIServer
 	if rc.listen != "" {
-		srv = startWebUI(rc.listen, store, stderr)
+		srv = startWebUI(rc.listen, store, log)
 	}
 
 	var wg sync.WaitGroup
 
+	log.Info("starting jobs", "count", len(rc.jobs))
+
 	for _, job := range rc.jobs {
-		warnIfKeyWontChange(stderr, job)
+		warnIfKeyWontChange(log, job)
 
 		wg.Go(func() {
 			r.schedule(ctx, job)
@@ -118,8 +143,12 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 
 	if r.failed.Load() {
+		log.Warn("run finished with failures")
+
 		return 1
 	}
+
+	log.Info("run finished")
 
 	return 0
 }
@@ -127,7 +156,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 // runner tracks whether any job run has failed across the concurrently
 // scheduled jobs.
 type runner struct {
-	stderr  io.Writer
+	log     *slog.Logger
 	store   *statusStore
 	stateDB *sql.DB // nil if no job uses start-time, or the db couldn't be opened
 	failed  atomic.Bool
@@ -137,17 +166,19 @@ type runner struct {
 // last-run info (see readLastRun), so a restart's web UI can still show
 // when each job last ran instead of every job reverting to "never" until it
 // next runs. Called once at startup, before the jobs' own goroutines start.
-func seedStatusFromState(ctx context.Context, db *sql.DB, jobs []*config, store *statusStore, stderr io.Writer) {
+func seedStatusFromState(ctx context.Context, db *sql.DB, jobs []*config, store *statusStore, log *slog.Logger) {
 	for _, j := range jobs {
 		run, ok, err := readLastRun(ctx, db, j.name)
 		if err != nil {
-			_, _ = fmt.Fprintln(stderr, "warning:", err)
+			log.Warn("reading last run from state db", "job", j.name, "err", err)
 			continue
 		}
 
 		if !ok {
 			continue
 		}
+
+		log.Debug("seeded job status from state db", "job", j.name, "state", run.State, "last_end", run.End)
 
 		store.seedLastRun(j.name, run)
 	}
@@ -175,7 +206,7 @@ func (r *runner) lastJobSuccess(ctx context.Context, name string) time.Time {
 
 	t, ok, err := readLastSuccess(ctx, r.stateDB, name)
 	if err != nil {
-		_, _ = fmt.Fprintln(r.stderr, "warning:", err)
+		r.log.Warn("reading last success from state db", "job", name, "err", err)
 		return time.Time{}
 	}
 
@@ -194,7 +225,7 @@ func (r *runner) recordJobSuccess(ctx context.Context, name string) {
 	}
 
 	if err := writeLastSuccess(ctx, r.stateDB, name, time.Now()); err != nil {
-		_, _ = fmt.Fprintln(r.stderr, "warning:", err)
+		r.log.Warn("recording job success to state db", "job", name, "err", err)
 	}
 }
 
@@ -217,7 +248,7 @@ func (r *runner) recordLastRun(ctx context.Context, name string, start time.Time
 	}
 
 	if err := writeLastRun(ctx, r.stateDB, name, run); err != nil {
-		_, _ = fmt.Fprintln(r.stderr, "warning:", err)
+		r.log.Warn("recording last run to state db", "job", name, "err", err)
 	}
 }
 
@@ -235,6 +266,8 @@ func (r *runner) recordLastRun(ctx context.Context, name string, start time.Time
 // accumulating +interval, so the schedule stays exactly grid-aligned
 // regardless of how long a run takes.
 func (r *runner) schedule(ctx context.Context, job *config) {
+	log := r.log.With("job", job.name)
+
 	if job.startTime.IsZero() {
 		r.runOnce(ctx, job)
 
@@ -243,6 +276,7 @@ func (r *runner) schedule(ctx context.Context, job *config) {
 		}
 
 		r.store.setNextRun(job.name, time.Now().Add(job.interval))
+		log.Debug("scheduled next run", "interval", job.interval)
 
 		ticker := time.NewTicker(job.interval)
 		defer ticker.Stop()
@@ -254,6 +288,7 @@ func (r *runner) schedule(ctx context.Context, job *config) {
 			case <-ticker.C:
 				r.runOnce(ctx, job)
 				r.store.setNextRun(job.name, time.Now().Add(job.interval))
+				log.Debug("scheduled next run", "interval", job.interval)
 			}
 		}
 	}
@@ -266,6 +301,9 @@ func (r *runner) schedule(ctx context.Context, job *config) {
 		// success (e.g. we restarted moments after an on-time run) — no
 		// run was actually missed, so don't fire an extra one now.
 		next = nextGridTime(job.startTime, job.interval, time.Now())
+		log.Debug("most recent due slot already recorded, waiting for next slot", "due", due, "next_run", next)
+	} else {
+		log.Debug("scheduling on start-time grid", "start_time", job.startTime, "next_run", next)
 	}
 
 	r.store.setNextRun(job.name, next)
@@ -279,6 +317,7 @@ func (r *runner) schedule(ctx context.Context, job *config) {
 
 		next = nextGridTime(job.startTime, job.interval, time.Now())
 		r.store.setNextRun(job.name, next)
+		log.Debug("scheduled next run", "next_run", next)
 	}
 }
 
@@ -333,16 +372,21 @@ func nextGridTime(start time.Time, interval time.Duration, now time.Time) time.T
 
 // runOnce runs job a single time, resolving a fresh {time} timestamp in its
 // key first so a repeating job doesn't overwrite the same object on every
-// run, and reports the outcome to r.stderr.
+// run, and reports the outcome to r.log.
 func (r *runner) runOnce(ctx context.Context, job *config) {
 	run := *job
 	run.key = substituteKeyTime(job.key)
 
+	log := r.log.With("job", job.name, "key", run.key)
+
 	start := time.Now()
 
 	r.store.starting(job.name)
+	log.Info("job starting", "targets", len(run.targets))
 
-	targetErrs, bytesWritten, err := runPipeline(ctx, &run)
+	targetErrs, bytesWritten, err := runPipeline(ctx, &run, log)
+	duration := time.Since(start)
+
 	r.recordTargetResults(job.name, run.targets, targetErrs, err)
 	r.store.finished(job.name, err, bytesWritten)
 	r.recordLastRun(ctx, job.name, start, err, bytesWritten)
@@ -350,7 +394,7 @@ func (r *runner) runOnce(ctx context.Context, job *config) {
 	if err != nil {
 		r.failed.Store(true)
 
-		_, _ = fmt.Fprintln(r.stderr, "error:", jobError(job, err))
+		log.Error("job failed", "duration", duration, "err", jobError(job, err))
 
 		return
 	}
@@ -359,17 +403,17 @@ func (r *runner) runOnce(ctx context.Context, job *config) {
 		r.recordJobSuccess(ctx, job.name)
 	}
 
-	// Status/diagnostic message, not program output, so it goes to
-	// stderr; stdout stays silent on success.
+	log.Info("job finished", "duration", duration, "bytes", bytesWritten)
+
 	for i := range run.targets {
 		t := &run.targets[i]
 
 		if t.kind == serverKindLocal {
-			_, _ = fmt.Fprintf(r.stderr, "%swrote %s (server %q)\n", jobLabel(job), localObjectPath(&run, t), t.serverName)
+			log.Info("wrote target", "target", targetLabel(t), "path", localObjectPath(&run, t))
 			continue
 		}
 
-		_, _ = fmt.Fprintf(r.stderr, "%suploaded s3://%s/%s (server %q)\n", jobLabel(job), t.bucket, run.key, t.serverName)
+		log.Info("uploaded target", "target", targetLabel(t), "url", fmt.Sprintf("s3://%s/%s", t.bucket, run.key))
 	}
 }
 
@@ -405,18 +449,12 @@ func substituteKeyTime(key string) string {
 // warnIfKeyWontChange warns when a repeating job's key has no {time}
 // placeholder: every run would then overwrite the same S3 object, silently
 // leaving only the most recent backup instead of a history of them.
-func warnIfKeyWontChange(stderr io.Writer, job *config) {
+func warnIfKeyWontChange(log *slog.Logger, job *config) {
 	if job.interval <= 0 || strings.Contains(job.key, "{time}") {
 		return
 	}
 
-	_, _ = fmt.Fprintf(stderr, "warning: %srepeats every %s but its key has no {time} placeholder; every run will overwrite the same object\n", jobLabel(job), job.interval)
-}
-
-// jobLabel returns "<name>: ", prefixing status output with the job that
-// produced it.
-func jobLabel(cfg *config) string {
-	return cfg.name + ": "
+	log.Warn("repeating job's key has no {time} placeholder; every run will overwrite the same object", "job", job.name, "interval", job.interval, "key", job.key)
 }
 
 // sweepStartupRetention runs one retention sweep, before any job starts, for
@@ -425,7 +463,7 @@ func jobLabel(cfg *config) string {
 // intervals would only get swept whenever one of them next happens to write
 // to it — potentially long after files there actually expired, e.g. right
 // after go-backup-tool restarts following a period of downtime.
-func sweepStartupRetention(ctx context.Context, jobs []*config, stderr io.Writer) {
+func sweepStartupRetention(ctx context.Context, jobs []*config, log *slog.Logger) {
 	seen := make(map[string]bool)
 
 	for _, j := range jobs {
@@ -437,8 +475,10 @@ func sweepStartupRetention(ctx context.Context, jobs []*config, stderr io.Writer
 
 			seen[t.localPath] = true
 
-			if err := sweepRetentionForTarget(ctx, t); err != nil {
-				_, _ = fmt.Fprintf(stderr, "warning: retention sweep for server %q: %v\n", t.serverName, err)
+			log.Debug("startup retention sweep", "server", t.serverName, "path", t.localPath, "retention", t.retention)
+
+			if err := sweepRetentionForTarget(ctx, t, log); err != nil {
+				log.Warn("startup retention sweep failed", "server", t.serverName, "err", err)
 			}
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"regexp"
 	"strconv"
@@ -117,6 +118,7 @@ type runConfig struct {
 	timeout    time.Duration
 	listen     string // empty disables the web UI; see fileConfig.Listen
 	configPath string // where the config file was loaded from; state db lives alongside it
+	logLevel   slog.Level
 }
 
 // Built-in defaults for fields a job's or server's config file entry
@@ -206,7 +208,9 @@ type fileConfig struct {
 // All job parameters come from the YAML config file (-config, defaulting to
 // config.yaml); there are no CLI flags to set them individually. Every job
 // is defined under the config file's jobs: list; -job selects a single one
-// to run, or every job runs (in order) when -job isn't given.
+// to run, or every job runs (in order) when -job isn't given. -log-level
+// (debug, info, warn, or error; default info) controls diagnostic log
+// verbosity.
 //
 // Each job's key keeps any {time} placeholder unresolved: it's substituted
 // fresh by the caller immediately before every run (see substituteKeyTime),
@@ -219,12 +223,19 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 	var (
 		configPath string
 		jobFilter  string
+		logLevel   string
 	)
 
 	fs.StringVar(&configPath, "config", defaultConfigPath, "path to the YAML config file")
 	fs.StringVar(&jobFilter, "job", "", "run only the named job from the config file's jobs: list")
+	fs.StringVar(&logLevel, "log-level", "info", "log verbosity: debug, info, warn, or error")
 
 	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+
+	level, err := parseLogLevel(logLevel)
+	if err != nil {
 		return nil, err
 	}
 
@@ -276,7 +287,19 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 		}
 	}
 
-	return &runConfig{jobs: jobs, timeout: timeout, listen: strings.TrimSpace(fileCfg.Listen), configPath: configPath}, nil
+	return &runConfig{jobs: jobs, timeout: timeout, listen: strings.TrimSpace(fileCfg.Listen), configPath: configPath, logLevel: level}, nil
+}
+
+// parseLogLevel parses the -log-level flag's value into a slog.Level,
+// accepting the same case-insensitive names slog itself recognizes
+// (debug, info, warn, error).
+func parseLogLevel(s string) (slog.Level, error) {
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(s)); err != nil {
+		return 0, fmt.Errorf("parsing -log-level %q: %w", s, err)
+	}
+
+	return level, nil
 }
 
 // resolveJobs builds the list of jobs to run from fileCfg's jobs: list,

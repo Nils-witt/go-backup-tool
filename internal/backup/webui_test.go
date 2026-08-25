@@ -55,7 +55,7 @@ func TestStartWebUIServesRequests(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := startWebUI("127.0.0.1:0", store, &discardWriter{})
+	srv := startWebUI("127.0.0.1:0", store, discardLogger)
 	if srv == nil {
 		t.Fatal("startWebUI() = nil, want a running server")
 	}
@@ -84,13 +84,9 @@ func TestStartWebUIBadAddrReturnsNil(t *testing.T) {
 	store, _ := newTestStore()
 
 	// Port 0 is valid (means "pick one"); an unparseable address is not.
-	srv := startWebUI("not-a-valid-address", store, &discardWriter{})
+	srv := startWebUI("not-a-valid-address", store, discardLogger)
 	if srv != nil {
 		t.Cleanup(srv.shutdown)
 		t.Fatal("startWebUI() with an invalid address = non-nil, want nil")
 	}
 }
-
-type discardWriter struct{}
-
-func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
