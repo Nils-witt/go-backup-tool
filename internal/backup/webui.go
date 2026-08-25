@@ -50,6 +50,7 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 	mux.HandleFunc("GET /", handleDashboard)
 	mux.HandleFunc("GET /api/status", handleStatus(store))
 	mux.HandleFunc("GET /api/receivers", handleReceiverStatus(receiverStore))
+	mux.HandleFunc("GET /api/receivers/{id}/files", handleReceiverFiles(receivers, log))
 	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, receiverStore, log, db))
 	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, receiverStore, log, db))
 
@@ -134,6 +135,35 @@ func handleReceiverStatus(store *receiverStatusStore) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
 		if err := json.NewEncoder(w).Encode(store.snapshot()); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}
+}
+
+// handleReceiverFiles serves GET /api/receivers/{id}/files: the objects
+// currently stored under receiver {id}'s path (see listReceiverFiles), for
+// the web UI dashboard's per-receiver file listing. Unlike the receiver API
+// (handleReceiveObject/handleDeleteObject), this is dashboard-only and isn't
+// token-authenticated, matching /api/receivers.
+func handleReceiverFiles(receivers map[string]resolvedReceiver, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		recv, ok := receivers[r.PathValue("id")]
+		if !ok {
+			http.Error(w, "unknown receiver id", http.StatusNotFound)
+			return
+		}
+
+		files, err := listReceiverFiles(recv)
+		if err != nil {
+			log.Warn("receiver: listing files failed", "id", recv.id, "err", err)
+			http.Error(w, "listing files failed", http.StatusInternalServerError)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+		if err := json.NewEncoder(w).Encode(files); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	}
@@ -407,6 +437,48 @@ const dashboardHTML = `<!doctype html>
     margin: 2.5rem auto 1rem;
     max-width: 1200px;
   }
+  .files-toggle {
+    margin-top: .6rem;
+    padding: .3rem .6rem;
+    font-size: .78rem;
+    font-weight: 600;
+    color: var(--fg);
+    background: var(--idle-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .files-toggle:hover {
+    filter: brightness(0.95);
+  }
+  .files-wrap {
+    margin-top: .6rem;
+    max-height: 220px;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+  }
+  .files {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .files li {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: .5rem;
+    padding: .35rem 0;
+    border-bottom: 1px solid var(--border);
+    font-size: .8rem;
+  }
+  .file-key {
+    overflow-wrap: anywhere;
+  }
+  .file-meta {
+    color: var(--muted);
+    font-size: .72rem;
+    white-space: nowrap;
+  }
 </style>
 </head>
 <body>
@@ -464,6 +536,71 @@ function render(jobs) {
   }).join("");
 }
 
+// expandedReceivers/receiverFilesCache/lastReceivers hold client-only UI
+// state across refresh() polls: which receiver cards have their file list
+// open, the last-fetched file list per receiver id, and the last /api/receivers
+// payload (so a files fetch completing asynchronously can re-render without
+// waiting on the next poll).
+let expandedReceivers = {};
+let receiverFilesCache = {};
+let lastReceivers = [];
+
+function fmtSize(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  const units = ["KB", "MB", "GB", "TB"];
+  let val = bytes;
+  let i = -1;
+  do {
+    val /= 1024;
+    i++;
+  } while (val >= 1024 && i < units.length - 1);
+  return val.toFixed(1) + " " + units[i];
+}
+
+// escapeHtml escapes s for safe inclusion as HTML text. File keys, unlike
+// the rest of this dashboard's data, originate from the receiver API's
+// caller (any holder of a receiver's bearer token) rather than this
+// instance's own config, so they're escaped before going into innerHTML.
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+
+function renderFileList(id) {
+  const files = receiverFilesCache[id];
+  if (!files) return '<p class="meta">loading&hellip;</p>';
+  if (!files.length) return '<p class="meta">no files stored</p>';
+
+  return '<ul class="files">' + files.map(function (f) {
+    return '<li><span class="file-key">' + escapeHtml(f.key) + '</span>' +
+      '<span class="file-meta">' + fmtSize(f.size) + ' &middot; ' + fmtTime(f.mod_time) + '</span></li>';
+  }).join("") + '</ul>';
+}
+
+function toggleReceiverFiles(id) {
+  if (expandedReceivers[id]) {
+    expandedReceivers[id] = false;
+    renderReceivers(lastReceivers);
+    return;
+  }
+
+  expandedReceivers[id] = true;
+  delete receiverFilesCache[id];
+  renderReceivers(lastReceivers);
+
+  fetch("/api/receivers/" + encodeURIComponent(id) + "/files")
+    .then(function (r) { return r.json(); })
+    .then(function (files) {
+      receiverFilesCache[id] = files;
+      renderReceivers(lastReceivers);
+    })
+    .catch(function () {
+      receiverFilesCache[id] = [];
+      renderReceivers(lastReceivers);
+    });
+}
+
 function renderReceivers(receivers) {
   const wrap = document.getElementById("receivers-wrap");
   if (!receivers.length) {
@@ -478,15 +615,27 @@ function renderReceivers(receivers) {
     const lastSeen = hasTime(rcv.last_seen)
       ? ('last received: ' + fmtTime(rcv.last_seen) + (rcv.last_key ? ' (' + rcv.last_key + ')' : ''))
       : 'no objects received yet';
+    const expanded = !!expandedReceivers[rcv.id];
+    const filesSection = expanded ? '<div class="files-wrap">' + renderFileList(rcv.id) + '</div>' : '';
 
     return '<div class="card">' +
       '<div class="card-head"><span class="job-name">' + rcv.id + '</span>' + badge(rcv.state) + '</div>' +
       '<div class="meta">' + rcv.path + retention + '</div>' +
       '<div class="meta">' + lastSeen + '</div>' +
       err +
+      '<button type="button" class="files-toggle" data-id="' + rcv.id + '">' +
+        (expanded ? "Hide files" : "Show files") +
+      '</button>' +
+      filesSection +
       '</div>';
   }).join("");
 }
+
+document.getElementById("receivers").addEventListener("click", function (e) {
+  const btn = e.target.closest(".files-toggle");
+  if (!btn) return;
+  toggleReceiverFiles(btn.dataset.id);
+});
 
 function refresh() {
   Promise.all([
@@ -494,7 +643,8 @@ function refresh() {
     fetch("/api/receivers").then(function (r) { return r.json(); })
   ]).then(function (results) {
     render(results[0]);
-    renderReceivers(results[1]);
+    lastReceivers = results[1] || [];
+    renderReceivers(lastReceivers);
     document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
   }).catch(function (err) {
     document.getElementById("updated").textContent = "error fetching status: " + err;

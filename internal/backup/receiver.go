@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -101,6 +104,65 @@ func receiverTarget(recv resolvedReceiver) *target {
 		localPath:  recv.path,
 		retention:  recv.retention,
 	}
+}
+
+// receiverFile is one object currently stored under a receiver's path, as
+// reported over /api/receivers/{id}/files, for display in the web UI
+// dashboard (see webui.go).
+type receiverFile struct {
+	Key     string    `json:"key"`
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"mod_time"`
+}
+
+// listReceiverFiles walks recv.path and returns every object currently
+// stored there, keyed the same way handleReceiveObject/handleDeleteObject
+// address them (the path relative to recv.path, using "/" separators
+// regardless of OS), sorted by key. A root directory that doesn't exist yet
+// (nothing has been received) is not an error — it just yields no files.
+// Temp files left behind by an interrupted write (see writeLocalObject's
+// ".*.tmp" pattern) are skipped since they're not yet complete objects.
+func listReceiverFiles(recv resolvedReceiver) ([]receiverFile, error) {
+	if _, err := os.Stat(recv.path); err != nil {
+		if os.IsNotExist(err) {
+			return []receiverFile{}, nil
+		}
+
+		return nil, err
+	}
+
+	files := []receiverFile{}
+
+	err := filepath.WalkDir(recv.path, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+
+		if d.IsDir() || strings.HasPrefix(d.Name(), ".") {
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+
+		rel, err := filepath.Rel(recv.path, path)
+		if err != nil {
+			return err
+		}
+
+		files = append(files, receiverFile{Key: filepath.ToSlash(rel), Size: info.Size(), ModTime: info.ModTime()})
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Slice(files, func(i, j int) bool { return files[i].Key < files[j].Key })
+
+	return files, nil
 }
 
 // receiverSnapshot is one configured receiver's current status, as reported

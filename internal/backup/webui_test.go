@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -75,6 +76,50 @@ func TestStartWebUIServesRequests(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("GET /api/status status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestHandleReceiverFilesServesJSON(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "backup.gpg"), "data")
+
+	receivers := map[string]resolvedReceiver{"a": {id: "a", path: root}}
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/files", nil)
+	req.SetPathValue("id", "a")
+
+	rec := httptest.NewRecorder()
+
+	handleReceiverFiles(receivers, discardLogger)(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var files []receiverFile
+	if err := json.Unmarshal(rec.Body.Bytes(), &files); err != nil {
+		t.Fatalf("decoding response body: %v", err)
+	}
+
+	if len(files) != 1 || files[0].Key != "backup.gpg" || files[0].Size != 4 {
+		t.Errorf("files = %+v, want one entry backup.gpg size 4", files)
+	}
+}
+
+func TestHandleReceiverFilesUnknownID(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/missing/files", nil)
+	req.SetPathValue("id", "missing")
+
+	rec := httptest.NewRecorder()
+
+	handleReceiverFiles(map[string]resolvedReceiver{}, discardLogger)(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
 	}
 }
 

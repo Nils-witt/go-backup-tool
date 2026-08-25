@@ -1,6 +1,8 @@
 package backup
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -78,5 +80,62 @@ func TestBuildReceiversRequiresPath(t *testing.T) {
 	_, err := buildReceivers([]fileReceiver{{ID: "a", Token: "t"}})
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for missing path, got nil")
+	}
+}
+
+func TestListReceiverFilesMissingRoot(t *testing.T) {
+	t.Parallel()
+
+	recv := resolvedReceiver{id: "a", path: filepath.Join(t.TempDir(), "does-not-exist")}
+
+	files, err := listReceiverFiles(recv)
+	if err != nil {
+		t.Fatalf("listReceiverFiles() unexpected error: %v", err)
+	}
+
+	if len(files) != 0 {
+		t.Errorf("listReceiverFiles() = %+v, want empty", files)
+	}
+}
+
+func TestListReceiverFilesListsNestedObjectsSortedByKey(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, "b.gpg"), "bbb")
+	writeFile(t, filepath.Join(root, "subdir", "a.gpg"), "a")
+	writeFile(t, filepath.Join(root, ".hidden.tmp"), "temp")
+
+	recv := resolvedReceiver{id: "a", path: root}
+
+	files, err := listReceiverFiles(recv)
+	if err != nil {
+		t.Fatalf("listReceiverFiles() unexpected error: %v", err)
+	}
+
+	if len(files) != 2 {
+		t.Fatalf("listReceiverFiles() = %+v, want 2 entries", files)
+	}
+
+	if files[0].Key != "b.gpg" || files[0].Size != 3 {
+		t.Errorf("files[0] = %+v, want key b.gpg size 3", files[0])
+	}
+
+	if files[1].Key != "subdir/a.gpg" || files[1].Size != 1 {
+		t.Errorf("files[1] = %+v, want key subdir/a.gpg size 1", files[1])
+	}
+}
+
+// writeFile creates path (and any missing parent directories) with contents.
+func writeFile(t *testing.T, path, contents string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("creating directory for %q: %v", path, err)
+	}
+
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("writing %q: %v", path, err)
 	}
 }
