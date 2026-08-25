@@ -63,6 +63,8 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		defer cancel()
 	}
 
+	sweepStartupRetention(ctx, rc.jobs, stderr)
+
 	store := newStatusStore(rc.jobs)
 	r := &runner{stderr: stderr, store: store}
 
@@ -209,4 +211,29 @@ func warnIfKeyWontChange(stderr io.Writer, job *config) {
 // produced it.
 func jobLabel(cfg *config) string {
 	return cfg.name + ": "
+}
+
+// sweepStartupRetention runs one retention sweep, before any job starts, for
+// every distinct local server (identified by root path) with retention: set
+// among jobs' targets. Without this, a server whose jobs all run on long
+// intervals would only get swept whenever one of them next happens to write
+// to it — potentially long after files there actually expired, e.g. right
+// after go-backup-tool restarts following a period of downtime.
+func sweepStartupRetention(ctx context.Context, jobs []*config, stderr io.Writer) {
+	seen := make(map[string]bool)
+
+	for _, j := range jobs {
+		for i := range j.targets {
+			t := &j.targets[i]
+			if t.kind != serverKindLocal || t.retention <= 0 || seen[t.localPath] {
+				continue
+			}
+
+			seen[t.localPath] = true
+
+			if err := sweepRetentionForTarget(ctx, t); err != nil {
+				_, _ = fmt.Fprintf(stderr, "warning: retention sweep for server %q: %v\n", t.serverName, err)
+			}
+		}
+	}
 }

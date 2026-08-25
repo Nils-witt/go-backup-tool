@@ -627,6 +627,114 @@ jobs:
 	}
 }
 
+func TestParseFlagsLocalServerRetention(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: nas
+    type: local
+    path: `+dir+`
+    retention: 168h
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: nas, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	cfg := singleJob(t, rc)
+
+	want := target{serverName: "nas", kind: serverKindLocal, bucket: "b", localPath: dir, retention: 168 * time.Hour}
+	if len(cfg.targets) != 1 || cfg.targets[0] != want {
+		t.Errorf("cfg.targets = %+v, want [%+v]", cfg.targets, want)
+	}
+}
+
+func TestParseFlagsLocalServerRetentionInDays(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: nas
+    type: local
+    path: `+dir+`
+    retention: 7d
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: nas, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	cfg := singleJob(t, rc)
+
+	want := target{serverName: "nas", kind: serverKindLocal, bucket: "b", localPath: dir, retention: 7 * 24 * time.Hour}
+	if len(cfg.targets) != 1 || cfg.targets[0] != want {
+		t.Errorf("cfg.targets = %+v, want [%+v]", cfg.targets, want)
+	}
+}
+
+func TestParseFlagsLocalServerRetentionRejectsNegative(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: nas
+    type: local
+    path: /mnt/backups
+    retention: -1h
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: nas, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "retention must not be negative") {
+		t.Fatalf("parseFlags() error = %v, want substring %q", err, "retention must not be negative")
+	}
+}
+
+func TestParseFlagsS3ServerRejectsRetention(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    retention: 168h
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "retention is not valid for type: s3") {
+		t.Fatalf("parseFlags() error = %v, want substring %q", err, "retention is not valid for type: s3")
+	}
+}
+
 func TestParseFlagsLocalServerRejectsS3Fields(t *testing.T) {
 	t.Parallel()
 

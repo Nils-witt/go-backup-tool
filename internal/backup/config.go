@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,6 +101,12 @@ type target struct {
 	// kind == serverKindLocal). The object is written to
 	// localPath/bucket/key, mirroring the S3 bucket/key layout.
 	localPath string
+
+	// retention is how long a local target's written objects are kept
+	// before they're deleted automatically (only set when
+	// kind == serverKindLocal). Zero means no automatic expiry. See
+	// retention.go.
+	retention time.Duration
 }
 
 // runConfig is the result of parseFlags: one or more jobs to run, plus the
@@ -155,7 +163,14 @@ type fileJobTarget struct {
 // (both required together, or neither); like GPG_PASSPHRASE, credentials
 // are never read directly out of the config file itself. When neither is
 // set, an s3 server falls back to the AWS SDK's default credential chain
-// (env vars, shared config, IAM role, ...).
+// (env vars, shared config, IAM role, ...). Retention (local only) is a
+// duration string (e.g. "7d" or "168h" for 7 days, "30m" for 30 minutes) —
+// like time.ParseDuration but with "d" also accepted for days (parsed by
+// parseDayDuration, since the standard library has no day unit; "m" is
+// already minutes in time.ParseDuration, not months); when set, any object
+// this tool writes under path is deleted once it's older than that, tracked
+// via a small sqlite database at path/.go-backup-tool-retention.db (see
+// retention.go). Unset or "0" disables automatic cleanup.
 type fileServer struct {
 	Name         string `yaml:"name"`
 	Type         string `yaml:"type"`
@@ -164,7 +179,8 @@ type fileServer struct {
 	PathStyle    bool   `yaml:"path-style"`
 	AccessKeyEnv string `yaml:"access-key-env"`
 	SecretKeyEnv string `yaml:"secret-key-env"`
-	Path         string `yaml:"path"` // local only: root directory backups are written under
+	Path         string `yaml:"path"`      // local only: root directory backups are written under
+	Retention    string `yaml:"retention"` // local only: e.g. "7d" or "168h"; unset/"0" keeps objects forever
 }
 
 // fileConfig is the top-level shape of the YAML config file. Its embedded
@@ -352,6 +368,10 @@ func buildServers(fileServers []fileServer) (map[string]resolvedServer, error) {
 			continue
 		}
 
+		if fs.Retention != "" {
+			return nil, fmt.Errorf("server %q: retention is not valid for type: s3 (local only)", name)
+		}
+
 		if (fs.AccessKeyEnv == "") != (fs.SecretKeyEnv == "") {
 			return nil, fmt.Errorf("server %q: access-key-env and secret-key-env must be set together", name)
 		}
@@ -385,7 +405,93 @@ func buildLocalServer(name string, fs *fileServer) (resolvedServer, error) {
 		return resolvedServer{}, fmt.Errorf("server %q: endpoint/path-style/access-key-env/secret-key-env are not valid for type: local", name)
 	}
 
-	return resolvedServer{name: name, kind: serverKindLocal, path: fs.Path}, nil
+	retention, err := parseRetention(fs.Retention)
+	if err != nil {
+		return resolvedServer{}, fmt.Errorf("server %q: %w", name, err)
+	}
+
+	return resolvedServer{name: name, kind: serverKindLocal, path: fs.Path, retention: retention}, nil
+}
+
+// parseRetention parses a local server's retention: string into a
+// time.Duration. An empty string means no automatic expiry (the zero
+// value); a negative duration is rejected since "delete files from the
+// future" isn't meaningful.
+func parseRetention(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+
+	d, err := parseDayDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("parsing retention %q: %w", s, err)
+	}
+
+	if d < 0 {
+		return 0, fmt.Errorf("retention must not be negative, got %q", s)
+	}
+
+	return d, nil
+}
+
+// dayUnitRE matches a leading "<number>d" component (e.g. "7d" or "1.5d") of
+// a duration string handled by parseDayDuration.
+var dayUnitRE = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)?)d`)
+
+// parseDayDuration is time.ParseDuration extended with a "d" (day) unit,
+// which the standard library doesn't support: e.g. "30d" or "1d12h" for
+// go-backup-tool's retention: (time.ParseDuration's "m" already means
+// minutes, so that unit needs no extra support). A day component, if
+// present, must come first, mirroring time.ParseDuration's largest-to-
+// smallest unit ordering; whatever follows it (if anything) is parsed by
+// time.ParseDuration as usual and added on.
+func parseDayDuration(s string) (time.Duration, error) {
+	rest := s
+
+	neg := false
+
+	switch {
+	case strings.HasPrefix(rest, "-"):
+		neg, rest = true, rest[1:]
+	case strings.HasPrefix(rest, "+"):
+		rest = rest[1:]
+	}
+
+	if rest == "" {
+		return 0, fmt.Errorf("invalid duration %q", s)
+	}
+
+	var days float64
+
+	if m := dayUnitRE.FindStringSubmatch(rest); m != nil {
+		var err error
+
+		days, err = strconv.ParseFloat(m[1], 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid duration %q", s)
+		}
+
+		rest = rest[len(m[0]):]
+	}
+
+	var rem time.Duration
+
+	if rest != "" {
+		var err error
+
+		rem, err = time.ParseDuration(rest)
+		if err != nil {
+			return 0, fmt.Errorf("invalid duration %q", s)
+		}
+	}
+
+	total := time.Duration(days*24*float64(time.Hour)) + rem
+	if neg {
+		total = -total
+	}
+
+	return total, nil
 }
 
 // resolvedServer is one servers: entry after defaulting its region, ready
@@ -400,7 +506,8 @@ type resolvedServer struct {
 	pathStyle    bool
 	accessKeyEnv string
 	secretKeyEnv string
-	path         string // local only: root directory backups are written under
+	path         string        // local only: root directory backups are written under
+	retention    time.Duration // local only: 0 means no automatic expiry
 }
 
 // resolveJobTargets resolves cfg's raw target references (targetRefs, from
@@ -438,6 +545,7 @@ func resolveJobTargets(cfg *config, servers map[string]resolvedServer) error {
 			accessKeyEnv: server.accessKeyEnv,
 			secretKeyEnv: server.secretKeyEnv,
 			localPath:    server.path,
+			retention:    server.retention,
 		}
 	}
 

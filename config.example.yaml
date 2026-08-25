@@ -27,6 +27,15 @@
 # another backup tool's watched directory). A local server only needs path;
 # a target's bucket is still required and is used as a subdirectory under
 # it, so the object ends up at path/bucket/key.
+#
+# A local server may also set retention: (e.g. "7d" for 7 days, "168h",
+# "90m" for 90 minutes — "d" for days works alongside every unit Go's
+# time.ParseDuration already supports, including "m" for minutes) to
+# delete its own objects automatically once they're older than that.
+# go-backup-tool tracks what it wrote in a small sqlite database at
+# path/.go-backup-tool-retention.db so it only ever deletes objects it
+# wrote itself; retention is swept after every write to that server, and
+# once at startup. Omit retention (the default) to keep objects forever.
 servers:
   - name: primary
     region: us-east-1
@@ -47,6 +56,7 @@ servers:
   - name: nas
     type: local
     path: /mnt/backups
+    retention: 7d # delete objects here once they're older than 7 days
 
 # Every job is defined under jobs:, one entry per backup; run all jobs (in
 # order) with no -job flag, or one with -job <name>. Every key below is

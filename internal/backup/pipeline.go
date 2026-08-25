@@ -169,6 +169,10 @@ func cleanupPartialUpload(ctx context.Context, cfg *config, sourceErr, gpgErr er
 				continue
 			}
 
+			if recErr := removeRetentionRecord(ctx, cfg, t); recErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to remove retention db record for %s (%s): %v\n", localObjectPath(cfg, t), targetLabel(t), recErr)
+			}
+
 			targetErrs[i] = errors.New("upload rolled back after pipeline failure")
 
 			continue
@@ -316,7 +320,18 @@ func uploadToTargets(ctx context.Context, cfg *config, r io.Reader) (targetErrs 
 
 		if t.kind == serverKindLocal {
 			uploaders[i] = func(r io.Reader) error {
-				return writeLocalObject(cfg, t, r)
+				if err := writeLocalObject(cfg, t, r); err != nil {
+					return err
+				}
+
+				if err := recordLocalWrite(ctx, cfg, t); err != nil {
+					// Retention tracking is best-effort auxiliary
+					// bookkeeping: the backup itself already succeeded, so a
+					// db hiccup here shouldn't fail the whole target.
+					fmt.Fprintf(os.Stderr, "warning: target (%s): retention tracking: %v\n", targetLabel(t), err)
+				}
+
+				return nil
 			}
 
 			continue
