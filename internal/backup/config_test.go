@@ -5,8 +5,10 @@ import (
 	"errors"
 	"flag"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1626,7 +1628,7 @@ jobs:
 	}
 
 	want := resolvedReceiver{id: "from-primary", token: "shared-secret", path: dir, retention: 30 * 24 * time.Hour}
-	if recv != want {
+	if !reflect.DeepEqual(recv, want) {
 		t.Errorf("rc.receivers[%q] = %+v, want %+v", "from-primary", recv, want)
 	}
 }
@@ -1682,6 +1684,87 @@ jobs:
 	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), `duplicate receiver id "dup"`) {
 		t.Fatalf("parseFlags() error = %v, want substring %q", err, `duplicate receiver id "dup"`)
+	}
+}
+
+func TestParseFlagsReceiverStaleAfterAndWebhook(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    region: us-east-1
+
+receivers:
+  - id: from-primary
+    token: "shared-secret"
+    path: `+dir+`
+    stale-after: 6h
+    webhook:
+      url: "https://alerts.example.com/hook"
+      method: put
+      headers:
+        Authorization: "Bearer webhook-token"
+      body: '{"text":"{receiver_id} is stale"}'
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	recv, ok := rc.receivers["from-primary"]
+	if !ok {
+		t.Fatalf("rc.receivers = %+v, want an entry for %q", rc.receivers, "from-primary")
+	}
+
+	want := resolvedReceiver{
+		id: "from-primary", token: "shared-secret", path: dir,
+		staleAfter: 6 * time.Hour,
+		webhook: resolvedWebhook{
+			url:     "https://alerts.example.com/hook",
+			method:  http.MethodPut,
+			headers: map[string]string{"Authorization": "Bearer webhook-token"},
+			body:    `{"text":"{receiver_id} is stale"}`,
+		},
+	}
+	if !reflect.DeepEqual(recv, want) {
+		t.Errorf("rc.receivers[%q] = %+v, want %+v", "from-primary", recv, want)
+	}
+}
+
+func TestParseFlagsReceiverStaleAfterRequiresWebhook(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    region: us-east-1
+
+receivers:
+  - id: from-primary
+    token: "shared-secret"
+    path: /mnt/backups
+    stale-after: 6h
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "stale-after and webhook.url must be set together") {
+		t.Fatalf("parseFlags() error = %v, want substring %q", err, "stale-after and webhook.url must be set together")
 	}
 }
 

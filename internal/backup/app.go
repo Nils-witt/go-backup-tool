@@ -44,7 +44,9 @@ func newLogger(w io.Writer, level slog.Level) *slog.Logger {
 // If the config file sets listen:, Run also serves a web UI dashboard of
 // every job's and target's live status (see webui.go) and, even once every
 // job is a one-shot run that has already finished, keeps running to keep
-// that dashboard reachable until ctx is canceled.
+// that dashboard reachable until ctx is canceled. It also starts the
+// stale-receiver webhook monitor (see monitorStaleReceivers in receiver.go)
+// for any receivers: entry with stale-after: set.
 func Run(args []string, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -120,6 +122,8 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		sweepStartupReceiverRetention(ctx, stateDB, rc.receivers, log)
 
 		srv = startWebUI(rc.listen, store, rc.receivers, log, stateDB)
+
+		go monitorStaleReceivers(ctx, rc.receivers, log)
 	}
 
 	var wg sync.WaitGroup

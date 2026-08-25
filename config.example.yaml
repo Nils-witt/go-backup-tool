@@ -180,11 +180,37 @@ jobs:
 # at path/key, mirroring a local server's path/bucket/key); retention (
 # optional, same syntax as a local server's) deletes objects here once
 # they're older than that.
+#
+# stale-after and webhook (optional, set together) monitor this receiver for
+# a sender that's stopped showing up: once at least one file has been
+# received under path, if the most recent one is older than stale-after
+# (same duration syntax as retention), go-backup-tool sends the request
+# described by webhook. A receiver that has never received anything at all
+# never fires — there's no file to be stale — so this only alerts on a
+# sender that stopped, not one that never started. It's checked about once a
+# minute and fires once per gap, not on every check — a fresh file resets it
+# so it can fire again on the next gap.
+#
+# webhook.url is the only required field; webhook.method defaults to POST.
+# webhook.headers (optional) is a map of header name to value — handy for
+# Content-Type, an Authorization token, or anything else your endpoint
+# needs. webhook.body (optional) is the request body; if unset, it defaults
+# to JSON: {receiver_id, path, stale_after, last_received}. Set body
+# yourself for a webhook receiver that expects its own shape (Slack,
+# PagerDuty, ...): it supports {receiver_id}, {path}, {stale_after}, and
+# {last_received} (an RFC 3339 timestamp) placeholders.
 # receivers:
 #   - id: from-primary
 #     token: "replace-with-a-long-random-shared-secret"
 #     path: /mnt/remote-backups/from-primary
 #     retention: 30d
+#     stale-after: 26h # alert if sibling-instance's daily job hasn't shown up
+#     webhook:
+#       url: "https://events.eu.pagerduty.com/v2/enqueue"
+#       method: POST
+#       headers:
+#         Content-Type: application/json
+#       body: '{"payload":{"summary":"from-primary backup stale, last file {last_received}","severity":"critical","source":"go-backup-tool"},"routing_key":"replace-with-your-pagerduty-routing-key","event_action":"trigger"}'
 
 # A job's key keeps its {time} placeholder each time it (re-)runs, so a
 # repeating job gets a fresh object on every run instead of overwriting the
