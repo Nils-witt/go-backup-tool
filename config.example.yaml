@@ -109,6 +109,16 @@ servers:
 # retries: 3
 # retry-delay: 5s
 
+# gpg-bin and gpg-homedir are almost always set here, at the top level,
+# rather than per job: they describe where gpg lives on this machine, not
+# anything about an individual backup. gpg-bin (default "gpg") is the gpg
+# binary to invoke, handy if it isn't on PATH or you want a specific
+# version. gpg-homedir (default: gpg's own default, usually ~/.gnupg)
+# points gpg at a specific keyring directory, e.g. one dedicated to this
+# service account rather than whichever user runs go-backup-tool.
+# gpg-bin: gpg
+# gpg-homedir: ""
+
 # timeout: 30m # applies to the whole run (every job), not per job
 
 # log-level: info # debug, info, warn, or error (default info); the

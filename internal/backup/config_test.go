@@ -1839,6 +1839,49 @@ jobs:
 	}
 }
 
+func TestParseFlagsGlobalGPGBinAndHomedir(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+gpg-bin: /usr/local/bin/gpg2
+gpg-homedir: /etc/go-backup-tool/gnupg
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: default-gpg
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+  - name: custom-gpg
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+    gpg-bin: /opt/gpg/bin/gpg
+    gpg-homedir: /opt/gpg/home
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	wantBin := map[string]string{"default-gpg": "/usr/local/bin/gpg2", "custom-gpg": "/opt/gpg/bin/gpg"}
+	wantHomedir := map[string]string{"default-gpg": "/etc/go-backup-tool/gnupg", "custom-gpg": "/opt/gpg/home"}
+
+	for _, j := range rc.jobs {
+		if j.gpgBin != wantBin[j.name] {
+			t.Errorf("job %q gpgBin = %q, want %q", j.name, j.gpgBin, wantBin[j.name])
+		}
+
+		if j.gpgHomedir != wantHomedir[j.name] {
+			t.Errorf("job %q gpgHomedir = %q, want %q", j.name, j.gpgHomedir, wantHomedir[j.name])
+		}
+	}
+}
+
 func TestParseFlagsRetryDelayBadFileValue(t *testing.T) {
 	t.Parallel()
 
