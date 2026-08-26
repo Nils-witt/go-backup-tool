@@ -47,7 +47,9 @@ type webUIServer struct {
 // dashboard entirely. logs backs the dashboard's log viewer (served over
 // /api/logs, see handleLogs); nil starts an empty one, so passing the
 // caller's own buffer only matters if the caller also arranged for it to be
-// written to (see runWithContext in app.go).
+// written to — which newRunLogger in app.go only does when the config
+// file's enable-log-viewer: is true, so the viewer stays effectively empty
+// (and its "Logs" section hidden) unless an operator opts in.
 func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB, downloadToken string, logs *logRingBuffer) *webUIServer {
 	var lc net.ListenConfig
 

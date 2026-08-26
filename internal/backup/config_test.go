@@ -308,6 +308,61 @@ jobs:
 	}
 }
 
+func TestParseFlagsLogViewerDefaultsToDisabled(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+listen: ":0"
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	if rc.logViewer {
+		t.Error("rc.logViewer = true, want false (log viewer disabled by default)")
+	}
+}
+
+func TestParseFlagsLogViewerEnabled(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+listen: ":0"
+enable-log-viewer: true
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	if !rc.logViewer {
+		t.Error("rc.logViewer = false, want true (enable-log-viewer: true set in config file)")
+	}
+}
+
 func TestParseFlagsConfigFileLogLevel(t *testing.T) {
 	t.Parallel()
 

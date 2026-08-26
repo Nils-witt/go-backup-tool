@@ -29,12 +29,14 @@ func newLogger(w io.Writer, level slog.Level) *slog.Logger {
 }
 
 // newRunLogger builds the logger runWithContext uses for the whole run, plus
-// (only when rc.listen enables the web UI) the ring buffer backing its log
-// viewer (see logRingBuffer, handleLogs). Without a web UI to serve it back
-// out, that buffer would just be memory nothing ever reads, so the returned
-// *logRingBuffer is nil in that case and log writes straight to stderr.
+// (only when rc.listen enables the web UI and rc.logViewer opts into its log
+// viewer) the ring buffer backing that viewer (see logRingBuffer,
+// handleLogs). Without a web UI to serve it back out, or with the viewer
+// left off, that buffer would just be memory nothing ever reads (or an
+// operator deliberately didn't want served over HTTP), so the returned
+// *logRingBuffer is nil in both cases and log writes straight to stderr.
 func newRunLogger(stderr io.Writer, rc *runConfig) (*slog.Logger, *logRingBuffer) {
-	if rc.listen == "" {
+	if rc.listen == "" || !rc.logViewer {
 		return newLogger(stderr, rc.logLevel), nil
 	}
 

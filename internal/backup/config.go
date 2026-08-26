@@ -186,6 +186,14 @@ type runConfig struct {
 	// Empty disables the feature entirely (handleLogin always reports it as
 	// unconfigured rather than accepting an empty submitted token).
 	downloadToken string
+
+	// logViewer enables the web UI's live log viewer (served over
+	// /api/logs, see handleLogs/newRunLogger). Off by default: the
+	// dashboard has no login of its own (unlike file downloads, which
+	// require download-token), so anyone who can reach it would otherwise
+	// see this process's raw log output, which may include operator detail
+	// (paths, error text) an operator might not want exposed that widely.
+	logViewer bool
 }
 
 // Built-in defaults for fields a job's or server's config file entry
@@ -295,6 +303,12 @@ type fileConfig struct {
 	// downloads: the dashboard still lists files, but there's no way to log
 	// in and fetch one.
 	DownloadToken string `yaml:"download-token"`
+
+	// EnableLogViewer turns on the web UI's live log viewer (a "Logs"
+	// section on the dashboard, polling /api/logs). Unset/false (the
+	// default) keeps it off, since — unlike file downloads, gated by
+	// DownloadToken — the dashboard has no login guarding it.
+	EnableLogViewer bool `yaml:"enable-log-viewer"`
 }
 
 // parseFlags parses args (typically os.Args[1:]) into a runConfig, writing
@@ -388,6 +402,7 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 		logLevel:      level,
 		receivers:     receivers,
 		downloadToken: strings.TrimSpace(fileCfg.DownloadToken),
+		logViewer:     fileCfg.EnableLogViewer,
 	}, nil
 }
 

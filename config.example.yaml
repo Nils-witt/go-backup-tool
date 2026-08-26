@@ -139,6 +139,12 @@ servers:
 # A successful login is remembered for 12h via a session cookie, so the
 # token itself only needs to be entered again once that expires.
 
+# enable-log-viewer: true # adds a "Logs" section to the dashboard, showing
+# this process's own recent log output (polled from /api/logs). Unset (the
+# default) leaves it off: unlike file downloads above, the dashboard has no
+# login guarding this, so anyone who can reach it would otherwise see this
+# process's raw log output. Only requires listen: to also be set.
+
 jobs:
   - name: database
     cmd: "mysqldump --single-transaction mydb | gzip"
