@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -142,7 +143,7 @@ func TestStartWebUIServesRequests(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, "")
+	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, "", nil)
 	if srv == nil {
 		t.Fatal("startWebUI() = nil, want a running server")
 	}
@@ -215,7 +216,7 @@ func TestStartWebUIBadAddrReturnsNil(t *testing.T) {
 	store, _ := newTestStore()
 
 	// Port 0 is valid (means "pick one"); an unparseable address is not.
-	srv := startWebUI("not-a-valid-address", store, nil, discardLogger, nil, "")
+	srv := startWebUI("not-a-valid-address", store, nil, discardLogger, nil, "", nil)
 	if srv != nil {
 		t.Cleanup(srv.shutdown)
 		t.Fatal("startWebUI() with an invalid address = non-nil, want nil")
@@ -381,5 +382,68 @@ func TestHandleLogoutRevokesSession(t *testing.T) {
 
 	if sessions.valid(id) {
 		t.Error("session is still valid after logout")
+	}
+}
+
+func TestLogRingBufferSnapshotOrdersOldestFirst(t *testing.T) {
+	t.Parallel()
+
+	buf := newLogRingBuffer(3)
+
+	for _, line := range []string{"one\n", "two\n", "three\n"} {
+		if _, err := buf.Write([]byte(line)); err != nil {
+			t.Fatalf("Write(%q): %v", line, err)
+		}
+	}
+
+	got := buf.snapshot()
+	want := []string{"one", "two", "three"}
+
+	if !slices.Equal(got, want) {
+		t.Errorf("snapshot() = %v, want %v", got, want)
+	}
+}
+
+func TestLogRingBufferEvictsOldestPastCapacity(t *testing.T) {
+	t.Parallel()
+
+	buf := newLogRingBuffer(2)
+
+	for _, line := range []string{"one\n", "two\n", "three\n"} {
+		if _, err := buf.Write([]byte(line)); err != nil {
+			t.Fatalf("Write(%q): %v", line, err)
+		}
+	}
+
+	got := buf.snapshot()
+	want := []string{"two", "three"}
+
+	if !slices.Equal(got, want) {
+		t.Errorf("snapshot() = %v, want %v (oldest evicted)", got, want)
+	}
+}
+
+func TestHandleLogsServesJSON(t *testing.T) {
+	t.Parallel()
+
+	buf := newLogRingBuffer(10)
+	_, _ = buf.Write([]byte("level=INFO msg=hello\n"))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/logs", nil)
+	rec := httptest.NewRecorder()
+
+	handleLogs(buf)(rec, req)
+
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json prefix", ct)
+	}
+
+	var lines []string
+	if err := json.Unmarshal(rec.Body.Bytes(), &lines); err != nil {
+		t.Fatalf("decoding response body: %v", err)
+	}
+
+	if !slices.Equal(lines, []string{"level=INFO msg=hello"}) {
+		t.Errorf("lines = %v, want one line", lines)
 	}
 }

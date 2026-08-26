@@ -44,8 +44,11 @@ type webUIServer struct {
 // disables that tracking (see recordLocalWrite). downloadToken gates the
 // dashboard's per-receiver file download links (see handleLogin/
 // handleDownloadFile); empty disables downloading files through the
-// dashboard entirely.
-func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB, downloadToken string) *webUIServer {
+// dashboard entirely. logs backs the dashboard's log viewer (served over
+// /api/logs, see handleLogs); nil starts an empty one, so passing the
+// caller's own buffer only matters if the caller also arranged for it to be
+// written to (see runWithContext in app.go).
+func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB, downloadToken string, logs *logRingBuffer) *webUIServer {
 	var lc net.ListenConfig
 
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
@@ -54,12 +57,17 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 		return nil
 	}
 
+	if logs == nil {
+		logs = newLogRingBuffer(logBufferCapacity)
+	}
+
 	receiverStore := newReceiverStatusStore(receivers)
 	sessions := newDownloadSessionStore()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", handleDashboard)
 	mux.HandleFunc("GET /api/status", handleStatus(store))
+	mux.HandleFunc("GET /api/logs", handleLogs(logs))
 	mux.HandleFunc("GET /api/receivers", handleReceiverStatus(receivers, receiverStore, log))
 	mux.HandleFunc("GET /api/receivers/{id}/files", handleReceiverFiles(receivers, log))
 	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", handleDownloadFile(receivers, sessions, log))
@@ -212,6 +220,74 @@ func handleReceiverFiles(receivers map[string]resolvedReceiver, log *slog.Logger
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
 		if err := json.NewEncoder(w).Encode(files); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}
+}
+
+// logBufferCapacity is how many of the most recent log lines startWebUI's
+// logRingBuffer keeps for the dashboard's log viewer (see handleLogs).
+const logBufferCapacity = 1000
+
+// logRingBuffer is a bounded, concurrency-safe in-memory tail of the most
+// recent log lines written to it, for the web UI's log viewer (see
+// handleLogs). It's an io.Writer meant to sit alongside the process's real
+// log output (see runWithContext in app.go, which fans writes out to both),
+// treating each Write call as one line — matching how a slog handler calls
+// Write exactly once per record. Lines live only in memory: a restart clears
+// it, same as the receiver status store.
+type logRingBuffer struct {
+	mu    sync.Mutex
+	lines []string
+	cap   int
+	start int // index of the oldest entry in lines, once lines is full
+}
+
+// newLogRingBuffer returns an empty logRingBuffer holding at most capacity
+// lines.
+func newLogRingBuffer(capacity int) *logRingBuffer {
+	return &logRingBuffer{cap: capacity, lines: make([]string, 0, capacity)}
+}
+
+// Write records p, trimmed of its trailing newline, as the newest line,
+// evicting the oldest one once the buffer is at capacity. Always succeeds,
+// so a logger writing through this never fails on that account.
+func (b *logRingBuffer) Write(p []byte) (int, error) {
+	line := strings.TrimRight(string(p), "\n")
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if len(b.lines) < b.cap {
+		b.lines = append(b.lines, line)
+	} else {
+		b.lines[b.start] = line
+		b.start = (b.start + 1) % b.cap
+	}
+
+	return len(p), nil
+}
+
+// snapshot returns the currently buffered lines, oldest first.
+func (b *logRingBuffer) snapshot() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	out := make([]string, len(b.lines))
+	for i := range out {
+		out[i] = b.lines[(b.start+i)%len(b.lines)]
+	}
+
+	return out
+}
+
+// handleLogs serves buf's currently buffered log lines as JSON, for the
+// dashboard's log viewer to poll.
+func handleLogs(buf *logRingBuffer) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+		if err := json.NewEncoder(w).Encode(buf.snapshot()); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	}
@@ -827,6 +903,33 @@ const dashboardHTML = `<!doctype html>
     font-size: .72rem;
     white-space: nowrap;
   }
+  .logs-card {
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  .follow-toggle {
+    display: flex;
+    align-items: center;
+    gap: .35rem;
+    font-size: .8rem;
+    color: var(--muted);
+    font-weight: 400;
+    text-transform: none;
+  }
+  .logs {
+    margin: .6rem 0 0;
+    max-height: 360px;
+    overflow: auto;
+    padding: .6rem .7rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .logs .log-error { color: var(--failed); }
+  .logs .log-warn { color: var(--running); }
 </style>
 </head>
 <body>
@@ -837,6 +940,17 @@ const dashboardHTML = `<!doctype html>
 <div id="receivers-wrap" hidden>
   <h2 class="section-title">Receivers</h2>
   <div class="grid" id="receivers"></div>
+</div>
+
+<div id="logs-wrap" hidden>
+  <h2 class="section-title">Logs</h2>
+  <div class="card logs-card">
+    <div class="card-head">
+      <span class="job-name">Recent output</span>
+      <label class="follow-toggle"><input type="checkbox" id="follow-logs" checked> Follow</label>
+    </div>
+    <pre class="logs" id="logs"></pre>
+  </div>
 </div>
 
 <script>
@@ -999,14 +1113,44 @@ document.getElementById("receivers").addEventListener("click", function (e) {
   toggleReceiverFiles(btn.dataset.id);
 });
 
+// renderLogs re-renders the log viewer from lines (oldest first, as served
+// by /api/logs). It preserves the reader's scroll position across refreshes
+// unless "Follow" is checked and they're already at (or near) the bottom, so
+// a poll landing mid-read doesn't yank the view down.
+function renderLogs(lines) {
+  const wrap = document.getElementById("logs-wrap");
+  if (!lines || !lines.length) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+
+  const pre = document.getElementById("logs");
+  const follow = document.getElementById("follow-logs").checked;
+  const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 4;
+
+  pre.innerHTML = lines.map(function (line) {
+    let cls = "";
+    if (line.indexOf("level=ERROR") !== -1) cls = "log-error";
+    else if (line.indexOf("level=WARN") !== -1) cls = "log-warn";
+    return '<span class="' + cls + '">' + escapeHtml(line) + '</span>';
+  }).join("\n");
+
+  if (follow && atBottom) {
+    pre.scrollTop = pre.scrollHeight;
+  }
+}
+
 function refresh() {
   Promise.all([
     fetch("/api/status").then(function (r) { return r.json(); }),
-    fetch("/api/receivers").then(function (r) { return r.json(); })
+    fetch("/api/receivers").then(function (r) { return r.json(); }),
+    fetch("/api/logs").then(function (r) { return r.json(); })
   ]).then(function (results) {
     render(results[0]);
     lastReceivers = results[1] || [];
     renderReceivers(lastReceivers);
+    renderLogs(results[2]);
     document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
   }).catch(function (err) {
     document.getElementById("updated").textContent = "error fetching status: " + err;

@@ -28,6 +28,21 @@ func newLogger(w io.Writer, level slog.Level) *slog.Logger {
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
 }
 
+// newRunLogger builds the logger runWithContext uses for the whole run, plus
+// (only when rc.listen enables the web UI) the ring buffer backing its log
+// viewer (see logRingBuffer, handleLogs). Without a web UI to serve it back
+// out, that buffer would just be memory nothing ever reads, so the returned
+// *logRingBuffer is nil in that case and log writes straight to stderr.
+func newRunLogger(stderr io.Writer, rc *runConfig) (*slog.Logger, *logRingBuffer) {
+	if rc.listen == "" {
+		return newLogger(stderr, rc.logLevel), nil
+	}
+
+	logs := newLogRingBuffer(logBufferCapacity)
+
+	return newLogger(io.MultiWriter(stderr, logs), rc.logLevel), logs
+}
+
 // Run parses args and executes every configured backup job, writing errors
 // and per-job status messages to stderr. It returns the process exit code:
 // 0 if every job succeeded (or -h/-help), 2 on a flag/config error, 1 if any
@@ -74,7 +89,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		return 2
 	}
 
-	log := newLogger(stderr, rc.logLevel)
+	log, logs := newRunLogger(stderr, rc)
 
 	if rc.timeout > 0 {
 		var cancel context.CancelFunc
@@ -121,7 +136,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	if rc.listen != "" {
 		sweepStartupReceiverRetention(ctx, stateDB, rc.receivers, log)
 
-		srv = startWebUI(rc.listen, store, rc.receivers, log, stateDB, rc.downloadToken)
+		srv = startWebUI(rc.listen, store, rc.receivers, log, stateDB, rc.downloadToken, logs)
 
 		go monitorStaleReceivers(ctx, rc.receivers, log)
 	}

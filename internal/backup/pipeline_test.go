@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -584,5 +585,106 @@ func TestSymmetricEncryptDecryptRoundTrip(t *testing.T) {
 
 	if string(got) != plaintext {
 		t.Errorf("round trip = %q, want %q", got, plaintext)
+	}
+}
+
+// loggedLines runs writes (each a separate Write call) through a logWriter
+// and returns the "output" attribute of every line it logged, in order.
+func loggedLines(t *testing.T, writes []string) []string {
+	t.Helper()
+
+	var buf strings.Builder
+
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	w := &logWriter{log: log, msg: "command stderr"}
+
+	for _, chunk := range writes {
+		n, err := w.Write([]byte(chunk))
+		if err != nil {
+			t.Fatalf("Write(%q): %v", chunk, err)
+		}
+
+		if n != len(chunk) {
+			t.Fatalf("Write(%q) = %d, want %d", chunk, n, len(chunk))
+		}
+	}
+
+	var lines []string
+
+	for entry := range strings.SplitSeq(strings.TrimRight(buf.String(), "\n"), "\n") {
+		if entry == "" {
+			continue
+		}
+
+		_, after, found := strings.Cut(entry, "output=")
+		if !found {
+			t.Fatalf("log entry %q has no output attribute", entry)
+		}
+
+		lines = append(lines, strings.Trim(after, `"`))
+	}
+
+	return lines
+}
+
+func TestLogWriterLineBuffering(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		writes []string
+		want   []string
+	}{
+		{
+			name:   "single write, single line",
+			writes: []string{"hello world\n"},
+			want:   []string{"hello world"},
+		},
+		{
+			name:   "line split across writes",
+			writes: []string{"hel", "lo wor", "ld\n"},
+			want:   []string{"hello world"},
+		},
+		{
+			name:   "multiple lines in one write",
+			writes: []string{"line one\nline two\n"},
+			want:   []string{"line one", "line two"},
+		},
+		{
+			name:   "no trailing newline still buffers and later completes",
+			writes: []string{"partial", " line\n"},
+			want:   []string{"partial line"},
+		},
+		{
+			name:   "blank lines are dropped",
+			writes: []string{"first\n\nsecond\n"},
+			want:   []string{"first", "second"},
+		},
+		{
+			name:   "CRLF line endings are trimmed",
+			writes: []string{"windows line\r\n"},
+			want:   []string{"windows line"},
+		},
+		{
+			name:   "incomplete line at end is never logged",
+			writes: []string{"complete\nincomplete"},
+			want:   []string{"complete"},
+		},
+		{
+			name:   "many single-byte writes reassemble a line",
+			writes: []string{"a", "b", "c\n"},
+			want:   []string{"abc"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := loggedLines(t, tt.writes)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("logged lines = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

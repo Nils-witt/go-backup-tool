@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -164,7 +165,7 @@ func newSourceCommand(ctx context.Context, cmd string) *exec.Cmd {
 // once gpg (its downstream reader) is done with it.
 func startEncryptingPipeline(ctx context.Context, cfg *config, log *slog.Logger) (sourceCmd, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
 	sourceCmd = newSourceCommand(ctx, cfg.cmd)
-	sourceCmd.Stderr = os.Stderr
+	sourceCmd.Stderr = &logWriter{log: log, msg: "command stderr"}
 	// The backup command may be arbitrary and its output/behavior is
 	// outside our control; make sure it can't read the encryption
 	// passphrase out of its environment.
@@ -181,7 +182,7 @@ func startEncryptingPipeline(ctx context.Context, cfg *config, log *slog.Logger)
 	}
 
 	gpgCmd.Stdin = sourceOut
-	gpgCmd.Stderr = os.Stderr
+	gpgCmd.Stderr = &logWriter{log: log, msg: "gpg stderr"}
 	// gpg itself gets the passphrase via --passphrase-fd, never via env.
 	gpgCmd.Env = environWithout("GPG_PASSPHRASE")
 
@@ -217,6 +218,41 @@ func startEncryptingPipeline(ctx context.Context, cfg *config, log *slog.Logger)
 	}
 
 	return sourceCmd, gpgCmd, gpgOut, nil
+}
+
+// logWriter adapts a *slog.Logger into an io.Writer, line-buffering writes
+// and logging each complete line as msg with an "output" attribute. Used for
+// the source command's and gpg's stderr (see startEncryptingPipeline)
+// instead of wiring them to os.Stderr directly: under the Windows service
+// (see runAsService in service_windows.go) there is no console for
+// os.Stderr to reach, so that output would otherwise be silently lost;
+// logging through log instead routes it wherever log itself writes —
+// os.Stderr for a console run, the Windows Event Log for a service.
+type logWriter struct {
+	log *slog.Logger
+	msg string
+	buf bytes.Buffer
+}
+
+func (w *logWriter) Write(p []byte) (int, error) {
+	w.buf.Write(p)
+
+	for {
+		data := w.buf.Bytes()
+
+		i := bytes.IndexByte(data, '\n')
+		if i < 0 {
+			break
+		}
+
+		if line := strings.TrimRight(string(data[:i]), "\r"); line != "" {
+			w.log.Warn(w.msg, "output", line)
+		}
+
+		w.buf.Next(i + 1)
+	}
+
+	return len(p), nil
 }
 
 // stageBackup drains r (the gpg pipeline's stdout) into a private temporary
