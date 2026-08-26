@@ -41,16 +41,21 @@ type webUIServer struct {
 // this run rather than failing the whole process over a dashboard. db is the
 // shared state/retention db (see schedule_state.go and retention.go), used
 // by the receiver API's handlers to track retention on incoming writes; nil
-// disables that tracking (see recordLocalWrite). downloadToken gates the
-// dashboard's per-receiver file download links (see handleLogin/
-// handleDownloadFile); empty disables downloading files through the
-// dashboard entirely. logs backs the dashboard's log viewer (served over
-// /api/logs, see handleLogs); nil starts an empty one, so passing the
-// caller's own buffer only matters if the caller also arranged for it to be
-// written to — which newRunLogger in app.go only does when the config
-// file's enable-log-viewer: is true, so the viewer stays effectively empty
-// (and its "Logs" section hidden) unless an operator opts in.
-func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB, downloadToken string, logs *logRingBuffer) *webUIServer {
+// disables that tracking (see recordLocalWrite). logs backs the dashboard's
+// log viewer (served over /api/logs, see handleLogs); nil starts an empty
+// one, so passing the caller's own buffer only matters if the caller also
+// arranged for it to be written to — which newRunLogger in app.go only does
+// when the config file's enable-log-viewer: is true, so the viewer stays
+// effectively empty (and its "Logs" section hidden) unless an operator opts
+// in. webUIUsername/webUIPassword, when webUIUsername is non-empty, gate
+// the dashboard and its /api/... endpoints (including per-receiver file
+// downloads) behind a login page and session cookie (see
+// requireWebUISession/handleWebUILogin); the receiver API
+// (handleReceiveObject/handleDeleteObject) is unaffected, since it
+// authenticates each request on its own via each receiver's bearer token
+// (see authorizeReceiver). An empty webUIUsername leaves the web UI open, as
+// before this was added.
+func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB, logs *logRingBuffer, webUIUsername, webUIPassword string) *webUIServer {
 	var lc net.ListenConfig
 
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
@@ -64,18 +69,31 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 	}
 
 	receiverStore := newReceiverStatusStore(receivers)
-	sessions := newDownloadSessionStore()
+	uiSessions := newSessionStore()
+
+	// page gates a full-page navigation (the dashboard itself, or a link a
+	// person clicks, like a file download): a missing/invalid session
+	// redirects the browser to the login page. api gates a JSON endpoint
+	// polled by the dashboard's own JavaScript (fetch()): a redirect there
+	// would hand the poller an HTML login page as its "JSON" response, so
+	// it reports 401 instead — see requireWebUISession.
+	page := func(h http.HandlerFunc) http.HandlerFunc {
+		return requireWebUISession(webUIUsername, uiSessions, true, h)
+	}
+	api := func(h http.HandlerFunc) http.HandlerFunc {
+		return requireWebUISession(webUIUsername, uiSessions, false, h)
+	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", handleDashboard)
-	mux.HandleFunc("GET /api/status", handleStatus(store))
-	mux.HandleFunc("GET /api/logs", handleLogs(logs))
-	mux.HandleFunc("GET /api/receivers", handleReceiverStatus(receivers, receiverStore, log))
-	mux.HandleFunc("GET /api/receivers/{id}/files", handleReceiverFiles(receivers, log))
-	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", handleDownloadFile(receivers, sessions, log))
-	mux.HandleFunc("GET /login", handleLogin(downloadToken, sessions))
-	mux.HandleFunc("POST /login", handleLogin(downloadToken, sessions))
-	mux.HandleFunc("GET /logout", handleLogout(sessions))
+	mux.HandleFunc("GET /", page(handleDashboard))
+	mux.HandleFunc("GET /api/status", api(handleStatus(store)))
+	mux.HandleFunc("GET /api/logs", api(handleLogs(logs)))
+	mux.HandleFunc("GET /api/receivers", api(handleReceiverStatus(receivers, receiverStore, log)))
+	mux.HandleFunc("GET /api/receivers/{id}/files", api(handleReceiverFiles(receivers, log)))
+	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", page(handleDownloadFile(receivers, log)))
+	mux.HandleFunc("GET /login", handleWebUILogin(webUIUsername, webUIPassword, uiSessions))
+	mux.HandleFunc("POST /login", handleWebUILogin(webUIUsername, webUIPassword, uiSessions))
+	mux.HandleFunc("GET /logout", handleWebUILogout(uiSessions))
 	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, receiverStore, log, db))
 	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, receiverStore, log, db))
 
@@ -295,42 +313,43 @@ func handleLogs(buf *logRingBuffer) http.HandlerFunc {
 	}
 }
 
-// downloadSessionCookie is the cookie a successful dashboard login (see
-// handleLogin) sets; its value is an opaque, randomly generated session id
-// rather than the configured download-token itself, so the token never
+// webUISessionCookie is the cookie a successful dashboard login (see
+// handleWebUILogin) sets, gating the dashboard and its /api/... endpoints —
+// including per-receiver file downloads — behind one login (see
+// requireWebUISession). Its value is an opaque, randomly generated session
+// id rather than the underlying username/password, so the credential never
 // needs to be re-sent (or stored client-side) once logged in.
-const downloadSessionCookie = "gbt_download_session"
+const webUISessionCookie = "gbt_webui_session"
 
-// downloadSessionTTL is how long a dashboard login remains valid before its
-// session expires and downloading a file requires logging in again.
-const downloadSessionTTL = 12 * time.Hour
+// sessionTTL is how long a dashboard login (see webUISessionCookie) remains
+// valid before its session expires and the browser has to log in again.
+const sessionTTL = 12 * time.Hour
 
-// downloadSessionStore tracks currently valid dashboard-login sessions for
-// the file-download feature (see handleLogin/requireDownloadSession), each
-// mapped to its expiry. Sessions live only in this process's memory: a
-// restart invalidates every session, same as it does the receiver status
-// store. Safe for concurrent use, since login and download requests can
-// arrive concurrently.
-type downloadSessionStore struct {
+// sessionStore tracks currently valid dashboard logins (see
+// webUISessionCookie/handleWebUILogin), mapping each session id to its
+// expiry. Sessions live only in this process's memory: a restart
+// invalidates every session, same as it does the receiver status store.
+// Safe for concurrent use, since login and other requests can arrive
+// concurrently.
+type sessionStore struct {
 	mu   sync.Mutex
 	byID map[string]time.Time
 }
 
-// newDownloadSessionStore returns an empty downloadSessionStore.
-func newDownloadSessionStore() *downloadSessionStore {
-	return &downloadSessionStore{byID: make(map[string]time.Time)}
+// newSessionStore returns an empty sessionStore.
+func newSessionStore() *sessionStore {
+	return &sessionStore{byID: make(map[string]time.Time)}
 }
 
-// create starts a new session, valid for downloadSessionTTL, and returns its
-// id.
-func (s *downloadSessionStore) create() (string, error) {
+// create starts a new session, valid for sessionTTL, and returns its id.
+func (s *sessionStore) create() (string, error) {
 	id, err := randomSessionID()
 	if err != nil {
 		return "", err
 	}
 
 	s.mu.Lock()
-	s.byID[id] = time.Now().Add(downloadSessionTTL)
+	s.byID[id] = time.Now().Add(sessionTTL)
 	s.mu.Unlock()
 
 	return id, nil
@@ -338,7 +357,7 @@ func (s *downloadSessionStore) create() (string, error) {
 
 // valid reports whether id names a currently unexpired session, evicting it
 // first if it has expired.
-func (s *downloadSessionStore) valid(id string) bool {
+func (s *sessionStore) valid(id string) bool {
 	if id == "" {
 		return false
 	}
@@ -359,11 +378,50 @@ func (s *downloadSessionStore) valid(id string) bool {
 	return true
 }
 
-// revoke ends session id (a no-op if it doesn't exist), used by handleLogout.
-func (s *downloadSessionStore) revoke(id string) {
+// revoke ends session id (a no-op if it doesn't exist), used by a logout
+// handler.
+func (s *sessionStore) revoke(id string) {
 	s.mu.Lock()
 	delete(s.byID, id)
 	s.mu.Unlock()
+}
+
+// authenticated reports whether r carries a currently valid session cookie
+// for s.
+func (s *sessionStore) authenticated(r *http.Request) bool {
+	c, err := r.Cookie(webUISessionCookie)
+	if err != nil {
+		return false
+	}
+
+	return s.valid(c.Value)
+}
+
+// cookie builds s's session cookie for value, or clears it when value is ""
+// (used by handleWebUILogout). Secure is only set when the request itself
+// arrived over TLS (r.TLS != nil): this process never terminates TLS on its
+// own listen: address (see startWebUI), but a reverse proxy in front of it
+// might, in which case Go's net/http sets r.TLS for the connection it
+// accepted from that proxy. HttpOnly and SameSite=Lax are always set, so
+// the session id is never readable from JavaScript and is only ever sent on
+// same-site navigations.
+func (s *sessionStore) cookie(value string, secure bool) *http.Cookie {
+	c := &http.Cookie{ //nolint:gosec // Secure is intentionally conditional (see doc comment above), not a literal true, so gosec can't verify it statically
+		Name:     webUISessionCookie,
+		Value:    value,
+		Path:     "/",
+		Secure:   secure,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
+
+	if value == "" {
+		c.MaxAge = -1
+	} else {
+		c.Expires = time.Now().Add(sessionTTL)
+	}
+
+	return c
 }
 
 // randomSessionID returns a 256-bit random value hex-encoded, unguessable
@@ -377,20 +435,9 @@ func randomSessionID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// requireDownloadSession reports whether r carries a currently valid
-// download session cookie (see downloadSessionStore).
-func requireDownloadSession(sessions *downloadSessionStore, r *http.Request) bool {
-	c, err := r.Cookie(downloadSessionCookie)
-	if err != nil {
-		return false
-	}
-
-	return sessions.valid(c.Value)
-}
-
 // safeNextPath validates a login redirect target (the next= query/form
-// value handleLogin and handleDownloadFile pass around): it must be a
-// same-site path, never an absolute URL or protocol-relative "//host/..."
+// value the login handlers and handleDownloadFile pass around): it must be
+// a same-site path, never an absolute URL or protocol-relative "//host/..."
 // one, so a crafted link can't use this instance's own login page to
 // redirect a browser off-site after a successful login. Anything else falls
 // back to "/".
@@ -402,34 +449,37 @@ func safeNextPath(next string) string {
 	return next
 }
 
-// handleLogin serves the dashboard's download-token login form (GET
-// /login) and its submission (POST /login). A successful submission starts
-// a session (see downloadSessionStore) and sets downloadSessionCookie so
-// handleDownloadFile lets the browser back in without asking for the token
-// on every file; it then redirects to next (see safeNextPath), typically
-// the download link that sent the browser here in the first place. An
-// empty downloadToken (download-token: unset in the config file) always
-// fails, reporting the feature as unconfigured rather than accepting a
-// blank submitted token as a match.
-func handleLogin(downloadToken string, sessions *downloadSessionStore) http.HandlerFunc {
+// handleWebUILogin serves the dashboard's own login form (GET /login) and
+// its submission (POST /login), checking username/password (webui.username/
+// webui.password in the config file) with subtle.ConstantTimeCompare rather
+// than ==, like authorizeReceiver's own token check, so a mismatch can't be
+// timed to learn how many leading bytes were guessed correctly. A
+// successful submission starts a session (see sessionStore) and sets
+// webUISessionCookie so requireWebUISession lets the browser back in
+// without asking for credentials on every request; it then redirects to
+// next (see safeNextPath), typically the page that sent the browser here in
+// the first place. An empty username (webui.username unset in the config
+// file, so there's nothing to authenticate) redirects straight to next
+// rather than showing a form there's no way to satisfy.
+func handleWebUILogin(username, password string, sessions *sessionStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		next := safeNextPath(r.FormValue("next"))
 
+		if username == "" {
+			http.Redirect(w, r, next, http.StatusSeeOther)
+			return
+		}
+
 		if r.Method == http.MethodGet {
-			writeLoginPage(w, "", next)
+			writeLoginPage(w, renderLoginPage("", next))
 			return
 		}
 
-		if downloadToken == "" {
-			writeLoginPage(w, "downloads are not configured on this server (set download-token in the config file)", next)
-			return
-		}
+		userMatch := subtle.ConstantTimeCompare([]byte(r.FormValue("username")), []byte(username)) == 1
+		passMatch := subtle.ConstantTimeCompare([]byte(r.FormValue("password")), []byte(password)) == 1
 
-		// subtle.ConstantTimeCompare, rather than ==, so a mismatch can't be
-		// timed to learn how many leading bytes of the token were guessed
-		// correctly (mirrors authorizeReceiver's own token check).
-		if subtle.ConstantTimeCompare([]byte(r.FormValue("token")), []byte(downloadToken)) != 1 {
-			writeLoginPage(w, "incorrect token", next)
+		if !userMatch || !passMatch {
+			writeLoginPage(w, renderLoginPage("incorrect username or password", next))
 			return
 		}
 
@@ -439,63 +489,34 @@ func handleLogin(downloadToken string, sessions *downloadSessionStore) http.Hand
 			return
 		}
 
-		http.SetCookie(w, sessionCookie(id, downloadSessionTTL, r.TLS != nil))
+		http.SetCookie(w, sessions.cookie(id, r.TLS != nil))
 		http.Redirect(w, r, next, http.StatusSeeOther)
 	}
 }
 
-// handleLogout serves GET /logout: it revokes the requesting browser's
-// download session, if any, clears its cookie, and sends it back to the
-// dashboard.
-func handleLogout(sessions *downloadSessionStore) http.HandlerFunc {
+// handleWebUILogout serves GET /logout: it revokes the requesting browser's
+// dashboard session, if any, clears its cookie, and sends it back to the
+// login page.
+func handleWebUILogout(sessions *sessionStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if c, err := r.Cookie(downloadSessionCookie); err == nil {
+		if c, err := r.Cookie(webUISessionCookie); err == nil {
 			sessions.revoke(c.Value)
 		}
 
-		http.SetCookie(w, sessionCookie("", -1, r.TLS != nil))
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.SetCookie(w, sessions.cookie("", r.TLS != nil))
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
 	}
 }
 
-// sessionCookie builds the download-session cookie: ttl <= 0 clears it
-// (MaxAge: -1) instead of setting value/expiry, for handleLogout. Secure is
-// only set when the request itself arrived over TLS (r.TLS != nil): this
-// process never terminates TLS on its own listen: address (see
-// startWebUI), but a reverse proxy in front of it might, in which case Go's
-// net/http sets r.TLS for the connection it accepted from that proxy.
-// HttpOnly and SameSite=Lax are always set, so the session id is never
-// readable from JavaScript and is only ever sent on same-site navigations.
-func sessionCookie(value string, ttl time.Duration, secure bool) *http.Cookie {
-	c := &http.Cookie{ //nolint:gosec // Secure is intentionally conditional (see doc comment above), not a literal true, so gosec can't verify it statically
-		Name:     downloadSessionCookie,
-		Value:    value,
-		Path:     "/",
-		Secure:   secure,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	}
-
-	if ttl <= 0 {
-		c.MaxAge = -1
-	} else {
-		c.Expires = time.Now().Add(ttl)
-	}
-
-	return c
-}
-
-// writeLoginPage renders the login form to w, with errMsg (if any) shown
-// above it and next carried through as a hidden field so the form's POST
-// still knows where to send the browser afterward.
-func writeLoginPage(w http.ResponseWriter, errMsg, next string) {
+// writeLoginPage writes a login page (built by renderLoginPage) to w.
+func writeLoginPage(w http.ResponseWriter, page string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = io.WriteString(w, renderLoginPage(errMsg, next))
+	_, _ = io.WriteString(w, page)
 }
 
-// renderLoginPage builds the login form page's HTML. errMsg and next are
-// both escaped before being embedded, since errMsg can echo back
-// invalid-token attempts and next comes directly from the request.
+// renderLoginPage builds the dashboard's login form page's HTML. errMsg and
+// next are both escaped before being embedded, since errMsg can echo back a
+// failed login attempt and next comes directly from the request.
 func renderLoginPage(errMsg, next string) string {
 	errHTML := ""
 	if errMsg != "" {
@@ -517,7 +538,7 @@ func renderLoginPage(errMsg, next string) string {
   body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
   form { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:1.5rem; width:100%; max-width:320px; }
   h1 { font-size:1.1rem; margin:0 0 1rem; }
-  input[type=password] { width:100%; padding:.5rem .6rem; margin:.4rem 0 1rem; border:1px solid var(--border); border-radius:6px; background:var(--bg); color:var(--fg); font-size:.9rem; }
+  input[type=text], input[type=password] { width:100%; padding:.5rem .6rem; margin:.4rem 0 1rem; border:1px solid var(--border); border-radius:6px; background:var(--bg); color:var(--fg); font-size:.9rem; }
   button { width:100%; padding:.5rem; border:none; border-radius:6px; background:var(--fg); color:var(--bg); font-weight:600; cursor:pointer; }
   .err { color:var(--failed); font-size:.85rem; margin:0 0 .8rem; }
   label { font-size:.85rem; color:var(--muted); }
@@ -526,8 +547,10 @@ func renderLoginPage(errMsg, next string) string {
 <body>
 <form method="post" action="/login">
 <h1>go-backup-tool</h1>
-` + errHTML + `<label for="token">Download token</label>
-<input type="password" id="token" name="token" autofocus required>
+` + errHTML + `<label for="username">Username</label>
+<input type="text" id="username" name="username" autocomplete="username" autofocus required>
+<label for="password">Password</label>
+<input type="password" id="password" name="password" autocomplete="current-password" required>
 <input type="hidden" name="next" value="` + html.EscapeString(next) + `">
 <button type="submit">Log in</button>
 </form>
@@ -541,19 +564,12 @@ func renderLoginPage(errMsg, next string) string {
 // for a person to save from the dashboard's file listing (see
 // listReceiverFiles/handleReceiverFiles for the metadata-only listing this
 // complements). Unlike the receiver API's own per-receiver token auth (see
-// authorizeReceiver), this checks the single dashboard-wide download-token:
-// via requireDownloadSession's session cookie, since the audience here is a
-// person clicking a link in a browser rather than another go-backup-tool
-// instance; an unauthenticated request is redirected to /login with next=
-// set back to the download URL, so logging in returns the browser straight
-// to the file.
-func handleDownloadFile(receivers map[string]resolvedReceiver, sessions *downloadSessionStore, log *slog.Logger) http.HandlerFunc {
+// authorizeReceiver), this relies entirely on the dashboard's own login (see
+// requireWebUISession, which wraps this handler in startWebUI) rather than
+// any auth of its own, since the audience here is a person clicking a link
+// in a browser rather than another go-backup-tool instance.
+func handleDownloadFile(receivers map[string]resolvedReceiver, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireDownloadSession(sessions, r) {
-			http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
-			return
-		}
-
 		recv, ok := receivers[r.PathValue("id")]
 		if !ok {
 			http.Error(w, "unknown receiver id", http.StatusNotFound)
@@ -666,6 +682,33 @@ func handleDeleteObject(receivers map[string]resolvedReceiver, status *receiverS
 		status.record(recv.id, key, nil)
 		log.Info("receiver: object deleted", "id", recv.id, "key", key, "path", localObjectPath(cfg, t))
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// requireWebUISession wraps next, requiring a currently valid dashboard
+// session cookie (see sessionStore/handleWebUILogin) before running it. A
+// missing/invalid session either redirects the browser to the login page
+// (redirectOnFail true — for a full-page navigation, like the dashboard
+// itself or a file download link) or reports 401 (redirectOnFail false —
+// for a JSON endpoint the dashboard's own JavaScript polls via fetch(),
+// which would otherwise silently receive an HTML login page as its "JSON"
+// response). An empty username (webui.username unset in the config file)
+// disables the check entirely, leaving the web UI open — this gates the
+// dashboard and its /api/... endpoints (see startWebUI), not the receiver
+// API, which authenticates separately via each receiver's own bearer token.
+func requireWebUISession(username string, sessions *sessionStore, redirectOnFail bool, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if username == "" || sessions.authenticated(r) {
+			next(w, r)
+			return
+		}
+
+		if !redirectOnFail {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
 	}
 }
 

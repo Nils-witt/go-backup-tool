@@ -52,7 +52,7 @@ func TestParseFlags(t *testing.T) {
 		},
 		{
 			name: "missing jobs list allowed with listen set",
-			yaml: "listen: :8080\nservers:\n  - name: s\n    region: us-east-1\nrecipients: [me@example.com]\n",
+			yaml: "webui:\n  enabled: true\n  listen: :8080\nservers:\n  - name: s\n    region: us-east-1\nrecipients: [me@example.com]\n",
 		},
 		{
 			name:    "missing cmd",
@@ -240,7 +240,9 @@ func TestParseFlagsConfigFile(t *testing.T) {
 
 	path := writeConfigFile(t, `
 timeout: 5m
-listen: ":8080"
+webui:
+  enabled: true
+  listen: ":8080"
 
 servers:
   - name: primary
@@ -308,11 +310,100 @@ jobs:
 	}
 }
 
+func TestParseFlagsWebUIEnabledRequiresListen(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+webui:
+  enabled: true
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "webui.listen is not set") {
+		t.Fatalf("parseFlags() error = %v, want it to mention webui.listen is not set", err)
+	}
+}
+
+func TestParseFlagsWebUIDisabledIgnoresListen(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+webui:
+  listen: ":8080"
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	if rc.listen != "" {
+		t.Errorf("rc.listen = %q, want empty (webui.enabled unset/false)", rc.listen)
+	}
+}
+
+func TestParseFlagsWebUIUsernamePassword(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+webui:
+  enabled: true
+  listen: ":0"
+  username: "admin"
+  password: "secret"
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	if rc.webUIUsername != "admin" {
+		t.Errorf("rc.webUIUsername = %q, want %q", rc.webUIUsername, "admin")
+	}
+
+	if rc.webUIPassword != "secret" {
+		t.Errorf("rc.webUIPassword = %q, want %q", rc.webUIPassword, "secret")
+	}
+}
+
 func TestParseFlagsLogViewerDefaultsToDisabled(t *testing.T) {
 	t.Parallel()
 
 	path := writeConfigFile(t, `
-listen: ":0"
+webui:
+  enabled: true
+  listen: ":0"
 
 servers:
   - name: s
@@ -339,8 +430,10 @@ func TestParseFlagsLogViewerEnabled(t *testing.T) {
 	t.Parallel()
 
 	path := writeConfigFile(t, `
-listen: ":0"
-enable-log-viewer: true
+webui:
+  enabled: true
+  listen: ":0"
+  log-viewer: true
 
 servers:
   - name: s

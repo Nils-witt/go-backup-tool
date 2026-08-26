@@ -175,24 +175,26 @@ type target struct {
 type runConfig struct {
 	jobs       []*config
 	timeout    time.Duration
-	listen     string // empty disables the web UI; see fileConfig.Listen
+	listen     string // empty disables the web UI; see resolveWebUIListen
 	configPath string // where the config file was loaded from; state db lives alongside it
 	logLevel   slog.Level
 	receivers  map[string]resolvedReceiver // this instance's receiver API entries, keyed by id; see receiver.go
 
-	// downloadToken gates the web UI's file-download links (see
-	// handleLogin/handleDownloadFile in webui.go): a browser must log in
-	// with this token before it can download a receiver's stored files.
-	// Empty disables the feature entirely (handleLogin always reports it as
-	// unconfigured rather than accepting an empty submitted token).
-	downloadToken string
+	// webUIUsername/webUIPassword, when both set, gate the entire web UI
+	// (the dashboard and its /api/... endpoints, including per-receiver
+	// file downloads; not the receiver API, which keeps its own
+	// per-receiver bearer tokens) behind a login page and session cookie —
+	// see requireWebUISession/handleWebUILogin in webui.go. Empty
+	// webUIUsername disables the check, leaving the web UI open as before.
+	webUIUsername string
+	webUIPassword string
 
 	// logViewer enables the web UI's live log viewer (served over
-	// /api/logs, see handleLogs/newRunLogger). Off by default: the
-	// dashboard has no login of its own (unlike file downloads, which
-	// require download-token), so anyone who can reach it would otherwise
-	// see this process's raw log output, which may include operator detail
-	// (paths, error text) an operator might not want exposed that widely.
+	// /api/logs, see handleLogs/newRunLogger). Off by default: unless
+	// webUIUsername/webUIPassword above are set, the dashboard has no login
+	// of its own, so anyone who can reach it would otherwise see this
+	// process's raw log output, which may include operator detail (paths,
+	// error text) an operator might not want exposed that widely.
 	logViewer bool
 }
 
@@ -291,24 +293,40 @@ type fileConfig struct {
 	fileJob `yaml:",inline"`
 
 	Timeout   string         `yaml:"timeout"`
-	Listen    string         `yaml:"listen"`    // e.g. ":8080"; empty (the default) disables the web UI
 	LogLevel  string         `yaml:"log-level"` // debug, info, warn, or error; overridden by -log-level when that flag is explicitly given
 	Servers   []fileServer   `yaml:"servers"`
 	Jobs      []fileJob      `yaml:"jobs"`
 	Receivers []fileReceiver `yaml:"receivers"`
+	WebUI     fileWebUI      `yaml:"webui"`
+}
 
-	// DownloadToken, if set, is the token a browser must log in with (see
-	// handleLogin in webui.go) before the web UI's per-receiver file lists
-	// will serve a download link for their contents. Unset disables
-	// downloads: the dashboard still lists files, but there's no way to log
-	// in and fetch one.
-	DownloadToken string `yaml:"download-token"`
+// fileWebUI is the top-level webui: entry, grouping every setting that
+// controls the optional web UI dashboard (and, since it's served by the same
+// HTTP server, the receiver API — see fileConfig's Receivers).
+type fileWebUI struct {
+	// Enabled turns the web UI on; Listen (e.g. ":8080") is the address it
+	// binds. Unset/false (the default) disables the web UI entirely,
+	// regardless of Listen. It's an error to set Enabled: true without also
+	// giving Listen a value — see resolveWebUIListen. When enabled, the
+	// process stays alive to keep serving the dashboard even after every
+	// job has finished its (possibly one-shot) run, until stopped
+	// (Ctrl-C/SIGTERM) or the config file's timeout elapses.
+	Enabled bool   `yaml:"enabled"`
+	Listen  string `yaml:"listen"`
 
-	// EnableLogViewer turns on the web UI's live log viewer (a "Logs"
-	// section on the dashboard, polling /api/logs). Unset/false (the
-	// default) keeps it off, since — unlike file downloads, gated by
-	// DownloadToken — the dashboard has no login guarding it.
-	EnableLogViewer bool `yaml:"enable-log-viewer"`
+	// Username/Password, when both set, require a browser to log in (at
+	// /login, with a session remembered via cookie) before the web UI
+	// (dashboard and its /api/... endpoints, including per-receiver file
+	// downloads) serves anything — see requireWebUISession/handleWebUILogin
+	// in webui.go. Unset (the default) leaves the web UI open, as before.
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+
+	// LogViewer turns on the web UI's live log viewer (a "Logs" section on
+	// the dashboard, polling /api/logs). Unset/false (the default) keeps it
+	// off, since the dashboard has no login guarding it on its own unless
+	// Username/Password above are also set.
+	LogViewer bool `yaml:"log-viewer"`
 }
 
 // parseFlags parses args (typically os.Args[1:]) into a runConfig, writing
@@ -362,7 +380,12 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 		return nil, err
 	}
 
-	jobs, err := resolveJobs(fileCfg)
+	listen, err := resolveWebUIListen(fileCfg.WebUI)
+	if err != nil {
+		return nil, err
+	}
+
+	jobs, err := resolveJobs(fileCfg, listen)
 	if err != nil {
 		return nil, err
 	}
@@ -397,13 +420,32 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 	return &runConfig{
 		jobs:          jobs,
 		timeout:       timeout,
-		listen:        strings.TrimSpace(fileCfg.Listen),
+		listen:        listen,
 		configPath:    configPath,
 		logLevel:      level,
 		receivers:     receivers,
-		downloadToken: strings.TrimSpace(fileCfg.DownloadToken),
-		logViewer:     fileCfg.EnableLogViewer,
+		webUIUsername: strings.TrimSpace(fileCfg.WebUI.Username),
+		webUIPassword: fileCfg.WebUI.Password,
+		logViewer:     fileCfg.WebUI.LogViewer,
 	}, nil
+}
+
+// resolveWebUIListen returns the effective web UI listen address from the
+// config file's webui: entry: empty disables the web UI entirely, whether
+// because webui.enabled is false/unset or webui: wasn't given at all. It's
+// an error to set webui.enabled: true without also giving webui.listen a
+// value, since there would then be no address to bind.
+func resolveWebUIListen(cfg fileWebUI) (string, error) {
+	if !cfg.Enabled {
+		return "", nil
+	}
+
+	listen := strings.TrimSpace(cfg.Listen)
+	if listen == "" {
+		return "", errors.New("webui.enabled is true but webui.listen is not set")
+	}
+
+	return listen, nil
 }
 
 // parseConfigTimeout parses the config file's top-level timeout: string, if
@@ -464,13 +506,15 @@ func parseLogLevel(s string) (slog.Level, error) {
 // resolveJobs builds the list of jobs to run from fileCfg's jobs: list,
 // layering fileCfg's top-level fields as shared defaults under each entry's
 // own fields, and resolving each job's targets: against fileCfg's servers:.
+// listen is the web UI's resolved effective listen address (see
+// resolveWebUIListen).
 //
-// An empty jobs: list is only allowed when listen: is set, since that still
-// leaves the web UI (and receiver API) as a reason to run; otherwise the
-// process would start and immediately have nothing to do.
-func resolveJobs(fileCfg *fileConfig) ([]*config, error) {
-	if len(fileCfg.Jobs) == 0 && strings.TrimSpace(fileCfg.Listen) == "" {
-		return nil, errors.New("config file must define at least one job under a jobs list, or set listen: to run without any")
+// An empty jobs: list is only allowed when the web UI is enabled, since that
+// still leaves the web UI (and receiver API) as a reason to run; otherwise
+// the process would start and immediately have nothing to do.
+func resolveJobs(fileCfg *fileConfig, listen string) ([]*config, error) {
+	if len(fileCfg.Jobs) == 0 && listen == "" {
+		return nil, errors.New("config file must define at least one job under a jobs list, or set webui.enabled: true to run without any")
 	}
 
 	return buildJobsFromFile(fileCfg)

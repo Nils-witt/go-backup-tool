@@ -143,7 +143,7 @@ func TestStartWebUIServesRequests(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, "", nil)
+	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, nil, "", "")
 	if srv == nil {
 		t.Fatal("startWebUI() = nil, want a running server")
 	}
@@ -163,6 +163,168 @@ func TestStartWebUIServesRequests(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("GET /api/status status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestRequireWebUISessionWithoutUsernameAllowsRequest(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	sessions := newSessionStore()
+	h := requireWebUISession("", sessions, true, func(http.ResponseWriter, *http.Request) { called = true })
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+
+	h(rec, req)
+
+	if !called {
+		t.Error("handler wasn't called despite auth being unconfigured")
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+}
+
+func TestRequireWebUISessionRedirectsWithoutValidSession(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	sessions := newSessionStore()
+	h := requireWebUISession("admin", sessions, true, func(http.ResponseWriter, *http.Request) { called = true })
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+
+	h(rec, req)
+
+	if called {
+		t.Error("handler was called despite no session cookie")
+	}
+
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+	}
+
+	if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, "/login?next=") {
+		t.Errorf("Location = %q, want a /login?next=... redirect", loc)
+	}
+}
+
+func TestRequireWebUISessionReportsUnauthorizedWithoutRedirect(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	sessions := newSessionStore()
+	h := requireWebUISession("admin", sessions, false, func(http.ResponseWriter, *http.Request) { called = true })
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/status", nil)
+	rec := httptest.NewRecorder()
+
+	h(rec, req)
+
+	if called {
+		t.Error("handler was called despite no session cookie")
+	}
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestRequireWebUISessionAcceptsValidSession(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	sessions := newSessionStore()
+
+	id, err := sessions.create()
+	if err != nil {
+		t.Fatalf("sessions.create(): %v", err)
+	}
+
+	h := requireWebUISession("admin", sessions, true, func(http.ResponseWriter, *http.Request) { called = true })
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: webUISessionCookie, Value: id}) //nolint:gosec // a request Cookie header, not a Set-Cookie response; Secure/HttpOnly/SameSite don't apply
+
+	rec := httptest.NewRecorder()
+
+	h(rec, req)
+
+	if !called {
+		t.Error("handler wasn't called despite a valid session cookie")
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+}
+
+func TestStartWebUIWithLoginRequiresSession(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore()
+
+	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, nil, "admin", "secret")
+	if srv == nil {
+		t.Fatal("startWebUI() = nil, want a running server")
+	}
+
+	t.Cleanup(srv.shutdown)
+
+	client := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+srv.addr+"/api/status", nil)
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/status: %v", err)
+	}
+
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("unauthenticated GET /api/status status = %d, want 401", resp.StatusCode)
+	}
+
+	form := url.Values{"username": {"admin"}, "password": {"secret"}}
+
+	loginReq, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+srv.addr+"/login", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatalf("building login request: %v", err)
+	}
+
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	loginResp, err := client.Do(loginReq)
+	if err != nil {
+		t.Fatalf("POST /login: %v", err)
+	}
+
+	_ = loginResp.Body.Close()
+
+	cookies := loginResp.Cookies()
+	if len(cookies) != 1 || cookies[0].Name != webUISessionCookie {
+		t.Fatalf("login cookies = %+v, want one %s cookie", cookies, webUISessionCookie)
+	}
+
+	req.AddCookie(cookies[0])
+
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("authenticated GET /api/status: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("authenticated GET /api/status status = %d, want 200", resp.StatusCode)
 	}
 }
 
@@ -216,58 +378,28 @@ func TestStartWebUIBadAddrReturnsNil(t *testing.T) {
 	store, _ := newTestStore()
 
 	// Port 0 is valid (means "pick one"); an unparseable address is not.
-	srv := startWebUI("not-a-valid-address", store, nil, discardLogger, nil, "", nil)
+	srv := startWebUI("not-a-valid-address", store, nil, discardLogger, nil, nil, "", "")
 	if srv != nil {
 		t.Cleanup(srv.shutdown)
 		t.Fatal("startWebUI() with an invalid address = non-nil, want nil")
 	}
 }
 
-func TestHandleDownloadFileWithoutSessionRedirectsToLogin(t *testing.T) {
-	t.Parallel()
-
-	receivers := map[string]resolvedReceiver{"a": {id: "a", path: t.TempDir()}}
-	sessions := newDownloadSessionStore()
-
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/backup.gpg", nil)
-	req.SetPathValue("id", "a")
-	req.SetPathValue("key", "backup.gpg")
-
-	rec := httptest.NewRecorder()
-
-	handleDownloadFile(receivers, sessions, discardLogger)(rec, req)
-
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
-	}
-
-	if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, "/login?next=") {
-		t.Errorf("Location = %q, want a /login?next=... redirect", loc)
-	}
-}
-
-func TestHandleDownloadFileWithSessionServesContent(t *testing.T) {
+func TestHandleDownloadFileServesContent(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "backup.gpg"), "secret data")
 
 	receivers := map[string]resolvedReceiver{"a": {id: "a", path: root}}
-	sessions := newDownloadSessionStore()
-
-	id, err := sessions.create()
-	if err != nil {
-		t.Fatalf("sessions.create(): %v", err)
-	}
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/backup.gpg", nil)
 	req.SetPathValue("id", "a")
 	req.SetPathValue("key", "backup.gpg")
-	req.AddCookie(&http.Cookie{Name: downloadSessionCookie, Value: id}) //nolint:gosec // a request Cookie header, not a Set-Cookie response; Secure/HttpOnly/SameSite don't apply
 
 	rec := httptest.NewRecorder()
 
-	handleDownloadFile(receivers, sessions, discardLogger)(rec, req)
+	handleDownloadFile(receivers, discardLogger)(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -282,76 +414,75 @@ func TestHandleDownloadFileWithSessionServesContent(t *testing.T) {
 	}
 }
 
-func TestHandleLoginWrongTokenDoesNotStartSession(t *testing.T) {
+func TestHandleWebUILoginWrongCredentialsDoesNotStartSession(t *testing.T) {
 	t.Parallel()
 
-	sessions := newDownloadSessionStore()
+	sessions := newSessionStore()
 
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader("token=wrong"))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	rec := httptest.NewRecorder()
-
-	handleLogin("correct-token", sessions)(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200 (re-rendered form)", rec.Code)
-	}
-
-	if !strings.Contains(rec.Body.String(), "incorrect token") {
-		t.Error("response body doesn't mention the incorrect token")
-	}
-
-	if len(rec.Result().Cookies()) != 0 {
-		t.Error("a session cookie was set despite the wrong token")
-	}
-}
-
-func TestHandleLoginEmptyDownloadTokenIsAlwaysUnconfigured(t *testing.T) {
-	t.Parallel()
-
-	sessions := newDownloadSessionStore()
-
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader("token="))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	rec := httptest.NewRecorder()
-
-	handleLogin("", sessions)(rec, req)
-
-	if !strings.Contains(rec.Body.String(), "not configured") {
-		t.Error("response body doesn't report downloads as unconfigured")
-	}
-
-	if len(rec.Result().Cookies()) != 0 {
-		t.Error("a session cookie was set despite download-token being unset")
-	}
-}
-
-func TestHandleLoginCorrectTokenStartsSessionAndRedirects(t *testing.T) {
-	t.Parallel()
-
-	sessions := newDownloadSessionStore()
-
-	form := url.Values{"token": {"correct-token"}, "next": {"/api/receivers/a/download/backup.gpg"}}
+	form := url.Values{"username": {"admin"}, "password": {"wrong"}}
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	rec := httptest.NewRecorder()
 
-	handleLogin("correct-token", sessions)(rec, req)
+	handleWebUILogin("admin", "secret", sessions)(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (re-rendered form)", rec.Code)
+	}
+
+	if !strings.Contains(rec.Body.String(), "incorrect username or password") {
+		t.Error("response body doesn't mention the incorrect credentials")
+	}
+
+	if len(rec.Result().Cookies()) != 0 {
+		t.Error("a session cookie was set despite the wrong password")
+	}
+}
+
+func TestHandleWebUILoginWithoutUsernameConfiguredRedirects(t *testing.T) {
+	t.Parallel()
+
+	sessions := newSessionStore()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/login?next=/", nil)
+	rec := httptest.NewRecorder()
+
+	handleWebUILogin("", "", sessions)(rec, req)
 
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
 	}
 
-	if loc := rec.Header().Get("Location"); loc != "/api/receivers/a/download/backup.gpg" {
-		t.Errorf("Location = %q, want the requested next path", loc)
+	if loc := rec.Header().Get("Location"); loc != "/" {
+		t.Errorf("Location = %q, want %q", loc, "/")
+	}
+}
+
+func TestHandleWebUILoginCorrectCredentialsStartsSessionAndRedirects(t *testing.T) {
+	t.Parallel()
+
+	sessions := newSessionStore()
+
+	form := url.Values{"username": {"admin"}, "password": {"secret"}, "next": {"/"}}
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+
+	handleWebUILogin("admin", "secret", sessions)(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+	}
+
+	if loc := rec.Header().Get("Location"); loc != "/" {
+		t.Errorf("Location = %q, want %q", loc, "/")
 	}
 
 	cookies := rec.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != downloadSessionCookie {
-		t.Fatalf("cookies = %+v, want one %s cookie", cookies, downloadSessionCookie)
+	if len(cookies) != 1 || cookies[0].Name != webUISessionCookie {
+		t.Fatalf("cookies = %+v, want one %s cookie", cookies, webUISessionCookie)
 	}
 
 	if !sessions.valid(cookies[0].Value) {
@@ -359,10 +490,10 @@ func TestHandleLoginCorrectTokenStartsSessionAndRedirects(t *testing.T) {
 	}
 }
 
-func TestHandleLogoutRevokesSession(t *testing.T) {
+func TestHandleWebUILogoutRevokesSession(t *testing.T) {
 	t.Parallel()
 
-	sessions := newDownloadSessionStore()
+	sessions := newSessionStore()
 
 	id, err := sessions.create()
 	if err != nil {
@@ -370,14 +501,18 @@ func TestHandleLogoutRevokesSession(t *testing.T) {
 	}
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/logout", nil)
-	req.AddCookie(&http.Cookie{Name: downloadSessionCookie, Value: id}) //nolint:gosec // a request Cookie header, not a Set-Cookie response; Secure/HttpOnly/SameSite don't apply
+	req.AddCookie(&http.Cookie{Name: webUISessionCookie, Value: id}) //nolint:gosec // a request Cookie header, not a Set-Cookie response; Secure/HttpOnly/SameSite don't apply
 
 	rec := httptest.NewRecorder()
 
-	handleLogout(sessions)(rec, req)
+	handleWebUILogout(sessions)(rec, req)
 
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+	}
+
+	if loc := rec.Header().Get("Location"); loc != "/login" {
+		t.Errorf("Location = %q, want %q", loc, "/login")
 	}
 
 	if sessions.valid(id) {

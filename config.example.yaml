@@ -124,26 +124,34 @@ servers:
 # log-level: info # debug, info, warn, or error (default info); the
 # -log-level flag overrides this when explicitly given on the command line.
 
-# listen: ":8080" # enables a web UI dashboard (http://host:port/) showing
-# every job's and target's live status (idle/running/ok/failed, last run
-# time, duration, error). Unset (the default) disables it. When set, the
-# process stays alive to keep serving the dashboard even after every job
-# has finished its (possibly one-shot) run, until stopped (Ctrl-C/SIGTERM)
-# or the config file's timeout elapses.
-
-# download-token: "replace-with-a-long-random-secret" # lets a person log in
-# (at /login, from the "download" link next to a file in a receiver's file
-# list on the dashboard) to download that file's contents. Unset (the
-# default) disables downloading files through the dashboard entirely — the
-# dashboard still lists receivers' files, there's just no way to fetch one.
-# A successful login is remembered for 12h via a session cookie, so the
-# token itself only needs to be entered again once that expires.
-
-# enable-log-viewer: true # adds a "Logs" section to the dashboard, showing
-# this process's own recent log output (polled from /api/logs). Unset (the
-# default) leaves it off: unlike file downloads above, the dashboard has no
-# login guarding this, so anyone who can reach it would otherwise see this
-# process's raw log output. Only requires listen: to also be set.
+# webui: configures the optional web UI dashboard (http://host:port/),
+# showing every job's and target's live status (idle/running/ok/failed, last
+# run time, duration, error), and — since it's served by the same HTTP
+# server — the receiver API used by any type: remote targets: (see
+# receivers: below). Omit this section entirely (the default) to disable
+# the web UI. When enabled, the process stays alive to keep serving the
+# dashboard even after every job has finished its (possibly one-shot) run,
+# until stopped (Ctrl-C/SIGTERM) or the config file's timeout elapses.
+# webui:
+#   enabled: true
+#   listen: ":8080" # required when enabled: true
+#
+#   # username/password, when both set, require a browser to log in (at
+#   # /login) before the dashboard or any of its /api/... endpoints —
+#   # including per-receiver file downloads — serve anything. A successful
+#   # login is remembered for 12h via a session cookie. Unset (the default)
+#   # leaves the web UI open to anyone who can reach it; the receiver API
+#   # (used by other go-backup-tool instances, not browsers) is unaffected
+#   # either way, since it authenticates each request with its own
+#   # per-receiver bearer token.
+#   username: "admin"
+#   password: "replace-with-a-long-random-password"
+#
+#   # log-viewer adds a "Logs" section to the dashboard, showing this
+#   # process's own recent log output (polled from /api/logs). Unset (the
+#   # default) leaves it off, since the dashboard has no login guarding it
+#   # on its own unless username/password above are also set.
+#   log-viewer: true
 
 jobs:
   - name: database
@@ -196,14 +204,14 @@ jobs:
 
 # receivers: configures this instance's own receiver API — the destination
 # side of another go-backup-tool instance's type: remote target above. Only
-# reachable when listen: is set (the receiver API is served by the same
-# HTTP server as the dashboard). Each entry's id is what a sender's target
-# names as its bucket; token must match the value the sender configured on
-# its own servers: entry (see "sibling-instance" above); path is the root
-# directory incoming objects for this id are written under (object ends up
-# at path/key, mirroring a local server's path/bucket/key); retention (
-# optional, same syntax as a local server's) deletes objects here once
-# they're older than that.
+# reachable when webui.enabled: true is set (the receiver API is served by
+# the same HTTP server as the dashboard). Each entry's id is what a
+# sender's target names as its bucket; token must match the value the
+# sender configured on its own servers: entry (see "sibling-instance"
+# above); path is the root directory incoming objects for this id are
+# written under (object ends up at path/key, mirroring a local server's
+# path/bucket/key); retention (optional, same syntax as a local server's)
+# deletes objects here once they're older than that.
 #
 # stale-after and webhook (optional, set together) monitor this receiver for
 # a sender that's stopped showing up: once at least one file has been
