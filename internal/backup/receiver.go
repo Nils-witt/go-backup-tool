@@ -228,8 +228,9 @@ type receiverFile struct {
 // listReceiverFiles walks recv.path and returns every object currently
 // stored there, keyed the same way handleReceiveObject/handleDeleteObject
 // address them (the path relative to recv.path, using "/" separators
-// regardless of OS), sorted by key. A root directory that doesn't exist yet
-// (nothing has been received) is not an error — it just yields no files.
+// regardless of OS), sorted by creation time ascending (oldest first). A root
+// directory that doesn't exist yet (nothing has been received) is not an
+// error — it just yields no files.
 // Temp files left behind by an interrupted write (see writeLocalObject's
 // ".*.tmp" pattern) are skipped since they're not yet complete objects.
 func listReceiverFiles(recv resolvedReceiver) ([]receiverFile, error) {
@@ -270,7 +271,7 @@ func listReceiverFiles(recv resolvedReceiver) ([]receiverFile, error) {
 		return nil, err
 	}
 
-	sort.Slice(files, func(i, j int) bool { return files[i].Key < files[j].Key })
+	sort.Slice(files, func(i, j int) bool { return files[i].ModTime.Before(files[j].ModTime) })
 
 	return files, nil
 }

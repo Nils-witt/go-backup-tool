@@ -104,14 +104,28 @@ func TestListReceiverFilesMissingRoot(t *testing.T) {
 	}
 }
 
-func TestListReceiverFilesListsNestedObjectsSortedByKey(t *testing.T) {
+func TestListReceiverFilesListsNestedObjectsSortedByCreatedTimeAscending(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
 
-	writeFile(t, filepath.Join(root, "b.gpg"), "bbb")
-	writeFile(t, filepath.Join(root, "subdir", "a.gpg"), "a")
+	newerPath := filepath.Join(root, "b.gpg")
+	olderPath := filepath.Join(root, "subdir", "a.gpg")
+
+	writeFile(t, newerPath, "bbb")
+	writeFile(t, olderPath, "a")
 	writeFile(t, filepath.Join(root, ".hidden.tmp"), "temp")
+
+	older := time.Now().Add(-time.Hour)
+	newer := time.Now()
+
+	if err := os.Chtimes(olderPath, older, older); err != nil {
+		t.Fatalf("os.Chtimes(%q) unexpected error: %v", olderPath, err)
+	}
+
+	if err := os.Chtimes(newerPath, newer, newer); err != nil {
+		t.Fatalf("os.Chtimes(%q) unexpected error: %v", newerPath, err)
+	}
 
 	recv := resolvedReceiver{id: "a", path: root}
 
@@ -124,12 +138,12 @@ func TestListReceiverFilesListsNestedObjectsSortedByKey(t *testing.T) {
 		t.Fatalf("listReceiverFiles() = %+v, want 2 entries", files)
 	}
 
-	if files[0].Key != "b.gpg" || files[0].Size != 3 {
-		t.Errorf("files[0] = %+v, want key b.gpg size 3", files[0])
+	if files[0].Key != "subdir/a.gpg" || files[0].Size != 1 {
+		t.Errorf("files[0] = %+v, want key subdir/a.gpg size 1 (oldest)", files[0])
 	}
 
-	if files[1].Key != "subdir/a.gpg" || files[1].Size != 1 {
-		t.Errorf("files[1] = %+v, want key subdir/a.gpg size 1", files[1])
+	if files[1].Key != "b.gpg" || files[1].Size != 3 {
+		t.Errorf("files[1] = %+v, want key b.gpg size 3 (newest)", files[1])
 	}
 }
 
