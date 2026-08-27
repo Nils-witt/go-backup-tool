@@ -425,7 +425,7 @@ func TestHandleWebUILoginWrongCredentialsDoesNotStartSession(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleWebUILogin("admin", "secret", false, sessions)(rec, req)
+	handleWebUILogin("admin", "secret", false, sessions, nil, discardLogger)(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200 (re-rendered form)", rec.Code)
@@ -448,7 +448,7 @@ func TestHandleWebUILoginWithoutUsernameConfiguredRedirects(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/login?next=/", nil)
 	rec := httptest.NewRecorder()
 
-	handleWebUILogin("", "", false, sessions)(rec, req)
+	handleWebUILogin("", "", false, sessions, nil, discardLogger)(rec, req)
 
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
@@ -470,7 +470,7 @@ func TestHandleWebUILoginCorrectCredentialsStartsSessionAndRedirects(t *testing.
 
 	rec := httptest.NewRecorder()
 
-	handleWebUILogin("admin", "secret", false, sessions)(rec, req)
+	handleWebUILogin("admin", "secret", false, sessions, nil, discardLogger)(rec, req)
 
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
@@ -580,5 +580,93 @@ func TestHandleLogsServesJSON(t *testing.T) {
 
 	if !slices.Equal(lines, []string{"level=INFO msg=hello"}) {
 		t.Errorf("lines = %v, want one line", lines)
+	}
+}
+
+func TestHandleWebUILoginRecordsLoginEvents(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	sessions := newSessionStore()
+
+	form := url.Values{"username": {"admin"}, "password": {"wrong"}}
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "198.51.100.1:4321"
+
+	rec := httptest.NewRecorder()
+
+	handleWebUILogin("admin", "secret", false, sessions, db, discardLogger)(rec, req)
+
+	form = url.Values{"username": {"admin"}, "password": {"secret"}}
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "198.51.100.2:4321"
+
+	rec = httptest.NewRecorder()
+
+	handleWebUILogin("admin", "secret", false, sessions, db, discardLogger)(rec, req)
+
+	events, err := readLoginEvents(t.Context(), db, 10)
+	if err != nil {
+		t.Fatalf("readLoginEvents() error: %v", err)
+	}
+
+	if len(events) != 2 {
+		t.Fatalf("readLoginEvents() returned %d events, want 2", len(events))
+	}
+
+	if events[0].Username != "admin" || events[0].Method != "password" || !events[0].Success || events[0].RemoteAddr != "198.51.100.2:4321" {
+		t.Errorf("readLoginEvents()[0] = %+v, want the successful attempt", events[0])
+	}
+
+	if events[1].Success || events[1].Detail == "" {
+		t.Errorf("readLoginEvents()[1] = %+v, want the failed attempt with a detail", events[1])
+	}
+}
+
+func TestHandleLoginEventsServesJSON(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+
+	if err := recordLoginEvent(t.Context(), db, loginEvent{At: time.Now(), Username: "admin", Method: "password", Success: true, RemoteAddr: "127.0.0.1:1"}); err != nil {
+		t.Fatalf("recordLoginEvent() error: %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/login-events", nil)
+	rec := httptest.NewRecorder()
+
+	handleLoginEvents(db, discardLogger)(rec, req)
+
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json prefix", ct)
+	}
+
+	var got []loginEventJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding response body: %v", err)
+	}
+
+	if len(got) != 1 || got[0].Username != "admin" || !got[0].Success {
+		t.Errorf("decoded events = %+v, want one successful admin login", got)
+	}
+}
+
+func TestHandleLoginEventsWithoutDBServesEmptyList(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/login-events", nil)
+	rec := httptest.NewRecorder()
+
+	handleLoginEvents(nil, discardLogger)(rec, req)
+
+	var got []loginEventJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding response body: %v", err)
+	}
+
+	if len(got) != 0 {
+		t.Errorf("decoded events = %+v, want none", got)
 	}
 }

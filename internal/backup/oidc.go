@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -162,9 +163,22 @@ func handleOIDCLogin(auth *oidcAuth, pending *oidcPendingStore) http.HandlerFunc
 // in-flight login's own, guarding against a replayed token), and — once all
 // of that checks out — starts a dashboard session exactly as a successful
 // password login would (see handleWebUILogin), redirecting the browser to
-// the in-flight login's next.
-func handleOIDCCallback(auth *oidcAuth, pending *oidcPendingStore, sessions *sessionStore, log *slog.Logger) http.HandlerFunc {
+// the in-flight login's next. db, when non-nil, gets every attempt appended
+// to the login log (see recordLoginEvent), win or lose, mirroring
+// handleWebUILogin's own recording.
+func handleOIDCCallback(auth *oidcAuth, pending *oidcPendingStore, sessions *sessionStore, log *slog.Logger, db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		record := func(username, detail string, success bool) {
+			if db == nil {
+				return
+			}
+
+			ev := loginEvent{At: time.Now(), Username: username, Method: "oidc", Success: success, RemoteAddr: r.RemoteAddr, Detail: detail}
+			if err := recordLoginEvent(r.Context(), db, ev); err != nil {
+				log.Warn("oidc: recording login event failed", "err", err)
+			}
+		}
+
 		p, ok := pending.consume(r.URL.Query().Get("state"))
 		if !ok {
 			http.Error(w, "login expired or invalid, please try again", http.StatusBadRequest)
@@ -173,6 +187,7 @@ func handleOIDCCallback(auth *oidcAuth, pending *oidcPendingStore, sessions *ses
 
 		if errParam := r.URL.Query().Get("error"); errParam != "" {
 			log.Warn("oidc: provider returned an error", "error", errParam, "description", r.URL.Query().Get("error_description"))
+			record("", "provider error: "+errParam, false)
 			http.Error(w, "login failed at identity provider", http.StatusBadGateway)
 
 			return
@@ -181,6 +196,7 @@ func handleOIDCCallback(auth *oidcAuth, pending *oidcPendingStore, sessions *ses
 		token, err := auth.oauth2Config.Exchange(r.Context(), r.URL.Query().Get("code"))
 		if err != nil {
 			log.Warn("oidc: exchanging code failed", "err", err)
+			record("", "exchanging code failed", false)
 			http.Error(w, "login failed", http.StatusBadGateway)
 
 			return
@@ -189,6 +205,7 @@ func handleOIDCCallback(auth *oidcAuth, pending *oidcPendingStore, sessions *ses
 		rawIDToken, ok := token.Extra("id_token").(string)
 		if !ok {
 			log.Warn("oidc: token response had no id_token")
+			record("", "no id_token in response", false)
 			http.Error(w, "login failed", http.StatusBadGateway)
 
 			return
@@ -197,6 +214,7 @@ func handleOIDCCallback(auth *oidcAuth, pending *oidcPendingStore, sessions *ses
 		idToken, err := auth.verifier.Verify(r.Context(), rawIDToken)
 		if err != nil {
 			log.Warn("oidc: verifying id token failed", "err", err)
+			record("", "verifying id token failed", false)
 			http.Error(w, "login failed", http.StatusBadGateway)
 
 			return
@@ -204,6 +222,7 @@ func handleOIDCCallback(auth *oidcAuth, pending *oidcPendingStore, sessions *ses
 
 		if idToken.Nonce != p.nonce {
 			log.Warn("oidc: id token nonce did not match")
+			record(oidcIdentity(idToken), "nonce did not match", false)
 			http.Error(w, "login failed", http.StatusBadGateway)
 
 			return
@@ -211,11 +230,29 @@ func handleOIDCCallback(auth *oidcAuth, pending *oidcPendingStore, sessions *ses
 
 		id, err := sessions.create()
 		if err != nil {
+			record(oidcIdentity(idToken), "starting session failed", false)
 			http.Error(w, "starting session failed", http.StatusInternalServerError)
+
 			return
 		}
 
+		record(oidcIdentity(idToken), "", true)
 		http.SetCookie(w, sessions.cookie(id, r.TLS != nil))
 		http.Redirect(w, r, p.next, http.StatusSeeOther)
 	}
+}
+
+// oidcIdentity returns the best-effort human identity to record for a
+// verified idToken (see handleOIDCCallback's login log entries): its "email"
+// claim if the provider sent one, otherwise its subject.
+func oidcIdentity(idToken *oidc.IDToken) string {
+	var claims struct {
+		Email string `json:"email"`
+	}
+
+	if err := idToken.Claims(&claims); err == nil && claims.Email != "" {
+		return claims.Email
+	}
+
+	return idToken.Subject
 }

@@ -113,6 +113,25 @@ func openScheduleStateDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("migrating job state db %q: %w", path, err)
 	}
 
+	// login_events records every dashboard login attempt, password or SSO,
+	// win or lose, so an operator can review who's signed in (and who's
+	// tried and failed) from the web UI (see recordLoginEvent/
+	// readLoginEvents and the dashboard's "Login log" section).
+	const loginEventsSchema = `CREATE TABLE IF NOT EXISTS login_events (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		at          TIMESTAMP NOT NULL,
+		username    TEXT NOT NULL,
+		method      TEXT NOT NULL,
+		success     INTEGER NOT NULL,
+		remote_addr TEXT NOT NULL,
+		detail      TEXT NOT NULL DEFAULT ''
+	)`
+
+	if _, err := db.ExecContext(ctx, loginEventsSchema); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
+	}
+
 	return db, nil
 }
 
@@ -311,6 +330,58 @@ func readTargetRuns(ctx context.Context, db *sql.DB, name string) ([]targetRun, 
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("reading job %q target runs: %w", name, err)
+	}
+
+	return out, nil
+}
+
+// loginEvent is one recorded attempt to log into the dashboard, password or
+// SSO, win or lose (see recordLoginEvent/readLoginEvents).
+type loginEvent struct {
+	At         time.Time
+	Username   string // best-effort identity: the submitted username, or the SSO claim used (email, falling back to subject); may be empty for a failed SSO attempt that never got that far
+	Method     string // "password" or "oidc"
+	Success    bool
+	RemoteAddr string
+	Detail     string // failure reason; empty on success
+}
+
+// recordLoginEvent appends ev to the login log. Called for every login
+// attempt the dashboard's handlers see, regardless of outcome.
+func recordLoginEvent(ctx context.Context, db *sql.DB, ev loginEvent) error {
+	const insert = `INSERT INTO login_events (at, username, method, success, remote_addr, detail) VALUES (?, ?, ?, ?, ?, ?)`
+
+	if _, err := db.ExecContext(ctx, insert, ev.At.UTC(), ev.Username, ev.Method, ev.Success, ev.RemoteAddr, ev.Detail); err != nil {
+		return fmt.Errorf("recording login event: %w", err)
+	}
+
+	return nil
+}
+
+// readLoginEvents returns up to limit of the most recently recorded login
+// events, newest first, for the dashboard's login log view.
+func readLoginEvents(ctx context.Context, db *sql.DB, limit int) ([]loginEvent, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT at, username, method, success, remote_addr, detail FROM login_events ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("reading login events: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []loginEvent
+
+	for rows.Next() {
+		var ev loginEvent
+
+		if err := rows.Scan(&ev.At, &ev.Username, &ev.Method, &ev.Success, &ev.RemoteAddr, &ev.Detail); err != nil {
+			return nil, fmt.Errorf("reading login events: %w", err)
+		}
+
+		out = append(out, ev)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading login events: %w", err)
 	}
 
 	return out, nil

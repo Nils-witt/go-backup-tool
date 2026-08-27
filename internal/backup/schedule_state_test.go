@@ -292,3 +292,77 @@ func TestScheduleStateDBPath(t *testing.T) {
 		t.Errorf("scheduleStateDBPath() = %q, want %q", got, want)
 	}
 }
+
+func TestRecordReadLoginEventsNewestFirst(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	ctx := context.Background()
+
+	events := []loginEvent{
+		{At: time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC), Username: "admin", Method: "password", Success: true, RemoteAddr: "10.0.0.1:1"},
+		{At: time.Date(2026, 1, 1, 3, 1, 0, 0, time.UTC), Username: "admin", Method: "password", Success: false, RemoteAddr: "10.0.0.2:1", Detail: "incorrect username or password"},
+		{At: time.Date(2026, 1, 1, 3, 2, 0, 0, time.UTC), Username: "person@example.com", Method: "oidc", Success: true, RemoteAddr: "10.0.0.3:1"},
+	}
+
+	for _, ev := range events {
+		if err := recordLoginEvent(ctx, db, ev); err != nil {
+			t.Fatalf("recordLoginEvent() error: %v", err)
+		}
+	}
+
+	got, err := readLoginEvents(ctx, db, 10)
+	if err != nil {
+		t.Fatalf("readLoginEvents() error: %v", err)
+	}
+
+	if len(got) != 3 {
+		t.Fatalf("readLoginEvents() returned %d events, want 3", len(got))
+	}
+
+	if !got[0].At.Equal(events[2].At) || got[0].Username != "person@example.com" || got[0].Method != "oidc" || !got[0].Success {
+		t.Errorf("readLoginEvents()[0] = %+v, want the most recently recorded event first", got[0])
+	}
+
+	if got[1].Success || got[1].Detail != "incorrect username or password" {
+		t.Errorf("readLoginEvents()[1] = %+v, want the failed password attempt with its detail", got[1])
+	}
+}
+
+func TestReadLoginEventsRespectsLimit(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	ctx := context.Background()
+
+	for i := range 5 {
+		ev := loginEvent{At: time.Date(2026, 1, 1, 0, i, 0, 0, time.UTC), Username: "admin", Method: "password", Success: true, RemoteAddr: "10.0.0.1:1"}
+		if err := recordLoginEvent(ctx, db, ev); err != nil {
+			t.Fatalf("recordLoginEvent() error: %v", err)
+		}
+	}
+
+	got, err := readLoginEvents(ctx, db, 2)
+	if err != nil {
+		t.Fatalf("readLoginEvents() error: %v", err)
+	}
+
+	if len(got) != 2 {
+		t.Errorf("readLoginEvents(limit=2) returned %d events, want 2", len(got))
+	}
+}
+
+func TestReadLoginEventsEmpty(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+
+	got, err := readLoginEvents(context.Background(), db, 10)
+	if err != nil {
+		t.Fatalf("readLoginEvents() error: %v", err)
+	}
+
+	if len(got) != 0 {
+		t.Errorf("readLoginEvents() on an empty log = %+v, want none", got)
+	}
+}

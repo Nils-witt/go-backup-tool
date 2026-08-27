@@ -40,8 +40,11 @@ type webUIServer struct {
 // returns nil if addr couldn't be bound, leaving the web UI disabled for
 // this run rather than failing the whole process over a dashboard. db is the
 // shared state/retention db (see schedule_state.go and retention.go), used
-// by the receiver API's handlers to track retention on incoming writes; nil
-// disables that tracking (see recordLocalWrite). logs backs the dashboard's
+// by the receiver API's handlers to track retention on incoming writes, and
+// by the login handlers (handleWebUILogin/handleOIDCCallback) to append
+// every login attempt to the login log served over /api/login-events (see
+// handleLoginEvents) and shown in the dashboard's "Login log" section; nil
+// disables both (see recordLocalWrite/recordLoginEvent). logs backs the dashboard's
 // log viewer (served over /api/logs, see handleLogs); nil starts an empty
 // one, so passing the caller's own buffer only matters if the caller also
 // arranged for it to be written to — which newRunLogger in app.go only does
@@ -103,16 +106,17 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 	mux.HandleFunc("GET /api/receivers", api(handleReceiverStatus(receivers, receiverStore, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/files", api(handleReceiverFiles(receivers, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", page(handleDownloadFile(receivers, log)))
-	mux.HandleFunc("GET /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions))
-	mux.HandleFunc("POST /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions))
+	mux.HandleFunc("GET /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions, db, log))
+	mux.HandleFunc("POST /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions, db, log))
 	mux.HandleFunc("GET /logout", handleWebUILogout(uiSessions))
+	mux.HandleFunc("GET /api/login-events", api(handleLoginEvents(db, log)))
 	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, receiverStore, log, db))
 	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, receiverStore, log, db))
 
 	if oidcAuth != nil {
 		pending := newOIDCPendingStore()
 		mux.HandleFunc("GET /login/oidc", handleOIDCLogin(oidcAuth, pending))
-		mux.HandleFunc("GET /login/oidc/callback", handleOIDCCallback(oidcAuth, pending, uiSessions, log))
+		mux.HandleFunc("GET /login/oidc/callback", handleOIDCCallback(oidcAuth, pending, uiSessions, log, db))
 	}
 
 	srv := &webUIServer{
@@ -484,7 +488,12 @@ func safeNextPath(next string) string {
 // no way to satisfy; an empty username with showSSO true shows the page
 // with only the SSO link, and POST /login (which only the password form
 // submits) 404s in that case, since there's no username/password to check.
-func handleWebUILogin(username, password string, showSSO bool, sessions *sessionStore) http.HandlerFunc {
+// db, when non-nil, gets every submitted attempt appended to the login log
+// (see recordLoginEvent), win or lose, for the dashboard's login log view
+// (see handleLoginEvents); a write failure there is only logged, not
+// surfaced to the browser, since it must never block an otherwise-successful
+// login.
+func handleWebUILogin(username, password string, showSSO bool, sessions *sessionStore, db *sql.DB, log *slog.Logger) http.HandlerFunc {
 	showPassword := username != ""
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -505,10 +514,24 @@ func handleWebUILogin(username, password string, showSSO bool, sessions *session
 			return
 		}
 
-		userMatch := subtle.ConstantTimeCompare([]byte(r.FormValue("username")), []byte(username)) == 1
+		submittedUser := r.FormValue("username")
+		userMatch := subtle.ConstantTimeCompare([]byte(submittedUser), []byte(username)) == 1
 		passMatch := subtle.ConstantTimeCompare([]byte(r.FormValue("password")), []byte(password)) == 1
+		success := userMatch && passMatch
 
-		if !userMatch || !passMatch {
+		if db != nil {
+			detail := ""
+			if !success {
+				detail = "incorrect username or password"
+			}
+
+			ev := loginEvent{At: time.Now(), Username: submittedUser, Method: "password", Success: success, RemoteAddr: r.RemoteAddr, Detail: detail}
+			if err := recordLoginEvent(r.Context(), db, ev); err != nil {
+				log.Warn("web UI: recording login event failed", "err", err)
+			}
+		}
+
+		if !success {
 			writeLoginPage(w, renderLoginPage("incorrect username or password", next, showPassword, showSSO))
 			return
 		}
@@ -521,6 +544,56 @@ func handleWebUILogin(username, password string, showSSO bool, sessions *session
 
 		http.SetCookie(w, sessions.cookie(id, r.TLS != nil))
 		http.Redirect(w, r, next, http.StatusSeeOther)
+	}
+}
+
+// loginEventJSON is loginEvent's wire shape for handleLoginEvents, matching
+// the dashboard's own field naming (snake_case, as every other /api/...
+// endpoint here uses).
+type loginEventJSON struct {
+	At         time.Time `json:"at"`
+	Username   string    `json:"username"`
+	Method     string    `json:"method"`
+	Success    bool      `json:"success"`
+	RemoteAddr string    `json:"remote_addr"`
+	Detail     string    `json:"detail"`
+}
+
+// loginEventsLimit caps how many of the most recent login events
+// handleLoginEvents serves, for the dashboard's login log view.
+const loginEventsLimit = 200
+
+// handleLoginEvents serves GET /api/login-events: the most recently recorded
+// dashboard login attempts (see recordLoginEvent), newest first, as JSON.
+// db nil (state tracking unavailable) serves an empty list rather than
+// failing the request, matching handleReceiverStatus's own tolerance for a
+// missing dependency.
+func handleLoginEvents(db *sql.DB, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var events []loginEvent
+
+		if db != nil {
+			var err error
+
+			events, err = readLoginEvents(r.Context(), db, loginEventsLimit)
+			if err != nil {
+				log.Warn("web UI: reading login events failed", "err", err)
+				http.Error(w, "reading login events failed", http.StatusInternalServerError)
+
+				return
+			}
+		}
+
+		out := make([]loginEventJSON, len(events))
+		for i, ev := range events {
+			out[i] = loginEventJSON(ev)
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+		if err := json.NewEncoder(w).Encode(out); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	}
 }
 
@@ -1032,6 +1105,35 @@ const dashboardHTML = `<!doctype html>
   }
   .logs .log-error { color: var(--failed); }
   .logs .log-warn { color: var(--running); }
+  .login-log-card {
+    max-width: 1200px;
+    margin: 0 auto;
+    overflow-x: auto;
+  }
+  table.login-events {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: .82rem;
+  }
+  table.login-events th {
+    text-align: left;
+    color: var(--muted);
+    font-weight: 600;
+    font-size: .72rem;
+    text-transform: uppercase;
+    letter-spacing: .02em;
+    padding: .4rem .5rem;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  table.login-events td {
+    padding: .4rem .5rem;
+    border-bottom: 1px solid var(--border);
+    overflow-wrap: anywhere;
+  }
+  table.login-events td.nowrap {
+    white-space: nowrap;
+  }
 </style>
 </head>
 <body>
@@ -1052,6 +1154,18 @@ const dashboardHTML = `<!doctype html>
       <label class="follow-toggle"><input type="checkbox" id="follow-logs" checked> Follow</label>
     </div>
     <pre class="logs" id="logs"></pre>
+  </div>
+</div>
+
+<div id="login-log-wrap" hidden>
+  <h2 class="section-title">Login log</h2>
+  <div class="card login-log-card">
+    <table class="login-events">
+      <thead>
+        <tr><th>Time</th><th>Username</th><th>Method</th><th>Result</th><th>Remote address</th></tr>
+      </thead>
+      <tbody id="login-log-body"></tbody>
+    </table>
   </div>
 </div>
 
@@ -1243,16 +1357,42 @@ function renderLogs(lines) {
   }
 }
 
+// renderLoginEvents re-renders the login log table from events (newest
+// first, as served by /api/login-events). The section stays hidden while
+// there's nothing to show, matching the receivers/logs sections above.
+function renderLoginEvents(events) {
+  const wrap = document.getElementById("login-log-wrap");
+  if (!events || !events.length) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+
+  document.getElementById("login-log-body").innerHTML = events.map(function (ev) {
+    const result = ev.success ? badge("ok", "success") : badge("failed", "failed");
+    const detail = ev.detail ? '<p class="err">' + escapeHtml(ev.detail) + '</p>' : '';
+    return '<tr>' +
+      '<td class="nowrap">' + fmtTime(ev.at) + '</td>' +
+      '<td>' + escapeHtml(ev.username || '(unknown)') + '</td>' +
+      '<td class="nowrap">' + escapeHtml(ev.method) + '</td>' +
+      '<td class="nowrap">' + result + detail + '</td>' +
+      '<td>' + escapeHtml(ev.remote_addr) + '</td>' +
+      '</tr>';
+  }).join("");
+}
+
 function refresh() {
   Promise.all([
     fetch("/api/status").then(function (r) { return r.json(); }),
     fetch("/api/receivers").then(function (r) { return r.json(); }),
-    fetch("/api/logs").then(function (r) { return r.json(); })
+    fetch("/api/logs").then(function (r) { return r.json(); }),
+    fetch("/api/login-events").then(function (r) { return r.json(); })
   ]).then(function (results) {
     render(results[0]);
     lastReceivers = results[1] || [];
     renderReceivers(lastReceivers);
     renderLogs(results[2]);
+    renderLoginEvents(results[3]);
     document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
   }).catch(function (err) {
     document.getElementById("updated").textContent = "error fetching status: " + err;

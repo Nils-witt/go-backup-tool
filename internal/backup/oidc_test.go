@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -209,9 +210,12 @@ func TestOIDCLoginAndCallback(t *testing.T) {
 	// the provider's own login, exchanges the code and starts a session.
 	callbackReq := httptest.NewRequestWithContext(t.Context(), http.MethodGet,
 		fmt.Sprintf("/login/oidc/callback?state=%s&code=test-code", url.QueryEscape(state)), nil)
+	callbackReq.RemoteAddr = "203.0.113.1:12345"
 	callbackRec := httptest.NewRecorder()
 
-	handleOIDCCallback(auth, pending, sessions, discardLogger)(callbackRec, callbackReq)
+	db := openTestStateDB(t)
+
+	handleOIDCCallback(auth, pending, sessions, discardLogger, db)(callbackRec, callbackReq)
 
 	if callbackRec.Code != http.StatusSeeOther {
 		t.Fatalf("callback status = %d, want %d; body = %s", callbackRec.Code, http.StatusSeeOther, callbackRec.Body.String())
@@ -226,8 +230,26 @@ func TestOIDCLoginAndCallback(t *testing.T) {
 		t.Fatalf("callback cookies = %+v, want one %s cookie", cookies, webUISessionCookie)
 	}
 
+	assertSoleLoginEvent(t, db, loginEvent{Username: "person@example.com", Method: "oidc", Success: true})
+
 	if !sessions.valid(cookies[0].Value) {
 		t.Error("the session cookie's value isn't a valid session")
+	}
+}
+
+// assertSoleLoginEvent fails t unless db's login log holds exactly one
+// event matching want's Username/Method/Success (its At/RemoteAddr/Detail
+// are ignored, since callers only care about identity/kind/outcome here).
+func assertSoleLoginEvent(t *testing.T, db *sql.DB, want loginEvent) {
+	t.Helper()
+
+	events, err := readLoginEvents(t.Context(), db, 10)
+	if err != nil {
+		t.Fatalf("readLoginEvents() error: %v", err)
+	}
+
+	if len(events) != 1 || events[0].Username != want.Username || events[0].Method != want.Method || events[0].Success != want.Success {
+		t.Errorf("readLoginEvents() = %+v, want one event %+v", events, want)
 	}
 }
 
@@ -253,7 +275,7 @@ func TestOIDCCallbackUnknownStateRejected(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/login/oidc/callback?state=bogus&code=test-code", nil)
 	rec := httptest.NewRecorder()
 
-	handleOIDCCallback(auth, pending, sessions, discardLogger)(rec, req)
+	handleOIDCCallback(auth, pending, sessions, discardLogger, nil)(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
@@ -292,7 +314,7 @@ func TestOIDCCallbackProviderErrorRejected(t *testing.T) {
 		"/login/oidc/callback?state="+url.QueryEscape(state)+"&error=access_denied", nil)
 	rec := httptest.NewRecorder()
 
-	handleOIDCCallback(auth, pending, sessions, discardLogger)(rec, req)
+	handleOIDCCallback(auth, pending, sessions, discardLogger, nil)(rec, req)
 
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadGateway)
@@ -397,7 +419,7 @@ func TestHandleWebUILoginPasswordPOSTNotFoundWithoutUsername(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleWebUILogin("", "", true, sessions)(rec, req)
+	handleWebUILogin("", "", true, sessions, nil, discardLogger)(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 (no password auth configured, SSO only)", rec.Code)
