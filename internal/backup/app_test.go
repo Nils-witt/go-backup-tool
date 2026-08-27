@@ -114,13 +114,13 @@ func TestRunOnceRefreshesEachTargetIndependently(t *testing.T) {
 		passphrase: "unit-test-passphrase",
 		gpgBin:     "gpg",
 		targets: []target{
-			{serverName: "slow-remote", kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a", token: "x"},
+			{serverName: "slow-remote", kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"},
 			{serverName: "fast-local", kind: serverKindLocal, bucket: "sub", localPath: dir},
 		},
 	}
 
 	store := newStatusStore([]*config{job})
-	r := &runner{log: discardLogger, store: store}
+	r := &runner{log: discardLogger, store: store, identity: testServerIdentity(t)}
 
 	done := make(chan struct{})
 

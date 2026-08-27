@@ -44,8 +44,9 @@ func TestUploadToRemote(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &config{key: "backup.gpg"}
-	tgt := &target{kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a", token: "shh-token"}
+	id := testServerIdentity(t)
+	cfg := &config{key: "backup.gpg", identity: id}
+	tgt := &target{kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"}
 
 	if err := uploadToRemote(t.Context(), cfg, tgt, strings.NewReader("ciphertext")); err != nil {
 		t.Fatalf("uploadToRemote() unexpected error: %v", err)
@@ -59,12 +60,34 @@ func TestUploadToRemote(t *testing.T) {
 		t.Errorf("path = %q, want /api/v1/objects/instance-a/backup.gpg", gotPath)
 	}
 
-	if gotAuth != "Bearer shh-token" {
-		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer shh-token")
+	const prefix = "Bearer "
+	if !strings.HasPrefix(gotAuth, prefix) {
+		t.Fatalf("Authorization = %q, want it to start with %q", gotAuth, prefix)
+	}
+
+	if err := verifyRemoteAuthToken(strings.TrimPrefix(gotAuth, prefix), &id.privateKey.PublicKey, "instance-a"); err != nil {
+		t.Errorf("token sent as Authorization did not verify: %v", err)
 	}
 
 	if gotBody != "ciphertext" {
 		t.Errorf("body = %q, want %q", gotBody, "ciphertext")
+	}
+}
+
+func TestUploadToRemoteNoIdentity(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	cfg := &config{key: "backup.gpg"} // identity left nil: loadServerIdentity failed at startup
+	tgt := &target{kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"}
+
+	err := uploadToRemote(t.Context(), cfg, tgt, strings.NewReader("x"))
+	if err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("uploadToRemote() with no identity error = %v, want it to mention identity", err)
 	}
 }
 
@@ -76,8 +99,8 @@ func TestUploadToRemoteUnauthorized(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &config{key: "backup.gpg"}
-	tgt := &target{kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a", token: "wrong"}
+	cfg := &config{key: "backup.gpg", identity: testServerIdentity(t)}
+	tgt := &target{kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"}
 
 	err := uploadToRemote(t.Context(), cfg, tgt, strings.NewReader("x"))
 	if err == nil || !strings.Contains(err.Error(), "401") {
@@ -98,8 +121,8 @@ func TestDeleteRemoteObject(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &config{key: "backup.gpg"}
-	tgt := &target{kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a", token: "shh-token"}
+	cfg := &config{key: "backup.gpg", identity: testServerIdentity(t)}
+	tgt := &target{kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"}
 
 	if err := deleteRemoteObject(t.Context(), cfg, tgt); err != nil {
 		t.Fatalf("deleteRemoteObject() unexpected error: %v", err)
@@ -122,8 +145,8 @@ func TestDeleteRemoteObjectNotFound(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &config{key: "backup.gpg"}
-	tgt := &target{kind: serverKindRemote, endpoint: srv.URL, bucket: "no-such-id", token: "shh-token"}
+	cfg := &config{key: "backup.gpg", identity: testServerIdentity(t)}
+	tgt := &target{kind: serverKindRemote, endpoint: srv.URL, bucket: "no-such-id"}
 
 	err := deleteRemoteObject(t.Context(), cfg, tgt)
 	if err == nil || !strings.Contains(err.Error(), "404") {
@@ -149,15 +172,16 @@ func TestRemoteTargetInteropWithReceiver(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
+	id := testServerIdentity(t)
 	receivers := map[string]resolvedReceiver{
-		"instance-a": {id: "instance-a", token: "shared-secret", path: dir},
+		"instance-a": {id: "instance-a", publicKey: &id.privateKey.PublicKey, path: dir},
 	}
 
 	srv := httptest.NewServer(newReceiverMux(receivers))
 	defer srv.Close()
 
-	cfg := &config{key: "backup-20260101.gpg"}
-	tgt := &target{kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a", token: "shared-secret"}
+	cfg := &config{key: "backup-20260101.gpg", identity: id}
+	tgt := &target{kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"}
 
 	const content = "encrypted backup bytes"
 
@@ -183,38 +207,69 @@ func TestRemoteTargetInteropWithReceiver(t *testing.T) {
 	}
 }
 
-func TestRemoteTargetInteropWrongToken(t *testing.T) {
+func TestRemoteTargetInteropWrongIdentity(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	receivers := map[string]resolvedReceiver{
-		"instance-a": {id: "instance-a", token: "shared-secret", path: dir},
+		"instance-a": {id: "instance-a", publicKey: &testServerIdentity(t).privateKey.PublicKey, path: dir},
 	}
 
 	srv := httptest.NewServer(newReceiverMux(receivers))
 	defer srv.Close()
 
-	cfg := &config{key: "backup.gpg"}
-	tgt := &target{kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a", token: "wrong-token"}
+	// cfg signs with a different identity than the one the receiver trusts,
+	// so its signature won't verify against the receiver's configured
+	// public-key:.
+	cfg := &config{key: "backup.gpg", identity: testServerIdentity(t)}
+	tgt := &target{kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"}
 
 	err := uploadToRemote(t.Context(), cfg, tgt, strings.NewReader("x"))
 	if err == nil || !strings.Contains(err.Error(), "401") {
-		t.Fatalf("uploadToRemote() with wrong token error = %v, want it to mention 401", err)
+		t.Fatalf("uploadToRemote() with the wrong identity error = %v, want it to mention 401", err)
+	}
+}
+
+func TestRemoteTargetInteropNoAuthorizationHeader(t *testing.T) {
+	t.Parallel()
+
+	id := testServerIdentity(t)
+	receivers := map[string]resolvedReceiver{
+		"instance-a": {id: "instance-a", publicKey: &id.privateKey.PublicKey, path: t.TempDir()},
+	}
+
+	srv := httptest.NewServer(newReceiverMux(receivers))
+	defer srv.Close()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, srv.URL+"/api/v1/objects/instance-a/backup.gpg", strings.NewReader("x"))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("sending request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d (no Authorization header at all)", resp.StatusCode, http.StatusUnauthorized)
 	}
 }
 
 func TestRemoteTargetInteropUnknownID(t *testing.T) {
 	t.Parallel()
 
+	id := testServerIdentity(t)
 	receivers := map[string]resolvedReceiver{
-		"instance-a": {id: "instance-a", token: "shared-secret", path: t.TempDir()},
+		"instance-a": {id: "instance-a", publicKey: &id.privateKey.PublicKey, path: t.TempDir()},
 	}
 
 	srv := httptest.NewServer(newReceiverMux(receivers))
 	defer srv.Close()
 
-	cfg := &config{key: "backup.gpg"}
-	tgt := &target{kind: serverKindRemote, endpoint: srv.URL, bucket: "no-such-id", token: "shared-secret"}
+	cfg := &config{key: "backup.gpg", identity: id}
+	tgt := &target{kind: serverKindRemote, endpoint: srv.URL, bucket: "no-such-id"}
 
 	err := uploadToRemote(t.Context(), cfg, tgt, strings.NewReader("x"))
 	if err == nil || !strings.Contains(err.Error(), "404") {

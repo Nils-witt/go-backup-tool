@@ -1,7 +1,11 @@
 package backup
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +16,28 @@ import (
 	"testing"
 	"time"
 )
+
+// testReceiverPublicKeyPEM generates a fresh (test-speed) RSA key pair and
+// returns its public key both PEM-encoded (as a receivers: entry's
+// public-key: value) and parsed (to build the resolvedReceiver a test
+// expects buildReceivers to produce).
+func testReceiverPublicKeyPEM(t *testing.T) (string, *rsa.PublicKey) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generating RSA key: %v", err)
+	}
+
+	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("marshaling public key: %v", err)
+	}
+
+	pemText := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+
+	return pemText, &key.PublicKey
+}
 
 func TestSanitizeObjectKey(t *testing.T) {
 	t.Parallel()
@@ -47,17 +73,20 @@ func TestSanitizeObjectKey(t *testing.T) {
 func TestBuildReceivers(t *testing.T) {
 	t.Parallel()
 
+	pemA, pubA := testReceiverPublicKeyPEM(t)
+	pemB, pubB := testReceiverPublicKeyPEM(t)
+
 	receivers, err := buildReceivers([]fileReceiver{
-		{ID: "a", Token: "tok-a", Path: "/mnt/a"},
-		{ID: "b", Token: "tok-b", Path: "/mnt/b", Retention: "7d"},
+		{ID: "a", PublicKey: pemA, Path: "/mnt/a"},
+		{ID: "b", PublicKey: pemB, Path: "/mnt/b", Retention: "7d"},
 	})
 	if err != nil {
 		t.Fatalf("buildReceivers() unexpected error: %v", err)
 	}
 
 	want := map[string]resolvedReceiver{
-		"a": {id: "a", token: "tok-a", path: "/mnt/a"},
-		"b": {id: "b", token: "tok-b", path: "/mnt/b", retention: 7 * 24 * time.Hour},
+		"a": {id: "a", publicKey: pubA, path: "/mnt/a"},
+		"b": {id: "b", publicKey: pubB, path: "/mnt/b", retention: 7 * 24 * time.Hour},
 	}
 
 	if len(receivers) != len(want) {
@@ -74,7 +103,9 @@ func TestBuildReceivers(t *testing.T) {
 func TestBuildReceiversRequiresID(t *testing.T) {
 	t.Parallel()
 
-	_, err := buildReceivers([]fileReceiver{{Token: "t", Path: "/mnt/a"}})
+	pemText, _ := testReceiverPublicKeyPEM(t)
+
+	_, err := buildReceivers([]fileReceiver{{PublicKey: pemText, Path: "/mnt/a"}})
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for missing id, got nil")
 	}
@@ -83,9 +114,46 @@ func TestBuildReceiversRequiresID(t *testing.T) {
 func TestBuildReceiversRequiresPath(t *testing.T) {
 	t.Parallel()
 
-	_, err := buildReceivers([]fileReceiver{{ID: "a", Token: "t"}})
+	pemText, _ := testReceiverPublicKeyPEM(t)
+
+	_, err := buildReceivers([]fileReceiver{{ID: "a", PublicKey: pemText}})
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for missing path, got nil")
+	}
+}
+
+func TestBuildReceiversRequiresPublicKey(t *testing.T) {
+	t.Parallel()
+
+	_, err := buildReceivers([]fileReceiver{{ID: "a", Path: "/mnt/a"}})
+	if err == nil {
+		t.Fatal("buildReceivers() expected error for missing public-key, got nil")
+	}
+}
+
+func TestBuildReceiversRejectsInvalidPublicKey(t *testing.T) {
+	t.Parallel()
+
+	_, err := buildReceivers([]fileReceiver{{ID: "a", PublicKey: "not a PEM key", Path: "/mnt/a"}})
+	if err == nil {
+		t.Fatal("buildReceivers() expected error for invalid public-key, got nil")
+	}
+}
+
+func TestBuildReceiversRejectsNonRSAPublicKey(t *testing.T) {
+	t.Parallel()
+
+	// A PEM block of the right type but the wrong key algorithm (an EC key,
+	// rather than RSA) must also be rejected, since signRemoteAuthToken/
+	// verifyRemoteAuthToken only support RS256.
+	const ecPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEF4MRFTT9HV60ttWqYkFekzGqdpVY
+If1SoUSBRfFVHGlXZJjmfRQxikr35aLMtrCtQ4GvhyLhd81I0HfA3+H0gg==
+-----END PUBLIC KEY-----`
+
+	_, err := buildReceivers([]fileReceiver{{ID: "a", PublicKey: ecPublicKeyPEM, Path: "/mnt/a"}})
+	if err == nil {
+		t.Fatal("buildReceivers() expected error for a non-RSA public-key, got nil")
 	}
 }
 
@@ -196,15 +264,17 @@ func TestParseStaleAfter(t *testing.T) {
 func TestBuildReceiversStaleAfterAndWebhook(t *testing.T) {
 	t.Parallel()
 
+	pemText, pub := testReceiverPublicKeyPEM(t)
+
 	receivers, err := buildReceivers([]fileReceiver{
-		{ID: "a", Token: "tok", Path: "/mnt/a", StaleAfter: "6h", Webhook: fileWebhook{URL: "https://example.com/hook"}},
+		{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h", Webhook: fileWebhook{URL: "https://example.com/hook"}},
 	})
 	if err != nil {
 		t.Fatalf("buildReceivers() unexpected error: %v", err)
 	}
 
 	want := resolvedReceiver{
-		id: "a", token: "tok", path: "/mnt/a",
+		id: "a", publicKey: pub, path: "/mnt/a",
 		staleAfter: 6 * time.Hour,
 		webhook:    resolvedWebhook{url: "https://example.com/hook", method: http.MethodPost},
 	}
@@ -217,7 +287,9 @@ func TestBuildReceiversStaleAfterAndWebhook(t *testing.T) {
 func TestBuildReceiversStaleAfterRequiresWebhook(t *testing.T) {
 	t.Parallel()
 
-	_, err := buildReceivers([]fileReceiver{{ID: "a", Token: "t", Path: "/mnt/a", StaleAfter: "6h"}})
+	pemText, _ := testReceiverPublicKeyPEM(t)
+
+	_, err := buildReceivers([]fileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h"}})
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for stale-after without webhook.url, got nil")
 	}
@@ -226,7 +298,9 @@ func TestBuildReceiversStaleAfterRequiresWebhook(t *testing.T) {
 func TestBuildReceiversWebhookRequiresStaleAfter(t *testing.T) {
 	t.Parallel()
 
-	_, err := buildReceivers([]fileReceiver{{ID: "a", Token: "t", Path: "/mnt/a", Webhook: fileWebhook{URL: "https://example.com/hook"}}})
+	pemText, _ := testReceiverPublicKeyPEM(t)
+
+	_, err := buildReceivers([]fileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", Webhook: fileWebhook{URL: "https://example.com/hook"}}})
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for webhook.url without stale-after, got nil")
 	}
@@ -235,9 +309,11 @@ func TestBuildReceiversWebhookRequiresStaleAfter(t *testing.T) {
 func TestBuildReceiversWebhookMethodHeadersAndBody(t *testing.T) {
 	t.Parallel()
 
+	pemText, _ := testReceiverPublicKeyPEM(t)
+
 	receivers, err := buildReceivers([]fileReceiver{
 		{
-			ID: "a", Token: "tok", Path: "/mnt/a", StaleAfter: "6h",
+			ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h",
 			Webhook: fileWebhook{
 				URL:     "https://example.com/hook",
 				Method:  "put",
@@ -268,8 +344,10 @@ func TestBuildReceiversWebhookMethodHeadersAndBody(t *testing.T) {
 func TestBuildReceiversWebhookMethodDefaultsToPost(t *testing.T) {
 	t.Parallel()
 
+	pemText, _ := testReceiverPublicKeyPEM(t)
+
 	receivers, err := buildReceivers([]fileReceiver{
-		{ID: "a", Token: "t", Path: "/mnt/a", StaleAfter: "6h", Webhook: fileWebhook{URL: "https://example.com/hook"}},
+		{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h", Webhook: fileWebhook{URL: "https://example.com/hook"}},
 	})
 	if err != nil {
 		t.Fatalf("buildReceivers() unexpected error: %v", err)
@@ -283,7 +361,9 @@ func TestBuildReceiversWebhookMethodDefaultsToPost(t *testing.T) {
 func TestBuildReceiversWebhookBodyRequiresURL(t *testing.T) {
 	t.Parallel()
 
-	_, err := buildReceivers([]fileReceiver{{ID: "a", Token: "t", Path: "/mnt/a", Webhook: fileWebhook{Body: "custom"}}})
+	pemText, _ := testReceiverPublicKeyPEM(t)
+
+	_, err := buildReceivers([]fileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", Webhook: fileWebhook{Body: "custom"}}})
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for webhook.body without webhook.url, got nil")
 	}
@@ -292,8 +372,10 @@ func TestBuildReceiversWebhookBodyRequiresURL(t *testing.T) {
 func TestBuildReceiversWebhookHeadersRequireURL(t *testing.T) {
 	t.Parallel()
 
+	pemText, _ := testReceiverPublicKeyPEM(t)
+
 	_, err := buildReceivers([]fileReceiver{
-		{ID: "a", Token: "t", Path: "/mnt/a", Webhook: fileWebhook{Headers: map[string]string{"X-Test": "y"}}},
+		{ID: "a", PublicKey: pemText, Path: "/mnt/a", Webhook: fileWebhook{Headers: map[string]string{"X-Test": "y"}}},
 	})
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for webhook.headers without webhook.url, got nil")
@@ -303,7 +385,9 @@ func TestBuildReceiversWebhookHeadersRequireURL(t *testing.T) {
 func TestBuildReceiversWebhookMethodRequiresURL(t *testing.T) {
 	t.Parallel()
 
-	_, err := buildReceivers([]fileReceiver{{ID: "a", Token: "t", Path: "/mnt/a", Webhook: fileWebhook{Method: "PUT"}}})
+	pemText, _ := testReceiverPublicKeyPEM(t)
+
+	_, err := buildReceivers([]fileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", Webhook: fileWebhook{Method: "PUT"}}})
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for webhook.method without webhook.url, got nil")
 	}

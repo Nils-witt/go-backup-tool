@@ -2,6 +2,7 @@ package backup
 
 import (
 	"bytes"
+	"crypto/rsa"
 	"errors"
 	"flag"
 	"log/slog"
@@ -13,6 +14,47 @@ import (
 	"testing"
 	"time"
 )
+
+// testConfigRSAPublicKeyPEM is a fixed RSA public key, PEM-encoded the same
+// way ensureServerKeyPair writes server.pub, for embedding as a receivers:
+// entry's public-key: in raw YAML config fixtures below (see
+// indentYAMLBlock) — a fixed value keeps these fixtures readable, since the
+// tests that need it don't care whose key it is, only that it's a valid
+// one. testConfigRSAPublicKey parses it back, for building the
+// resolvedReceiver a test expects parseFlags to produce.
+const testConfigRSAPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0tEcLZdvrCAVooY+qTwb
+0Er/KU65mc7jhrs6OV5yhDjzpdLD8/oN1stMyp47XAUbIwL7Sm0EaFmqbTPkgE+E
+Q+3czxCDSTnRLMLBk7qK/QdTQ03zNTmq/ZGatISUl+OWeJP+EdC4vMTHrMKtBquM
+rHOPc29Qc+KTTrRyqGJlFsfpFx6RuSphXDqC0rEuxcdxXf6/Nesux1r6yA1lJqcX
+Tik8xq6oBBbbnF7CK4oUPMgSKlrOs2+TrYEv1jG4zmv6XFWu70z2mYbll5LvguIT
+wnccZSbEZ0rr3WTuW3NGjGYJFXx1f1IzoCbt4LxjT3sLvqyWlmCXSnhAZkVvN5YQ
+MQIDAQAB
+-----END PUBLIC KEY-----
+`
+
+func testConfigRSAPublicKey(t *testing.T) *rsa.PublicKey {
+	t.Helper()
+
+	pub, err := parseReceiverPublicKey(testConfigRSAPublicKeyPEM)
+	if err != nil {
+		t.Fatalf("parsing testConfigRSAPublicKeyPEM: %v", err)
+	}
+
+	return pub
+}
+
+// indentYAMLBlock indents every line of text by indent, for embedding a
+// multi-line PEM value under a YAML public-key: |  block scalar in the raw
+// config fixtures below.
+func indentYAMLBlock(text, indent string) string {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	for i, l := range lines {
+		lines[i] = indent + l
+	}
+
+	return strings.Join(lines, "\n")
+}
 
 // writeConfigFile writes contents to a config.yaml inside t.TempDir() and
 // returns its path.
@@ -1066,7 +1108,6 @@ servers:
   - name: sib
     type: remote
     endpoint: "https://backup2.example.com:8443"
-    token: shared-secret
 
 jobs:
   - name: test
@@ -1646,7 +1687,6 @@ servers:
   - name: sibling
     type: remote
     endpoint: "https://backup2.example.com:8443"
-    token: "shared-secret"
 
 jobs:
   - name: test
@@ -1667,7 +1707,6 @@ jobs:
 		kind:       serverKindRemote,
 		bucket:     "from-primary",
 		endpoint:   "https://backup2.example.com:8443",
-		token:      "shared-secret",
 	}
 	if len(cfg.targets) != 1 || cfg.targets[0] != want {
 		t.Errorf("cfg.targets = %+v, want [%+v]", cfg.targets, want)
@@ -1681,7 +1720,6 @@ func TestParseFlagsRemoteServerRequiresEndpoint(t *testing.T) {
 servers:
   - name: sibling
     type: remote
-    token: "shared-secret"
 
 jobs:
   - name: test
@@ -1696,28 +1734,6 @@ jobs:
 	}
 }
 
-func TestParseFlagsRemoteServerRequiresToken(t *testing.T) {
-	t.Parallel()
-
-	path := writeConfigFile(t, `
-servers:
-  - name: sibling
-    type: remote
-    endpoint: "https://backup2.example.com:8443"
-
-jobs:
-  - name: test
-    cmd: echo hi
-    targets: [{server: sibling, bucket: from-primary}]
-    recipients: [me@example.com]
-`)
-
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "token is required for type: remote") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "token is required for type: remote")
-	}
-}
-
 func TestParseFlagsRemoteServerRejectsOtherFields(t *testing.T) {
 	t.Parallel()
 
@@ -1726,7 +1742,6 @@ servers:
   - name: sibling
     type: remote
     endpoint: "https://backup2.example.com:8443"
-    token: "shared-secret"
     path: /mnt/backups
 
 jobs:
@@ -1754,7 +1769,8 @@ servers:
 
 receivers:
   - id: from-primary
-    token: "shared-secret"
+    public-key: |
+`+indentYAMLBlock(testConfigRSAPublicKeyPEM, "      ")+`
     path: `+dir+`
     retention: 30d
 
@@ -1775,13 +1791,13 @@ jobs:
 		t.Fatalf("rc.receivers = %+v, want an entry for %q", rc.receivers, "from-primary")
 	}
 
-	want := resolvedReceiver{id: "from-primary", token: "shared-secret", path: dir, retention: 30 * 24 * time.Hour}
+	want := resolvedReceiver{id: "from-primary", publicKey: testConfigRSAPublicKey(t), path: dir, retention: 30 * 24 * time.Hour}
 	if !reflect.DeepEqual(recv, want) {
 		t.Errorf("rc.receivers[%q] = %+v, want %+v", "from-primary", recv, want)
 	}
 }
 
-func TestParseFlagsReceiverRequiresToken(t *testing.T) {
+func TestParseFlagsReceiverRequiresPublicKey(t *testing.T) {
 	t.Parallel()
 
 	path := writeConfigFile(t, `
@@ -1801,8 +1817,8 @@ jobs:
 `)
 
 	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), `receiver "from-primary": token is required`) {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, `receiver "from-primary": token is required`)
+	if err == nil || !strings.Contains(err.Error(), `receiver "from-primary": public-key is required`) {
+		t.Fatalf("parseFlags() error = %v, want substring %q", err, `receiver "from-primary": public-key is required`)
 	}
 }
 
@@ -1816,10 +1832,12 @@ servers:
 
 receivers:
   - id: dup
-    token: "a"
+    public-key: |
+`+indentYAMLBlock(testConfigRSAPublicKeyPEM, "      ")+`
     path: /mnt/a
   - id: dup
-    token: "b"
+    public-key: |
+`+indentYAMLBlock(testConfigRSAPublicKeyPEM, "      ")+`
     path: /mnt/b
 
 jobs:
@@ -1847,7 +1865,8 @@ servers:
 
 receivers:
   - id: from-primary
-    token: "shared-secret"
+    public-key: |
+`+indentYAMLBlock(testConfigRSAPublicKeyPEM, "      ")+`
     path: `+dir+`
     stale-after: 6h
     webhook:
@@ -1875,7 +1894,7 @@ jobs:
 	}
 
 	want := resolvedReceiver{
-		id: "from-primary", token: "shared-secret", path: dir,
+		id: "from-primary", publicKey: testConfigRSAPublicKey(t), path: dir,
 		staleAfter: 6 * time.Hour,
 		webhook: resolvedWebhook{
 			url:     "https://alerts.example.com/hook",
@@ -1899,7 +1918,8 @@ servers:
 
 receivers:
   - id: from-primary
-    token: "shared-secret"
+    public-key: |
+`+indentYAMLBlock(testConfigRSAPublicKeyPEM, "      ")+`
     path: /mnt/backups
     stale-after: 6h
 

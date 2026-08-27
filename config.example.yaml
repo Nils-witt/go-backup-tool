@@ -32,9 +32,14 @@
 # go-backup-tool instance's receiver API (see receivers: below). A local
 # server only needs path; a target's bucket is still required and is used
 # as a subdirectory under it, so the object ends up at path/bucket/key. A
-# remote server only needs endpoint and token; a target's bucket is still
-# required and is sent as the id identifying which of the destination
-# instance's receivers: entries to write to.
+# remote server only needs endpoint; a target's bucket is still required
+# and is sent as the id identifying which of the destination instance's
+# receivers: entries to write to. Unlike a local or S3 server, a remote
+# server needs no auth field of its own: every go-backup-tool instance
+# generates its own persistent RSA key pair and UUID on first run (under
+# ./data/keys, next to this file) and signs each request to a remote
+# server with it; see receivers: below for how the destination instance
+# is told to trust it.
 #
 # A local server may also set retention: (e.g. "7d" for 7 days, "168h",
 # "90m" for 90 minutes — "d" for days works alongside every unit Go's
@@ -78,11 +83,11 @@ servers:
   - name: sibling-instance
     type: remote
     endpoint: "https://backup2.example.com:8443"
-    # token authenticates to the destination instance's receiver API (see
-    # its own receivers: entry below); unlike access-key-env/secret-key-env
-    # above, it's written directly here rather than read from the
-    # environment, so protect this file's permissions accordingly.
-    token: "replace-with-a-long-random-shared-secret"
+    # No auth field here: this instance authenticates to the destination
+    # with its own generated identity (see above). Give the destination
+    # instance's operator this instance's public key — the contents of
+    # ./data/keys/server.pub — to paste into its own receivers: entry's
+    # public-key: (see below).
 
 # Every job is defined under jobs:, one entry per backup; run all jobs (in
 # order) with no -job flag, or one with -job <name>. Every key below is
@@ -143,7 +148,7 @@ servers:
 #   # leaves the web UI open to anyone who can reach it; the receiver API
 #   # (used by other go-backup-tool instances, not browsers) is unaffected
 #   # either way, since it authenticates each request with its own
-#   # per-receiver bearer token.
+#   # per-receiver public-key-verified JSON Web Token.
 #   username: "admin"
 #   password: "replace-with-a-long-random-password"
 #
@@ -227,12 +232,14 @@ jobs:
 # side of another go-backup-tool instance's type: remote target above. Only
 # reachable when webui.enabled: true is set (the receiver API is served by
 # the same HTTP server as the dashboard). Each entry's id is what a
-# sender's target names as its bucket; token must match the value the
-# sender configured on its own servers: entry (see "sibling-instance"
-# above); path is the root directory incoming objects for this id are
-# written under (object ends up at path/key, mirroring a local server's
-# path/bucket/key); retention (optional, same syntax as a local server's)
-# deletes objects here once they're older than that.
+# sender's target names as its bucket; public-key must be the sending
+# instance's own public key — the contents of that instance's
+# ./data/keys/server.pub (see "sibling-instance" above) — so this instance
+# can verify the JSON Web Token every request from it is signed with,
+# instead of a shared secret; path is the root directory incoming objects
+# for this id are written under (object ends up at path/key, mirroring a
+# local server's path/bucket/key); retention (optional, same syntax as a
+# local server's) deletes objects here once they're older than that.
 #
 # stale-after and webhook (optional, set together) monitor this receiver for
 # a sender that's stopped showing up: once at least one file has been
@@ -254,7 +261,10 @@ jobs:
 # {last_received} (an RFC 3339 timestamp) placeholders.
 # receivers:
 #   - id: from-primary
-#     token: "replace-with-a-long-random-shared-secret"
+#     public-key: |
+#       -----BEGIN PUBLIC KEY-----
+#       ...paste sibling-instance's own data/keys/server.pub here...
+#       -----END PUBLIC KEY-----
 #     path: /mnt/remote-backups/from-primary
 #     retention: 30d
 #     stale-after: 26h # alert if sibling-instance's daily job hasn't shown up

@@ -641,17 +641,41 @@ func remoteObjectURL(t *target, key string) string {
 		strings.TrimSuffix(t.endpoint, "/"), url.PathEscape(t.bucket), url.PathEscape(key))
 }
 
+// remoteAuthHeader signs a fresh JWT with cfg.identity (this instance's own
+// RSA key and UUID — see loadServerIdentity) scoped to t.bucket (the
+// destination instance's receiver id) and formats it as an Authorization:
+// Bearer header value, for uploadToRemote/deleteRemoteObject. Errors if
+// cfg.identity is nil, meaning loadServerIdentity failed at startup.
+func remoteAuthHeader(cfg *config, t *target) (string, error) {
+	if cfg.identity == nil {
+		return "", errors.New("no server identity available (see startup log for why loadServerIdentity failed)")
+	}
+
+	token, err := signRemoteAuthToken(cfg.identity.privateKey, cfg.identity.uuid, t.bucket)
+	if err != nil {
+		return "", fmt.Errorf("signing request: %w", err)
+	}
+
+	return "Bearer " + token, nil
+}
+
 // uploadToRemote streams r as the body of a PUT request to another
 // go-backup-tool instance's receiver API (target t, kind ==
-// serverKindRemote), authenticated with t.token as a bearer token. r is
-// streamed directly as the request body, never buffered.
+// serverKindRemote), authenticated with a JWT signed by this instance's own
+// identity (see remoteAuthHeader). r is streamed directly as the request
+// body, never buffered.
 func uploadToRemote(ctx context.Context, cfg *config, t *target, r io.Reader) error {
+	auth, err := remoteAuthHeader(cfg, t)
+	if err != nil {
+		return err
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, remoteObjectURL(t, cfg.key), r)
 	if err != nil {
 		return fmt.Errorf("building request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+t.token)
+	req.Header.Set("Authorization", auth)
 	req.Header.Set("Content-Type", "application/octet-stream")
 
 	resp, err := remoteHTTPClient.Do(req)
@@ -676,12 +700,17 @@ func uploadToRemote(ctx context.Context, cfg *config, t *target, r io.Reader) er
 // tested against the real receiver handler, see remote_test.go) as part of
 // the receiver API's client surface.
 func deleteRemoteObject(ctx context.Context, cfg *config, t *target) error {
+	auth, err := remoteAuthHeader(cfg, t)
+	if err != nil {
+		return err
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, remoteObjectURL(t, cfg.key), nil)
 	if err != nil {
 		return fmt.Errorf("building request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+t.token)
+	req.Header.Set("Authorization", auth)
 
 	resp, err := remoteHTTPClient.Do(req)
 	if err != nil {

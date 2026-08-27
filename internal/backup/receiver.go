@@ -3,8 +3,11 @@ package backup
 import (
 	"bytes"
 	"context"
+	"crypto/rsa"
+	"crypto/x509"
 	"database/sql"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -26,8 +29,16 @@ import (
 // when listen: is set, since the receiver API is served by the same HTTP
 // server as the web UI dashboard.
 type fileReceiver struct {
-	ID         string      `yaml:"id"`
-	Token      string      `yaml:"token"`       // bearer token a sender must present; matches the sender's servers: entry token
+	ID string `yaml:"id"`
+
+	// PublicKey is the PEM-encoded RSA public key of the sending instance
+	// allowed to write to this receiver — the contents of that instance's
+	// own generated data/keys/server.pub (see ensureServerKeyPair). Every
+	// request must present a JSON Web Token signed with the matching
+	// private key (see signRemoteAuthToken/verifyRemoteAuthToken and
+	// authorizeReceiver in webui.go); unlike the token: field this replaces,
+	// nothing here is itself a secret; it just names who's allowed to send.
+	PublicKey  string      `yaml:"public-key"`
 	Path       string      `yaml:"path"`        // root directory incoming objects for this id are written under
 	Retention  string      `yaml:"retention"`   // optional, same syntax as a local server's retention: e.g. "30d"
 	StaleAfter string      `yaml:"stale-after"` // optional, same duration syntax as retention: e.g. "6h" or "1d"; requires webhook.url: and enables the stale-receiver webhook monitor (see monitorStaleReceivers)
@@ -63,7 +74,7 @@ type resolvedWebhook struct {
 // the receiver API's handlers.
 type resolvedReceiver struct {
 	id         string
-	token      string
+	publicKey  *rsa.PublicKey
 	path       string
 	retention  time.Duration
 	staleAfter time.Duration   // 0 disables the stale-receiver webhook monitor for this receiver
@@ -71,8 +82,8 @@ type resolvedReceiver struct {
 }
 
 // buildReceivers validates fileReceivers and builds an id -> resolvedReceiver
-// map, requiring every entry to have a unique, non-empty id, a non-empty
-// token, and a non-empty path.
+// map, requiring every entry to have a unique, non-empty id, a valid RSA
+// public-key:, and a non-empty path.
 func buildReceivers(fileReceivers []fileReceiver) (map[string]resolvedReceiver, error) {
 	receivers := make(map[string]resolvedReceiver, len(fileReceivers))
 
@@ -86,8 +97,9 @@ func buildReceivers(fileReceivers []fileReceiver) (map[string]resolvedReceiver, 
 			return nil, fmt.Errorf("receivers[%d]: duplicate receiver id %q", i, id)
 		}
 
-		if strings.TrimSpace(fr.Token) == "" {
-			return nil, fmt.Errorf("receiver %q: token is required", id)
+		publicKey, err := parseReceiverPublicKey(fr.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("receiver %q: %w", id, err)
 		}
 
 		if strings.TrimSpace(fr.Path) == "" {
@@ -111,7 +123,7 @@ func buildReceivers(fileReceivers []fileReceiver) (map[string]resolvedReceiver, 
 
 		receivers[id] = resolvedReceiver{
 			id:         id,
-			token:      fr.Token,
+			publicKey:  publicKey,
 			path:       fr.Path,
 			retention:  retention,
 			staleAfter: staleAfter,
@@ -120,6 +132,29 @@ func buildReceivers(fileReceivers []fileReceiver) (map[string]resolvedReceiver, 
 	}
 
 	return receivers, nil
+}
+
+// parseReceiverPublicKey parses raw (a receiver's public-key: value) as a
+// PEM-encoded PKIX public key — the same format ensureServerKeyPair writes
+// to server.pub — requiring it to be an RSA key, since that's the only
+// algorithm signRemoteAuthToken/verifyRemoteAuthToken sign and verify with.
+func parseReceiverPublicKey(raw string) (*rsa.PublicKey, error) {
+	block, _ := pem.Decode([]byte(raw))
+	if block == nil || block.Type != "PUBLIC KEY" {
+		return nil, errors.New("public-key is required and must be a PEM-encoded PUBLIC KEY block")
+	}
+
+	key, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parsing public-key: %w", err)
+	}
+
+	rsaKey, ok := key.(*rsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("public-key must be an RSA key, got %T", key)
+	}
+
+	return rsaKey, nil
 }
 
 // buildWebhook validates fw (a receiver's webhook: block) against that
@@ -205,7 +240,7 @@ func sanitizeObjectKey(key string) (string, error) {
 // API's handlers can reuse writeLocalObject/recordLocalWrite/
 // deleteLocalObject/removeRetentionRecord (see pipeline.go and retention.go)
 // exactly as a type: local target does — a receiver is a local target
-// written to over HTTP with token auth, not a distinct storage
+// written to over HTTP with JWT auth, not a distinct storage
 // implementation.
 func receiverTarget(recv resolvedReceiver) *target {
 	return &target{

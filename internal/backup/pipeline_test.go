@@ -267,9 +267,10 @@ func TestUploadStagedToTargetsIsolatesSlowTarget(t *testing.T) {
 	dir := t.TempDir()
 
 	cfg := &config{
-		key: "backup.gpg",
+		key:      "backup.gpg",
+		identity: testServerIdentity(t),
 		targets: []target{
-			{serverName: "sibling-instance", kind: serverKindRemote, endpoint: "http://10.255.255.1:8050", bucket: "from-primary", token: "x"},
+			{serverName: "sibling-instance", kind: serverKindRemote, endpoint: "http://10.255.255.1:8050", bucket: "from-primary"},
 			{serverName: "nas", kind: serverKindLocal, bucket: "my-backup-bucket-local", localPath: dir},
 		},
 	}
@@ -340,8 +341,8 @@ func TestUploadTargetWithRetryRecoversTransientFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &config{key: "backup.gpg", retries: 3, retryDelay: time.Millisecond}
-	tgt := &target{serverName: "flaky", kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a", token: "x"}
+	cfg := &config{key: "backup.gpg", retries: 3, retryDelay: time.Millisecond, identity: testServerIdentity(t)}
+	tgt := &target{serverName: "flaky", kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"}
 
 	err := uploadTargetWithRetry(t.Context(), cfg, tgt, stageTestContent(t, content), discardLogger)
 	if err != nil {
@@ -377,8 +378,8 @@ func TestUploadTargetWithRetryExhausted(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &config{key: "backup.gpg", retries: 2, retryDelay: time.Millisecond}
-	tgt := &target{serverName: "always-down", kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a", token: "x"}
+	cfg := &config{key: "backup.gpg", retries: 2, retryDelay: time.Millisecond, identity: testServerIdentity(t)}
+	tgt := &target{serverName: "always-down", kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"}
 
 	err := uploadTargetWithRetry(t.Context(), cfg, tgt, stageTestContent(t, "hello"), discardLogger)
 	if err == nil {

@@ -21,21 +21,11 @@ const (
 	serverKeyBits        = 4096
 )
 
-// ensureServerKeyPairAtStartup calls ensureServerKeyPair for
-// defaultServerKeyDir, the default location every run maintains a server
-// key pair under, logging (rather than failing the run over) any error —
-// this is best-effort housekeeping, not something any run depends on yet.
-func ensureServerKeyPairAtStartup(log *slog.Logger) {
-	if err := ensureServerKeyPair(defaultServerKeyDir, log); err != nil {
-		log.Warn("ensuring server key pair", "dir", defaultServerKeyDir, "err", err)
-	}
-}
-
 // ensureServerKeyPair makes sure an RSA 4096 server key pair exists under
 // dir (server.key holding the PKCS#1 private key, server.pub the PKIX
 // public key, both PEM-encoded), generating one if dir/server.key is
-// missing. Nothing currently reads these files back; this only guarantees
-// they exist for future use.
+// missing. See loadServerIdentity, which reads server.key back to sign
+// outgoing type: remote target requests.
 func ensureServerKeyPair(dir string, log *slog.Logger) error {
 	privPath := filepath.Join(dir, serverPrivateKeyFile)
 	pubPath := filepath.Join(dir, serverPublicKeyFile)

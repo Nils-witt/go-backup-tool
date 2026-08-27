@@ -93,8 +93,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 
 	log, logs := newRunLogger(stderr, rc)
 
-	ensureServerKeyPairAtStartup(log)
-	ensureServerUUIDAtStartup(log)
+	identity := loadServerIdentityAtStartup(log)
 
 	if rc.timeout > 0 {
 		var cancel context.CancelFunc
@@ -134,7 +133,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		seedStatusFromState(ctx, stateDB, rc.jobs, store, log)
 	}
 
-	r := &runner{log: log, store: store, stateDB: stateDB}
+	r := &runner{log: log, store: store, stateDB: stateDB, identity: identity}
 
 	var srv *webUIServer
 
@@ -185,10 +184,11 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 // runner tracks whether any job run has failed across the concurrently
 // scheduled jobs.
 type runner struct {
-	log     *slog.Logger
-	store   *statusStore
-	stateDB *sql.DB // nil if no job uses start-time, or the db couldn't be opened
-	failed  atomic.Bool
+	log      *slog.Logger
+	store    *statusStore
+	stateDB  *sql.DB         // nil if no job uses start-time, or the db couldn't be opened
+	identity *serverIdentity // nil if loadServerIdentity failed at startup; see config.identity
+	failed   atomic.Bool
 }
 
 // seedStatusFromState initializes store's jobs from previously persisted
@@ -425,6 +425,7 @@ func (r *runner) runOnce(ctx context.Context, job *config) {
 	run := *job
 	run.key = substituteKeyTime(job.key)
 	run.stateDB = r.stateDB
+	run.identity = r.identity
 
 	log := r.log.With("job", job.name, "key", run.key)
 

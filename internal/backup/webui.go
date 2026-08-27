@@ -59,9 +59,9 @@ type webUIServer struct {
 // downloads) behind a login page and session cookie (see
 // requireWebUISession/handleWebUILogin); the receiver API
 // (handleReceiveObject/handleDeleteObject) is unaffected, since it
-// authenticates each request on its own via each receiver's bearer token
-// (see authorizeReceiver). An empty webUIUsername leaves the web UI open, as
-// before this was added.
+// authenticates each request on its own via each receiver's own
+// public-key-verified JWT (see authorizeReceiver). An empty webUIUsername
+// leaves the web UI open, as before this was added.
 // oidcAuth, when non-nil (see newOIDCAuth in oidc.go), additionally lets a
 // browser log in via that provider's own "Log in with SSO" link on the
 // login page (see handleOIDCLogin/handleOIDCCallback), alongside the
@@ -247,7 +247,7 @@ func annotateReceiverStaleness(snap *receiverSnapshot, recv resolvedReceiver, lo
 // currently stored under receiver {id}'s path (see listReceiverFiles), for
 // the web UI dashboard's per-receiver file listing. Unlike the receiver API
 // (handleReceiveObject/handleDeleteObject), this is dashboard-only and isn't
-// token-authenticated, matching /api/receivers.
+// JWT-authenticated, matching /api/receivers.
 func handleReceiverFiles(receivers map[string]resolvedReceiver, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := receivers[r.PathValue("id")]
@@ -512,8 +512,9 @@ func safeNextPath(next string) string {
 // handleWebUILogin serves the dashboard's own login form (GET /login) and
 // its submission (POST /login), checking username/password (webui.username/
 // webui.password in the config file) with subtle.ConstantTimeCompare rather
-// than ==, like authorizeReceiver's own token check, so a mismatch can't be
-// timed to learn how many leading bytes were guessed correctly. A
+// than ==, so a mismatch can't be timed to learn how many leading bytes
+// were guessed correctly (authorizeReceiver's own auth is a JWT signature
+// check, not a raw comparison, so it needs no such care). A
 // successful submission starts a session (see sessionStore) and sets
 // webUISessionCookie so requireWebUISession lets the browser back in
 // without asking for credentials on every request; it then redirects to
@@ -746,7 +747,7 @@ func renderLoginPage(errMsg, next string, showPassword, showSSO bool) string {
 // actual content of one object currently stored under receiver {id}'s path,
 // for a person to save from the dashboard's file listing (see
 // listReceiverFiles/handleReceiverFiles for the metadata-only listing this
-// complements). Unlike the receiver API's own per-receiver token auth (see
+// complements). Unlike the receiver API's own per-receiver JWT auth (see
 // authorizeReceiver), this relies entirely on the dashboard's own login (see
 // requireWebUISession, which wraps this handler in startWebUI) rather than
 // any auth of its own, since the audience here is a person clicking a link
@@ -901,7 +902,7 @@ func handleDeleteObject(receivers map[string]resolvedReceiver, status *receiverS
 // username/password nor an OIDC provider configured) disables the check
 // entirely, leaving the web UI open — this gates the dashboard and its
 // /api/... endpoints (see startWebUI), not the receiver API, which
-// authenticates separately via each receiver's own bearer token.
+// authenticates separately via each receiver's own public-key-verified JWT.
 func requireWebUISession(authEnabled bool, sessions *sessionStore, redirectOnFail bool, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !authEnabled || sessions.authenticated(r) {
@@ -919,9 +920,11 @@ func requireWebUISession(authEnabled bool, sessions *sessionStore, redirectOnFai
 }
 
 // authorizeReceiver looks up the receiver named by the request's {id} path
-// value and checks its Authorization: Bearer <token> header, writing an
+// value and verifies its Authorization: Bearer <token> header as a JWT
+// signed by that receiver's configured public-key: (see
+// verifyRemoteAuthToken/signRemoteAuthToken in remoteauth.go), writing an
 // error response and returning ok=false if either the id is unknown or the
-// token doesn't match.
+// token doesn't verify.
 func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers map[string]resolvedReceiver) (recv resolvedReceiver, ok bool) {
 	recv, exists := receivers[r.PathValue("id")]
 	if !exists {
@@ -930,10 +933,7 @@ func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers map[str
 	}
 
 	token, hasToken := bearerToken(r)
-	// subtle.ConstantTimeCompare, rather than ==, so a mismatch can't be
-	// timed to learn how many leading bytes of the token were guessed
-	// correctly.
-	if !hasToken || subtle.ConstantTimeCompare([]byte(token), []byte(recv.token)) != 1 {
+	if !hasToken || verifyRemoteAuthToken(token, recv.publicKey, recv.id) != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return resolvedReceiver{}, false
 	}

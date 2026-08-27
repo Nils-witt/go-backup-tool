@@ -71,6 +71,15 @@ type config struct {
 	// own db parameter. Nil disables retention tracking for this run (e.g.
 	// the db couldn't be opened at startup) — see recordLocalWrite.
 	stateDB *sql.DB
+
+	// identity is this instance's own persistent identity (see
+	// loadServerIdentity), set on each run's own copy of its job's config by
+	// runner.runOnce the same way stateDB is. uploadToRemote/
+	// deleteRemoteObject (pipeline.go) use it to sign a type: remote
+	// target's requests. Nil means loadServerIdentity failed at startup (see
+	// its own doc comment); any job with a remote target then fails that
+	// target's uploads until a later run's identity loads successfully.
+	identity *serverIdentity
 }
 
 // jobTargetRef is one targets: entry as written in a job: a server name
@@ -130,7 +139,9 @@ func serverKindLabel(kind serverKind) string {
 // fields below apply: s3 (the default) uses bucket/region/endpoint/
 // pathStyle/credentials; local uses only bucket (as a subdirectory of
 // localPath) and localPath itself; remote uses bucket (as the id sent to
-// the destination instance), endpoint, and token.
+// the destination instance) and endpoint. A remote target authenticates
+// with the run's own cfg.identity (see uploadToRemote/deleteRemoteObject in
+// pipeline.go), not a field on target itself.
 type target struct {
 	serverName string // the servers: entry this came from, for diagnostics
 	kind       serverKind
@@ -162,12 +173,6 @@ type target struct {
 	// resolved value is what recordLocalWrite stamps on each write. See
 	// retention.go.
 	retention time.Duration
-
-	// token authenticates to a remote target's destination instance (only
-	// set when kind == serverKindRemote), sent as a bearer token. Unlike
-	// accessKey/secretKey, it's read directly from the config file's
-	// token: field rather than an environment variable.
-	token string
 }
 
 // runConfig is the result of parseFlags: one or more jobs to run, plus the
@@ -183,8 +188,9 @@ type runConfig struct {
 	// webUIUsername/webUIPassword, when both set, gate the entire web UI
 	// (the dashboard and its /api/... endpoints, including per-receiver
 	// file downloads; not the receiver API, which keeps its own
-	// per-receiver bearer tokens) behind a login page and session cookie —
-	// see requireWebUISession/handleWebUILogin in webui.go. Empty
+	// per-receiver public-key-verified JWT auth) behind a login page and
+	// session cookie — see requireWebUISession/handleWebUILogin in
+	// webui.go. Empty
 	// webUIUsername disables the check, leaving the web UI open as before.
 	webUIUsername string
 	webUIPassword string
@@ -276,7 +282,9 @@ type fileJobTarget struct {
 // "s3" (the default) for an S3 (or S3-compatible) endpoint, using
 // region/endpoint/path-style/access-key-env/secret-key-env; "local" for a
 // directory on the local filesystem, using only path; or "remote" for
-// another go-backup-tool instance's receiver API, using endpoint and token.
+// another go-backup-tool instance's receiver API, using only endpoint —
+// auth is this instance's own identity (see loadServerIdentity), not a
+// config field.
 // AccessKeyEnv/SecretKeyEnv name environment variables to read static S3
 // credentials from (both required together, or neither); like
 // GPG_PASSPHRASE, they are never read directly out of the config file
@@ -290,11 +298,11 @@ type fileJobTarget struct {
 // it's older than that, tracked in the shared state sqlite database kept
 // alongside the config file (see retention.go and schedule_state.go). Unset
 // or "0"
-// disables automatic cleanup. Token (remote only) is the bearer token sent
-// to the destination instance's receiver API, matching one of its
-// receivers: entries' own token — unlike access-key-env/secret-key-env,
-// this is written directly in the config file rather than read from the
-// environment.
+// disables automatic cleanup. A remote server needs no auth field of its
+// own: it authenticates to the destination instance's receiver API with
+// this instance's own persistent identity (see loadServerIdentity), which
+// the destination instance verifies against the public key configured on
+// its matching receivers: entry's public-key: (see fileReceiver).
 type fileServer struct {
 	Name         string `yaml:"name"`
 	Type         string `yaml:"type"`
@@ -305,7 +313,6 @@ type fileServer struct {
 	SecretKeyEnv string `yaml:"secret-key-env"`
 	Path         string `yaml:"path"`      // local only: root directory backups are written under
 	Retention    string `yaml:"retention"` // local only: e.g. "7d" or "168h"; unset/"0" keeps objects forever
-	Token        string `yaml:"token"`     // remote only: bearer token for the destination instance's receiver API
 }
 
 // fileConfig is the top-level shape of the YAML config file. Its embedded
@@ -375,10 +382,9 @@ type fileWebUIOIDC struct {
 	Issuer string `yaml:"issuer"`
 
 	// ClientID/ClientSecret identify this application to the provider, as
-	// issued when registering it there. Unlike servers.access-key-env or
-	// receivers.token, ClientSecret is written directly in this file rather
-	// than read from the environment, so protect this file's permissions
-	// accordingly.
+	// issued when registering it there. Unlike servers.access-key-env,
+	// ClientSecret is written directly in this file rather than read from
+	// the environment, so protect this file's permissions accordingly.
 	ClientID     string `yaml:"client-id"`
 	ClientSecret string `yaml:"client-secret"`
 
@@ -792,22 +798,19 @@ func buildLocalServer(name string, fs *fileServer) (resolvedServer, error) {
 }
 
 // buildRemoteServer validates and builds a resolvedServer for a type: remote
-// servers: entry, which uses only endpoint and token and none of the
-// S3/local-specific fields.
+// servers: entry, which uses only endpoint and none of the S3/local-specific
+// fields — auth is this instance's own identity (see loadServerIdentity),
+// not a config field.
 func buildRemoteServer(name string, fs *fileServer) (resolvedServer, error) {
 	if strings.TrimSpace(fs.Endpoint) == "" {
 		return resolvedServer{}, fmt.Errorf("server %q: endpoint is required for type: remote", name)
-	}
-
-	if strings.TrimSpace(fs.Token) == "" {
-		return resolvedServer{}, fmt.Errorf("server %q: token is required for type: remote", name)
 	}
 
 	if fs.Region != "" || fs.PathStyle || fs.AccessKeyEnv != "" || fs.SecretKeyEnv != "" || fs.Path != "" || fs.Retention != "" {
 		return resolvedServer{}, fmt.Errorf("server %q: region/path-style/access-key-env/secret-key-env/path/retention are not valid for type: remote", name)
 	}
 
-	return resolvedServer{name: name, kind: serverKindRemote, endpoint: fs.Endpoint, token: fs.Token}, nil
+	return resolvedServer{name: name, kind: serverKindRemote, endpoint: fs.Endpoint}, nil
 }
 
 // parseRetention parses a local server's retention: string into a
@@ -905,7 +908,6 @@ type resolvedServer struct {
 	secretKeyEnv string
 	path         string        // local only: root directory backups are written under
 	retention    time.Duration // local only: 0 means no automatic expiry
-	token        string        // remote only: bearer token for the destination instance
 }
 
 // resolveJobTargets resolves cfg's raw target references (targetRefs, from
@@ -954,7 +956,6 @@ func resolveJobTargets(cfg *config, servers map[string]resolvedServer) error {
 			secretKeyEnv: server.secretKeyEnv,
 			localPath:    server.path,
 			retention:    retention,
-			token:        server.token,
 		}
 	}
 
