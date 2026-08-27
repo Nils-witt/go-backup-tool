@@ -152,6 +152,27 @@ servers:
 #   # default) leaves it off, since the dashboard has no login guarding it
 #   # on its own unless username/password above are also set.
 #   log-viewer: true
+#
+#   # oidc adds a "Log in with SSO" link to the login page, alongside
+#   # username/password above if that's also configured — either one starts
+#   # the same kind of dashboard session. Any account the provider itself
+#   # authenticates is let in: this doesn't further restrict who's allowed by
+#   # email or domain, so scope who can log in on the provider's side (e.g. a
+#   # dedicated app registration or realm) if that matters for your provider.
+#   oidc:
+#     enabled: true
+#     issuer: "https://accounts.google.com" # or your own IdP's issuer URL
+#     client-id: "replace-with-your-oidc-client-id"
+#     # client-secret is written directly here, like password above, rather
+#     # than read from the environment — protect this file's permissions
+#     # accordingly.
+#     client-secret: "replace-with-your-oidc-client-secret"
+#     # redirect-url must exactly match what's registered with the provider:
+#     # this instance's own address plus /login/oidc/callback.
+#     redirect-url: "https://backups.example.com/login/oidc/callback"
+#     # scopes requested in addition to "openid" (always requested). Unset
+#     # defaults to {profile, email}.
+#     # scopes: [profile, email]
 
 jobs:
   - name: database

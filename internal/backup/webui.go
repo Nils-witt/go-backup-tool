@@ -55,7 +55,14 @@ type webUIServer struct {
 // authenticates each request on its own via each receiver's bearer token
 // (see authorizeReceiver). An empty webUIUsername leaves the web UI open, as
 // before this was added.
-func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB, logs *logRingBuffer, webUIUsername, webUIPassword string) *webUIServer {
+// oidcAuth, when non-nil (see newOIDCAuth in oidc.go), additionally lets a
+// browser log in via that provider's own "Log in with SSO" link on the
+// login page (see handleOIDCLogin/handleOIDCCallback), alongside the
+// username/password form if one is also configured; either kind of login
+// starts the same dashboard session. Login is required whenever
+// webUIUsername or oidcAuth is set — either alone is enough to gate the
+// dashboard.
+func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB, logs *logRingBuffer, webUIUsername, webUIPassword string, oidcAuth *oidcAuth) *webUIServer {
 	var lc net.ListenConfig
 
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
@@ -71,6 +78,11 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 	receiverStore := newReceiverStatusStore(receivers)
 	uiSessions := newSessionStore()
 
+	// authEnabled mirrors requireWebUISession's own gating condition:
+	// either a username/password or an SSO provider is enough on its own to
+	// require a login before the dashboard serves anything.
+	authEnabled := webUIUsername != "" || oidcAuth != nil
+
 	// page gates a full-page navigation (the dashboard itself, or a link a
 	// person clicks, like a file download): a missing/invalid session
 	// redirects the browser to the login page. api gates a JSON endpoint
@@ -78,10 +90,10 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 	// would hand the poller an HTML login page as its "JSON" response, so
 	// it reports 401 instead — see requireWebUISession.
 	page := func(h http.HandlerFunc) http.HandlerFunc {
-		return requireWebUISession(webUIUsername, uiSessions, true, h)
+		return requireWebUISession(authEnabled, uiSessions, true, h)
 	}
 	api := func(h http.HandlerFunc) http.HandlerFunc {
-		return requireWebUISession(webUIUsername, uiSessions, false, h)
+		return requireWebUISession(authEnabled, uiSessions, false, h)
 	}
 
 	mux := http.NewServeMux()
@@ -91,11 +103,17 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 	mux.HandleFunc("GET /api/receivers", api(handleReceiverStatus(receivers, receiverStore, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/files", api(handleReceiverFiles(receivers, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", page(handleDownloadFile(receivers, log)))
-	mux.HandleFunc("GET /login", handleWebUILogin(webUIUsername, webUIPassword, uiSessions))
-	mux.HandleFunc("POST /login", handleWebUILogin(webUIUsername, webUIPassword, uiSessions))
+	mux.HandleFunc("GET /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions))
+	mux.HandleFunc("POST /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions))
 	mux.HandleFunc("GET /logout", handleWebUILogout(uiSessions))
 	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, receiverStore, log, db))
 	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, receiverStore, log, db))
+
+	if oidcAuth != nil {
+		pending := newOIDCPendingStore()
+		mux.HandleFunc("GET /login/oidc", handleOIDCLogin(oidcAuth, pending))
+		mux.HandleFunc("GET /login/oidc/callback", handleOIDCCallback(oidcAuth, pending, uiSessions, log))
+	}
 
 	srv := &webUIServer{
 		http: &http.Server{Handler: logRequests(log, mux), ReadHeaderTimeout: 10 * time.Second},
@@ -458,20 +476,32 @@ func safeNextPath(next string) string {
 // webUISessionCookie so requireWebUISession lets the browser back in
 // without asking for credentials on every request; it then redirects to
 // next (see safeNextPath), typically the page that sent the browser here in
-// the first place. An empty username (webui.username unset in the config
-// file, so there's nothing to authenticate) redirects straight to next
-// rather than showing a form there's no way to satisfy.
-func handleWebUILogin(username, password string, sessions *sessionStore) http.HandlerFunc {
+// the first place. showSSO adds a "Log in with SSO" link to the page (see
+// renderLoginPage), pointing at /login/oidc, whenever oidc.enabled is set
+// (see startWebUI) — independently of whether a username/password is also
+// configured. An empty username with showSSO false (neither kind of login
+// configured) redirects straight to next rather than showing a form there's
+// no way to satisfy; an empty username with showSSO true shows the page
+// with only the SSO link, and POST /login (which only the password form
+// submits) 404s in that case, since there's no username/password to check.
+func handleWebUILogin(username, password string, showSSO bool, sessions *sessionStore) http.HandlerFunc {
+	showPassword := username != ""
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		next := safeNextPath(r.FormValue("next"))
 
-		if username == "" {
+		if !showPassword && !showSSO {
 			http.Redirect(w, r, next, http.StatusSeeOther)
 			return
 		}
 
 		if r.Method == http.MethodGet {
-			writeLoginPage(w, renderLoginPage("", next))
+			writeLoginPage(w, renderLoginPage("", next, showPassword, showSSO))
+			return
+		}
+
+		if !showPassword {
+			http.NotFound(w, r)
 			return
 		}
 
@@ -479,7 +509,7 @@ func handleWebUILogin(username, password string, sessions *sessionStore) http.Ha
 		passMatch := subtle.ConstantTimeCompare([]byte(r.FormValue("password")), []byte(password)) == 1
 
 		if !userMatch || !passMatch {
-			writeLoginPage(w, renderLoginPage("incorrect username or password", next))
+			writeLoginPage(w, renderLoginPage("incorrect username or password", next, showPassword, showSSO))
 			return
 		}
 
@@ -514,13 +544,43 @@ func writeLoginPage(w http.ResponseWriter, page string) {
 	_, _ = io.WriteString(w, page)
 }
 
-// renderLoginPage builds the dashboard's login form page's HTML. errMsg and
-// next are both escaped before being embedded, since errMsg can echo back a
-// failed login attempt and next comes directly from the request.
-func renderLoginPage(errMsg, next string) string {
+// renderLoginPage builds the dashboard's login page's HTML: the
+// username/password form (showPassword), a "Log in with SSO" link to
+// /login/oidc (showSSO), or both, stacked with a divider between them.
+// errMsg and next are both escaped before being embedded, since errMsg can
+// echo back a failed login attempt and next comes directly from the
+// request; next is also passed along to /login/oidc's own next= so SSO
+// redirects to the same place the password form would.
+func renderLoginPage(errMsg, next string, showPassword, showSSO bool) string {
 	errHTML := ""
 	if errMsg != "" {
 		errHTML = `<p class="err">` + html.EscapeString(errMsg) + `</p>`
+	}
+
+	nextHTML := html.EscapeString(next)
+
+	passwordHTML := ""
+	if showPassword {
+		passwordHTML = `<form method="post" action="/login">
+` + errHTML + `<label for="username">Username</label>
+<input type="text" id="username" name="username" autocomplete="username" autofocus required>
+<label for="password">Password</label>
+<input type="password" id="password" name="password" autocomplete="current-password" required>
+<input type="hidden" name="next" value="` + nextHTML + `">
+<button type="submit">Log in</button>
+</form>`
+	}
+
+	ssoHTML := ""
+
+	if showSSO {
+		if showPassword {
+			ssoHTML += `<p class="divider">or</p>`
+		} else {
+			ssoHTML += errHTML
+		}
+
+		ssoHTML += `<a class="sso" href="/login/oidc?next=` + url.QueryEscape(next) + `">Log in with SSO</a>`
 	}
 
 	return `<!doctype html>
@@ -536,24 +596,20 @@ func renderLoginPage(errMsg, next string) string {
   }
   * { box-sizing: border-box; }
   body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-  form { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:1.5rem; width:100%; max-width:320px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:1.5rem; width:100%; max-width:320px; }
   h1 { font-size:1.1rem; margin:0 0 1rem; }
   input[type=text], input[type=password] { width:100%; padding:.5rem .6rem; margin:.4rem 0 1rem; border:1px solid var(--border); border-radius:6px; background:var(--bg); color:var(--fg); font-size:.9rem; }
-  button { width:100%; padding:.5rem; border:none; border-radius:6px; background:var(--fg); color:var(--bg); font-weight:600; cursor:pointer; }
+  button, .sso { display:block; width:100%; padding:.5rem; border:none; border-radius:6px; background:var(--fg); color:var(--bg); font-weight:600; cursor:pointer; text-align:center; text-decoration:none; box-sizing:border-box; }
   .err { color:var(--failed); font-size:.85rem; margin:0 0 .8rem; }
   label { font-size:.85rem; color:var(--muted); }
+  .divider { color:var(--muted); font-size:.8rem; text-align:center; margin:1rem 0; }
 </style>
 </head>
 <body>
-<form method="post" action="/login">
+<div class="card">
 <h1>go-backup-tool</h1>
-` + errHTML + `<label for="username">Username</label>
-<input type="text" id="username" name="username" autocomplete="username" autofocus required>
-<label for="password">Password</label>
-<input type="password" id="password" name="password" autocomplete="current-password" required>
-<input type="hidden" name="next" value="` + html.EscapeString(next) + `">
-<button type="submit">Log in</button>
-</form>
+` + passwordHTML + ssoHTML + `
+</div>
 </body>
 </html>
 `
@@ -686,19 +742,20 @@ func handleDeleteObject(receivers map[string]resolvedReceiver, status *receiverS
 }
 
 // requireWebUISession wraps next, requiring a currently valid dashboard
-// session cookie (see sessionStore/handleWebUILogin) before running it. A
-// missing/invalid session either redirects the browser to the login page
-// (redirectOnFail true — for a full-page navigation, like the dashboard
-// itself or a file download link) or reports 401 (redirectOnFail false —
-// for a JSON endpoint the dashboard's own JavaScript polls via fetch(),
-// which would otherwise silently receive an HTML login page as its "JSON"
-// response). An empty username (webui.username unset in the config file)
-// disables the check entirely, leaving the web UI open — this gates the
-// dashboard and its /api/... endpoints (see startWebUI), not the receiver
-// API, which authenticates separately via each receiver's own bearer token.
-func requireWebUISession(username string, sessions *sessionStore, redirectOnFail bool, next http.HandlerFunc) http.HandlerFunc {
+// session cookie (see sessionStore/handleWebUILogin/handleOIDCCallback)
+// before running it. A missing/invalid session either redirects the browser
+// to the login page (redirectOnFail true — for a full-page navigation, like
+// the dashboard itself or a file download link) or reports 401
+// (redirectOnFail false — for a JSON endpoint the dashboard's own
+// JavaScript polls via fetch(), which would otherwise silently receive an
+// HTML login page as its "JSON" response). authEnabled false (neither a
+// username/password nor an OIDC provider configured) disables the check
+// entirely, leaving the web UI open — this gates the dashboard and its
+// /api/... endpoints (see startWebUI), not the receiver API, which
+// authenticates separately via each receiver's own bearer token.
+func requireWebUISession(authEnabled bool, sessions *sessionStore, redirectOnFail bool, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if username == "" || sessions.authenticated(r) {
+		if !authEnabled || sessions.authenticated(r) {
 			next(w, r)
 			return
 		}

@@ -2087,3 +2087,216 @@ jobs:
 		}
 	}
 }
+
+func TestParseFlagsOIDCSettings(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+webui:
+  enabled: true
+  listen: ":0"
+  oidc:
+    enabled: true
+    issuer: "https://idp.example.com"
+    client-id: "my-client"
+    client-secret: "s3cr3t"
+    redirect-url: "https://backups.example.com/login/oidc/callback"
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	want := oidcSettings{
+		enabled:      true,
+		issuer:       "https://idp.example.com",
+		clientID:     "my-client",
+		clientSecret: "s3cr3t",
+		redirectURL:  "https://backups.example.com/login/oidc/callback",
+		scopes:       []string{"profile", "email"},
+	}
+
+	if !reflect.DeepEqual(rc.oidc, want) {
+		t.Errorf("rc.oidc = %+v, want %+v", rc.oidc, want)
+	}
+}
+
+func TestParseFlagsOIDCCustomScopes(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+webui:
+  enabled: true
+  listen: ":0"
+  oidc:
+    enabled: true
+    issuer: "https://idp.example.com"
+    client-id: "my-client"
+    client-secret: "s3cr3t"
+    redirect-url: "https://backups.example.com/login/oidc/callback"
+    scopes: ["groups"]
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	if !reflect.DeepEqual(rc.oidc.scopes, []string{"groups"}) {
+		t.Errorf("rc.oidc.scopes = %v, want [groups]", rc.oidc.scopes)
+	}
+}
+
+func TestParseFlagsOIDCEnabledRequiresWebUIEnabled(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+webui:
+  oidc:
+    enabled: true
+    issuer: "https://idp.example.com"
+    client-id: "my-client"
+    client-secret: "s3cr3t"
+    redirect-url: "https://backups.example.com/login/oidc/callback"
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "webui.enabled is not") {
+		t.Fatalf("parseFlags() error = %v, want it to mention webui.enabled is not", err)
+	}
+}
+
+func TestParseFlagsOIDCEnabledRequiresEveryField(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		oidcYAML   string
+		wantErrHas string
+	}{
+		{
+			name: "missing issuer",
+			oidcYAML: `
+    enabled: true
+    client-id: "my-client"
+    client-secret: "s3cr3t"
+    redirect-url: "https://backups.example.com/login/oidc/callback"`,
+			wantErrHas: "webui.oidc.issuer",
+		},
+		{
+			name: "missing client-id",
+			oidcYAML: `
+    enabled: true
+    issuer: "https://idp.example.com"
+    client-secret: "s3cr3t"
+    redirect-url: "https://backups.example.com/login/oidc/callback"`,
+			wantErrHas: "webui.oidc.client-id",
+		},
+		{
+			name: "missing client-secret",
+			oidcYAML: `
+    enabled: true
+    issuer: "https://idp.example.com"
+    client-id: "my-client"
+    redirect-url: "https://backups.example.com/login/oidc/callback"`,
+			wantErrHas: "webui.oidc.client-secret",
+		},
+		{
+			name: "missing redirect-url",
+			oidcYAML: `
+    enabled: true
+    issuer: "https://idp.example.com"
+    client-id: "my-client"
+    client-secret: "s3cr3t"`,
+			wantErrHas: "webui.oidc.redirect-url",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := writeConfigFile(t, `
+webui:
+  enabled: true
+  listen: ":0"
+  oidc:`+tc.oidcYAML+`
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+			_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), tc.wantErrHas) {
+				t.Fatalf("parseFlags() error = %v, want substring %q", err, tc.wantErrHas)
+			}
+		})
+	}
+}
+
+func TestParseFlagsOIDCDisabledByDefault(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+webui:
+  enabled: true
+  listen: ":0"
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	if rc.oidc.enabled {
+		t.Error("rc.oidc.enabled = true, want false (oidc: not configured)")
+	}
+}

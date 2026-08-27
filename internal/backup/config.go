@@ -196,6 +196,28 @@ type runConfig struct {
 	// process's raw log output, which may include operator detail (paths,
 	// error text) an operator might not want exposed that widely.
 	logViewer bool
+
+	// oidc, when its Enabled field is set, lets a browser log into the web
+	// UI via an OpenID Connect provider instead of (or alongside, if
+	// webUIUsername/webUIPassword are also set) the dashboard's own
+	// username/password form — see newOIDCAuth/handleOIDCLogin/
+	// handleOIDCCallback in oidc.go. Any account the provider itself
+	// authenticates is let in: this doesn't further restrict who's allowed
+	// by email or domain, so scoping who can authenticate is left to the
+	// provider (e.g. a dedicated app registration or realm).
+	oidc oidcSettings
+}
+
+// oidcSettings is runConfig's resolved form of the config file's
+// webui.oidc: entry (see fileWebUIOIDC), used to build an *oidcAuth (see
+// newOIDCAuth in oidc.go) once the web UI starts.
+type oidcSettings struct {
+	enabled      bool
+	issuer       string
+	clientID     string
+	clientSecret string
+	redirectURL  string
+	scopes       []string
 }
 
 // Built-in defaults for fields a job's or server's config file entry
@@ -327,6 +349,50 @@ type fileWebUI struct {
 	// off, since the dashboard has no login guarding it on its own unless
 	// Username/Password above are also set.
 	LogViewer bool `yaml:"log-viewer"`
+
+	// OIDC configures Single Sign-On via an OpenID Connect provider,
+	// alongside (or instead of) Username/Password above — see
+	// fileWebUIOIDC.
+	OIDC fileWebUIOIDC `yaml:"oidc"`
+}
+
+// fileWebUIOIDC is the webui.oidc: entry, configuring Single Sign-On for the
+// web UI dashboard via an OpenID Connect provider (Google, Okta, Keycloak, a
+// generic OIDC-compliant IdP, ...). When Enabled, the dashboard's login page
+// (see renderLoginPage) shows a "Log in with SSO" link alongside its
+// username/password form (if Username/Password are also set), taking the
+// browser through the provider's own login before starting the same kind of
+// dashboard session a password login would (see handleOIDCLogin/
+// handleOIDCCallback in oidc.go). Any account the provider itself
+// authenticates is let in.
+type fileWebUIOIDC struct {
+	Enabled bool `yaml:"enabled"`
+
+	// Issuer is the provider's issuer URL (e.g.
+	// "https://accounts.google.com"), used to discover its authorization,
+	// token, and JWKS endpoints via OpenID Connect Discovery
+	// (/.well-known/openid-configuration).
+	Issuer string `yaml:"issuer"`
+
+	// ClientID/ClientSecret identify this application to the provider, as
+	// issued when registering it there. Unlike servers.access-key-env or
+	// receivers.token, ClientSecret is written directly in this file rather
+	// than read from the environment, so protect this file's permissions
+	// accordingly.
+	ClientID     string `yaml:"client-id"`
+	ClientSecret string `yaml:"client-secret"`
+
+	// RedirectURL is the callback URL registered with the provider that it
+	// redirects back to after a login — this instance's own address plus
+	// /login/oidc/callback (e.g.
+	// "https://backups.example.com/login/oidc/callback").
+	RedirectURL string `yaml:"redirect-url"`
+
+	// Scopes are the OpenID Connect scopes requested at login, in addition
+	// to "openid" (always requested, and required by the protocol). Unset
+	// defaults to {"profile", "email"}, enough for most providers to return
+	// a usable display name.
+	Scopes []string `yaml:"scopes"`
 }
 
 // parseFlags parses args (typically os.Args[1:]) into a runConfig, writing
@@ -380,7 +446,7 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 		return nil, err
 	}
 
-	listen, err := resolveWebUIListen(fileCfg.WebUI)
+	listen, oidc, err := resolveWebUISettings(fileCfg.WebUI)
 	if err != nil {
 		return nil, err
 	}
@@ -427,6 +493,74 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 		webUIUsername: strings.TrimSpace(fileCfg.WebUI.Username),
 		webUIPassword: fileCfg.WebUI.Password,
 		logViewer:     fileCfg.WebUI.LogViewer,
+		oidc:          oidc,
+	}, nil
+}
+
+// resolveWebUISettings resolves cfg (the config file's webui: entry) into
+// its listen address (see resolveWebUIListen) and its SSO settings (see
+// resolveOIDCSettings), the two pieces of runConfig parseFlags derives from
+// webui: that need validation beyond a plain field copy.
+func resolveWebUISettings(cfg fileWebUI) (listen string, oidc oidcSettings, err error) {
+	listen, err = resolveWebUIListen(cfg)
+	if err != nil {
+		return "", oidcSettings{}, err
+	}
+
+	oidc, err = resolveOIDCSettings(cfg.OIDC, listen)
+	if err != nil {
+		return "", oidcSettings{}, err
+	}
+
+	return listen, oidc, nil
+}
+
+// resolveOIDCSettings validates cfg (the config file's webui.oidc: entry)
+// against listen (the web UI's resolved listen address, empty if the web UI
+// itself is disabled — see resolveWebUIListen) and returns runConfig's
+// resolved oidcSettings. An unset/false cfg.Enabled returns the zero value,
+// leaving SSO disabled. It's an error to enable OIDC without the web UI
+// itself enabled (there'd be no dashboard to log into), or without every one
+// of issuer/client-id/client-secret/redirect-url set, since newOIDCAuth
+// needs all four to talk to the provider.
+func resolveOIDCSettings(cfg fileWebUIOIDC, listen string) (oidcSettings, error) {
+	if !cfg.Enabled {
+		return oidcSettings{}, nil
+	}
+
+	if listen == "" {
+		return oidcSettings{}, errors.New("webui.oidc.enabled is true but webui.enabled is not")
+	}
+
+	issuer := strings.TrimSpace(cfg.Issuer)
+	clientID := strings.TrimSpace(cfg.ClientID)
+	redirectURL := strings.TrimSpace(cfg.RedirectURL)
+
+	required := []struct{ name, val string }{
+		{"issuer", issuer},
+		{"client-id", clientID},
+		{"client-secret", cfg.ClientSecret},
+		{"redirect-url", redirectURL},
+	}
+
+	for _, r := range required {
+		if r.val == "" {
+			return oidcSettings{}, fmt.Errorf("webui.oidc.enabled is true but webui.oidc.%s is not set", r.name)
+		}
+	}
+
+	scopes := cfg.Scopes
+	if len(scopes) == 0 {
+		scopes = []string{"profile", "email"}
+	}
+
+	return oidcSettings{
+		enabled:      true,
+		issuer:       issuer,
+		clientID:     clientID,
+		clientSecret: cfg.ClientSecret,
+		redirectURL:  redirectURL,
+		scopes:       scopes,
 	}, nil
 }
 

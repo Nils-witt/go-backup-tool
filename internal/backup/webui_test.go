@@ -143,7 +143,7 @@ func TestStartWebUIServesRequests(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, nil, "", "")
+	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, nil, "", "", nil)
 	if srv == nil {
 		t.Fatal("startWebUI() = nil, want a running server")
 	}
@@ -171,7 +171,7 @@ func TestRequireWebUISessionWithoutUsernameAllowsRequest(t *testing.T) {
 
 	called := false
 	sessions := newSessionStore()
-	h := requireWebUISession("", sessions, true, func(http.ResponseWriter, *http.Request) { called = true })
+	h := requireWebUISession(false, sessions, true, func(http.ResponseWriter, *http.Request) { called = true })
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
@@ -192,7 +192,7 @@ func TestRequireWebUISessionRedirectsWithoutValidSession(t *testing.T) {
 
 	called := false
 	sessions := newSessionStore()
-	h := requireWebUISession("admin", sessions, true, func(http.ResponseWriter, *http.Request) { called = true })
+	h := requireWebUISession(true, sessions, true, func(http.ResponseWriter, *http.Request) { called = true })
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
@@ -217,7 +217,7 @@ func TestRequireWebUISessionReportsUnauthorizedWithoutRedirect(t *testing.T) {
 
 	called := false
 	sessions := newSessionStore()
-	h := requireWebUISession("admin", sessions, false, func(http.ResponseWriter, *http.Request) { called = true })
+	h := requireWebUISession(true, sessions, false, func(http.ResponseWriter, *http.Request) { called = true })
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/status", nil)
 	rec := httptest.NewRecorder()
@@ -244,7 +244,7 @@ func TestRequireWebUISessionAcceptsValidSession(t *testing.T) {
 		t.Fatalf("sessions.create(): %v", err)
 	}
 
-	h := requireWebUISession("admin", sessions, true, func(http.ResponseWriter, *http.Request) { called = true })
+	h := requireWebUISession(true, sessions, true, func(http.ResponseWriter, *http.Request) { called = true })
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: webUISessionCookie, Value: id}) //nolint:gosec // a request Cookie header, not a Set-Cookie response; Secure/HttpOnly/SameSite don't apply
@@ -267,7 +267,7 @@ func TestStartWebUIWithLoginRequiresSession(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, nil, "admin", "secret")
+	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, nil, "admin", "secret", nil)
 	if srv == nil {
 		t.Fatal("startWebUI() = nil, want a running server")
 	}
@@ -378,7 +378,7 @@ func TestStartWebUIBadAddrReturnsNil(t *testing.T) {
 	store, _ := newTestStore()
 
 	// Port 0 is valid (means "pick one"); an unparseable address is not.
-	srv := startWebUI("not-a-valid-address", store, nil, discardLogger, nil, nil, "", "")
+	srv := startWebUI("not-a-valid-address", store, nil, discardLogger, nil, nil, "", "", nil)
 	if srv != nil {
 		t.Cleanup(srv.shutdown)
 		t.Fatal("startWebUI() with an invalid address = non-nil, want nil")
@@ -425,7 +425,7 @@ func TestHandleWebUILoginWrongCredentialsDoesNotStartSession(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleWebUILogin("admin", "secret", sessions)(rec, req)
+	handleWebUILogin("admin", "secret", false, sessions)(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200 (re-rendered form)", rec.Code)
@@ -448,7 +448,7 @@ func TestHandleWebUILoginWithoutUsernameConfiguredRedirects(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/login?next=/", nil)
 	rec := httptest.NewRecorder()
 
-	handleWebUILogin("", "", sessions)(rec, req)
+	handleWebUILogin("", "", false, sessions)(rec, req)
 
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
@@ -470,7 +470,7 @@ func TestHandleWebUILoginCorrectCredentialsStartsSessionAndRedirects(t *testing.
 
 	rec := httptest.NewRecorder()
 
-	handleWebUILogin("admin", "secret", sessions)(rec, req)
+	handleWebUILogin("admin", "secret", false, sessions)(rec, req)
 
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
