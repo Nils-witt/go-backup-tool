@@ -14,6 +14,7 @@ builds:
       - arm64
     ldflags:
       - -s -w
+      - -X go-backup-tool/internal/backup.version={{.Version}}
 
 archives:
   - formats: [tar.gz]

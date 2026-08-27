@@ -269,6 +269,15 @@
     white-space: pre-wrap;
     word-break: break-all;
   }
+  .footer {
+    max-width: 1200px;
+    margin: 2.5rem auto 0;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: .78rem;
+    text-align: center;
+  }
 </style>
 </head>
 <body>
@@ -324,6 +333,8 @@
     </table>
   </div>
 </div>
+
+<p class="footer">&copy; {{COPYRIGHT_YEAR}} Nils Witt &middot; go-backup-tool {{VERSION}}</p>
 
 <script>
 {{DASHBOARD_JS}}

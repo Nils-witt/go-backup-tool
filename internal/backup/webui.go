@@ -17,6 +17,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -757,6 +759,8 @@ type loginPageData struct {
 	Next         string
 	ShowPassword bool
 	ShowSSO      bool
+	Version      string
+	Year         int
 }
 
 // renderLoginPage builds the dashboard's login page's HTML: the
@@ -769,7 +773,14 @@ type loginPageData struct {
 func renderLoginPage(errMsg, next string, showPassword, showSSO bool) string {
 	var buf strings.Builder
 
-	data := loginPageData{ErrMsg: errMsg, Next: next, ShowPassword: showPassword, ShowSSO: showSSO}
+	data := loginPageData{
+		ErrMsg:       errMsg,
+		Next:         next,
+		ShowPassword: showPassword,
+		ShowSSO:      showSSO,
+		Version:      displayVersion(),
+		Year:         time.Now().Year(),
+	}
 	if err := loginPageTemplate.Execute(&buf, data); err != nil {
 		// loginPageTemplate is a fixed, compile-time-checked template
 		// executed against a plain struct of strings/bools, so this can't
@@ -1015,4 +1026,29 @@ var dashboardJS string
 // dashboardHTML is the entire web UI: a single self-contained page (no
 // external assets) that polls /api/status every couple of seconds and
 // re-renders the job/target table.
-var dashboardHTML = strings.Replace(dashboardHTMLSrc, "{{DASHBOARD_JS}}", dashboardJS, 1)
+var dashboardHTML = strings.NewReplacer(
+	"{{DASHBOARD_JS}}", dashboardJS,
+	"{{VERSION}}", displayVersion(),
+	"{{COPYRIGHT_YEAR}}", strconv.Itoa(time.Now().Year()),
+).Replace(dashboardHTMLSrc)
+
+// version is the build version. It's set at release time via
+// `-X go-backup-tool/internal/backup.version=...` (see .goreleaser.yaml's
+// ldflags); a local `go build` leaves it at "dev".
+var version = "dev"
+
+// displayVersion resolves the version shown in the dashboard footer,
+// falling back to the version recorded by `go install` (unavailable to
+// ldflags, which only reach main-package builds) when version wasn't set at
+// build time.
+func displayVersion() string {
+	if version != "dev" {
+		return version
+	}
+
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+
+	return version
+}
