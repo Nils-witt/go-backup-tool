@@ -93,6 +93,9 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 
 	log, logs := newRunLogger(stderr, rc)
 
+	ensureServerKeyPairAtStartup(log)
+	ensureServerUUIDAtStartup(log)
+
 	if rc.timeout > 0 {
 		var cancel context.CancelFunc
 
