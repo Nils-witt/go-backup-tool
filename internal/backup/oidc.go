@@ -228,7 +228,7 @@ func handleOIDCCallback(auth *oidcAuth, pending *oidcPendingStore, sessions *ses
 			return
 		}
 
-		id, err := sessions.create()
+		id, err := sessions.create(oidcIdentity(idToken))
 		if err != nil {
 			record(oidcIdentity(idToken), "starting session failed", false)
 			http.Error(w, "starting session failed", http.StatusInternalServerError)

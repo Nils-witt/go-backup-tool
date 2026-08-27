@@ -239,7 +239,7 @@ func TestRequireWebUISessionAcceptsValidSession(t *testing.T) {
 	called := false
 	sessions := newSessionStore()
 
-	id, err := sessions.create()
+	id, err := sessions.create("alice")
 	if err != nil {
 		t.Fatalf("sessions.create(): %v", err)
 	}
@@ -399,7 +399,7 @@ func TestHandleDownloadFileServesContent(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleDownloadFile(receivers, discardLogger)(rec, req)
+	handleDownloadFile(receivers, discardLogger, nil, newSessionStore())(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -495,7 +495,7 @@ func TestHandleWebUILogoutRevokesSession(t *testing.T) {
 
 	sessions := newSessionStore()
 
-	id, err := sessions.create()
+	id, err := sessions.create("alice")
 	if err != nil {
 		t.Fatalf("sessions.create(): %v", err)
 	}
@@ -662,6 +662,101 @@ func TestHandleLoginEventsWithoutDBServesEmptyList(t *testing.T) {
 	handleLoginEvents(nil, discardLogger)(rec, req)
 
 	var got []loginEventJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding response body: %v", err)
+	}
+
+	if len(got) != 0 {
+		t.Errorf("decoded events = %+v, want none", got)
+	}
+}
+
+func TestHandleDownloadFileRecordsDownloadEvents(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	sessions := newSessionStore()
+
+	id, err := sessions.create("alice")
+	if err != nil {
+		t.Fatalf("sessions.create() error: %v", err)
+	}
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "backup.gpg"), "secret data")
+
+	receivers := map[string]resolvedReceiver{"a": {id: "a", path: root}}
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/backup.gpg", nil)
+	req.SetPathValue("id", "a")
+	req.SetPathValue("key", "backup.gpg")
+	req.AddCookie(&http.Cookie{Name: webUISessionCookie, Value: id}) //nolint:gosec // a request Cookie header, not a Set-Cookie response; Secure/HttpOnly/SameSite don't apply
+	req.RemoteAddr = "198.51.100.1:4321"
+
+	handleDownloadFile(receivers, discardLogger, db, sessions)(httptest.NewRecorder(), req)
+
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/missing.gpg", nil)
+	req.SetPathValue("id", "a")
+	req.SetPathValue("key", "missing.gpg")
+	req.RemoteAddr = "198.51.100.2:4321"
+
+	handleDownloadFile(receivers, discardLogger, db, sessions)(httptest.NewRecorder(), req)
+
+	events, err := readDownloadEvents(t.Context(), db, 10)
+	if err != nil {
+		t.Fatalf("readDownloadEvents() error: %v", err)
+	}
+
+	if len(events) != 2 {
+		t.Fatalf("readDownloadEvents() returned %d events, want 2", len(events))
+	}
+
+	if events[0].Success || events[0].Key != "missing.gpg" || events[0].Detail != "not found" {
+		t.Errorf("readDownloadEvents()[0] = %+v, want the failed attempt", events[0])
+	}
+
+	if !events[1].Success || events[1].Username != "alice" || events[1].ReceiverID != "a" || events[1].Key != "backup.gpg" || events[1].RemoteAddr != "198.51.100.1:4321" {
+		t.Errorf("readDownloadEvents()[1] = %+v, want the successful attempt attributed to alice", events[1])
+	}
+}
+
+func TestHandleDownloadEventsServesJSON(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+
+	if err := recordDownloadEvent(t.Context(), db, downloadEvent{At: time.Now(), Username: "admin", ReceiverID: "a", Key: "backup.gpg", Success: true, RemoteAddr: "127.0.0.1:1"}); err != nil {
+		t.Fatalf("recordDownloadEvent() error: %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/download-events", nil)
+	rec := httptest.NewRecorder()
+
+	handleDownloadEvents(db, discardLogger)(rec, req)
+
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json prefix", ct)
+	}
+
+	var got []downloadEventJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding response body: %v", err)
+	}
+
+	if len(got) != 1 || got[0].Username != "admin" || got[0].Key != "backup.gpg" || !got[0].Success {
+		t.Errorf("decoded events = %+v, want one successful admin download", got)
+	}
+}
+
+func TestHandleDownloadEventsWithoutDBServesEmptyList(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/download-events", nil)
+	rec := httptest.NewRecorder()
+
+	handleDownloadEvents(nil, discardLogger)(rec, req)
+
+	var got []downloadEventJSON
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decoding response body: %v", err)
 	}

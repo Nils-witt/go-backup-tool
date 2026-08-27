@@ -132,6 +132,26 @@ func openScheduleStateDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
 	}
 
+	// download_events records every dashboard file download, win or lose, so
+	// an operator can see who pulled which file and when (see
+	// recordDownloadEvent/readDownloadEvents and the dashboard's "Download
+	// log" section).
+	const downloadEventsSchema = `CREATE TABLE IF NOT EXISTS download_events (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		at          TIMESTAMP NOT NULL,
+		username    TEXT NOT NULL,
+		receiver_id TEXT NOT NULL,
+		key         TEXT NOT NULL,
+		success     INTEGER NOT NULL,
+		remote_addr TEXT NOT NULL,
+		detail      TEXT NOT NULL DEFAULT ''
+	)`
+
+	if _, err := db.ExecContext(ctx, downloadEventsSchema); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
+	}
+
 	return db, nil
 }
 
@@ -382,6 +402,59 @@ func readLoginEvents(ctx context.Context, db *sql.DB, limit int) ([]loginEvent, 
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("reading login events: %w", err)
+	}
+
+	return out, nil
+}
+
+// downloadEvent is one recorded attempt to download a file from the
+// dashboard, win or lose (see recordDownloadEvent/readDownloadEvents).
+type downloadEvent struct {
+	At         time.Time
+	Username   string // best-effort identity of the logged-in dashboard session; empty when the web UI has no login configured
+	ReceiverID string
+	Key        string
+	Success    bool
+	RemoteAddr string
+	Detail     string // failure reason; empty on success
+}
+
+// recordDownloadEvent appends ev to the download log. Called for every
+// download attempt handleDownloadFile sees, regardless of outcome.
+func recordDownloadEvent(ctx context.Context, db *sql.DB, ev downloadEvent) error {
+	const insert = `INSERT INTO download_events (at, username, receiver_id, key, success, remote_addr, detail) VALUES (?, ?, ?, ?, ?, ?, ?)`
+
+	if _, err := db.ExecContext(ctx, insert, ev.At.UTC(), ev.Username, ev.ReceiverID, ev.Key, ev.Success, ev.RemoteAddr, ev.Detail); err != nil {
+		return fmt.Errorf("recording download event: %w", err)
+	}
+
+	return nil
+}
+
+// readDownloadEvents returns up to limit of the most recently recorded
+// download events, newest first, for the dashboard's download log view.
+func readDownloadEvents(ctx context.Context, db *sql.DB, limit int) ([]downloadEvent, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT at, username, receiver_id, key, success, remote_addr, detail FROM download_events ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("reading download events: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []downloadEvent
+
+	for rows.Next() {
+		var ev downloadEvent
+
+		if err := rows.Scan(&ev.At, &ev.Username, &ev.ReceiverID, &ev.Key, &ev.Success, &ev.RemoteAddr, &ev.Detail); err != nil {
+			return nil, fmt.Errorf("reading download events: %w", err)
+		}
+
+		out = append(out, ev)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading download events: %w", err)
 	}
 
 	return out, nil

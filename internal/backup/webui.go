@@ -43,8 +43,11 @@ type webUIServer struct {
 // by the receiver API's handlers to track retention on incoming writes, and
 // by the login handlers (handleWebUILogin/handleOIDCCallback) to append
 // every login attempt to the login log served over /api/login-events (see
-// handleLoginEvents) and shown in the dashboard's "Login log" section; nil
-// disables both (see recordLocalWrite/recordLoginEvent). logs backs the dashboard's
+// handleLoginEvents) and shown in the dashboard's "Login log" section, and
+// by handleDownloadFile to append every file download to the download log
+// served over /api/download-events (see handleDownloadEvents) and shown in
+// the dashboard's "Download log" section; nil disables all three (see
+// recordLocalWrite/recordLoginEvent/recordDownloadEvent). logs backs the dashboard's
 // log viewer (served over /api/logs, see handleLogs); nil starts an empty
 // one, so passing the caller's own buffer only matters if the caller also
 // arranged for it to be written to — which newRunLogger in app.go only does
@@ -105,11 +108,12 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 	mux.HandleFunc("GET /api/logs", api(handleLogs(logs)))
 	mux.HandleFunc("GET /api/receivers", api(handleReceiverStatus(receivers, receiverStore, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/files", api(handleReceiverFiles(receivers, log)))
-	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", page(handleDownloadFile(receivers, log)))
+	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", page(handleDownloadFile(receivers, log, db, uiSessions)))
 	mux.HandleFunc("GET /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions, db, log))
 	mux.HandleFunc("POST /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions, db, log))
 	mux.HandleFunc("GET /logout", handleWebUILogout(uiSessions))
 	mux.HandleFunc("GET /api/login-events", api(handleLoginEvents(db, log)))
+	mux.HandleFunc("GET /api/download-events", api(handleDownloadEvents(db, log)))
 	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, receiverStore, log, db))
 	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, receiverStore, log, db))
 
@@ -347,31 +351,41 @@ const webUISessionCookie = "gbt_webui_session"
 // valid before its session expires and the browser has to log in again.
 const sessionTTL = 12 * time.Hour
 
+// sessionEntry is one currently valid dashboard login (see sessionStore):
+// its expiry, plus the identity that logged in, so handlers downstream of
+// requireWebUISession (e.g. handleDownloadFile) can attribute what they do
+// to a username without re-deriving it from the request.
+type sessionEntry struct {
+	expires  time.Time
+	username string // best-effort identity recorded at login (see handleWebUILogin/handleOIDCCallback); may be empty
+}
+
 // sessionStore tracks currently valid dashboard logins (see
 // webUISessionCookie/handleWebUILogin), mapping each session id to its
-// expiry. Sessions live only in this process's memory: a restart
+// sessionEntry. Sessions live only in this process's memory: a restart
 // invalidates every session, same as it does the receiver status store.
 // Safe for concurrent use, since login and other requests can arrive
 // concurrently.
 type sessionStore struct {
 	mu   sync.Mutex
-	byID map[string]time.Time
+	byID map[string]sessionEntry
 }
 
 // newSessionStore returns an empty sessionStore.
 func newSessionStore() *sessionStore {
-	return &sessionStore{byID: make(map[string]time.Time)}
+	return &sessionStore{byID: make(map[string]sessionEntry)}
 }
 
-// create starts a new session, valid for sessionTTL, and returns its id.
-func (s *sessionStore) create() (string, error) {
+// create starts a new session for username, valid for sessionTTL, and
+// returns its id.
+func (s *sessionStore) create(username string) (string, error) {
 	id, err := randomSessionID()
 	if err != nil {
 		return "", err
 	}
 
 	s.mu.Lock()
-	s.byID[id] = time.Now().Add(sessionTTL)
+	s.byID[id] = sessionEntry{expires: time.Now().Add(sessionTTL), username: username}
 	s.mu.Unlock()
 
 	return id, nil
@@ -387,17 +401,40 @@ func (s *sessionStore) valid(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	exp, ok := s.byID[id]
+	e, ok := s.byID[id]
 	if !ok {
 		return false
 	}
 
-	if time.Now().After(exp) {
+	if time.Now().After(e.expires) {
 		delete(s.byID, id)
 		return false
 	}
 
 	return true
+}
+
+// usernameFor returns the username recorded (see create) for r's session
+// cookie, for handlers that want to attribute an action to whoever is
+// currently logged in (e.g. handleDownloadFile's download log). It returns
+// "" whenever there's no currently valid session — including when the web
+// UI has no login configured at all, in which case every download is
+// logged with an empty username rather than failing to log it.
+func (s *sessionStore) usernameFor(r *http.Request) string {
+	c, err := r.Cookie(webUISessionCookie)
+	if err != nil {
+		return ""
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	e, ok := s.byID[c.Value]
+	if !ok || time.Now().After(e.expires) {
+		return ""
+	}
+
+	return e.username
 }
 
 // revoke ends session id (a no-op if it doesn't exist), used by a logout
@@ -536,7 +573,7 @@ func handleWebUILogin(username, password string, showSSO bool, sessions *session
 			return
 		}
 
-		id, err := sessions.create()
+		id, err := sessions.create(submittedUser)
 		if err != nil {
 			http.Error(w, "starting session failed", http.StatusInternalServerError)
 			return
@@ -570,30 +607,73 @@ const loginEventsLimit = 200
 // missing dependency.
 func handleLoginEvents(db *sql.DB, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var events []loginEvent
+		serveEventLog(w, r, log, db, loginEventsLimit, readLoginEvents,
+			func(ev loginEvent) loginEventJSON { return loginEventJSON(ev) },
+			"reading login events failed")
+	}
+}
 
-		if db != nil {
-			var err error
+// serveEventLog writes a JSON array of the most recently recorded audit-log
+// events (see readLoginEvents/readDownloadEvents), newest first, converting
+// each raw event E to its wire shape J via toJSON. db nil (state tracking
+// unavailable) serves an empty list rather than failing the request, since
+// the state db is optional (see startWebUI). Shared by handleLoginEvents
+// and handleDownloadEvents, whose bodies would otherwise be identical but
+// for the event/read/limit types involved.
+func serveEventLog[E, J any](w http.ResponseWriter, r *http.Request, log *slog.Logger, db *sql.DB, limit int, read func(context.Context, *sql.DB, int) ([]E, error), toJSON func(E) J, errMsg string) {
+	var events []E
 
-			events, err = readLoginEvents(r.Context(), db, loginEventsLimit)
-			if err != nil {
-				log.Warn("web UI: reading login events failed", "err", err)
-				http.Error(w, "reading login events failed", http.StatusInternalServerError)
+	if db != nil {
+		var err error
 
-				return
-			}
+		events, err = read(r.Context(), db, limit)
+		if err != nil {
+			log.Warn("web UI: "+errMsg, "err", err)
+			http.Error(w, errMsg, http.StatusInternalServerError)
+
+			return
 		}
+	}
 
-		out := make([]loginEventJSON, len(events))
-		for i, ev := range events {
-			out[i] = loginEventJSON(ev)
-		}
+	out := make([]J, len(events))
+	for i, ev := range events {
+		out[i] = toJSON(ev)
+	}
 
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
-		if err := json.NewEncoder(w).Encode(out); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+	if err := json.NewEncoder(w).Encode(out); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// downloadEventJSON is downloadEvent's wire shape for handleDownloadEvents,
+// matching the dashboard's own field naming (snake_case, as every other
+// /api/... endpoint here uses).
+type downloadEventJSON struct {
+	At         time.Time `json:"at"`
+	Username   string    `json:"username"`
+	ReceiverID string    `json:"receiver_id"`
+	Key        string    `json:"key"`
+	Success    bool      `json:"success"`
+	RemoteAddr string    `json:"remote_addr"`
+	Detail     string    `json:"detail"`
+}
+
+// downloadEventsLimit caps how many of the most recent download events
+// handleDownloadEvents serves, for the dashboard's download log view.
+const downloadEventsLimit = 200
+
+// handleDownloadEvents serves GET /api/download-events: the most recently
+// recorded file download attempts (see recordDownloadEvent), newest first,
+// as JSON. db nil (state tracking unavailable) serves an empty list rather
+// than failing the request, matching handleLoginEvents's own tolerance for
+// a missing dependency.
+func handleDownloadEvents(db *sql.DB, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		serveEventLog(w, r, log, db, downloadEventsLimit, readDownloadEvents,
+			func(ev downloadEvent) downloadEventJSON { return downloadEventJSON(ev) },
+			"reading download events failed")
 	}
 }
 
@@ -696,8 +776,15 @@ func renderLoginPage(errMsg, next string, showPassword, showSSO bool) string {
 // authorizeReceiver), this relies entirely on the dashboard's own login (see
 // requireWebUISession, which wraps this handler in startWebUI) rather than
 // any auth of its own, since the audience here is a person clicking a link
-// in a browser rather than another go-backup-tool instance.
-func handleDownloadFile(receivers map[string]resolvedReceiver, log *slog.Logger) http.HandlerFunc {
+// in a browser rather than another go-backup-tool instance. db, when
+// non-nil, gets every attempt appended to the download log (see
+// recordDownloadEvent), win or lose, for the dashboard's "Download log"
+// section (see handleDownloadEvents); a write failure there is only logged,
+// not surfaced to the browser, mirroring handleWebUILogin's own tolerance
+// for a login log write failure. sessions supplies the username to record
+// (see sessionStore.usernameFor), best-effort: it's empty whenever the web
+// UI has no login configured.
+func handleDownloadFile(receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB, sessions *sessionStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := receivers[r.PathValue("id")]
 		if !ok {
@@ -711,15 +798,28 @@ func handleDownloadFile(receivers map[string]resolvedReceiver, log *slog.Logger)
 			return
 		}
 
+		record := func(success bool, detail string) {
+			if db == nil {
+				return
+			}
+
+			ev := downloadEvent{At: time.Now(), Username: sessions.usernameFor(r), ReceiverID: recv.id, Key: key, Success: success, RemoteAddr: r.RemoteAddr, Detail: detail}
+			if err := recordDownloadEvent(r.Context(), db, ev); err != nil {
+				log.Warn("download: recording download event failed", "err", err)
+			}
+		}
+
 		path := filepath.Join(recv.path, filepath.FromSlash(key))
 
 		f, err := os.Open(path) //nolint:gosec // key is sanitized by sanitizeObjectKey and joined under recv.path, not attacker-controlled beyond that
 		if err != nil {
 			if os.IsNotExist(err) {
 				http.Error(w, "not found", http.StatusNotFound)
+				record(false, "not found")
 			} else {
 				log.Warn("download: opening file failed", "id", recv.id, "key", key, "err", err)
 				http.Error(w, "opening file failed", http.StatusInternalServerError)
+				record(false, "opening file failed")
 			}
 
 			return
@@ -728,6 +828,8 @@ func handleDownloadFile(receivers map[string]resolvedReceiver, log *slog.Logger)
 
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(key)+`"`)
+
+		record(true, "")
 
 		if _, err := io.Copy(w, f); err != nil {
 			log.Warn("download: streaming file failed", "id", recv.id, "key", key, "err", err)
@@ -1105,17 +1207,20 @@ const dashboardHTML = `<!doctype html>
   }
   .logs .log-error { color: var(--failed); }
   .logs .log-warn { color: var(--running); }
-  .login-log-card {
+  .login-log-card,
+  .download-log-card {
     max-width: 1200px;
     margin: 0 auto;
     overflow-x: auto;
   }
-  table.login-events {
+  table.login-events,
+  table.download-events {
     width: 100%;
     border-collapse: collapse;
     font-size: .82rem;
   }
-  table.login-events th {
+  table.login-events th,
+  table.download-events th {
     text-align: left;
     color: var(--muted);
     font-weight: 600;
@@ -1126,12 +1231,14 @@ const dashboardHTML = `<!doctype html>
     border-bottom: 1px solid var(--border);
     white-space: nowrap;
   }
-  table.login-events td {
+  table.login-events td,
+  table.download-events td {
     padding: .4rem .5rem;
     border-bottom: 1px solid var(--border);
     overflow-wrap: anywhere;
   }
-  table.login-events td.nowrap {
+  table.login-events td.nowrap,
+  table.download-events td.nowrap {
     white-space: nowrap;
   }
 </style>
@@ -1165,6 +1272,18 @@ const dashboardHTML = `<!doctype html>
         <tr><th>Time</th><th>Username</th><th>Method</th><th>Result</th><th>Remote address</th></tr>
       </thead>
       <tbody id="login-log-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="download-log-wrap" hidden>
+  <h2 class="section-title">Download log</h2>
+  <div class="card download-log-card">
+    <table class="download-events">
+      <thead>
+        <tr><th>Time</th><th>Username</th><th>Receiver</th><th>File</th><th>Result</th><th>Remote address</th></tr>
+      </thead>
+      <tbody id="download-log-body"></tbody>
     </table>
   </div>
 </div>
@@ -1381,18 +1500,45 @@ function renderLoginEvents(events) {
   }).join("");
 }
 
+// renderDownloadEvents re-renders the download log table from events
+// (newest first, as served by /api/download-events). The section stays
+// hidden while there's nothing to show, matching renderLoginEvents above.
+function renderDownloadEvents(events) {
+  const wrap = document.getElementById("download-log-wrap");
+  if (!events || !events.length) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+
+  document.getElementById("download-log-body").innerHTML = events.map(function (ev) {
+    const result = ev.success ? badge("ok", "success") : badge("failed", "failed");
+    const detail = ev.detail ? '<p class="err">' + escapeHtml(ev.detail) + '</p>' : '';
+    return '<tr>' +
+      '<td class="nowrap">' + fmtTime(ev.at) + '</td>' +
+      '<td>' + escapeHtml(ev.username || '(unknown)') + '</td>' +
+      '<td class="nowrap">' + escapeHtml(ev.receiver_id) + '</td>' +
+      '<td>' + escapeHtml(ev.key) + '</td>' +
+      '<td class="nowrap">' + result + detail + '</td>' +
+      '<td>' + escapeHtml(ev.remote_addr) + '</td>' +
+      '</tr>';
+  }).join("");
+}
+
 function refresh() {
   Promise.all([
     fetch("/api/status").then(function (r) { return r.json(); }),
     fetch("/api/receivers").then(function (r) { return r.json(); }),
     fetch("/api/logs").then(function (r) { return r.json(); }),
-    fetch("/api/login-events").then(function (r) { return r.json(); })
+    fetch("/api/login-events").then(function (r) { return r.json(); }),
+    fetch("/api/download-events").then(function (r) { return r.json(); })
   ]).then(function (results) {
     render(results[0]);
     lastReceivers = results[1] || [];
     renderReceivers(lastReceivers);
     renderLogs(results[2]);
     renderLoginEvents(results[3]);
+    renderDownloadEvents(results[4]);
     document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
   }).catch(function (err) {
     document.getElementById("updated").textContent = "error fetching status: " + err;

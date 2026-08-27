@@ -366,3 +366,76 @@ func TestReadLoginEventsEmpty(t *testing.T) {
 		t.Errorf("readLoginEvents() on an empty log = %+v, want none", got)
 	}
 }
+
+func TestRecordReadDownloadEventsNewestFirst(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	ctx := context.Background()
+
+	events := []downloadEvent{
+		{At: time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC), Username: "admin", ReceiverID: "a", Key: "backup.gpg", Success: true, RemoteAddr: "10.0.0.1:1"},
+		{At: time.Date(2026, 1, 1, 3, 1, 0, 0, time.UTC), Username: "admin", ReceiverID: "a", Key: "missing.gpg", Success: false, RemoteAddr: "10.0.0.2:1", Detail: "not found"},
+	}
+
+	for _, ev := range events {
+		if err := recordDownloadEvent(ctx, db, ev); err != nil {
+			t.Fatalf("recordDownloadEvent() error: %v", err)
+		}
+	}
+
+	got, err := readDownloadEvents(ctx, db, 10)
+	if err != nil {
+		t.Fatalf("readDownloadEvents() error: %v", err)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("readDownloadEvents() returned %d events, want 2", len(got))
+	}
+
+	if got[0].Success || got[0].Key != "missing.gpg" || got[0].Detail != "not found" {
+		t.Errorf("readDownloadEvents()[0] = %+v, want the most recently recorded (failed) attempt first", got[0])
+	}
+
+	if !got[1].At.Equal(events[0].At) || got[1].Username != "admin" || got[1].ReceiverID != "a" || !got[1].Success {
+		t.Errorf("readDownloadEvents()[1] = %+v, want the earlier successful download", got[1])
+	}
+}
+
+func TestReadDownloadEventsRespectsLimit(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	ctx := context.Background()
+
+	for i := range 5 {
+		ev := downloadEvent{At: time.Date(2026, 1, 1, 0, i, 0, 0, time.UTC), Username: "admin", ReceiverID: "a", Key: "backup.gpg", Success: true, RemoteAddr: "10.0.0.1:1"}
+		if err := recordDownloadEvent(ctx, db, ev); err != nil {
+			t.Fatalf("recordDownloadEvent() error: %v", err)
+		}
+	}
+
+	got, err := readDownloadEvents(ctx, db, 2)
+	if err != nil {
+		t.Fatalf("readDownloadEvents() error: %v", err)
+	}
+
+	if len(got) != 2 {
+		t.Errorf("readDownloadEvents(limit=2) returned %d events, want 2", len(got))
+	}
+}
+
+func TestReadDownloadEventsEmpty(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+
+	got, err := readDownloadEvents(context.Background(), db, 10)
+	if err != nil {
+		t.Fatalf("readDownloadEvents() error: %v", err)
+	}
+
+	if len(got) != 0 {
+		t.Errorf("readDownloadEvents() on an empty log = %+v, want none", got)
+	}
+}
