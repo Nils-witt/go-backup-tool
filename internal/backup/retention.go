@@ -15,11 +15,10 @@ import (
 // wrote the object at localObjectPath(cfg, t) — then sweeps t's server for
 // anything now past its retention window. Only called after a successful
 // write to a local target whose server has retention: set; retention == 0
-// means no tracking (and so nothing to sweep). cfg.stateDB == nil (the db
-// couldn't be opened, or nothing needed it at startup — see
-// needsRetentionTracking) also disables tracking rather than erroring, since
-// the backup write itself already succeeded and this is auxiliary
-// bookkeeping.
+// means no tracking (and so nothing to sweep). cfg.stateDB == nil (the state
+// db couldn't be opened at startup) also disables tracking rather than
+// erroring, since the backup write itself already succeeded and this is
+// auxiliary bookkeeping.
 func recordLocalWrite(ctx context.Context, cfg *config, t *target, log *slog.Logger) error {
 	if t.retention <= 0 || cfg.stateDB == nil {
 		return nil
@@ -59,8 +58,8 @@ func removeRetentionRecord(ctx context.Context, cfg *config, t *target) error {
 
 // sweepRetentionForTarget sweeps db for t's server, for callers (see
 // sweepStartupRetention/sweepStartupReceiverRetention) that aren't already
-// in the middle of a write. A nil db (retention tracking unavailable this
-// run — see needsRetentionTracking) is a no-op.
+// in the middle of a write. A nil db (the state db couldn't be opened at
+// startup) is a no-op.
 func sweepRetentionForTarget(ctx context.Context, db *sql.DB, t *target, log *slog.Logger) error {
 	if t.retention <= 0 || db == nil {
 		return nil

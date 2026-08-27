@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -279,6 +280,173 @@ func TestWriteLastRunUpsertPreservesLastSuccess(t *testing.T) {
 
 	if !ok || gotRun.State != stateFailed || gotRun.Error != "boom" {
 		t.Errorf("readLastRun() = (%+v, %v), want a failed run with error %q", gotRun, ok, "boom")
+	}
+}
+
+func TestQueueAndListOutstandingUploads(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	ctx := context.Background()
+
+	earlier := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+	later := time.Date(2026, 1, 1, 3, 5, 0, 0, time.UTC)
+
+	if err := queueOutstandingUpload(ctx, db, "job-a", 1, "/tmp/a.staged", "backup-a.gpg", later, errors.New("boom b")); err != nil {
+		t.Fatalf("queueOutstandingUpload() second error: %v", err)
+	}
+
+	if err := queueOutstandingUpload(ctx, db, "job-a", 0, "/tmp/a.staged", "backup-a.gpg", earlier, errors.New("boom a")); err != nil {
+		t.Fatalf("queueOutstandingUpload() first error: %v", err)
+	}
+
+	got, err := listOutstandingUploads(ctx, db)
+	if err != nil {
+		t.Fatalf("listOutstandingUploads() error: %v", err)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("listOutstandingUploads() = %+v, want 2 rows", got)
+	}
+
+	if got[0].TargetIdx != 0 || got[1].TargetIdx != 1 {
+		t.Errorf("listOutstandingUploads() order = [target %d, target %d], want oldest (queued_at) first: [0, 1]", got[0].TargetIdx, got[1].TargetIdx)
+	}
+
+	if got[0].JobName != "job-a" || got[0].StagingPath != "/tmp/a.staged" || got[0].Key != "backup-a.gpg" || got[0].Attempts != 1 || got[0].LastError != "boom a" {
+		t.Errorf("listOutstandingUploads()[0] = %+v, want job-a/target 0 with attempts=1", got[0])
+	}
+}
+
+func TestQueueOutstandingUploadIdempotent(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	ctx := context.Background()
+	at := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+
+	if err := queueOutstandingUpload(ctx, db, "job-a", 0, "/tmp/a.staged", "backup-a.gpg", at, errors.New("boom")); err != nil {
+		t.Fatalf("queueOutstandingUpload() first error: %v", err)
+	}
+
+	if err := queueOutstandingUpload(ctx, db, "job-a", 0, "/tmp/a.staged", "backup-a.gpg", at, errors.New("boom again")); err != nil {
+		t.Fatalf("queueOutstandingUpload() second error: %v", err)
+	}
+
+	got, err := listOutstandingUploads(ctx, db)
+	if err != nil {
+		t.Fatalf("listOutstandingUploads() error: %v", err)
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("listOutstandingUploads() = %+v, want exactly 1 row for a duplicate (job, target, path)", got)
+	}
+}
+
+func TestRecordOutstandingUploadAttempt(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	ctx := context.Background()
+	queuedAt := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+	retriedAt := time.Date(2026, 1, 1, 3, 1, 0, 0, time.UTC)
+
+	if err := queueOutstandingUpload(ctx, db, "job-a", 0, "/tmp/a.staged", "backup-a.gpg", queuedAt, errors.New("first failure")); err != nil {
+		t.Fatalf("queueOutstandingUpload() error: %v", err)
+	}
+
+	rows, err := listOutstandingUploads(ctx, db)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("listOutstandingUploads() = %+v, %v, want exactly 1 row", rows, err)
+	}
+
+	if err := recordOutstandingUploadAttempt(ctx, db, rows[0].ID, retriedAt, errors.New("second failure")); err != nil {
+		t.Fatalf("recordOutstandingUploadAttempt() error: %v", err)
+	}
+
+	got, err := listOutstandingUploads(ctx, db)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("listOutstandingUploads() after attempt = %+v, %v, want exactly 1 row", got, err)
+	}
+
+	if got[0].Attempts != 2 || got[0].LastError != "second failure" {
+		t.Errorf("listOutstandingUploads()[0] = %+v, want attempts=2, last_error=%q", got[0], "second failure")
+	}
+}
+
+func TestDeleteOutstandingUpload(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	ctx := context.Background()
+
+	if err := queueOutstandingUpload(ctx, db, "job-a", 0, "/tmp/a.staged", "backup-a.gpg", time.Now(), errors.New("boom")); err != nil {
+		t.Fatalf("queueOutstandingUpload() error: %v", err)
+	}
+
+	rows, err := listOutstandingUploads(ctx, db)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("listOutstandingUploads() = %+v, %v, want exactly 1 row", rows, err)
+	}
+
+	if err := deleteOutstandingUpload(ctx, db, rows[0].ID); err != nil {
+		t.Fatalf("deleteOutstandingUpload() error: %v", err)
+	}
+
+	got, err := listOutstandingUploads(ctx, db)
+	if err != nil {
+		t.Fatalf("listOutstandingUploads() error: %v", err)
+	}
+
+	if len(got) != 0 {
+		t.Errorf("listOutstandingUploads() after delete = %+v, want none", got)
+	}
+}
+
+func TestCountOutstandingUploadsForPath(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	ctx := context.Background()
+	at := time.Now()
+
+	if err := queueOutstandingUpload(ctx, db, "job-a", 0, "/tmp/shared.staged", "backup-a.gpg", at, errors.New("boom")); err != nil {
+		t.Fatalf("queueOutstandingUpload() target 0 error: %v", err)
+	}
+
+	if err := queueOutstandingUpload(ctx, db, "job-a", 1, "/tmp/shared.staged", "backup-a.gpg", at, errors.New("boom")); err != nil {
+		t.Fatalf("queueOutstandingUpload() target 1 error: %v", err)
+	}
+
+	if err := queueOutstandingUpload(ctx, db, "job-b", 0, "/tmp/other.staged", "backup-b.gpg", at, errors.New("boom")); err != nil {
+		t.Fatalf("queueOutstandingUpload() other path error: %v", err)
+	}
+
+	got, err := countOutstandingUploadsForPath(ctx, db, "/tmp/shared.staged")
+	if err != nil {
+		t.Fatalf("countOutstandingUploadsForPath() error: %v", err)
+	}
+
+	if got != 2 {
+		t.Errorf("countOutstandingUploadsForPath(shared.staged) = %d, want 2", got)
+	}
+
+	got, err = countOutstandingUploadsForPath(ctx, db, "/tmp/other.staged")
+	if err != nil {
+		t.Fatalf("countOutstandingUploadsForPath() error: %v", err)
+	}
+
+	if got != 1 {
+		t.Errorf("countOutstandingUploadsForPath(other.staged) = %d, want 1", got)
+	}
+
+	got, err = countOutstandingUploadsForPath(ctx, db, "/tmp/nonexistent.staged")
+	if err != nil {
+		t.Fatalf("countOutstandingUploadsForPath() error: %v", err)
+	}
+
+	if got != 0 {
+		t.Errorf("countOutstandingUploadsForPath(nonexistent.staged) = %d, want 0", got)
 	}
 }
 

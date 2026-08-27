@@ -100,11 +100,14 @@ servers:
 # A job's backup is encrypted and written to a local staging file (see
 # staging-dir below) before any target upload starts, so a failed source
 # command or gpg never reaches a target, and each target then uploads from
-# that same stable file independently. If a target's upload fails, only
-# that target is retried (retries: how many attempts total, default 3;
-# retry-delay: how long to wait between attempts, default 5s) — a target
-# retrying never re-runs the backup command or gpg, and never affects any
-# other target's own attempts or retries.
+# that same stable file independently. If a target's upload fails, only that
+# target is retried: its first attempt happens immediately as part of the
+# run, and (retries: how many attempts total, default 3) further attempts
+# happen roughly once a minute afterward, persisted so they survive a
+# restart — a target retrying never re-runs the backup command or gpg, and
+# never affects any other target's own attempts or retries. The staged file
+# itself is kept on disk until every target has either succeeded or
+# permanently given up on it.
 #
 # staging-dir: "" # directory the encrypted backup is staged to before
 # uploading; empty (the default) uses the OS temp directory. Set this if
@@ -112,7 +115,6 @@ servers:
 # size (e.g. point it at the same volume a large local target already
 # lives on).
 # retries: 3
-# retry-delay: 5s
 
 # gpg-bin and gpg-homedir are almost always set here, at the top level,
 # rather than per job: they describe where gpg lives on this machine, not

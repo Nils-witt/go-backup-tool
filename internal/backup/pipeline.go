@@ -3,6 +3,7 @@ package backup
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -63,9 +64,10 @@ func environWithout(names ...string) []string {
 // back, unlike a live streaming design where a target could already have a
 // complete-but-truncated object by the time the failure is noticed), and
 // each target then uploads from that same stable file independently — so a
-// target that fails is retried (see uploadTargetWithRetry) by re-reading
-// the file, without re-running the backup command or gpg and without
-// affecting any other target's own attempts.
+// target that fails is retried (see queueOutstandingUpload and
+// monitorOutstandingUploads in uploadretry.go) by re-reading the file,
+// without re-running the backup command or gpg and without affecting any
+// other target's own attempts.
 //
 // cfg.cmd is run through the platform shell ("sh -c" on every OS but
 // Windows, "cmd /C" there — see newSourceCommand) deliberately: it lets an
@@ -121,7 +123,7 @@ func runPipeline(ctx context.Context, cfg *config, log *slog.Logger, onTargetDon
 	sourceErr := sourceCmd.Wait()
 
 	if stageErr == nil {
-		defer func() { _ = os.Remove(stagingPath) }()
+		defer cleanupStagedFileIfIdle(ctx, cfg.stateDB, stagingPath, log)
 	}
 
 	// Only upload if every earlier stage genuinely succeeded: staging a
@@ -403,21 +405,26 @@ func newS3Client(ctx context.Context, t *target) (*s3.Client, error) {
 // uploadStagedToTargets uploads the already-staged backup at stagingPath
 // (see stageBackup) to every one of cfg.targets, each independently and
 // concurrently: every target opens its own handle on stagingPath, so one
-// target being slow, blocked, or retrying doesn't affect any other's
-// progress the way funneling them all through a single shared reader would.
+// target being slow or blocked doesn't affect any other's progress the way
+// funneling them all through a single shared reader would.
 //
-// A target whose upload fails is retried in place (see
-// uploadTargetWithRetry) without involving any other target; only after its
-// attempts are exhausted does it count as failed. onTargetDone (see its doc
-// on runPipeline) is called for target i the moment its own outcome — after
-// any retries — is known, independently of every other target still in
-// progress; onTargetDone must be safe for concurrent use, since every
-// target's goroutine calls it on its own.
+// Each target gets exactly one attempt here. A target whose attempt fails is
+// queued as an outstanding upload (see queueOutstandingUpload) for
+// monitorOutstandingUploads (uploadretry.go) to retry roughly once a minute,
+// up to cfg.retries total attempts, instead of retrying immediately in place
+// — unless cfg.retries allows no more than this one attempt, in which case
+// the failure is permanent for this run, matching the old behavior for a
+// job with no retries configured. onTargetDone (see its doc on runPipeline)
+// is called for target i the moment this attempt's outcome is known,
+// independently of every other target still in progress; onTargetDone must
+// be safe for concurrent use, since every target's goroutine calls it on its
+// own.
 //
 // It returns the combined error via errors.Join, for callers that just want
 // to know whether anything failed.
 func uploadStagedToTargets(ctx context.Context, cfg *config, stagingPath string, onTargetDone func(index int, err error), log *slog.Logger) error {
 	targetErrs := make([]error, len(cfg.targets))
+	maxAttempts := max(cfg.retries, 1)
 
 	var wg sync.WaitGroup
 
@@ -429,14 +436,16 @@ func uploadStagedToTargets(ctx context.Context, cfg *config, stagingPath string,
 		wg.Go(func() {
 			start := time.Now()
 
-			err := uploadTargetWithRetry(ctx, cfg, t, stagingPath, log)
-			if err != nil {
-				targetErrs[i] = fmt.Errorf("target (%s): %w", targetLabel(t), err)
-				log.Warn("target upload failed", "target", targetLabel(t), "duration", time.Since(start), "err", err)
-			} else {
+			err := uploadTargetAttempt(ctx, cfg, t, stagingPath, log)
+			if err == nil {
 				log.Debug("target upload finished", "target", targetLabel(t), "duration", time.Since(start))
+				onTargetDone(i, nil)
+
+				return
 			}
 
+			targetErrs[i] = fmt.Errorf("target (%s): %w", targetLabel(t), err)
+			queueOrLogTargetFailure(ctx, cfg, i, t, stagingPath, maxAttempts, time.Since(start), err, log)
 			onTargetDone(i, targetErrs[i])
 		})
 	}
@@ -446,57 +455,48 @@ func uploadStagedToTargets(ctx context.Context, cfg *config, stagingPath string,
 	return errors.Join(targetErrs...)
 }
 
-// uploadTargetWithRetry attempts to upload stagingPath to target t, retrying
-// up to cfg.retries times (waiting cfg.retryDelay between attempts) before
-// giving up. Every attempt re-opens stagingPath from the start, so a target
-// that fails part-way through never leaves later attempts reading from a
-// stale offset, and retrying it never involves re-running the backup
-// command or gpg, or touches any other target.
-//
-// cfg.retries < 1 (the zero value, e.g. for a *config built directly in a
-// test rather than via newConfigDefaults) is treated as 1: always try
-// exactly once, no retries, rather than silently uploading nothing.
-func uploadTargetWithRetry(ctx context.Context, cfg *config, t *target, stagingPath string, log *slog.Logger) error {
-	attempts := max(cfg.retries, 1)
-
-	var err error
-
-	for attempt := 1; attempt <= attempts; attempt++ {
-		err = uploadTargetAttempt(ctx, cfg, t, stagingPath, log)
-		if err == nil {
-			return nil
-		}
-
-		if attempt == attempts {
-			break
-		}
-
-		log.Warn("target upload attempt failed, retrying", "target", targetLabel(t), "attempt", attempt, "max_attempts", attempts, "retry_delay", cfg.retryDelay, "err", err)
-
-		if !sleepOrDone(ctx, cfg.retryDelay) {
-			return fmt.Errorf("attempt %d/%d: %w (retry canceled: %w)", attempt, attempts, err, ctx.Err())
-		}
+// queueOrLogTargetFailure handles target i's failed upload attempt for
+// uploadStagedToTargets: if maxAttempts allows a further attempt, it's
+// queued as an outstanding upload for monitorOutstandingUploads
+// (uploadretry.go) to retry later; otherwise the failure is permanent for
+// this run, matching a job with no retries configured.
+func queueOrLogTargetFailure(ctx context.Context, cfg *config, index int, t *target, stagingPath string, maxAttempts int, duration time.Duration, err error, log *slog.Logger) {
+	if maxAttempts <= 1 {
+		log.Warn("target upload failed", "target", targetLabel(t), "duration", duration, "err", err)
+		return
 	}
 
-	return fmt.Errorf("attempt %d/%d: %w", attempts, attempts, err)
+	log.Warn("target upload failed, queuing for retry", "target", targetLabel(t), "duration", duration, "max_attempts", maxAttempts, "err", err)
+
+	if qerr := queueOutstandingUpload(ctx, cfg.stateDB, cfg.name, index, stagingPath, cfg.key, time.Now(), err); qerr != nil {
+		log.Error("failed to queue outstanding upload; this target will not be retried", "target", targetLabel(t), "err", qerr)
+	}
 }
 
-// sleepOrDone blocks for d, or until ctx is done, whichever comes first,
-// reporting whether the wait completed normally (false means ctx ended it
-// early, so the caller should stop rather than proceed).
-func sleepOrDone(ctx context.Context, d time.Duration) bool {
-	if d <= 0 {
-		return ctx.Err() == nil
+// cleanupStagedFileIfIdle removes path once no outstanding_uploads row still
+// references it (see queueOutstandingUpload/countOutstandingUploadsForPath),
+// called once runPipeline's own upload attempts are done, and again by
+// monitorOutstandingUploads (uploadretry.go) after each retry that resolves a
+// queued upload (success or giving up). A nil db means state tracking isn't
+// available for this run, so there's no way to know what's outstanding
+// elsewhere; fall back to the old unconditional-delete behavior, matching a
+// plain CLI run with no state db.
+func cleanupStagedFileIfIdle(ctx context.Context, db *sql.DB, path string, log *slog.Logger) {
+	if db == nil {
+		_ = os.Remove(path)
+		return
 	}
 
-	timer := time.NewTimer(d)
-	defer timer.Stop()
+	n, err := countOutstandingUploadsForPath(ctx, db, path)
+	if err != nil {
+		log.Warn("checking outstanding uploads before removing staged file; leaving it in place", "path", path, "err", err)
+		return
+	}
 
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
+	if n == 0 {
+		_ = os.Remove(path)
+	} else {
+		log.Debug("staged file kept for outstanding retries", "path", path, "outstanding", n)
 	}
 }
 

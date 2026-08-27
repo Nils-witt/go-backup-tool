@@ -106,23 +106,21 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 
 	var stateDB *sql.DB
 
-	// Opened whenever a job needs it for catch-up scheduling, whenever the
-	// web UI is up to show it, or whenever a local target or receiver has
-	// retention: set: without any of those, nothing reads or writes this db,
-	// so skip the file entirely for a plain CLI run with no retention
-	// configured.
-	if needsScheduleState(rc.jobs) || rc.listen != "" || needsRetentionTracking(rc.jobs, rc.receivers) {
-		path := scheduleStateDBPath(rc.configPath)
+	// Always opened: besides catch-up scheduling, the web UI, and retention
+	// tracking, it now also backs the outstanding-uploads retry queue (see
+	// uploadretry.go), which every run needs regardless of those other
+	// features — a target upload failure with no state db to queue it in
+	// would otherwise be retried immediately or not at all.
+	path := scheduleStateDBPath(rc.configPath)
 
-		db, err := openScheduleStateDB(ctx, path)
-		if err != nil {
-			log.Warn("opening job state db", "path", path, "err", err)
-		} else {
-			stateDB = db
-			defer func() { _ = db.Close() }()
+	db, err := openScheduleStateDB(ctx, path)
+	if err != nil {
+		log.Warn("opening job state db", "path", path, "err", err)
+	} else {
+		stateDB = db
+		defer func() { _ = db.Close() }()
 
-			log.Debug("opened job state db", "path", path)
-		}
+		log.Debug("opened job state db", "path", path)
 	}
 
 	sweepStartupRetention(ctx, stateDB, rc.jobs, log)
@@ -134,6 +132,17 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 
 	r := &runner{log: log, store: store, stateDB: stateDB, identity: identity}
+
+	if stateDB != nil {
+		jobsByName := make(map[string]*config, len(rc.jobs))
+		for _, j := range rc.jobs {
+			jobsByName[j.name] = j
+		}
+
+		monitor := &outstandingUploadMonitor{db: stateDB, jobsByName: jobsByName, store: store, identity: identity, log: log}
+
+		go monitor.run(ctx)
+	}
 
 	var srv *webUIServer
 
@@ -186,7 +195,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 type runner struct {
 	log      *slog.Logger
 	store    *statusStore
-	stateDB  *sql.DB         // nil if no job uses start-time, or the db couldn't be opened
+	stateDB  *sql.DB         // nil only if the db couldn't be opened
 	identity *serverIdentity // nil if loadServerIdentity failed at startup; see config.identity
 	failed   atomic.Bool
 }
@@ -223,18 +232,6 @@ func seedStatusFromState(ctx context.Context, db *sql.DB, jobs []*config, store 
 			store.seedTargetRun(j.name, tr.Index, tr.State, tr.Error)
 		}
 	}
-}
-
-// needsScheduleState reports whether any job sets start-time, i.e. whether
-// the state db needs to be opened at all.
-func needsScheduleState(jobs []*config) bool {
-	for _, j := range jobs {
-		if !j.startTime.IsZero() {
-			return true
-		}
-	}
-
-	return false
 }
 
 // lastJobSuccess returns job name's last recorded successful run, or the
@@ -551,26 +548,4 @@ func sweepStartupRetention(ctx context.Context, db *sql.DB, jobs []*config, log 
 			}
 		}
 	}
-}
-
-// needsRetentionTracking reports whether any job's local target or any
-// receiver has retention: set, i.e. whether the shared state db needs to be
-// opened purely to support retention tracking (independent of
-// needsScheduleState or -listen).
-func needsRetentionTracking(jobs []*config, receivers map[string]resolvedReceiver) bool {
-	for _, j := range jobs {
-		for i := range j.targets {
-			if j.targets[i].kind == serverKindLocal && j.targets[i].retention > 0 {
-				return true
-			}
-		}
-	}
-
-	for _, recv := range receivers {
-		if recv.retention > 0 {
-			return true
-		}
-	}
-
-	return false
 }

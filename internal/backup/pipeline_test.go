@@ -121,10 +121,9 @@ func TestDeleteLocalObjectMissingFileIsNotError(t *testing.T) {
 }
 
 // stageTestContent stages content into a private temp file via the real
-// stageBackup, for tests exercising uploadStagedToTargets/
-// uploadTargetWithRetry against a real file on disk the way runPipeline
-// does, rather than an in-memory reader. The file is removed automatically
-// when the test ends.
+// stageBackup, for tests exercising uploadStagedToTargets/uploadTargetAttempt
+// against a real file on disk the way runPipeline does, rather than an
+// in-memory reader. The file is removed automatically when the test ends.
 func stageTestContent(t *testing.T, content string) string {
 	t.Helper()
 
@@ -306,68 +305,12 @@ func TestUploadStagedToTargetsIsolatesSlowTarget(t *testing.T) {
 	}
 }
 
-// TestUploadTargetWithRetryRecoversTransientFailure verifies the retry
-// behavior itself: a target that fails its first two attempts and succeeds
-// on the third should end up successful, with every attempt (including the
-// two that failed) having read the full staged content — retrying a target
-// re-reads the same local file rather than needing the backup re-run.
-func TestUploadTargetWithRetryRecoversTransientFailure(t *testing.T) {
-	t.Parallel()
-
-	const content = "hello from the pipeline"
-
-	var (
-		mu       sync.Mutex
-		requests int
-		bodies   []string
-	)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-
-		mu.Lock()
-		requests++
-		n := requests
-
-		bodies = append(bodies, string(body))
-		mu.Unlock()
-
-		if n < 3 {
-			http.Error(w, "transient failure", http.StatusInternalServerError)
-			return
-		}
-
-		w.WriteHeader(http.StatusCreated)
-	}))
-	defer srv.Close()
-
-	cfg := &config{key: "backup.gpg", retries: 3, retryDelay: time.Millisecond, identity: testServerIdentity(t)}
-	tgt := &target{serverName: "flaky", kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"}
-
-	err := uploadTargetWithRetry(t.Context(), cfg, tgt, stageTestContent(t, content), discardLogger)
-	if err != nil {
-		t.Fatalf("uploadTargetWithRetry() unexpected error: %v", err)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if requests != 3 {
-		t.Errorf("requests = %d, want 3 (2 failures + 1 success)", requests)
-	}
-
-	for i, body := range bodies {
-		if body != content {
-			t.Errorf("attempt %d body = %q, want %q", i+1, body, content)
-		}
-	}
-}
-
-// TestUploadTargetWithRetryExhausted verifies that a target which never
-// succeeds is retried exactly cfg.retries times and then reported as
-// failed, without affecting the staged file itself (nothing here re-runs
-// the backup).
-func TestUploadTargetWithRetryExhausted(t *testing.T) {
+// TestUploadStagedToTargetsQueuesFailureForRetry verifies that a failing
+// target is attempted exactly once (no in-run retry loop) and, since
+// cfg.retries here allows further attempts, queued as an outstanding upload
+// for monitorOutstandingUploads (uploadretry.go) to retry roughly once a
+// minute afterward, instead of retrying immediately in place.
+func TestUploadStagedToTargetsQueuesFailureForRetry(t *testing.T) {
 	t.Parallel()
 
 	var requests atomic.Int32
@@ -378,36 +321,91 @@ func TestUploadTargetWithRetryExhausted(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &config{key: "backup.gpg", retries: 2, retryDelay: time.Millisecond, identity: testServerIdentity(t)}
-	tgt := &target{serverName: "always-down", kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"}
+	stateDB := openTestStateDB(t)
 
-	err := uploadTargetWithRetry(t.Context(), cfg, tgt, stageTestContent(t, "hello"), discardLogger)
-	if err == nil {
-		t.Fatal("uploadTargetWithRetry() error = nil, want non-nil")
+	cfg := &config{
+		name:     "job-a",
+		key:      "backup.gpg",
+		retries:  3,
+		identity: testServerIdentity(t),
+		stateDB:  stateDB,
+		targets:  []target{{serverName: "always-down", kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"}},
 	}
 
-	if got := requests.Load(); got != 2 {
-		t.Errorf("requests = %d, want 2 (cfg.retries)", got)
+	stagingPath := stageTestContent(t, "hello")
+
+	onDone, results := collectTargetDone(len(cfg.targets))
+
+	if err := uploadStagedToTargets(t.Context(), cfg, stagingPath, onDone, discardLogger); err == nil {
+		t.Fatal("uploadStagedToTargets() error = nil, want non-nil")
+	}
+
+	if got := requests.Load(); got != 1 {
+		t.Errorf("requests = %d, want 1 (no in-run retry; retries now happen via the outstanding-uploads queue)", got)
+	}
+
+	if targetErrs := results(); len(targetErrs) != 1 || targetErrs[0] == nil {
+		t.Fatalf("uploadStagedToTargets() reported target results = %v, want [<err>]", targetErrs)
+	}
+
+	rows, err := listOutstandingUploads(t.Context(), stateDB)
+	if err != nil {
+		t.Fatalf("listOutstandingUploads() error: %v", err)
+	}
+
+	if len(rows) != 1 {
+		t.Fatalf("listOutstandingUploads() = %+v, want exactly 1 queued row", rows)
+	}
+
+	if rows[0].JobName != "job-a" || rows[0].TargetIdx != 0 || rows[0].StagingPath != stagingPath {
+		t.Errorf("queued row = %+v, want job-a/target 0/%q", rows[0], stagingPath)
 	}
 }
 
-// TestUploadTargetWithRetryZeroTriesOnce verifies that a *config built
-// directly (retries left at its Go zero value, as many tests and any code
-// that doesn't go through newConfigDefaults do) still uploads once instead
-// of never attempting the upload at all.
-func TestUploadTargetWithRetryZeroTriesOnce(t *testing.T) {
+// TestUploadStagedToTargetsNoQueueWhenNoRetriesConfigured verifies that a
+// *config built directly (retries left at its Go zero value, as many tests
+// and any code that doesn't go through newConfigDefaults do — treated as 1,
+// no retries) still makes exactly one upload attempt but does not queue a
+// failed target for retry at all, matching the old no-retry-configured
+// behavior exactly.
+func TestUploadStagedToTargetsNoQueueWhenNoRetriesConfigured(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	cfg := &config{key: "backup.gpg"} // retries left at 0
-	tgt := &target{serverName: "nas", kind: serverKindLocal, bucket: "sub", localPath: dir}
+	var requests atomic.Int32
 
-	if err := uploadTargetWithRetry(t.Context(), cfg, tgt, stageTestContent(t, "hello"), discardLogger); err != nil {
-		t.Fatalf("uploadTargetWithRetry() unexpected error: %v", err)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, "always fails", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	stateDB := openTestStateDB(t)
+
+	cfg := &config{
+		name:     "job-a",
+		key:      "backup.gpg", // retries left at 0
+		identity: testServerIdentity(t),
+		stateDB:  stateDB,
+		targets:  []target{{serverName: "always-down", kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"}},
 	}
 
-	if _, err := os.Stat(localObjectPath(cfg, tgt)); err != nil {
-		t.Errorf("target was never uploaded to: %v", err)
+	onDone, _ := collectTargetDone(len(cfg.targets))
+
+	if err := uploadStagedToTargets(t.Context(), cfg, stageTestContent(t, "hello"), onDone, discardLogger); err == nil {
+		t.Fatal("uploadStagedToTargets() error = nil, want non-nil")
+	}
+
+	if got := requests.Load(); got != 1 {
+		t.Errorf("requests = %d, want 1", got)
+	}
+
+	rows, err := listOutstandingUploads(t.Context(), stateDB)
+	if err != nil {
+		t.Fatalf("listOutstandingUploads() error: %v", err)
+	}
+
+	if len(rows) != 0 {
+		t.Fatalf("listOutstandingUploads() = %+v, want none (retries=1 means no retry queued)", rows)
 	}
 }
 

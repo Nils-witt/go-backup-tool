@@ -113,6 +113,33 @@ func openScheduleStateDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("migrating job state db %q: %w", path, err)
 	}
 
+	// outstanding_uploads records a target upload that failed and still has
+	// attempts remaining (see config.retries), so monitorOutstandingUploads
+	// (uploadretry.go) can retry it roughly once a minute instead of the old
+	// in-run, sleep-based retry loop. id is the primary key (rather than
+	// job_name+target_idx, as target_runs uses) because a repeating job can
+	// queue a new failure for the same target against a different staging
+	// path while an earlier one is still outstanding. key is the run's
+	// already-resolved object key (post {time} substitution) and must never
+	// be recomputed on retry.
+	const outstandingUploadsSchema = `CREATE TABLE IF NOT EXISTS outstanding_uploads (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		job_name        TEXT NOT NULL,
+		target_idx      INTEGER NOT NULL,
+		staging_path    TEXT NOT NULL,
+		key             TEXT NOT NULL,
+		queued_at       TIMESTAMP NOT NULL,
+		attempts        INTEGER NOT NULL,
+		last_attempt_at TIMESTAMP,
+		last_error      TEXT,
+		UNIQUE (job_name, target_idx, staging_path)
+	)`
+
+	if _, err := db.ExecContext(ctx, outstandingUploadsSchema); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
+	}
+
 	// login_events records every dashboard login attempt, password or SSO,
 	// win or lose, so an operator can review who's signed in (and who's
 	// tried and failed) from the web UI (see recordLoginEvent/
@@ -353,6 +380,119 @@ func readTargetRuns(ctx context.Context, db *sql.DB, name string) ([]targetRun, 
 	}
 
 	return out, nil
+}
+
+// outstandingUpload is one target upload that failed and still has retry
+// attempts remaining, as persisted by queueOutstandingUpload and retried by
+// monitorOutstandingUploads (uploadretry.go).
+type outstandingUpload struct {
+	ID          int64
+	JobName     string
+	TargetIdx   int
+	StagingPath string
+	Key         string
+	QueuedAt    time.Time
+	Attempts    int
+	LastError   string
+}
+
+// queueOutstandingUpload records that job name's target at index failed its
+// first upload attempt for stagingPath (as key), so monitorOutstandingUploads
+// retries it going forward instead of the old in-run retry loop. Idempotent
+// for the same (job, target, stagingPath) triple: a duplicate call (which
+// shouldn't happen in practice) leaves the existing row untouched rather than
+// erroring or inserting a second row.
+func queueOutstandingUpload(ctx context.Context, db *sql.DB, jobName string, targetIdx int, stagingPath, key string, at time.Time, uploadErr error) error {
+	const insert = `INSERT INTO outstanding_uploads (job_name, target_idx, staging_path, key, queued_at, attempts, last_attempt_at, last_error)
+		VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+		ON CONFLICT(job_name, target_idx, staging_path) DO NOTHING`
+
+	errText := ""
+	if uploadErr != nil {
+		errText = uploadErr.Error()
+	}
+
+	if _, err := db.ExecContext(ctx, insert, jobName, targetIdx, stagingPath, key, at.UTC(), at.UTC(), errText); err != nil {
+		return fmt.Errorf("queuing outstanding upload for job %q target %d: %w", jobName, targetIdx, err)
+	}
+
+	return nil
+}
+
+// listOutstandingUploads returns every queued outstanding upload, oldest
+// first, so monitorOutstandingUploads processes failures in the order they
+// occurred.
+func listOutstandingUploads(ctx context.Context, db *sql.DB) ([]outstandingUpload, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT id, job_name, target_idx, staging_path, key, queued_at, attempts, last_error FROM outstanding_uploads ORDER BY queued_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("reading outstanding uploads: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []outstandingUpload
+
+	for rows.Next() {
+		var (
+			u         outstandingUpload
+			lastError sql.NullString
+		)
+
+		if err := rows.Scan(&u.ID, &u.JobName, &u.TargetIdx, &u.StagingPath, &u.Key, &u.QueuedAt, &u.Attempts, &lastError); err != nil {
+			return nil, fmt.Errorf("reading outstanding uploads: %w", err)
+		}
+
+		u.LastError = lastError.String
+		out = append(out, u)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading outstanding uploads: %w", err)
+	}
+
+	return out, nil
+}
+
+// recordOutstandingUploadAttempt increments id's attempts and records the
+// error from its latest failed retry, called when a retry has failed again
+// but hasn't yet hit the job's max attempts (see uploadretry.go).
+func recordOutstandingUploadAttempt(ctx context.Context, db *sql.DB, id int64, at time.Time, attemptErr error) error {
+	const update = `UPDATE outstanding_uploads SET attempts = attempts + 1, last_attempt_at = ?, last_error = ? WHERE id = ?`
+
+	errText := ""
+	if attemptErr != nil {
+		errText = attemptErr.Error()
+	}
+
+	if _, err := db.ExecContext(ctx, update, at.UTC(), errText, id); err != nil {
+		return fmt.Errorf("recording outstanding upload %d attempt: %w", id, err)
+	}
+
+	return nil
+}
+
+// deleteOutstandingUpload removes outstanding upload id — called once its
+// upload finally succeeds, once it's been retried the job's maximum number of
+// times, or once its staging file is confirmed permanently gone.
+func deleteOutstandingUpload(ctx context.Context, db *sql.DB, id int64) error {
+	if _, err := db.ExecContext(ctx, `DELETE FROM outstanding_uploads WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("deleting outstanding upload %d: %w", id, err)
+	}
+
+	return nil
+}
+
+// countOutstandingUploadsForPath reports how many outstanding uploads (across
+// every job and target) still reference stagingPath, so a caller knows
+// whether it's finally safe to delete that staged file.
+func countOutstandingUploadsForPath(ctx context.Context, db *sql.DB, stagingPath string) (int, error) {
+	var n int
+
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM outstanding_uploads WHERE staging_path = ?`, stagingPath).Scan(&n); err != nil {
+		return 0, fmt.Errorf("counting outstanding uploads for %q: %w", stagingPath, err)
+	}
+
+	return n, nil
 }
 
 // loginEvent is one recorded attempt to log into the dashboard, password or

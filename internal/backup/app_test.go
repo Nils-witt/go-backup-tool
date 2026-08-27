@@ -257,6 +257,129 @@ func TestRunOnceReportsIncompleteWhenSomeTargetsFail(t *testing.T) {
 	}
 }
 
+// TestRunOnceKeepsStagedFileUntilOutstandingUploadResolves is an end-to-end
+// check (real gpg, real runOnce) that a job's staged file survives past
+// runOnce returning when a target fails and cfg.retries allows a later
+// retry: the failure is queued as an outstanding upload (see
+// queueOutstandingUpload) instead of the old behavior of exhausting retries
+// in place and deleting the staged file unconditionally — the file must
+// stick around for monitorOutstandingUploads to retry from later.
+func TestRunOnceKeepsStagedFileUntilOutstandingUploadResolves(t *testing.T) {
+	if _, err := exec.LookPath("gpg"); err != nil {
+		t.Skip("gpg not found in PATH, skipping")
+	}
+
+	t.Parallel()
+
+	dir := t.TempDir()
+	stagingDir := t.TempDir()
+
+	// Make the target's parent directory path a regular file, so
+	// writeLocalObject's os.MkdirAll for it fails deterministically, every
+	// attempt, forever.
+	badParent := filepath.Join(dir, "blocked")
+	if err := os.WriteFile(badParent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("setting up blocked path: %v", err)
+	}
+
+	job := &config{
+		name:       "test",
+		cmd:        "echo hi",
+		key:        "backup-{time}.gpg",
+		symmetric:  true,
+		passphrase: "unit-test-passphrase",
+		gpgBin:     "gpg",
+		stagingDir: stagingDir,
+		retries:    3,
+		targets: []target{
+			{serverName: "bad", kind: serverKindLocal, bucket: "blocked/sub", localPath: dir},
+		},
+	}
+
+	stateDB, err := openScheduleStateDB(context.Background(), filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatalf("openScheduleStateDB() error: %v", err)
+	}
+
+	t.Cleanup(func() { _ = stateDB.Close() })
+
+	store := newStatusStore([]*config{job})
+	r := &runner{log: discardLogger, store: store, stateDB: stateDB}
+
+	r.runOnce(context.Background(), job)
+
+	staged, err := filepath.Glob(filepath.Join(stagingDir, "go-backup-tool-*.staged"))
+	if err != nil {
+		t.Fatalf("globbing staging dir: %v", err)
+	}
+
+	if len(staged) != 1 {
+		t.Fatalf("staged files in %q = %v, want exactly 1 (kept for the outstanding retry)", stagingDir, staged)
+	}
+
+	rows, err := listOutstandingUploads(context.Background(), stateDB)
+	if err != nil {
+		t.Fatalf("listOutstandingUploads() error: %v", err)
+	}
+
+	if len(rows) != 1 {
+		t.Fatalf("listOutstandingUploads() = %+v, want exactly 1 queued row", rows)
+	}
+
+	if rows[0].StagingPath != staged[0] {
+		t.Errorf("queued row staging_path = %q, want %q", rows[0].StagingPath, staged[0])
+	}
+}
+
+// TestRunOnceDeletesStagedFileWhenNoTargetsOutstanding is the regression
+// counterpart to TestRunOnceKeepsStagedFileUntilOutstandingUploadResolves:
+// once every target has succeeded, nothing is outstanding, so the staged
+// file should be removed exactly as it always was.
+func TestRunOnceDeletesStagedFileWhenNoTargetsOutstanding(t *testing.T) {
+	if _, err := exec.LookPath("gpg"); err != nil {
+		t.Skip("gpg not found in PATH, skipping")
+	}
+
+	t.Parallel()
+
+	dir := t.TempDir()
+	stagingDir := t.TempDir()
+
+	job := &config{
+		name:       "test",
+		cmd:        "echo hi",
+		key:        "backup-{time}.gpg",
+		symmetric:  true,
+		passphrase: "unit-test-passphrase",
+		gpgBin:     "gpg",
+		stagingDir: stagingDir,
+		targets: []target{
+			{serverName: "good", kind: serverKindLocal, bucket: "sub", localPath: dir},
+		},
+	}
+
+	stateDB, err := openScheduleStateDB(context.Background(), filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatalf("openScheduleStateDB() error: %v", err)
+	}
+
+	t.Cleanup(func() { _ = stateDB.Close() })
+
+	store := newStatusStore([]*config{job})
+	r := &runner{log: discardLogger, store: store, stateDB: stateDB}
+
+	r.runOnce(context.Background(), job)
+
+	staged, err := filepath.Glob(filepath.Join(stagingDir, "go-backup-tool-*.staged"))
+	if err != nil {
+		t.Fatalf("globbing staging dir: %v", err)
+	}
+
+	if len(staged) != 0 {
+		t.Errorf("staged files in %q = %v, want none (nothing outstanding)", stagingDir, staged)
+	}
+}
+
 // TestSeedStatusFromStateAcrossRestart simulates a restart: a first runner
 // (with its own statusStore) runs a job and persists its outcome; a second,
 // independent statusStore — standing in for the fresh one a restarted
@@ -518,54 +641,6 @@ func TestScheduleStartTimeSkipsCatchUpWhenAlreadyRecorded(t *testing.T) { //noli
 
 	if got := countMarkerRuns(t, marker); got != 0 {
 		t.Errorf("marker recorded %d runs, want 0 (already-covered slot must not trigger a catch-up run)", got)
-	}
-}
-
-func TestNeedsRetentionTracking(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		jobs      []*config
-		receivers map[string]resolvedReceiver
-		want      bool
-	}{
-		{name: "no jobs or receivers", want: false},
-		{
-			name: "local target without retention",
-			jobs: []*config{{targets: []target{{kind: serverKindLocal}}}},
-			want: false,
-		},
-		{
-			name: "s3 target with retention field set is irrelevant (not local)",
-			jobs: []*config{{targets: []target{{kind: serverKindS3, retention: time.Hour}}}},
-			want: false,
-		},
-		{
-			name: "local target with retention",
-			jobs: []*config{{targets: []target{{kind: serverKindLocal, retention: time.Hour}}}},
-			want: true,
-		},
-		{
-			name:      "receiver without retention",
-			receivers: map[string]resolvedReceiver{"a": {id: "a"}},
-			want:      false,
-		},
-		{
-			name:      "receiver with retention",
-			receivers: map[string]resolvedReceiver{"a": {id: "a", retention: 24 * time.Hour}},
-			want:      true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			if got := needsRetentionTracking(tt.jobs, tt.receivers); got != tt.want {
-				t.Errorf("needsRetentionTracking() = %v, want %v", got, tt.want)
-			}
-		})
 	}
 }
 

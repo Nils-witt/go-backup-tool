@@ -1961,10 +1961,6 @@ jobs:
 		t.Errorf("cfg.retries = %v, want %v", cfg.retries, defaultRetries)
 	}
 
-	if cfg.retryDelay != defaultRetryDelay {
-		t.Errorf("cfg.retryDelay = %v, want %v", cfg.retryDelay, defaultRetryDelay)
-	}
-
 	if cfg.stagingDir != "" {
 		t.Errorf("cfg.stagingDir = %q, want empty (OS default temp dir)", cfg.stagingDir)
 	}
@@ -1984,7 +1980,6 @@ jobs:
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
     retries: 5
-    retry-delay: 30s
     staging-dir: /var/lib/go-backup-tool/staging
 `)
 
@@ -1996,10 +1991,6 @@ jobs:
 	cfg := singleJob(t, rc)
 	if cfg.retries != 5 {
 		t.Errorf("cfg.retries = %v, want 5", cfg.retries)
-	}
-
-	if cfg.retryDelay != 30*time.Second {
-		t.Errorf("cfg.retryDelay = %v, want 30s", cfg.retryDelay)
 	}
 
 	if cfg.stagingDir != "/var/lib/go-backup-tool/staging" {
@@ -2047,28 +2038,6 @@ jobs:
 		if j.gpgHomedir != wantHomedir[j.name] {
 			t.Errorf("job %q gpgHomedir = %q, want %q", j.name, j.gpgHomedir, wantHomedir[j.name])
 		}
-	}
-}
-
-func TestParseFlagsRetryDelayBadFileValue(t *testing.T) {
-	t.Parallel()
-
-	path := writeConfigFile(t, `
-servers:
-  - name: s
-    region: us-east-1
-
-jobs:
-  - name: test
-    cmd: echo hi
-    targets: [{server: s, bucket: b}]
-    recipients: [me@example.com]
-    retry-delay: "not-a-duration"
-`)
-
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "parsing retry-delay") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "parsing retry-delay")
 	}
 }
 

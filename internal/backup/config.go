@@ -54,15 +54,16 @@ type config struct {
 	// temp directory (os.CreateTemp's behavior when given "").
 	stagingDir string
 
-	// retries is how many times each target's upload is attempted (1 means
-	// no retry) before that target is reported as failed; retryDelay is how
-	// long to wait between attempts. Retries are per target: one target
-	// exhausting its retries doesn't affect any other target's attempts, and
-	// none of them re-run the backup command or gpg, since every attempt
-	// re-reads the same already-staged local file. See
-	// uploadTargetWithRetry.
-	retries    int
-	retryDelay time.Duration
+	// retries is the total number of attempts allowed for each target's
+	// upload (1 means no retry) before that target is permanently abandoned:
+	// its first attempt happens in-run (see uploadStagedToTargets), and any
+	// further attempts happen roughly once a minute afterward, persisted as
+	// an outstanding upload and driven by monitorOutstandingUploads
+	// (uploadretry.go) rather than an immediate in-run retry loop. Retries
+	// are per target: one target exhausting its retries doesn't affect any
+	// other target's attempts, and none of them re-run the backup command or
+	// gpg, since every attempt re-reads the same already-staged local file.
+	retries int
 
 	// stateDB is the shared state/retention sqlite database (see
 	// schedule_state.go and retention.go), set on each run's own copy of its
@@ -240,7 +241,6 @@ const (
 	defaultRegion     = "us-east-1"
 	defaultGPGBin     = "gpg"
 	defaultRetries    = 3
-	defaultRetryDelay = 5 * time.Second
 )
 
 // fileJob mirrors config's per-job fields for YAML unmarshaling, used both
@@ -268,7 +268,6 @@ type fileJob struct {
 	StartTime  string          `yaml:"start-time"`
 	StagingDir string          `yaml:"staging-dir"`
 	Retries    int             `yaml:"retries"`
-	RetryDelay string          `yaml:"retry-delay"`
 }
 
 // fileJobTarget mirrors jobTargetRef for YAML unmarshaling. Retention (local
@@ -998,10 +997,9 @@ func resolveTargetCredentials(jobs []*config) error {
 // every job before its config file fields are layered on top.
 func newConfigDefaults() *config {
 	return &config{
-		key:        defaultKeyPattern,
-		gpgBin:     defaultGPGBin,
-		retries:    defaultRetries,
-		retryDelay: defaultRetryDelay,
+		key:     defaultKeyPattern,
+		gpgBin:  defaultGPGBin,
+		retries: defaultRetries,
 	}
 }
 
@@ -1175,15 +1173,6 @@ func applyFileJob(cfg *config, fj *fileJob) error {
 	// would be no attempts at all), so treating it as unset costs nothing.
 	if fj.Retries > 0 {
 		cfg.retries = fj.Retries
-	}
-
-	if fj.RetryDelay != "" {
-		d, err := time.ParseDuration(fj.RetryDelay)
-		if err != nil {
-			return fmt.Errorf("parsing retry-delay %q: %w", fj.RetryDelay, err)
-		}
-
-		cfg.retryDelay = d
 	}
 
 	if len(fj.Targets) > 0 {
