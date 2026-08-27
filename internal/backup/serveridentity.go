@@ -16,9 +16,13 @@ import (
 // signRemoteAuthToken, used by uploadToRemote/deleteRemoteObject in
 // pipeline.go). A receiver on the other end verifies those requests against
 // this instance's public key, configured on its matching receivers: entry.
+// publicKeyPEM is that same public key, PEM-encoded, so the web UI dashboard
+// (see handleIdentity) can display it for an operator to paste into a
+// receiving instance's config.
 type serverIdentity struct {
-	uuid       string
-	privateKey *rsa.PrivateKey
+	uuid         string
+	privateKey   *rsa.PrivateKey
+	publicKeyPEM string
 }
 
 // loadServerIdentityAtStartup calls loadServerIdentity, logging (rather than
@@ -58,7 +62,12 @@ func loadServerIdentity(dir string, log *slog.Logger) (*serverIdentity, error) {
 		return nil, fmt.Errorf("loading server private key: %w", err)
 	}
 
-	return &serverIdentity{uuid: id, privateKey: key}, nil
+	pubPEM, err := os.ReadFile(filepath.Join(dir, serverPublicKeyFile)) //nolint:gosec // path is the operator-configured/default key dir plus a fixed literal, not user input
+	if err != nil {
+		return nil, fmt.Errorf("loading server public key: %w", err)
+	}
+
+	return &serverIdentity{uuid: id, privateKey: key, publicKeyPEM: string(pubPEM)}, nil
 }
 
 // loadServerPrivateKey reads and parses dir/server.key (written by

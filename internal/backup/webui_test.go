@@ -143,7 +143,7 @@ func TestStartWebUIServesRequests(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, nil, "", "", nil)
+	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, nil, "", "", nil, nil)
 	if srv == nil {
 		t.Fatal("startWebUI() = nil, want a running server")
 	}
@@ -267,7 +267,7 @@ func TestStartWebUIWithLoginRequiresSession(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, nil, "admin", "secret", nil)
+	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, nil, "admin", "secret", nil, nil)
 	if srv == nil {
 		t.Fatal("startWebUI() = nil, want a running server")
 	}
@@ -378,7 +378,7 @@ func TestStartWebUIBadAddrReturnsNil(t *testing.T) {
 	store, _ := newTestStore()
 
 	// Port 0 is valid (means "pick one"); an unparseable address is not.
-	srv := startWebUI("not-a-valid-address", store, nil, discardLogger, nil, nil, "", "", nil)
+	srv := startWebUI("not-a-valid-address", store, nil, discardLogger, nil, nil, "", "", nil, nil)
 	if srv != nil {
 		t.Cleanup(srv.shutdown)
 		t.Fatal("startWebUI() with an invalid address = non-nil, want nil")

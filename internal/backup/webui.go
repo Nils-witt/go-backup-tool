@@ -69,7 +69,12 @@ type webUIServer struct {
 // starts the same dashboard session. Login is required whenever
 // webUIUsername or oidcAuth is set — either alone is enough to gate the
 // dashboard.
-func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB, logs *logRingBuffer, webUIUsername, webUIPassword string, oidcAuth *oidcAuth) *webUIServer {
+// identity, when non-nil (see loadServerIdentityAtStartup in app.go), is
+// served over /api/identity (see handleIdentity) for the dashboard's "Server
+// identity" section, so an operator can read off this instance's UUID and
+// public key without digging through its keys-dir: on disk; a nil identity
+// (loadServerIdentityAtStartup failed at startup) hides that section.
+func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB, logs *logRingBuffer, webUIUsername, webUIPassword string, oidcAuth *oidcAuth, identity *serverIdentity) *webUIServer {
 	var lc net.ListenConfig
 
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
@@ -107,6 +112,7 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 	mux.HandleFunc("GET /", page(handleDashboard))
 	mux.HandleFunc("GET /api/status", api(handleStatus(store)))
 	mux.HandleFunc("GET /api/logs", api(handleLogs(logs)))
+	mux.HandleFunc("GET /api/identity", api(handleIdentity(identity)))
 	mux.HandleFunc("GET /api/receivers", api(handleReceiverStatus(receivers, receiverStore, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/files", api(handleReceiverFiles(receivers, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", page(handleDownloadFile(receivers, log, db, uiSessions)))
@@ -214,6 +220,38 @@ func handleReceiverStatus(receivers map[string]resolvedReceiver, store *receiver
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
 		if err := json.NewEncoder(w).Encode(snapshots); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}
+}
+
+// identityJSON is serverIdentity's wire shape for handleIdentity, matching
+// the dashboard's own field naming (snake_case, as every other /api/...
+// endpoint here uses).
+type identityJSON struct {
+	UUID      string `json:"uuid"`
+	PublicKey string `json:"public_key"`
+}
+
+// handleIdentity serves GET /api/identity: this instance's persistent UUID
+// and PEM-encoded public key (see serverIdentity), for the dashboard's
+// "Server identity" section — an operator reads them off there to fill in a
+// receiving instance's matching receivers: entry (id: and public-key:)
+// rather than digging through this instance's keys-dir: on disk. identity
+// nil (loadServerIdentityAtStartup failed at startup, or the receiver API
+// isn't used by any type: remote target) serves a zero-value identityJSON,
+// which the dashboard's JS treats as "no identity to show".
+func handleIdentity(identity *serverIdentity) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		var out identityJSON
+
+		if identity != nil {
+			out = identityJSON{UUID: identity.uuid, PublicKey: identity.publicKeyPEM}
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+		if err := json.NewEncoder(w).Encode(out); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	}

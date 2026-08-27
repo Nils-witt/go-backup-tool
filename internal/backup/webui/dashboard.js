@@ -234,7 +234,41 @@ function renderDownloadEvents(events) {
   }).join("");
 }
 
+// renderIdentity fills in the "Server identity" section from identity (as
+// served by /api/identity). It stays hidden when there's no identity to
+// show, matching the receivers/logs sections above — either
+// loadServerIdentityAtStartup failed at startup, or the response hasn't
+// loaded yet.
+function renderIdentity(identity) {
+  const wrap = document.getElementById("identity-wrap");
+  if (!identity || !identity.uuid) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+
+  document.getElementById("identity-uuid").textContent = identity.uuid;
+  document.getElementById("identity-pubkey").textContent = identity.public_key;
+}
+
+// identityLoaded tracks whether /api/identity has been fetched yet: unlike
+// the rest of the dashboard, this data never changes while the process is
+// running, so it's fetched once rather than on every refresh() poll.
+let identityLoaded = false;
+
+function loadIdentity() {
+  fetch("/api/identity")
+    .then(function (r) { return r.json(); })
+    .then(function (identity) {
+      identityLoaded = true;
+      renderIdentity(identity);
+    })
+    .catch(function () {});
+}
+
 function refresh() {
+  if (!identityLoaded) loadIdentity();
+
   Promise.all([
     fetch("/api/status").then(function (r) { return r.json(); }),
     fetch("/api/receivers").then(function (r) { return r.json(); }),

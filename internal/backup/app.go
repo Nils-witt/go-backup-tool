@@ -141,7 +141,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		sweepStartupReceiverRetention(ctx, stateDB, rc.receivers, log)
 
 		oAuth := setupOIDCAuth(ctx, rc.oidc, log)
-		srv = startWebUI(rc.listen, store, rc.receivers, log, stateDB, logs, rc.webUIUsername, rc.webUIPassword, oAuth)
+		srv = startWebUI(rc.listen, store, rc.receivers, log, stateDB, logs, rc.webUIUsername, rc.webUIPassword, oAuth, identity)
 
 		go monitorStaleReceivers(ctx, rc.receivers, log)
 	}

@@ -249,6 +249,26 @@
   table.download-events td.nowrap {
     white-space: nowrap;
   }
+  .identity-card {
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  .identity-card .meta {
+    overflow-wrap: anywhere;
+  }
+  .identity-card code {
+    font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .pubkey {
+    margin: .3rem 0 0;
+    padding: .6rem .7rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
 </style>
 </head>
 <body>
@@ -281,6 +301,15 @@
       </thead>
       <tbody id="login-log-body"></tbody>
     </table>
+  </div>
+</div>
+
+<div id="identity-wrap" hidden>
+  <h2 class="section-title">Server identity</h2>
+  <div class="card identity-card">
+    <div class="meta">UUID: <code id="identity-uuid"></code></div>
+    <div class="meta">Public key &mdash; paste into a receiving instance's <code>receivers:</code> entry as <code>public-key:</code>:</div>
+    <pre class="pubkey" id="identity-pubkey"></pre>
   </div>
 </div>
 
