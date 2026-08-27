@@ -185,6 +185,12 @@ type runConfig struct {
 	logLevel   slog.Level
 	receivers  map[string]resolvedReceiver // this instance's receiver API entries, keyed by id; see receiver.go
 
+	// keysDir is where this instance's persistent identity (its RSA key pair
+	// and UUID — see loadServerIdentity) is stored. Defaults to
+	// defaultServerKeyDir when the config file's top-level keys-dir: is
+	// unset.
+	keysDir string
+
 	// webUIUsername/webUIPassword, when both set, gate the entire web UI
 	// (the dashboard and its /api/... endpoints, including per-receiver
 	// file downloads; not the receiver API, which keeps its own
@@ -323,6 +329,7 @@ type fileConfig struct {
 
 	Timeout   string         `yaml:"timeout"`
 	LogLevel  string         `yaml:"log-level"` // debug, info, warn, or error; overridden by -log-level when that flag is explicitly given
+	KeysDir   string         `yaml:"keys-dir"`  // where this instance's persistent identity (RSA key pair + UUID) is stored; defaults to defaultServerKeyDir
 	Servers   []fileServer   `yaml:"servers"`
 	Jobs      []fileJob      `yaml:"jobs"`
 	Receivers []fileReceiver `yaml:"receivers"`
@@ -462,20 +469,8 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 		return nil, err
 	}
 
-	jobs, err = applyJobFilter(jobs, jobFilter)
+	jobs, err = prepareJobs(jobs, jobFilter)
 	if err != nil {
-		return nil, err
-	}
-
-	if err := validateJobs(jobs); err != nil {
-		return nil, err
-	}
-
-	if err := resolvePassphrases(jobs); err != nil {
-		return nil, err
-	}
-
-	if err := resolveTargetCredentials(jobs); err != nil {
 		return nil, err
 	}
 
@@ -489,6 +484,11 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 		return nil, err
 	}
 
+	keysDir := strings.TrimSpace(fileCfg.KeysDir)
+	if keysDir == "" {
+		keysDir = defaultServerKeyDir
+	}
+
 	return &runConfig{
 		jobs:          jobs,
 		timeout:       timeout,
@@ -496,6 +496,7 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 		configPath:    configPath,
 		logLevel:      level,
 		receivers:     receivers,
+		keysDir:       keysDir,
 		webUIUsername: strings.TrimSpace(fileCfg.WebUI.Username),
 		webUIPassword: fileCfg.WebUI.Password,
 		logViewer:     fileCfg.WebUI.LogViewer,
@@ -1002,6 +1003,29 @@ func newConfigDefaults() *config {
 		retries:    defaultRetries,
 		retryDelay: defaultRetryDelay,
 	}
+}
+
+// prepareJobs narrows jobs to the one named by jobFilter (if any), validates
+// them, and resolves their passphrases and target credentials.
+func prepareJobs(jobs []*config, jobFilter string) ([]*config, error) {
+	jobs, err := applyJobFilter(jobs, jobFilter)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := validateJobs(jobs); err != nil {
+		return nil, err
+	}
+
+	if err := resolvePassphrases(jobs); err != nil {
+		return nil, err
+	}
+
+	if err := resolveTargetCredentials(jobs); err != nil {
+		return nil, err
+	}
+
+	return jobs, nil
 }
 
 // applyJobFilter applies -job, if given, restricting jobs to the single

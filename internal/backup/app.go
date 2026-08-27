@@ -93,7 +93,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 
 	log, logs := newRunLogger(stderr, rc)
 
-	identity := loadServerIdentityAtStartup(log)
+	identity := loadServerIdentityAtStartup(log, rc.keysDir)
 
 	if rc.timeout > 0 {
 		var cancel context.CancelFunc
