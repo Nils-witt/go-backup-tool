@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>go-backup-tool</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f8;
+    --fg: #1c1c1e;
+    --muted: #6b6b70;
+    --card: #ffffff;
+    --border: #e2e2e5;
+    --ok: #1a7f37;
+    --ok-bg: #e7f6ec;
+    --failed: #b3261e;
+    --failed-bg: #fdeceb;
+    --running: #9a6700;
+    --running-bg: #fff6dc;
+    --incomplete: #bf5b04;
+    --incomplete-bg: #fff0e0;
+    --idle: #6b6b70;
+    --idle-bg: #eeeef0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17171a;
+      --fg: #eaeaec;
+      --muted: #9a9aa0;
+      --card: #202024;
+      --border: #313136;
+      --ok: #56d364;
+      --ok-bg: #123321;
+      --failed: #ff7b72;
+      --failed-bg: #3a1414;
+      --running: #e3b341;
+      --running-bg: #3a2e0a;
+      --incomplete: #ffa657;
+      --incomplete-bg: #3a2410;
+      --idle: #9a9aa0;
+      --idle-bg: #2a2a2e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2rem 1.5rem 4rem;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  h1 {
+    font-size: 1.25rem;
+    margin: 0 0 .25rem;
+  }
+  .sub {
+    color: var(--muted);
+    font-size: .85rem;
+    margin: 0 0 1.5rem;
+  }
+  .grid {
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem 1.1rem;
+  }
+  .card-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: .5rem;
+    margin-bottom: .5rem;
+  }
+  .job-name {
+    font-weight: 600;
+    font-size: 1rem;
+  }
+  .badges {
+    display: flex;
+    align-items: baseline;
+    gap: .35rem;
+  }
+  .meta {
+    color: var(--muted);
+    font-size: .8rem;
+    margin-bottom: .6rem;
+  }
+  .badge {
+    display: inline-block;
+    font-size: .72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .02em;
+    padding: .15rem .5rem;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .badge.ok { color: var(--ok); background: var(--ok-bg); }
+  .badge.failed { color: var(--failed); background: var(--failed-bg); }
+  .badge.running { color: var(--running); background: var(--running-bg); }
+  .badge.incomplete { color: var(--incomplete); background: var(--incomplete-bg); }
+  .badge.idle { color: var(--idle); background: var(--idle-bg); }
+  .targets {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border-top: 1px solid var(--border);
+  }
+  .targets li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .5rem;
+    padding: .45rem 0;
+    border-bottom: 1px solid var(--border);
+    font-size: .85rem;
+  }
+  .target-name {
+    overflow-wrap: anywhere;
+  }
+  .target-name .kind {
+    color: var(--muted);
+    font-size: .75rem;
+  }
+  .err {
+    margin: .3rem 0 0;
+    font-size: .78rem;
+    color: var(--failed);
+    overflow-wrap: anywhere;
+  }
+  .empty {
+    color: var(--muted);
+    text-align: center;
+    margin-top: 3rem;
+  }
+  .section-title {
+    font-size: 1.05rem;
+    margin: 2.5rem auto 1rem;
+    max-width: 1200px;
+  }
+  .files-toggle {
+    margin-top: .6rem;
+    padding: .3rem .6rem;
+    font-size: .78rem;
+    font-weight: 600;
+    color: var(--fg);
+    background: var(--idle-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .files-toggle:hover {
+    filter: brightness(0.95);
+  }
+  .files-wrap {
+    margin-top: .6rem;
+    max-height: 220px;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+  }
+  .files {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .files li {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: .5rem;
+    padding: .35rem 0;
+    border-bottom: 1px solid var(--border);
+    font-size: .8rem;
+  }
+  .file-key {
+    overflow-wrap: anywhere;
+  }
+  .file-meta {
+    color: var(--muted);
+    font-size: .72rem;
+    white-space: nowrap;
+  }
+  .logs-card {
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  .follow-toggle {
+    display: flex;
+    align-items: center;
+    gap: .35rem;
+    font-size: .8rem;
+    color: var(--muted);
+    font-weight: 400;
+    text-transform: none;
+  }
+  .logs {
+    margin: .6rem 0 0;
+    max-height: 360px;
+    overflow: auto;
+    padding: .6rem .7rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .logs .log-error { color: var(--failed); }
+  .logs .log-warn { color: var(--running); }
+  .login-log-card,
+  .download-log-card {
+    max-width: 1200px;
+    margin: 0 auto;
+    overflow-x: auto;
+  }
+  table.login-events,
+  table.download-events {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: .82rem;
+  }
+  table.login-events th,
+  table.download-events th {
+    text-align: left;
+    color: var(--muted);
+    font-weight: 600;
+    font-size: .72rem;
+    text-transform: uppercase;
+    letter-spacing: .02em;
+    padding: .4rem .5rem;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  table.login-events td,
+  table.download-events td {
+    padding: .4rem .5rem;
+    border-bottom: 1px solid var(--border);
+    overflow-wrap: anywhere;
+  }
+  table.login-events td.nowrap,
+  table.download-events td.nowrap {
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<h1>go-backup-tool</h1>
+<p class="sub" id="updated">loading&hellip;</p>
+<div class="grid" id="jobs"></div>
+
+<div id="receivers-wrap" hidden>
+  <h2 class="section-title">Receivers</h2>
+  <div class="grid" id="receivers"></div>
+</div>
+
+<div id="logs-wrap" hidden>
+  <h2 class="section-title">Logs</h2>
+  <div class="card logs-card">
+    <div class="card-head">
+      <span class="job-name">Recent output</span>
+      <label class="follow-toggle"><input type="checkbox" id="follow-logs" checked> Follow</label>
+    </div>
+    <pre class="logs" id="logs"></pre>
+  </div>
+</div>
+
+<div id="login-log-wrap" hidden>
+  <h2 class="section-title">Login log</h2>
+  <div class="card login-log-card">
+    <table class="login-events">
+      <thead>
+        <tr><th>Time</th><th>Username</th><th>Method</th><th>Result</th><th>Remote address</th></tr>
+      </thead>
+      <tbody id="login-log-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="download-log-wrap" hidden>
+  <h2 class="section-title">Download log</h2>
+  <div class="card download-log-card">
+    <table class="download-events">
+      <thead>
+        <tr><th>Time</th><th>Username</th><th>Receiver</th><th>File</th><th>Result</th><th>Remote address</th></tr>
+      </thead>
+      <tbody id="download-log-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+{{DASHBOARD_JS}}
+</script>
+</body>
+</html>

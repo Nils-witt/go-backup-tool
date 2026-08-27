@@ -5,10 +5,11 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"database/sql"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"html"
+	"html/template"
 	"io"
 	"log/slog"
 	"net"
@@ -697,75 +698,48 @@ func writeLoginPage(w http.ResponseWriter, page string) {
 	_, _ = io.WriteString(w, page)
 }
 
+// loginPageTemplateSrc is the dashboard's login page (see renderLoginPage),
+// kept in its own file so the markup lives alongside dashboardHTMLSrc rather
+// than as a Go string literal.
+//
+//go:embed webui/login.html
+var loginPageTemplateSrc string
+
+// loginPageTemplate is loginPageTemplateSrc parsed once at package init.
+// html/template's contextual autoescaping handles ErrMsg and Next itself
+// (HTML-escaping ErrMsg, and applying the right escaping to Next in both the
+// hidden-input attribute and the /login/oidc?next= query value), so
+// renderLoginPage no longer has to escape either by hand.
+var loginPageTemplate = template.Must(template.New("login.html").Parse(loginPageTemplateSrc))
+
+// loginPageData is loginPageTemplate's input.
+type loginPageData struct {
+	ErrMsg       string
+	Next         string
+	ShowPassword bool
+	ShowSSO      bool
+}
+
 // renderLoginPage builds the dashboard's login page's HTML: the
 // username/password form (showPassword), a "Log in with SSO" link to
 // /login/oidc (showSSO), or both, stacked with a divider between them.
-// errMsg and next are both escaped before being embedded, since errMsg can
-// echo back a failed login attempt and next comes directly from the
-// request; next is also passed along to /login/oidc's own next= so SSO
+// errMsg can echo back a failed login attempt and next comes directly from
+// the request; both are safe to embed as-is since loginPageTemplate escapes
+// them contextually. next is also used for /login/oidc's own next= so SSO
 // redirects to the same place the password form would.
 func renderLoginPage(errMsg, next string, showPassword, showSSO bool) string {
-	errHTML := ""
-	if errMsg != "" {
-		errHTML = `<p class="err">` + html.EscapeString(errMsg) + `</p>`
+	var buf strings.Builder
+
+	data := loginPageData{ErrMsg: errMsg, Next: next, ShowPassword: showPassword, ShowSSO: showSSO}
+	if err := loginPageTemplate.Execute(&buf, data); err != nil {
+		// loginPageTemplate is a fixed, compile-time-checked template
+		// executed against a plain struct of strings/bools, so this can't
+		// fail in practice; panicking here would be worse than a broken
+		// page for a login attempt.
+		return ""
 	}
 
-	nextHTML := html.EscapeString(next)
-
-	passwordHTML := ""
-	if showPassword {
-		passwordHTML = `<form method="post" action="/login">
-` + errHTML + `<label for="username">Username</label>
-<input type="text" id="username" name="username" autocomplete="username" autofocus required>
-<label for="password">Password</label>
-<input type="password" id="password" name="password" autocomplete="current-password" required>
-<input type="hidden" name="next" value="` + nextHTML + `">
-<button type="submit">Log in</button>
-</form>`
-	}
-
-	ssoHTML := ""
-
-	if showSSO {
-		if showPassword {
-			ssoHTML += `<p class="divider">or</p>`
-		} else {
-			ssoHTML += errHTML
-		}
-
-		ssoHTML += `<a class="sso" href="/login/oidc?next=` + url.QueryEscape(next) + `">Log in with SSO</a>`
-	}
-
-	return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>go-backup-tool &middot; log in</title>
-<style>
-  :root { color-scheme: light dark; --bg:#f7f7f8; --fg:#1c1c1e; --muted:#6b6b70; --card:#fff; --border:#e2e2e5; --failed:#b3261e; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg:#17171a; --fg:#eaeaec; --muted:#9a9aa0; --card:#202024; --border:#313136; --failed:#ff7b72; }
-  }
-  * { box-sizing: border-box; }
-  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:1.5rem; width:100%; max-width:320px; }
-  h1 { font-size:1.1rem; margin:0 0 1rem; }
-  input[type=text], input[type=password] { width:100%; padding:.5rem .6rem; margin:.4rem 0 1rem; border:1px solid var(--border); border-radius:6px; background:var(--bg); color:var(--fg); font-size:.9rem; }
-  button, .sso { display:block; width:100%; padding:.5rem; border:none; border-radius:6px; background:var(--fg); color:var(--bg); font-weight:600; cursor:pointer; text-align:center; text-decoration:none; box-sizing:border-box; }
-  .err { color:var(--failed); font-size:.85rem; margin:0 0 .8rem; }
-  label { font-size:.85rem; color:var(--muted); }
-  .divider { color:var(--muted); font-size:.8rem; text-align:center; margin:1rem 0; }
-</style>
-</head>
-<body>
-<div class="card">
-<h1>go-backup-tool</h1>
-` + passwordHTML + ssoHTML + `
-</div>
-</body>
-</html>
-`
+	return buf.String()
 }
 
 // handleDownloadFile serves GET /api/receivers/{id}/download/{key...}: the
@@ -987,567 +961,20 @@ func handleDashboard(w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, dashboardHTML)
 }
 
+// dashboardHTMLSrc is the dashboard page's markup and CSS, kept in its own
+// file so the web UI's HTML doesn't live as a Go string literal; the JS is
+// kept separately in dashboard.js and spliced into the "{{DASHBOARD_JS}}"
+// placeholder below rather than fetched by the browser as its own request,
+// preserving dashboardHTML's single-self-contained-page behavior (see
+// handleDashboard).
+//
+//go:embed webui/dashboard.html
+var dashboardHTMLSrc string
+
+//go:embed webui/dashboard.js
+var dashboardJS string
+
 // dashboardHTML is the entire web UI: a single self-contained page (no
 // external assets) that polls /api/status every couple of seconds and
 // re-renders the job/target table.
-const dashboardHTML = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>go-backup-tool</title>
-<style>
-  :root {
-    color-scheme: light dark;
-    --bg: #f7f7f8;
-    --fg: #1c1c1e;
-    --muted: #6b6b70;
-    --card: #ffffff;
-    --border: #e2e2e5;
-    --ok: #1a7f37;
-    --ok-bg: #e7f6ec;
-    --failed: #b3261e;
-    --failed-bg: #fdeceb;
-    --running: #9a6700;
-    --running-bg: #fff6dc;
-    --incomplete: #bf5b04;
-    --incomplete-bg: #fff0e0;
-    --idle: #6b6b70;
-    --idle-bg: #eeeef0;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #17171a;
-      --fg: #eaeaec;
-      --muted: #9a9aa0;
-      --card: #202024;
-      --border: #313136;
-      --ok: #56d364;
-      --ok-bg: #123321;
-      --failed: #ff7b72;
-      --failed-bg: #3a1414;
-      --running: #e3b341;
-      --running-bg: #3a2e0a;
-      --incomplete: #ffa657;
-      --incomplete-bg: #3a2410;
-      --idle: #9a9aa0;
-      --idle-bg: #2a2a2e;
-    }
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    padding: 2rem 1.5rem 4rem;
-    background: var(--bg);
-    color: var(--fg);
-    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  }
-  h1 {
-    font-size: 1.25rem;
-    margin: 0 0 .25rem;
-  }
-  .sub {
-    color: var(--muted);
-    font-size: .85rem;
-    margin: 0 0 1.5rem;
-  }
-  .grid {
-    display: grid;
-    gap: 1rem;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-    max-width: 1200px;
-    margin: 0 auto;
-  }
-  .card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 1rem 1.1rem;
-  }
-  .card-head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: .5rem;
-    margin-bottom: .5rem;
-  }
-  .job-name {
-    font-weight: 600;
-    font-size: 1rem;
-  }
-  .badges {
-    display: flex;
-    align-items: baseline;
-    gap: .35rem;
-  }
-  .meta {
-    color: var(--muted);
-    font-size: .8rem;
-    margin-bottom: .6rem;
-  }
-  .badge {
-    display: inline-block;
-    font-size: .72rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .02em;
-    padding: .15rem .5rem;
-    border-radius: 999px;
-    white-space: nowrap;
-  }
-  .badge.ok { color: var(--ok); background: var(--ok-bg); }
-  .badge.failed { color: var(--failed); background: var(--failed-bg); }
-  .badge.running { color: var(--running); background: var(--running-bg); }
-  .badge.incomplete { color: var(--incomplete); background: var(--incomplete-bg); }
-  .badge.idle { color: var(--idle); background: var(--idle-bg); }
-  .targets {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    border-top: 1px solid var(--border);
-  }
-  .targets li {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: .5rem;
-    padding: .45rem 0;
-    border-bottom: 1px solid var(--border);
-    font-size: .85rem;
-  }
-  .target-name {
-    overflow-wrap: anywhere;
-  }
-  .target-name .kind {
-    color: var(--muted);
-    font-size: .75rem;
-  }
-  .err {
-    margin: .3rem 0 0;
-    font-size: .78rem;
-    color: var(--failed);
-    overflow-wrap: anywhere;
-  }
-  .empty {
-    color: var(--muted);
-    text-align: center;
-    margin-top: 3rem;
-  }
-  .section-title {
-    font-size: 1.05rem;
-    margin: 2.5rem auto 1rem;
-    max-width: 1200px;
-  }
-  .files-toggle {
-    margin-top: .6rem;
-    padding: .3rem .6rem;
-    font-size: .78rem;
-    font-weight: 600;
-    color: var(--fg);
-    background: var(--idle-bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    cursor: pointer;
-  }
-  .files-toggle:hover {
-    filter: brightness(0.95);
-  }
-  .files-wrap {
-    margin-top: .6rem;
-    max-height: 220px;
-    overflow-y: auto;
-    border-top: 1px solid var(--border);
-  }
-  .files {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-  .files li {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: .5rem;
-    padding: .35rem 0;
-    border-bottom: 1px solid var(--border);
-    font-size: .8rem;
-  }
-  .file-key {
-    overflow-wrap: anywhere;
-  }
-  .file-meta {
-    color: var(--muted);
-    font-size: .72rem;
-    white-space: nowrap;
-  }
-  .logs-card {
-    max-width: 1200px;
-    margin: 0 auto;
-  }
-  .follow-toggle {
-    display: flex;
-    align-items: center;
-    gap: .35rem;
-    font-size: .8rem;
-    color: var(--muted);
-    font-weight: 400;
-    text-transform: none;
-  }
-  .logs {
-    margin: .6rem 0 0;
-    max-height: 360px;
-    overflow: auto;
-    padding: .6rem .7rem;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-  .logs .log-error { color: var(--failed); }
-  .logs .log-warn { color: var(--running); }
-  .login-log-card,
-  .download-log-card {
-    max-width: 1200px;
-    margin: 0 auto;
-    overflow-x: auto;
-  }
-  table.login-events,
-  table.download-events {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: .82rem;
-  }
-  table.login-events th,
-  table.download-events th {
-    text-align: left;
-    color: var(--muted);
-    font-weight: 600;
-    font-size: .72rem;
-    text-transform: uppercase;
-    letter-spacing: .02em;
-    padding: .4rem .5rem;
-    border-bottom: 1px solid var(--border);
-    white-space: nowrap;
-  }
-  table.login-events td,
-  table.download-events td {
-    padding: .4rem .5rem;
-    border-bottom: 1px solid var(--border);
-    overflow-wrap: anywhere;
-  }
-  table.login-events td.nowrap,
-  table.download-events td.nowrap {
-    white-space: nowrap;
-  }
-</style>
-</head>
-<body>
-<h1>go-backup-tool</h1>
-<p class="sub" id="updated">loading&hellip;</p>
-<div class="grid" id="jobs"></div>
-
-<div id="receivers-wrap" hidden>
-  <h2 class="section-title">Receivers</h2>
-  <div class="grid" id="receivers"></div>
-</div>
-
-<div id="logs-wrap" hidden>
-  <h2 class="section-title">Logs</h2>
-  <div class="card logs-card">
-    <div class="card-head">
-      <span class="job-name">Recent output</span>
-      <label class="follow-toggle"><input type="checkbox" id="follow-logs" checked> Follow</label>
-    </div>
-    <pre class="logs" id="logs"></pre>
-  </div>
-</div>
-
-<div id="login-log-wrap" hidden>
-  <h2 class="section-title">Login log</h2>
-  <div class="card login-log-card">
-    <table class="login-events">
-      <thead>
-        <tr><th>Time</th><th>Username</th><th>Method</th><th>Result</th><th>Remote address</th></tr>
-      </thead>
-      <tbody id="login-log-body"></tbody>
-    </table>
-  </div>
-</div>
-
-<div id="download-log-wrap" hidden>
-  <h2 class="section-title">Download log</h2>
-  <div class="card download-log-card">
-    <table class="download-events">
-      <thead>
-        <tr><th>Time</th><th>Username</th><th>Receiver</th><th>File</th><th>Result</th><th>Remote address</th></tr>
-      </thead>
-      <tbody id="download-log-body"></tbody>
-    </table>
-  </div>
-</div>
-
-<script>
-// The Go zero time.Time serializes as "0001-01-01T00:00:00Z" rather than an
-// empty/omitted field.
-function hasTime(s) {
-  return !!s && new Date(s).getUTCFullYear() > 1;
-}
-
-function fmtTime(s) {
-  if (!hasTime(s)) return "never";
-  return new Date(s).toLocaleString();
-}
-
-function badge(state, label) {
-  return '<span class="badge ' + state + '">' + (label || state) + '</span>';
-}
-
-function render(jobs) {
-  const grid = document.getElementById("jobs");
-  if (!jobs.length) {
-    grid.innerHTML = '<p class="empty">no jobs configured</p>';
-    return;
-  }
-
-  grid.innerHTML = jobs.map(function (j) {
-    const targets = (j.targets || []).map(function (t) {
-      const err = t.error ? '<p class="err">' + t.error + '</p>' : '';
-      return '<li><span class="target-name">' + t.server + ' / ' + t.bucket +
-        ' <span class="kind">(' + t.kind + ')</span>' + err + '</span>' + badge(t.state) + '</li>';
-    }).join("");
-
-    const err = j.error ? '<p class="err">' + j.error + '</p>' : '';
-    const interval = j.interval ? ('every ' + j.interval) : 'runs once';
-    const duration = j.duration ? (' &middot; took ' + j.duration) : '';
-    const size = j.size ? (' &middot; ' + j.size) : '';
-    const nextRun = hasTime(j.next_run) ? (' &middot; next run: ' + fmtTime(j.next_run)) : '';
-
-    return '<div class="card">' +
-      '<div class="card-head"><span class="job-name">' + j.name + '</span>' + badge(j.state) + '</div>' +
-      '<div class="meta">' + interval + ' &middot; last run: ' + fmtTime(j.last_start) + duration + size + nextRun + '</div>' +
-      err +
-      '<ul class="targets">' + targets + '</ul>' +
-      '</div>';
-  }).join("");
-}
-
-// expandedReceivers/receiverFilesCache/lastReceivers hold client-only UI
-// state across refresh() polls: which receiver cards have their file list
-// open, the last-fetched file list per receiver id, and the last /api/receivers
-// payload (so a files fetch completing asynchronously can re-render without
-// waiting on the next poll).
-let expandedReceivers = {};
-let receiverFilesCache = {};
-let lastReceivers = [];
-
-function fmtSize(bytes) {
-  if (bytes < 1024) return bytes + " B";
-  const units = ["KB", "MB", "GB", "TB"];
-  let val = bytes;
-  let i = -1;
-  do {
-    val /= 1024;
-    i++;
-  } while (val >= 1024 && i < units.length - 1);
-  return val.toFixed(1) + " " + units[i];
-}
-
-// escapeHtml escapes s for safe inclusion as HTML text. File keys, unlike
-// the rest of this dashboard's data, originate from the receiver API's
-// caller (any holder of a receiver's bearer token) rather than this
-// instance's own config, so they're escaped before going into innerHTML.
-function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, function (c) {
-    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
-  });
-}
-
-// encodePathKey percent-encodes each segment of a "/"-separated file key on
-// its own, so the download link's URL keeps the key's directory structure
-// (matching the server's {key...} wildcard route) while still escaping
-// anything else that needs it.
-function encodePathKey(key) {
-  return key.split("/").map(encodeURIComponent).join("/");
-}
-
-function renderFileList(id) {
-  const files = receiverFilesCache[id];
-  if (!files) return '<p class="meta">loading&hellip;</p>';
-  if (!files.length) return '<p class="meta">no files stored</p>';
-
-  return '<ul class="files">' + files.map(function (f) {
-    const href = "/api/receivers/" + encodeURIComponent(id) + "/download/" + encodePathKey(f.key);
-    return '<li><span class="file-key">' + escapeHtml(f.key) + '</span>' +
-      '<span class="file-meta">' + fmtSize(f.size) + ' &middot; ' + fmtTime(f.mod_time) +
-      ' &middot; <a href="' + href + '">download</a></span></li>';
-  }).join("") + '</ul>';
-}
-
-function toggleReceiverFiles(id) {
-  if (expandedReceivers[id]) {
-    expandedReceivers[id] = false;
-    renderReceivers(lastReceivers);
-    return;
-  }
-
-  expandedReceivers[id] = true;
-  delete receiverFilesCache[id];
-  renderReceivers(lastReceivers);
-
-  fetch("/api/receivers/" + encodeURIComponent(id) + "/files")
-    .then(function (r) { return r.json(); })
-    .then(function (files) {
-      receiverFilesCache[id] = files;
-      renderReceivers(lastReceivers);
-    })
-    .catch(function () {
-      receiverFilesCache[id] = [];
-      renderReceivers(lastReceivers);
-    });
-}
-
-function renderReceivers(receivers) {
-  const wrap = document.getElementById("receivers-wrap");
-  if (!receivers.length) {
-    wrap.hidden = true;
-    return;
-  }
-  wrap.hidden = false;
-
-  document.getElementById("receivers").innerHTML = receivers.map(function (rcv) {
-    const err = rcv.error ? '<p class="err">' + rcv.error + '</p>' : '';
-    const retention = rcv.retention ? (' &middot; retention ' + rcv.retention) : '';
-    const staleAfter = rcv.stale_after ? (' &middot; stale after ' + rcv.stale_after) : '';
-    const staleBadge = rcv.stale ? badge('failed', 'stale') : '';
-    const lastSeen = hasTime(rcv.last_seen)
-      ? ('last received: ' + fmtTime(rcv.last_seen) + (rcv.last_key ? ' (' + rcv.last_key + ')' : ''))
-      : 'no objects received yet';
-    const expanded = !!expandedReceivers[rcv.id];
-    const filesSection = expanded ? '<div class="files-wrap">' + renderFileList(rcv.id) + '</div>' : '';
-
-    return '<div class="card">' +
-      '<div class="card-head"><span class="job-name">' + rcv.id + '</span>' +
-        '<span class="badges">' + badge(rcv.state) + staleBadge + '</span>' +
-      '</div>' +
-      '<div class="meta">' + rcv.path + retention + staleAfter + '</div>' +
-      '<div class="meta">' + lastSeen + '</div>' +
-      err +
-      '<button type="button" class="files-toggle" data-id="' + rcv.id + '">' +
-        (expanded ? "Hide files" : "Show files") +
-      '</button>' +
-      filesSection +
-      '</div>';
-  }).join("");
-}
-
-document.getElementById("receivers").addEventListener("click", function (e) {
-  const btn = e.target.closest(".files-toggle");
-  if (!btn) return;
-  toggleReceiverFiles(btn.dataset.id);
-});
-
-// renderLogs re-renders the log viewer from lines (oldest first, as served
-// by /api/logs). It preserves the reader's scroll position across refreshes
-// unless "Follow" is checked and they're already at (or near) the bottom, so
-// a poll landing mid-read doesn't yank the view down.
-function renderLogs(lines) {
-  const wrap = document.getElementById("logs-wrap");
-  if (!lines || !lines.length) {
-    wrap.hidden = true;
-    return;
-  }
-  wrap.hidden = false;
-
-  const pre = document.getElementById("logs");
-  const follow = document.getElementById("follow-logs").checked;
-  const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 4;
-
-  pre.innerHTML = lines.map(function (line) {
-    let cls = "";
-    if (line.indexOf("level=ERROR") !== -1) cls = "log-error";
-    else if (line.indexOf("level=WARN") !== -1) cls = "log-warn";
-    return '<span class="' + cls + '">' + escapeHtml(line) + '</span>';
-  }).join("\n");
-
-  if (follow && atBottom) {
-    pre.scrollTop = pre.scrollHeight;
-  }
-}
-
-// renderLoginEvents re-renders the login log table from events (newest
-// first, as served by /api/login-events). The section stays hidden while
-// there's nothing to show, matching the receivers/logs sections above.
-function renderLoginEvents(events) {
-  const wrap = document.getElementById("login-log-wrap");
-  if (!events || !events.length) {
-    wrap.hidden = true;
-    return;
-  }
-  wrap.hidden = false;
-
-  document.getElementById("login-log-body").innerHTML = events.map(function (ev) {
-    const result = ev.success ? badge("ok", "success") : badge("failed", "failed");
-    const detail = ev.detail ? '<p class="err">' + escapeHtml(ev.detail) + '</p>' : '';
-    return '<tr>' +
-      '<td class="nowrap">' + fmtTime(ev.at) + '</td>' +
-      '<td>' + escapeHtml(ev.username || '(unknown)') + '</td>' +
-      '<td class="nowrap">' + escapeHtml(ev.method) + '</td>' +
-      '<td class="nowrap">' + result + detail + '</td>' +
-      '<td>' + escapeHtml(ev.remote_addr) + '</td>' +
-      '</tr>';
-  }).join("");
-}
-
-// renderDownloadEvents re-renders the download log table from events
-// (newest first, as served by /api/download-events). The section stays
-// hidden while there's nothing to show, matching renderLoginEvents above.
-function renderDownloadEvents(events) {
-  const wrap = document.getElementById("download-log-wrap");
-  if (!events || !events.length) {
-    wrap.hidden = true;
-    return;
-  }
-  wrap.hidden = false;
-
-  document.getElementById("download-log-body").innerHTML = events.map(function (ev) {
-    const result = ev.success ? badge("ok", "success") : badge("failed", "failed");
-    const detail = ev.detail ? '<p class="err">' + escapeHtml(ev.detail) + '</p>' : '';
-    return '<tr>' +
-      '<td class="nowrap">' + fmtTime(ev.at) + '</td>' +
-      '<td>' + escapeHtml(ev.username || '(unknown)') + '</td>' +
-      '<td class="nowrap">' + escapeHtml(ev.receiver_id) + '</td>' +
-      '<td>' + escapeHtml(ev.key) + '</td>' +
-      '<td class="nowrap">' + result + detail + '</td>' +
-      '<td>' + escapeHtml(ev.remote_addr) + '</td>' +
-      '</tr>';
-  }).join("");
-}
-
-function refresh() {
-  Promise.all([
-    fetch("/api/status").then(function (r) { return r.json(); }),
-    fetch("/api/receivers").then(function (r) { return r.json(); }),
-    fetch("/api/logs").then(function (r) { return r.json(); }),
-    fetch("/api/login-events").then(function (r) { return r.json(); }),
-    fetch("/api/download-events").then(function (r) { return r.json(); })
-  ]).then(function (results) {
-    render(results[0]);
-    lastReceivers = results[1] || [];
-    renderReceivers(lastReceivers);
-    renderLogs(results[2]);
-    renderLoginEvents(results[3]);
-    renderDownloadEvents(results[4]);
-    document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
-  }).catch(function (err) {
-    document.getElementById("updated").textContent = "error fetching status: " + err;
-  });
-}
-
-refresh();
-setInterval(refresh, 2000);
-</script>
-</body>
-</html>
-`
+var dashboardHTML = strings.Replace(dashboardHTMLSrc, "{{DASHBOARD_JS}}", dashboardJS, 1)

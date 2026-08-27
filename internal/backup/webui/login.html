@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>go-backup-tool &middot; log in</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f7f7f8; --fg:#1c1c1e; --muted:#6b6b70; --card:#fff; --border:#e2e2e5; --failed:#b3261e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#17171a; --fg:#eaeaec; --muted:#9a9aa0; --card:#202024; --border:#313136; --failed:#ff7b72; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:1.5rem; width:100%; max-width:320px; }
+  h1 { font-size:1.1rem; margin:0 0 1rem; }
+  input[type=text], input[type=password] { width:100%; padding:.5rem .6rem; margin:.4rem 0 1rem; border:1px solid var(--border); border-radius:6px; background:var(--bg); color:var(--fg); font-size:.9rem; }
+  button, .sso { display:block; width:100%; padding:.5rem; border:none; border-radius:6px; background:var(--fg); color:var(--bg); font-weight:600; cursor:pointer; text-align:center; text-decoration:none; box-sizing:border-box; }
+  .err { color:var(--failed); font-size:.85rem; margin:0 0 .8rem; }
+  label { font-size:.85rem; color:var(--muted); }
+  .divider { color:var(--muted); font-size:.8rem; text-align:center; margin:1rem 0; }
+</style>
+</head>
+<body>
+<div class="card">
+<h1>go-backup-tool</h1>
+{{if .ShowPassword}}
+<form method="post" action="/login">
+{{if .ErrMsg}}<p class="err">{{.ErrMsg}}</p>{{end}}
+<label for="username">Username</label>
+<input type="text" id="username" name="username" autocomplete="username" autofocus required>
+<label for="password">Password</label>
+<input type="password" id="password" name="password" autocomplete="current-password" required>
+<input type="hidden" name="next" value="{{.Next}}">
+<button type="submit">Log in</button>
+</form>
+{{end}}
+{{if .ShowSSO}}
+{{if .ShowPassword}}<p class="divider">or</p>{{else if .ErrMsg}}<p class="err">{{.ErrMsg}}</p>{{end}}
+<a class="sso" href="/login/oidc?next={{.Next}}">Log in with SSO</a>
+{{end}}
+</div>
+</body>
+</html>
