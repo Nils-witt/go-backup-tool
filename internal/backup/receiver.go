@@ -433,6 +433,58 @@ func (s *receiverStatusStore) record(id, key string, err error) {
 	r.Error = ""
 }
 
+// seedLastEvent initializes receiver id's snapshot from ev, its most
+// recently persisted receiver_events row (see readLastReceiverEvent in
+// schedule_state.go), mirroring statusStore.seedLastRun's reasoning for job
+// status: a restart's web UI can still show a receiver's last activity
+// instead of it reverting to idle until it next serves a request. Called
+// once at startup, before the receiver API can serve any request, so it
+// never races an actual record call.
+func (s *receiverStatusStore) seedLastEvent(id string, ev receiverEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	r, ok := s.byID[id]
+	if !ok {
+		return
+	}
+
+	r.LastKey = ev.Key
+	r.LastSeen = ev.At
+
+	if ev.Success {
+		r.State = stateOK
+		r.Error = ""
+
+		return
+	}
+
+	r.State = stateFailed
+	r.Error = ev.Error
+}
+
+// seedReceiverStatusFromState initializes store's receivers from each one's
+// most recently persisted receiver_events row (see readLastReceiverEvent in
+// schedule_state.go), so a restart's web UI can still show a receiver's last
+// activity instead of every receiver reverting to idle until it next serves
+// a request. Called once at startup, before the receiver API's handlers can
+// serve any request.
+func seedReceiverStatusFromState(ctx context.Context, db *sql.DB, receivers map[string]resolvedReceiver, store *receiverStatusStore, log *slog.Logger) {
+	for id := range receivers {
+		ev, ok, err := readLastReceiverEvent(ctx, db, id)
+		if err != nil {
+			log.Warn("reading last receiver event from state db", "id", id, "err", err)
+			continue
+		}
+
+		if !ok {
+			continue
+		}
+
+		store.seedLastEvent(id, ev)
+	}
+}
+
 // snapshot returns every receiver's current status, in id order, each a copy
 // safe to serialize without holding s.mu.
 func (s *receiverStatusStore) snapshot() []receiverSnapshot {

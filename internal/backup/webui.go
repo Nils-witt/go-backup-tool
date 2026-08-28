@@ -36,8 +36,11 @@ type webUIServer struct {
 // of store's job/target statuses (see dashboardHTML and handleStatus), plus
 // the receiver API (see handleReceiveObject/handleDeleteObject) for any
 // entries in receivers — whose own live status is tracked in a
-// receiverStatusStore and served over /api/receivers (see
-// handleReceiverStatus) — reporting it (and any later failure) to log.
+// receiverStatusStore, seeded from each receiver's last persisted
+// receiver_events row so a restart doesn't revert every receiver to idle
+// (see seedReceiverStatusFromState in receiver.go), and served over
+// /api/receivers (see handleReceiverStatus) — reporting it (and any later
+// failure) to log.
 // Binding happens synchronously so a bad address is reported immediately and
 // callers can rely on the server being reachable as soon as this returns; it
 // returns nil if addr couldn't be bound, leaving the web UI disabled for
@@ -90,6 +93,10 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 	}
 
 	receiverStore := newReceiverStatusStore(receivers)
+	if db != nil {
+		seedReceiverStatusFromState(context.Background(), db, receivers, receiverStore, log)
+	}
+
 	uiSessions := newSessionStore()
 
 	// authEnabled mirrors requireWebUISession's own gating condition:

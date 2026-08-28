@@ -607,3 +607,54 @@ func TestReadDownloadEventsEmpty(t *testing.T) {
 		t.Errorf("readDownloadEvents() on an empty log = %+v, want none", got)
 	}
 }
+
+func TestReadLastReceiverEventReturnsMostRecent(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	ctx := context.Background()
+
+	older := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Hour)
+
+	events := []receiverEvent{
+		{At: older, ReceiverID: "recv-a", Kind: receiverEventReceive, Key: "a1.gpg", Size: 100, Success: true},
+		{At: newer, ReceiverID: "recv-a", Kind: receiverEventDelete, Key: "a2.gpg", Success: false, Error: "disk full"},
+		{At: newer, ReceiverID: "recv-b", Kind: receiverEventReceive, Key: "b1.gpg", Size: 50, Success: true},
+	}
+
+	for _, ev := range events {
+		if err := recordReceiverEvent(ctx, db, ev); err != nil {
+			t.Fatalf("recordReceiverEvent() error: %v", err)
+		}
+	}
+
+	got, ok, err := readLastReceiverEvent(ctx, db, "recv-a")
+	if err != nil {
+		t.Fatalf("readLastReceiverEvent() error: %v", err)
+	}
+
+	if !ok {
+		t.Fatal("readLastReceiverEvent() ok = false, want true")
+	}
+
+	want := events[1]
+	if !got.At.Equal(want.At) || got.Kind != want.Kind || got.Key != want.Key || got.Success != want.Success || got.Error != want.Error {
+		t.Errorf("readLastReceiverEvent() = %+v, want %+v", got, want)
+	}
+}
+
+func TestReadLastReceiverEventUnknownReceiver(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+
+	_, ok, err := readLastReceiverEvent(context.Background(), db, "does-not-exist")
+	if err != nil {
+		t.Fatalf("readLastReceiverEvent() error: %v", err)
+	}
+
+	if ok {
+		t.Error("readLastReceiverEvent() ok = true, want false for a receiver with no events")
+	}
+}

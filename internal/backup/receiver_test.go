@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -768,5 +769,90 @@ func TestStaleReceiverMonitorCheckDefaultContentTypeWhenNoHeadersSet(t *testing.
 
 	if gotCT != defaultStaleWebhookContentType {
 		t.Errorf("webhook Content-Type = %q, want %q", gotCT, defaultStaleWebhookContentType)
+	}
+}
+
+func TestReceiverStatusStoreSeedLastEventSuccess(t *testing.T) {
+	t.Parallel()
+
+	receivers := map[string]resolvedReceiver{"a": {id: "a", path: t.TempDir()}}
+	store := newReceiverStatusStore(receivers)
+
+	at := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+	store.seedLastEvent("a", receiverEvent{At: at, ReceiverID: "a", Kind: receiverEventReceive, Key: "obj.gpg", Success: true})
+
+	snap := store.snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("snapshot() = %+v, want 1 entry", snap)
+	}
+
+	if snap[0].State != stateOK || snap[0].LastKey != "obj.gpg" || !snap[0].LastSeen.Equal(at) || snap[0].Error != "" {
+		t.Errorf("snapshot()[0] = %+v, want state ok, last_key obj.gpg, last_seen %v, no error", snap[0], at)
+	}
+}
+
+func TestReceiverStatusStoreSeedLastEventFailure(t *testing.T) {
+	t.Parallel()
+
+	receivers := map[string]resolvedReceiver{"a": {id: "a", path: t.TempDir()}}
+	store := newReceiverStatusStore(receivers)
+
+	at := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+	store.seedLastEvent("a", receiverEvent{At: at, ReceiverID: "a", Kind: receiverEventDelete, Key: "obj.gpg", Success: false, Error: "disk full"})
+
+	snap := store.snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("snapshot() = %+v, want 1 entry", snap)
+	}
+
+	if snap[0].State != stateFailed || snap[0].Error != "disk full" {
+		t.Errorf("snapshot()[0] = %+v, want state failed with error %q", snap[0], "disk full")
+	}
+}
+
+func TestReceiverStatusStoreSeedLastEventUnknownReceiverIsNoop(t *testing.T) {
+	t.Parallel()
+
+	store := newReceiverStatusStore(map[string]resolvedReceiver{})
+
+	store.seedLastEvent("does-not-exist", receiverEvent{Success: true})
+
+	if snap := store.snapshot(); len(snap) != 0 {
+		t.Errorf("snapshot() = %+v, want none", snap)
+	}
+}
+
+func TestSeedReceiverStatusFromState(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	ctx := context.Background()
+
+	at := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+	if err := recordReceiverEvent(ctx, db, receiverEvent{At: at, ReceiverID: "a", Kind: receiverEventReceive, Key: "obj.gpg", Success: true}); err != nil {
+		t.Fatalf("recordReceiverEvent() error: %v", err)
+	}
+
+	receivers := map[string]resolvedReceiver{
+		"a": {id: "a", path: t.TempDir()},
+		"b": {id: "b", path: t.TempDir()}, // no events recorded: stays idle
+	}
+	store := newReceiverStatusStore(receivers)
+
+	seedReceiverStatusFromState(ctx, db, receivers, store, discardLogger)
+
+	snap := store.snapshot()
+
+	byID := make(map[string]receiverSnapshot, len(snap))
+	for _, s := range snap {
+		byID[s.ID] = s
+	}
+
+	if got := byID["a"]; got.State != stateOK || got.LastKey != "obj.gpg" || !got.LastSeen.Equal(at) {
+		t.Errorf("receiver a = %+v, want state ok, last_key obj.gpg, last_seen %v", got, at)
+	}
+
+	if got := byID["b"]; got.State != stateIdle {
+		t.Errorf("receiver b = %+v, want state idle", got)
 	}
 }

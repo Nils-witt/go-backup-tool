@@ -656,6 +656,30 @@ func recordReceiverEvent(ctx context.Context, db *sql.DB, ev receiverEvent) erro
 	return nil
 }
 
+// readLastReceiverEvent returns receiver id's most recently recorded
+// receiver_events row (receive or delete, win or lose), and false if none is
+// recorded yet — used to seed a restarted process's in-memory
+// receiverStatusStore (see seedReceiverStatusFromState in receiver.go) with
+// what its last request actually did, mirroring readLastRun's reasoning for
+// job status.
+func readLastReceiverEvent(ctx context.Context, db *sql.DB, id string) (receiverEvent, bool, error) {
+	var ev receiverEvent
+
+	err := db.QueryRowContext(ctx,
+		`SELECT at, receiver_id, kind, key, size, success, error FROM receiver_events WHERE receiver_id = ? ORDER BY id DESC LIMIT 1`,
+		id,
+	).Scan(&ev.At, &ev.ReceiverID, &ev.Kind, &ev.Key, &ev.Size, &ev.Success, &ev.Error)
+
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return receiverEvent{}, false, nil
+	case err != nil:
+		return receiverEvent{}, false, fmt.Errorf("reading receiver %q last event: %w", id, err)
+	}
+
+	return ev, true, nil
+}
+
 // receiverDaySummary is one receiver's activity over a time window, as
 // returned by summarizeReceiverEvents for the daily report: how many files
 // it successfully received, their total size, and how many requests (of
