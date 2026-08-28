@@ -144,6 +144,11 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		go monitor.run(ctx)
 	}
 
+	// Independent of the web UI: a daily report is useful for anyone
+	// monitoring receivers by inbox, not just those watching the dashboard.
+	// runDailyReportLoop itself no-ops when report.enabled isn't set.
+	go runDailyReportLoop(ctx, rc, stateDB, log)
+
 	var srv *webUIServer
 
 	if rc.listen != "" {

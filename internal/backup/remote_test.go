@@ -1,12 +1,15 @@
 package backup
 
 import (
+	"database/sql"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRemoteObjectURL(t *testing.T) {
@@ -274,5 +277,108 @@ func TestRemoteTargetInteropUnknownID(t *testing.T) {
 	err := uploadToRemote(t.Context(), cfg, tgt, strings.NewReader("x"))
 	if err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("uploadToRemote() with unknown id error = %v, want it to mention 404", err)
+	}
+}
+
+// newReceiverMuxWithDB is newReceiverMux, but wiring db through to
+// handleReceiveObject/handleDeleteObject instead of nil, so a test can
+// inspect what they recorded to it (retention tracking, receiver_events).
+func newReceiverMuxWithDB(receivers map[string]resolvedReceiver, db *sql.DB) *http.ServeMux {
+	status := newReceiverStatusStore(receivers)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, status, discardLogger, db))
+	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, status, discardLogger, db))
+
+	return mux
+}
+
+func TestHandleReceiveAndDeleteObjectRecordReceiverEvents(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	db, err := openScheduleStateDB(t.Context(), filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatalf("openScheduleStateDB() error: %v", err)
+	}
+
+	t.Cleanup(func() { _ = db.Close() })
+
+	id := testServerIdentity(t)
+	receivers := map[string]resolvedReceiver{
+		"instance-a": {id: "instance-a", publicKey: &id.privateKey.PublicKey, path: filepath.Join(dir, "objects")},
+	}
+
+	srv := httptest.NewServer(newReceiverMuxWithDB(receivers, db))
+	defer srv.Close()
+
+	cfg := &config{key: "backup.gpg", identity: id}
+	tgt := &target{kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"}
+
+	const content = "ciphertext bytes"
+
+	if err := uploadToRemote(t.Context(), cfg, tgt, strings.NewReader(content)); err != nil {
+		t.Fatalf("uploadToRemote() error: %v", err)
+	}
+
+	if err := deleteRemoteObject(t.Context(), cfg, tgt); err != nil {
+		t.Fatalf("deleteRemoteObject() error: %v", err)
+	}
+
+	summaries, err := summarizeReceiverEvents(t.Context(), db, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("summarizeReceiverEvents() error: %v", err)
+	}
+
+	if len(summaries) != 1 {
+		t.Fatalf("summarizeReceiverEvents() = %+v, want exactly one receiver's summary", summaries)
+	}
+
+	if got := summaries[0]; got.ReceiverID != "instance-a" || got.FilesReceived != 1 || got.BytesReceived != int64(len(content)) || got.Errors != 0 {
+		t.Errorf("summary = %+v, want {instance-a, 1 file, %d bytes, 0 errors}", got, len(content))
+	}
+}
+
+func TestHandleReceiveObjectRecordsFailedReceiverEvent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	db, err := openScheduleStateDB(t.Context(), filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatalf("openScheduleStateDB() error: %v", err)
+	}
+
+	t.Cleanup(func() { _ = db.Close() })
+
+	// A plain file where the receiver's root directory should be: writing
+	// "backup.gpg" under it needs os.MkdirAll(root) to succeed, and MkdirAll
+	// fails when root already exists as a non-directory.
+	root := filepath.Join(dir, "not-a-directory")
+	writeFile(t, root, "occupied")
+
+	id := testServerIdentity(t)
+	receivers := map[string]resolvedReceiver{
+		"instance-a": {id: "instance-a", publicKey: &id.privateKey.PublicKey, path: root},
+	}
+
+	srv := httptest.NewServer(newReceiverMuxWithDB(receivers, db))
+	defer srv.Close()
+
+	cfg := &config{key: "backup.gpg", identity: id}
+	tgt := &target{kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"}
+
+	if err := uploadToRemote(t.Context(), cfg, tgt, strings.NewReader("x")); err == nil {
+		t.Fatal("uploadToRemote() error = nil, want a failure since the receiver's root isn't a directory")
+	}
+
+	errs, err := readReceiverErrorEvents(t.Context(), db, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("readReceiverErrorEvents() error: %v", err)
+	}
+
+	if len(errs) != 1 || errs[0].ReceiverID != "instance-a" || errs[0].Kind != receiverEventReceive {
+		t.Fatalf("readReceiverErrorEvents() = %+v, want one failed receive for instance-a", errs)
 	}
 }

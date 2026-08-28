@@ -179,6 +179,28 @@ func openScheduleStateDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
 	}
 
+	// receiver_events records every receiver API request (PUT or DELETE)
+	// this instance has served, win or lose, regardless of whether that
+	// receiver has retention: set (unlike objects above, which only tracks
+	// writes for a receiver with retention: configured) — so the daily
+	// report (see report.go) can summarize how many files each receiver
+	// received, and any errors it hit, over a given day.
+	const receiverEventsSchema = `CREATE TABLE IF NOT EXISTS receiver_events (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		at          TIMESTAMP NOT NULL,
+		receiver_id TEXT NOT NULL,
+		kind        TEXT NOT NULL,
+		key         TEXT NOT NULL,
+		size        INTEGER NOT NULL DEFAULT 0,
+		success     INTEGER NOT NULL,
+		error       TEXT NOT NULL DEFAULT ''
+	)`
+
+	if _, err := db.ExecContext(ctx, receiverEventsSchema); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
+	}
+
 	return db, nil
 }
 
@@ -595,6 +617,128 @@ func readDownloadEvents(ctx context.Context, db *sql.DB, limit int) ([]downloadE
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("reading download events: %w", err)
+	}
+
+	return out, nil
+}
+
+// receiverEventReceive and receiverEventDelete are the kind values
+// recordReceiverEvent records, mirroring the two receiver API operations
+// (handleReceiveObject/handleDeleteObject in webui.go).
+const (
+	receiverEventReceive = "receive"
+	receiverEventDelete  = "delete"
+)
+
+// receiverEvent is one recorded receiver API request, win or lose, as
+// persisted by recordReceiverEvent and summarized by report.go for the daily
+// report.
+type receiverEvent struct {
+	At         time.Time
+	ReceiverID string
+	Kind       string // receiverEventReceive or receiverEventDelete
+	Key        string
+	Size       int64 // bytes written; 0 for a delete or a failed receive
+	Success    bool
+	Error      string // failure reason; empty on success
+}
+
+// recordReceiverEvent appends ev to the receiver event log. Called for every
+// receiver API request handleReceiveObject/handleDeleteObject serve,
+// regardless of outcome.
+func recordReceiverEvent(ctx context.Context, db *sql.DB, ev receiverEvent) error {
+	const insert = `INSERT INTO receiver_events (at, receiver_id, kind, key, size, success, error) VALUES (?, ?, ?, ?, ?, ?, ?)`
+
+	if _, err := db.ExecContext(ctx, insert, ev.At.UTC(), ev.ReceiverID, ev.Kind, ev.Key, ev.Size, ev.Success, ev.Error); err != nil {
+		return fmt.Errorf("recording receiver event: %w", err)
+	}
+
+	return nil
+}
+
+// receiverDaySummary is one receiver's activity over a time window, as
+// returned by summarizeReceiverEvents for the daily report: how many files
+// it successfully received, their total size, and how many requests (of
+// either kind) failed.
+type receiverDaySummary struct {
+	ReceiverID    string
+	FilesReceived int
+	BytesReceived int64
+	Errors        int
+}
+
+// summarizeReceiverEvents returns, in receiver id order, every receiver
+// id's receiverDaySummary for the events recorded in [start, end).
+func summarizeReceiverEvents(ctx context.Context, db *sql.DB, start, end time.Time) ([]receiverDaySummary, error) {
+	const query = `SELECT receiver_id,
+		SUM(CASE WHEN kind = ? AND success = 1 THEN 1 ELSE 0 END),
+		SUM(CASE WHEN kind = ? AND success = 1 THEN size ELSE 0 END),
+		SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END)
+		FROM receiver_events
+		WHERE at >= ? AND at < ?
+		GROUP BY receiver_id
+		ORDER BY receiver_id`
+
+	rows, err := db.QueryContext(ctx, query, receiverEventReceive, receiverEventReceive, start.UTC(), end.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("summarizing receiver events: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []receiverDaySummary
+
+	for rows.Next() {
+		var s receiverDaySummary
+
+		if err := rows.Scan(&s.ReceiverID, &s.FilesReceived, &s.BytesReceived, &s.Errors); err != nil {
+			return nil, fmt.Errorf("summarizing receiver events: %w", err)
+		}
+
+		out = append(out, s)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("summarizing receiver events: %w", err)
+	}
+
+	return out, nil
+}
+
+// receiverErrorEvent is one failed receiver API request in a time window, as
+// returned by readReceiverErrorEvents for the daily report's error listing.
+type receiverErrorEvent struct {
+	At         time.Time
+	ReceiverID string
+	Kind       string
+	Key        string
+	Error      string
+}
+
+// readReceiverErrorEvents returns every failed receiver API request
+// recorded in [start, end), oldest first.
+func readReceiverErrorEvents(ctx context.Context, db *sql.DB, start, end time.Time) ([]receiverErrorEvent, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT at, receiver_id, kind, key, error FROM receiver_events WHERE success = 0 AND at >= ? AND at < ? ORDER BY at ASC`,
+		start.UTC(), end.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("reading receiver error events: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []receiverErrorEvent
+
+	for rows.Next() {
+		var e receiverErrorEvent
+
+		if err := rows.Scan(&e.At, &e.ReceiverID, &e.Kind, &e.Key, &e.Error); err != nil {
+			return nil, fmt.Errorf("reading receiver error events: %w", err)
+		}
+
+		out = append(out, e)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading receiver error events: %w", err)
 	}
 
 	return out, nil

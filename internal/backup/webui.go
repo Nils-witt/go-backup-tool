@@ -887,6 +887,7 @@ func handleReceiveObject(receivers map[string]resolvedReceiver, status *receiver
 		if err := writeLocalObject(cfg, t, r.Body); err != nil {
 			log.Warn("receiver: writing object failed", "id", recv.id, "key", key, "err", err)
 			status.record(recv.id, key, err)
+			recordReceiverEventBestEffort(r.Context(), db, log, recv.id, receiverEventReceive, key, 0, err)
 			http.Error(w, "writing object failed", http.StatusInternalServerError)
 
 			return
@@ -897,6 +898,14 @@ func handleReceiveObject(receivers map[string]resolvedReceiver, status *receiver
 		}
 
 		status.record(recv.id, key, nil)
+
+		var size int64
+		if info, statErr := os.Stat(localObjectPath(cfg, t)); statErr == nil {
+			size = info.Size()
+		}
+
+		recordReceiverEventBestEffort(r.Context(), db, log, recv.id, receiverEventReceive, key, size, nil)
+
 		log.Info("receiver: object written", "id", recv.id, "key", key, "path", localObjectPath(cfg, t))
 		w.WriteHeader(http.StatusCreated)
 	}
@@ -925,6 +934,7 @@ func handleDeleteObject(receivers map[string]resolvedReceiver, status *receiverS
 		if err := deleteLocalObject(cfg, t); err != nil {
 			log.Warn("receiver: deleting object failed", "id", recv.id, "key", key, "err", err)
 			status.record(recv.id, key, err)
+			recordReceiverEventBestEffort(r.Context(), db, log, recv.id, receiverEventDelete, key, 0, err)
 			http.Error(w, "deleting object failed", http.StatusInternalServerError)
 
 			return
@@ -935,6 +945,7 @@ func handleDeleteObject(receivers map[string]resolvedReceiver, status *receiverS
 		}
 
 		status.record(recv.id, key, nil)
+		recordReceiverEventBestEffort(r.Context(), db, log, recv.id, receiverEventDelete, key, 0, nil)
 		log.Info("receiver: object deleted", "id", recv.id, "key", key, "path", localObjectPath(cfg, t))
 		w.WriteHeader(http.StatusNoContent)
 	}

@@ -2289,3 +2289,105 @@ jobs:
 		t.Error("rc.oidc.enabled = true, want false (oidc: not configured)")
 	}
 }
+
+func TestParseFlagsReportSettings(t *testing.T) {
+	t.Setenv("TEST_SMTP_PASSWORD", "s3cr3t")
+
+	path := writeConfigFile(t, `
+report:
+  enabled: true
+  to: ["ops@example.com"]
+  time: "06:30"
+  smtp:
+    host: smtp.example.com
+    port: 2525
+    username: backups@example.com
+    password-env: TEST_SMTP_PASSWORD
+    security: none
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	want := reportSettings{
+		enabled:    true,
+		to:         []string{"ops@example.com"},
+		from:       "backups@example.com",
+		sendHour:   6,
+		sendMinute: 30,
+		smtp: smtpSettings{
+			host:     "smtp.example.com",
+			port:     2525,
+			username: "backups@example.com",
+			password: "s3cr3t",
+			security: smtpSecurityNone,
+		},
+	}
+
+	if !reflect.DeepEqual(rc.report, want) {
+		t.Errorf("rc.report = %+v, want %+v", rc.report, want)
+	}
+}
+
+func TestParseFlagsReportDisabledByDefault(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseFlags() unexpected error: %v", err)
+	}
+
+	if rc.report.enabled {
+		t.Error("rc.report.enabled = true, want false (report: not configured)")
+	}
+}
+
+func TestParseFlagsReportEnabledRequiresTo(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+report:
+  enabled: true
+  smtp:
+    host: smtp.example.com
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "report.to") {
+		t.Fatalf("parseFlags() error = %v, want it to mention report.to", err)
+	}
+}

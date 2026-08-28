@@ -448,6 +448,28 @@ func (s *receiverStatusStore) snapshot() []receiverSnapshot {
 	return out
 }
 
+// recordReceiverEventBestEffort appends a receiver_events row for one
+// handleReceiveObject/handleDeleteObject request, win or lose, so the daily
+// report (see report.go) can summarize receiver activity later. A nil db
+// (the state db couldn't be opened at startup) is a no-op, matching every
+// other state-db write in this package; a write failure is logged rather
+// than returned, since it shouldn't affect the response the request already
+// committed to.
+func recordReceiverEventBestEffort(ctx context.Context, db *sql.DB, log *slog.Logger, receiverID, kind, key string, size int64, recvErr error) {
+	if db == nil {
+		return
+	}
+
+	ev := receiverEvent{At: time.Now(), ReceiverID: receiverID, Kind: kind, Key: key, Size: size, Success: recvErr == nil}
+	if recvErr != nil {
+		ev.Error = recvErr.Error()
+	}
+
+	if err := recordReceiverEvent(ctx, db, ev); err != nil {
+		log.Warn("receiver: recording event failed", "id", receiverID, "err", err)
+	}
+}
+
 // sweepStartupReceiverRetention runs one retention sweep, before the web UI
 // starts serving, for every receiver with retention: set — mirroring
 // sweepStartupRetention's reasoning for local server targets: without this,

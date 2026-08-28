@@ -285,3 +285,32 @@ jobs:
 # repeating job gets a fresh object on every run instead of overwriting the
 # last one; go-backup-tool warns at startup if a repeating job's key has no
 # {time} placeholder at all.
+
+# report: configures an optional daily email summarizing this instance's
+# receiver activity: how many files each configured receivers: entry
+# received in the last 24h, any receiver API errors, and any receiver
+# currently stale (see receivers: above). Independent of webui: — it's sent
+# regardless of whether the dashboard is enabled, as long as at least one
+# receivers: entry exists to report on. Omit this section entirely (the
+# default) to disable it.
+# report:
+#   enabled: true
+#   to: ["ops@example.com"]
+#   # from: "backups@example.com" # defaults to smtp.username if unset;
+#   # it's an error to leave both unset.
+#   time: "07:00" # "HH:MM", 24h, in this process's local time zone; default 07:00
+#   smtp:
+#     host: "smtp.example.com"
+#     # port: 587 # default 587, or 465 if security: tls
+#     username: "backups@example.com"
+#     # password is never written directly in this file: password-env names
+#     # an environment variable to read it from instead, same as a server's
+#     # access-key-env/secret-key-env above. Required together with
+#     # username; omit both to send unauthenticated (e.g. a trusted local
+#     # relay).
+#     password-env: SMTP_PASSWORD
+#     # security selects the connection's encryption: "starttls" (the
+#     # default) connects in plaintext and upgrades before authenticating;
+#     # "tls" connects already encrypted (the traditional port 465); "none"
+#     # never encrypts, for a trusted local relay only.
+#     security: starttls

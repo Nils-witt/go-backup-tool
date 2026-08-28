@@ -219,6 +219,13 @@ type runConfig struct {
 	// by email or domain, so scoping who can authenticate is left to the
 	// provider (e.g. a dedicated app registration or realm).
 	oidc oidcSettings
+
+	// report, when its enabled field is set, sends a daily email summarizing
+	// this instance's receiver activity (files received per receiver, any
+	// errors, and any receiver currently stale) — see report.go. Independent
+	// of the web UI: a daily report is useful for anyone monitoring
+	// receivers by inbox, not just those watching the dashboard.
+	report reportSettings
 }
 
 // oidcSettings is runConfig's resolved form of the config file's
@@ -333,6 +340,7 @@ type fileConfig struct {
 	Jobs      []fileJob      `yaml:"jobs"`
 	Receivers []fileReceiver `yaml:"receivers"`
 	WebUI     fileWebUI      `yaml:"webui"`
+	Report    fileReport     `yaml:"report"`
 }
 
 // fileWebUI is the top-level webui: entry, grouping every setting that
@@ -488,6 +496,11 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 		keysDir = defaultServerKeyDir
 	}
 
+	report, err := resolveReportSettings(fileCfg.Report)
+	if err != nil {
+		return nil, err
+	}
+
 	return &runConfig{
 		jobs:          jobs,
 		timeout:       timeout,
@@ -500,6 +513,7 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 		webUIPassword: fileCfg.WebUI.Password,
 		logViewer:     fileCfg.WebUI.LogViewer,
 		oidc:          oidc,
+		report:        report,
 	}, nil
 }
 
