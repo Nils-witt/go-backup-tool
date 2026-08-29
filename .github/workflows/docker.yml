@@ -38,6 +38,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set build metadata
+        run: |
+          echo "COMMIT=${GITHUB_SHA::12}" >> "$GITHUB_ENV"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=" >> "$GITHUB_ENV"
+          fi
+
       - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v5
