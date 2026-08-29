@@ -3,6 +3,9 @@ FROM golang:1.27-alpine AS builder
 
 WORKDIR /src
 
+ARG VERSION=dev
+ARG COMMIT=unknown
+
 COPY go.mod go.sum ./
 RUN go mod download
 
@@ -12,7 +15,7 @@ COPY internal/ internal/
 # CGO is off on purpose: the sqlite driver (modernc.org/sqlite) is pure Go,
 # so the binary builds static with no libc/gcc dependency in the final image.
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/go-backup-tool ./cmd/go-backup-tool
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X go-backup-tool/internal/backup.version=${VERSION} -X go-backup-tool/internal/backup.commit=${COMMIT}" -o /out/go-backup-tool ./cmd/go-backup-tool
 
 FROM alpine:3.22
 
