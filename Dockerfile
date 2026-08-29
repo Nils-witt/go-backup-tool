@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.27-alpine AS builder
+FROM golang:alpine AS builder
 
 WORKDIR /src
 
@@ -17,7 +17,7 @@ COPY internal/ internal/
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X go-backup-tool/internal/backup.version=${VERSION} -X go-backup-tool/internal/backup.commit=${COMMIT}" -o /out/go-backup-tool ./cmd/go-backup-tool
 
-FROM alpine:3.22
+FROM alpine:latest
 
 # ca-certificates: TLS to S3-compatible/remote endpoints.
 # gnupg: go-backup-tool shells out to the "gpg" binary to encrypt every backup.
