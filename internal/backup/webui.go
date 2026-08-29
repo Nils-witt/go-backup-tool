@@ -80,7 +80,7 @@ type webUIServer struct {
 // identity" section, so an operator can read off this instance's UUID and
 // public key without digging through its keys-dir: on disk; a nil identity
 // (loadServerIdentityAtStartup failed at startup) hides that section.
-func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB, logs *logRingBuffer, webUIUsername, webUIPassword string, oidcAuth *oidcAuth, identity *serverIdentity) *webUIServer {
+func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB, logs *logRingBuffer, webUIUsername, webUIPassword string, oidcAuth *oidcAuth, identity *serverIdentity, trustProxyHeaders bool) *webUIServer {
 	var lc net.ListenConfig
 
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
@@ -127,9 +127,9 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 	mux.HandleFunc("GET /api/identity", api(handleIdentity(identity)))
 	mux.HandleFunc("GET /api/receivers", api(handleReceiverStatus(receivers, receiverStore, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/files", api(handleReceiverFiles(receivers, log)))
-	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", page(handleDownloadFile(receivers, log, db, uiSessions)))
-	mux.HandleFunc("GET /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions, db, log))
-	mux.HandleFunc("POST /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions, db, log))
+	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", page(handleDownloadFile(receivers, log, db, uiSessions, trustProxyHeaders)))
+	mux.HandleFunc("GET /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions, db, log, trustProxyHeaders))
+	mux.HandleFunc("POST /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions, db, log, trustProxyHeaders))
 	mux.HandleFunc("GET /logout", handleWebUILogout(uiSessions))
 	mux.HandleFunc("GET /api/login-events", api(handleLoginEvents(db, log)))
 	mux.HandleFunc("GET /api/download-events", api(handleDownloadEvents(db, log)))
@@ -139,11 +139,11 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 	if oidcAuth != nil {
 		pending := newOIDCPendingStore()
 		mux.HandleFunc("GET /login/oidc", handleOIDCLogin(oidcAuth, pending))
-		mux.HandleFunc("GET /login/oidc/callback", handleOIDCCallback(oidcAuth, pending, uiSessions, log, db))
+		mux.HandleFunc("GET /login/oidc/callback", handleOIDCCallback(oidcAuth, pending, uiSessions, log, db, trustProxyHeaders))
 	}
 
 	srv := &webUIServer{
-		http: &http.Server{Handler: logRequests(log, mux), ReadHeaderTimeout: 10 * time.Second},
+		http: &http.Server{Handler: logRequests(log, mux, trustProxyHeaders), ReadHeaderTimeout: 10 * time.Second},
 		done: make(chan struct{}),
 		addr: ln.Addr().String(),
 	}
@@ -166,7 +166,7 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 // how long it took — the same per-request detail an operator would reach
 // for a proper HTTP access log, without pulling in a logging middleware
 // dependency for a handful of routes.
-func logRequests(log *slog.Logger, next http.Handler) http.Handler {
+func logRequests(log *slog.Logger, next http.Handler, trustProxyHeaders bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
@@ -176,11 +176,74 @@ func logRequests(log *slog.Logger, next http.Handler) http.Handler {
 		log.Debug("web UI request",
 			"method", req.Method,
 			"path", req.URL.Path,
-			"remote", req.RemoteAddr,
+			"remote", clientAddr(req, trustProxyHeaders),
 			"status", sw.status,
 			"duration", time.Since(start),
 		)
 	})
+}
+
+// clientAddr returns the address to record as a request's origin: req's raw
+// TCP peer (req.RemoteAddr) normally, or — when trustProxyHeaders is set,
+// because this instance sits behind a reverse proxy — the original client's
+// address as reported by that proxy, so logs reflect the real client rather
+// than the proxy's own address. Only enable trustProxyHeaders when a proxy
+// that itself sets these headers (and strips any client-supplied copies
+// first) is guaranteed to be in front of every request; otherwise a client
+// can spoof its own logged address by sending these headers itself.
+//
+// The standard Forwarded header (RFC 7239) is preferred, since its for=
+// parameter can carry the client's port alongside its IP; the de facto
+// X-Forwarded-For and X-Real-Ip headers only ever carry the IP.
+func clientAddr(req *http.Request, trustProxyHeaders bool) string {
+	if !trustProxyHeaders {
+		return req.RemoteAddr
+	}
+
+	if fwd := req.Header.Get("Forwarded"); fwd != "" {
+		if addr, ok := forwardedFor(fwd); ok {
+			return addr
+		}
+	}
+
+	if xff := req.Header.Get("X-Forwarded-For"); xff != "" {
+		if ip := strings.TrimSpace(strings.Split(xff, ",")[0]); ip != "" {
+			return ip
+		}
+	}
+
+	if ip := strings.TrimSpace(req.Header.Get("X-Real-Ip")); ip != "" {
+		return ip
+	}
+
+	return req.RemoteAddr
+}
+
+// forwardedFor extracts the for= parameter naming the originating client
+// from the first (nearest-client) element of a Forwarded header value, e.g.
+// "for=192.0.2.60:4711;proto=http" or, quoted as RFC 7239 requires whenever
+// the value itself contains reserved characters like an IPv6 literal's
+// brackets and colons, `for="[2001:db8:cafe::17]:4711"`. Further elements
+// after a comma, if any, were each prepended by the proxy in front of it, so
+// the first is the one closest to the original client.
+func forwardedFor(header string) (string, bool) {
+	first, _, _ := strings.Cut(header, ",")
+
+	for part := range strings.SplitSeq(first, ";") {
+		key, value, ok := strings.Cut(part, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(key), "for") {
+			continue
+		}
+
+		value = strings.Trim(strings.TrimSpace(value), `"`)
+		if value == "" {
+			return "", false
+		}
+
+		return value, true
+	}
+
+	return "", false
 }
 
 // statusWriter wraps an http.ResponseWriter to capture the status code
@@ -582,7 +645,7 @@ func safeNextPath(next string) string {
 // (see handleLoginEvents); a write failure there is only logged, not
 // surfaced to the browser, since it must never block an otherwise-successful
 // login.
-func handleWebUILogin(username, password string, showSSO bool, sessions *sessionStore, db *sql.DB, log *slog.Logger) http.HandlerFunc {
+func handleWebUILogin(username, password string, showSSO bool, sessions *sessionStore, db *sql.DB, log *slog.Logger, trustProxyHeaders bool) http.HandlerFunc {
 	showPassword := username != ""
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -614,7 +677,7 @@ func handleWebUILogin(username, password string, showSSO bool, sessions *session
 				detail = "incorrect username or password"
 			}
 
-			ev := loginEvent{At: time.Now(), Username: submittedUser, Method: "password", Success: success, RemoteAddr: r.RemoteAddr, Detail: detail}
+			ev := loginEvent{At: time.Now(), Username: submittedUser, Method: "password", Success: success, RemoteAddr: clientAddr(r, trustProxyHeaders), Detail: detail}
 			if err := recordLoginEvent(r.Context(), db, ev); err != nil {
 				log.Warn("web UI: recording login event failed", "err", err)
 			}
@@ -820,7 +883,7 @@ func renderLoginPage(errMsg, next string, showPassword, showSSO bool) string {
 // for a login log write failure. sessions supplies the username to record
 // (see sessionStore.usernameFor), best-effort: it's empty whenever the web
 // UI has no login configured.
-func handleDownloadFile(receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB, sessions *sessionStore) http.HandlerFunc {
+func handleDownloadFile(receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB, sessions *sessionStore, trustProxyHeaders bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := receivers[r.PathValue("id")]
 		if !ok {
@@ -839,7 +902,7 @@ func handleDownloadFile(receivers map[string]resolvedReceiver, log *slog.Logger,
 				return
 			}
 
-			ev := downloadEvent{At: time.Now(), Username: sessions.usernameFor(r), ReceiverID: recv.id, Key: key, Success: success, RemoteAddr: r.RemoteAddr, Detail: detail}
+			ev := downloadEvent{At: time.Now(), Username: sessions.usernameFor(r), ReceiverID: recv.id, Key: key, Success: success, RemoteAddr: clientAddr(r, trustProxyHeaders), Detail: detail}
 			if err := recordDownloadEvent(r.Context(), db, ev); err != nil {
 				log.Warn("download: recording download event failed", "err", err)
 			}

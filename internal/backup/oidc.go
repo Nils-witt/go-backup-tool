@@ -166,14 +166,14 @@ func handleOIDCLogin(auth *oidcAuth, pending *oidcPendingStore) http.HandlerFunc
 // the in-flight login's next. db, when non-nil, gets every attempt appended
 // to the login log (see recordLoginEvent), win or lose, mirroring
 // handleWebUILogin's own recording.
-func handleOIDCCallback(auth *oidcAuth, pending *oidcPendingStore, sessions *sessionStore, log *slog.Logger, db *sql.DB) http.HandlerFunc {
+func handleOIDCCallback(auth *oidcAuth, pending *oidcPendingStore, sessions *sessionStore, log *slog.Logger, db *sql.DB, trustProxyHeaders bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		record := func(username, detail string, success bool) {
 			if db == nil {
 				return
 			}
 
-			ev := loginEvent{At: time.Now(), Username: username, Method: "oidc", Success: success, RemoteAddr: r.RemoteAddr, Detail: detail}
+			ev := loginEvent{At: time.Now(), Username: username, Method: "oidc", Success: success, RemoteAddr: clientAddr(r, trustProxyHeaders), Detail: detail}
 			if err := recordLoginEvent(r.Context(), db, ev); err != nil {
 				log.Warn("oidc: recording login event failed", "err", err)
 			}

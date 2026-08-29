@@ -143,7 +143,7 @@ func TestStartWebUIServesRequests(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, nil, "", "", nil, nil)
+	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, nil, "", "", nil, nil, false)
 	if srv == nil {
 		t.Fatal("startWebUI() = nil, want a running server")
 	}
@@ -267,7 +267,7 @@ func TestStartWebUIWithLoginRequiresSession(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, nil, "admin", "secret", nil, nil)
+	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, nil, "admin", "secret", nil, nil, false)
 	if srv == nil {
 		t.Fatal("startWebUI() = nil, want a running server")
 	}
@@ -378,7 +378,7 @@ func TestStartWebUIBadAddrReturnsNil(t *testing.T) {
 	store, _ := newTestStore()
 
 	// Port 0 is valid (means "pick one"); an unparseable address is not.
-	srv := startWebUI("not-a-valid-address", store, nil, discardLogger, nil, nil, "", "", nil, nil)
+	srv := startWebUI("not-a-valid-address", store, nil, discardLogger, nil, nil, "", "", nil, nil, false)
 	if srv != nil {
 		t.Cleanup(srv.shutdown)
 		t.Fatal("startWebUI() with an invalid address = non-nil, want nil")
@@ -399,7 +399,7 @@ func TestHandleDownloadFileServesContent(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleDownloadFile(receivers, discardLogger, nil, newSessionStore())(rec, req)
+	handleDownloadFile(receivers, discardLogger, nil, newSessionStore(), false)(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -425,7 +425,7 @@ func TestHandleWebUILoginWrongCredentialsDoesNotStartSession(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleWebUILogin("admin", "secret", false, sessions, nil, discardLogger)(rec, req)
+	handleWebUILogin("admin", "secret", false, sessions, nil, discardLogger, false)(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200 (re-rendered form)", rec.Code)
@@ -448,7 +448,7 @@ func TestHandleWebUILoginWithoutUsernameConfiguredRedirects(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/login?next=/", nil)
 	rec := httptest.NewRecorder()
 
-	handleWebUILogin("", "", false, sessions, nil, discardLogger)(rec, req)
+	handleWebUILogin("", "", false, sessions, nil, discardLogger, false)(rec, req)
 
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
@@ -470,7 +470,7 @@ func TestHandleWebUILoginCorrectCredentialsStartsSessionAndRedirects(t *testing.
 
 	rec := httptest.NewRecorder()
 
-	handleWebUILogin("admin", "secret", false, sessions, nil, discardLogger)(rec, req)
+	handleWebUILogin("admin", "secret", false, sessions, nil, discardLogger, false)(rec, req)
 
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
@@ -583,6 +583,88 @@ func TestHandleLogsServesJSON(t *testing.T) {
 	}
 }
 
+func TestClientAddr(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		trustProxyHeaders bool
+		headers           map[string]string
+		want              string
+	}{
+		{
+			name: "no proxy headers trusted",
+			headers: map[string]string{
+				"X-Forwarded-For": "203.0.113.9",
+			},
+			want: "198.51.100.1:4321",
+		},
+		{
+			name:              "forwarded header preferred, includes port",
+			trustProxyHeaders: true,
+			headers: map[string]string{
+				"Forwarded":       "for=203.0.113.9:5678;proto=https",
+				"X-Forwarded-For": "203.0.113.10",
+			},
+			want: "203.0.113.9:5678",
+		},
+		{
+			name:              "forwarded header with quoted ipv6",
+			trustProxyHeaders: true,
+			headers: map[string]string{
+				"Forwarded": `for="[2001:db8:cafe::17]:4711"`,
+			},
+			want: "[2001:db8:cafe::17]:4711",
+		},
+		{
+			name:              "forwarded header takes first hop of a chain",
+			trustProxyHeaders: true,
+			headers: map[string]string{
+				"Forwarded": "for=203.0.113.9, for=198.51.100.100",
+			},
+			want: "203.0.113.9",
+		},
+		{
+			name:              "x-forwarded-for used when no forwarded header",
+			trustProxyHeaders: true,
+			headers: map[string]string{
+				"X-Forwarded-For": "203.0.113.9, 198.51.100.100",
+			},
+			want: "203.0.113.9",
+		},
+		{
+			name:              "x-real-ip used as last resort",
+			trustProxyHeaders: true,
+			headers: map[string]string{
+				"X-Real-Ip": "203.0.113.9",
+			},
+			want: "203.0.113.9",
+		},
+		{
+			name:              "falls back to remote addr without any header",
+			trustProxyHeaders: true,
+			want:              "198.51.100.1:4321",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+			req.RemoteAddr = "198.51.100.1:4321"
+
+			for k, v := range tt.headers {
+				req.Header.Set(k, v)
+			}
+
+			if got := clientAddr(req, tt.trustProxyHeaders); got != tt.want {
+				t.Errorf("clientAddr() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHandleWebUILoginRecordsLoginEvents(t *testing.T) {
 	t.Parallel()
 
@@ -596,7 +678,7 @@ func TestHandleWebUILoginRecordsLoginEvents(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleWebUILogin("admin", "secret", false, sessions, db, discardLogger)(rec, req)
+	handleWebUILogin("admin", "secret", false, sessions, db, discardLogger, false)(rec, req)
 
 	form = url.Values{"username": {"admin"}, "password": {"secret"}}
 	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader(form.Encode()))
@@ -605,7 +687,7 @@ func TestHandleWebUILoginRecordsLoginEvents(t *testing.T) {
 
 	rec = httptest.NewRecorder()
 
-	handleWebUILogin("admin", "secret", false, sessions, db, discardLogger)(rec, req)
+	handleWebUILogin("admin", "secret", false, sessions, db, discardLogger, false)(rec, req)
 
 	events, err := readLoginEvents(t.Context(), db, 10)
 	if err != nil {
@@ -622,6 +704,32 @@ func TestHandleWebUILoginRecordsLoginEvents(t *testing.T) {
 
 	if events[1].Success || events[1].Detail == "" {
 		t.Errorf("readLoginEvents()[1] = %+v, want the failed attempt with a detail", events[1])
+	}
+}
+
+func TestHandleWebUILoginWithTrustProxyHeadersRecordsForwardedAddr(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	sessions := newSessionStore()
+
+	form := url.Values{"username": {"admin"}, "password": {"secret"}}
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	req.RemoteAddr = "198.51.100.1:4321"
+
+	rec := httptest.NewRecorder()
+
+	handleWebUILogin("admin", "secret", false, sessions, db, discardLogger, true)(rec, req)
+
+	events, err := readLoginEvents(t.Context(), db, 10)
+	if err != nil {
+		t.Fatalf("readLoginEvents() error: %v", err)
+	}
+
+	if len(events) != 1 || events[0].RemoteAddr != "203.0.113.9" {
+		t.Fatalf("readLoginEvents() = %+v, want one event with RemoteAddr from X-Forwarded-For", events)
 	}
 }
 
@@ -693,14 +801,14 @@ func TestHandleDownloadFileRecordsDownloadEvents(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: webUISessionCookie, Value: id}) //nolint:gosec // a request Cookie header, not a Set-Cookie response; Secure/HttpOnly/SameSite don't apply
 	req.RemoteAddr = "198.51.100.1:4321"
 
-	handleDownloadFile(receivers, discardLogger, db, sessions)(httptest.NewRecorder(), req)
+	handleDownloadFile(receivers, discardLogger, db, sessions, false)(httptest.NewRecorder(), req)
 
 	req = httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/missing.gpg", nil)
 	req.SetPathValue("id", "a")
 	req.SetPathValue("key", "missing.gpg")
 	req.RemoteAddr = "198.51.100.2:4321"
 
-	handleDownloadFile(receivers, discardLogger, db, sessions)(httptest.NewRecorder(), req)
+	handleDownloadFile(receivers, discardLogger, db, sessions, false)(httptest.NewRecorder(), req)
 
 	events, err := readDownloadEvents(t.Context(), db, 10)
 	if err != nil {

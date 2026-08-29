@@ -164,6 +164,16 @@ servers:
 #   # on its own unless username/password above are also set.
 #   log-viewer: true
 #
+#   # trust-proxy-headers makes the dashboard's login/download logs and
+#   # access log record the client address from the Forwarded/
+#   # X-Forwarded-For/X-Real-Ip request headers instead of the raw TCP
+#   # connection's address. Only enable this when a reverse proxy sits in
+#   # front of every request and itself sets these headers (stripping any
+#   # client-supplied copies first) — otherwise a client can spoof its own
+#   # logged address. Unset (the default) always uses the TCP connection's
+#   # own address.
+#   trust-proxy-headers: true
+#
 #   # oidc adds a "Log in with SSO" link to the login page, alongside
 #   # username/password above if that's also configured — either one starts
 #   # the same kind of dashboard session. Any account the provider itself

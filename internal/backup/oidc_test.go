@@ -215,7 +215,7 @@ func TestOIDCLoginAndCallback(t *testing.T) {
 
 	db := openTestStateDB(t)
 
-	handleOIDCCallback(auth, pending, sessions, discardLogger, db)(callbackRec, callbackReq)
+	handleOIDCCallback(auth, pending, sessions, discardLogger, db, false)(callbackRec, callbackReq)
 
 	if callbackRec.Code != http.StatusSeeOther {
 		t.Fatalf("callback status = %d, want %d; body = %s", callbackRec.Code, http.StatusSeeOther, callbackRec.Body.String())
@@ -275,7 +275,7 @@ func TestOIDCCallbackUnknownStateRejected(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/login/oidc/callback?state=bogus&code=test-code", nil)
 	rec := httptest.NewRecorder()
 
-	handleOIDCCallback(auth, pending, sessions, discardLogger, nil)(rec, req)
+	handleOIDCCallback(auth, pending, sessions, discardLogger, nil, false)(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
@@ -314,7 +314,7 @@ func TestOIDCCallbackProviderErrorRejected(t *testing.T) {
 		"/login/oidc/callback?state="+url.QueryEscape(state)+"&error=access_denied", nil)
 	rec := httptest.NewRecorder()
 
-	handleOIDCCallback(auth, pending, sessions, discardLogger, nil)(rec, req)
+	handleOIDCCallback(auth, pending, sessions, discardLogger, nil, false)(rec, req)
 
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadGateway)
@@ -419,7 +419,7 @@ func TestHandleWebUILoginPasswordPOSTNotFoundWithoutUsername(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleWebUILogin("", "", true, sessions, nil, discardLogger)(rec, req)
+	handleWebUILogin("", "", true, sessions, nil, discardLogger, false)(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 (no password auth configured, SSO only)", rec.Code)

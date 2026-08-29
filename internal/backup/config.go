@@ -210,6 +210,12 @@ type runConfig struct {
 	// error text) an operator might not want exposed that widely.
 	logViewer bool
 
+	// trustProxyHeaders, when set, makes the web UI derive the client
+	// address it records (login/download logs, access log) from
+	// proxy-supplied headers rather than the raw TCP connection — see
+	// fileWebUI.TrustProxyHeaders and clientAddr in webui.go.
+	trustProxyHeaders bool
+
 	// oidc, when its Enabled field is set, lets a browser log into the web
 	// UI via an OpenID Connect provider instead of (or alongside, if
 	// webUIUsername/webUIPassword are also set) the dashboard's own
@@ -371,6 +377,17 @@ type fileWebUI struct {
 	// Username/Password above are also set.
 	LogViewer bool `yaml:"log-viewer"`
 
+	// TrustProxyHeaders makes the web UI take the client address recorded
+	// in the login/download logs and access log (see clientAddr in
+	// webui.go) from the Forwarded/X-Forwarded-For/X-Real-Ip request
+	// headers instead of the raw TCP connection's address, when present.
+	// Only enable this when the web UI sits behind a reverse proxy that
+	// itself sets these headers and strips any client-supplied copies
+	// first — otherwise any client can spoof its own logged address by
+	// sending these headers itself. Unset/false (the default) always uses
+	// the TCP connection's own address.
+	TrustProxyHeaders bool `yaml:"trust-proxy-headers"`
+
 	// OIDC configures Single Sign-On via an OpenID Connect provider,
 	// alongside (or instead of) Username/Password above — see
 	// fileWebUIOIDC.
@@ -502,18 +519,19 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 	}
 
 	return &runConfig{
-		jobs:          jobs,
-		timeout:       timeout,
-		listen:        listen,
-		configPath:    configPath,
-		logLevel:      level,
-		receivers:     receivers,
-		keysDir:       keysDir,
-		webUIUsername: strings.TrimSpace(fileCfg.WebUI.Username),
-		webUIPassword: fileCfg.WebUI.Password,
-		logViewer:     fileCfg.WebUI.LogViewer,
-		oidc:          oidc,
-		report:        report,
+		jobs:              jobs,
+		timeout:           timeout,
+		listen:            listen,
+		configPath:        configPath,
+		logLevel:          level,
+		receivers:         receivers,
+		keysDir:           keysDir,
+		webUIUsername:     strings.TrimSpace(fileCfg.WebUI.Username),
+		webUIPassword:     fileCfg.WebUI.Password,
+		logViewer:         fileCfg.WebUI.LogViewer,
+		trustProxyHeaders: fileCfg.WebUI.TrustProxyHeaders,
+		oidc:              oidc,
+		report:            report,
 	}, nil
 }
 
