@@ -2,7 +2,7 @@
 /.claude
 /agent
 /data
-
+/.idea
 # go build output (binary named after the module, from `go build .`)
 /go-backup-tool
 /coverage.out
