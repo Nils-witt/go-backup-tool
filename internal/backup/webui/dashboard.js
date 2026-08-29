@@ -90,7 +90,7 @@ function renderFileList(id) {
     const href = "/api/receivers/" + encodeURIComponent(id) + "/download/" + encodePathKey(f.key);
     return '<li><span class="file-key">' + escapeHtml(f.key) + '</span>' +
       '<span class="file-meta">' + fmtSize(f.size) + ' &middot; ' + fmtTime(f.mod_time) +
-      ' &middot; <a href="' + href + '">download</a></span></li>';
+      ' &middot; <a href="' + href + '" class="download-link" data-key="' + escapeHtml(f.key) + '">download</a></span></li>';
   }).join("") + '</ul>';
 }
 
@@ -151,7 +151,32 @@ function renderReceivers(receivers) {
   }).join("");
 }
 
+// download confirmation dialog: clicking a download link opens the native
+// <dialog> in dashboard.html instead of navigating immediately; the actual
+// navigation happens on "close" only if the form's submitted value is
+// "confirm" (the Download button), so Cancel and Esc both fall through as
+// a no-op.
+const downloadDialog = document.getElementById("download-confirm-dialog");
+const downloadDialogKey = document.getElementById("download-confirm-key");
+let pendingDownloadHref = null;
+
+downloadDialog.addEventListener("close", function () {
+  if (downloadDialog.returnValue === "confirm" && pendingDownloadHref) {
+    window.location.href = pendingDownloadHref;
+  }
+  pendingDownloadHref = null;
+});
+
 document.getElementById("receivers").addEventListener("click", function (e) {
+  const link = e.target.closest(".download-link");
+  if (link) {
+    e.preventDefault();
+    pendingDownloadHref = link.getAttribute("href");
+    downloadDialogKey.textContent = link.dataset.key;
+    downloadDialog.showModal();
+    return;
+  }
+
   const btn = e.target.closest(".files-toggle");
   if (!btn) return;
   toggleReceiverFiles(btn.dataset.id);

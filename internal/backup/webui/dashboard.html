@@ -269,6 +269,50 @@
     white-space: pre-wrap;
     word-break: break-all;
   }
+  .confirm-dialog {
+    padding: 1.2rem 1.3rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--card);
+    color: var(--fg);
+    max-width: 420px;
+  }
+  .confirm-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.4);
+  }
+  .confirm-dialog .confirm-message {
+    margin: 0 0 1rem;
+    font-size: .9rem;
+    overflow-wrap: anywhere;
+  }
+  .confirm-dialog .confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: .5rem;
+  }
+  .confirm-dialog .btn {
+    padding: .4rem .8rem;
+    font-size: .82rem;
+    font-weight: 600;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    cursor: pointer;
+  }
+  .confirm-dialog .btn-secondary {
+    color: var(--fg);
+    background: var(--idle-bg);
+  }
+  .confirm-dialog .btn-secondary:hover {
+    filter: brightness(0.95);
+  }
+  .confirm-dialog .btn-primary {
+    color: #fff;
+    background: var(--ok);
+    border-color: var(--ok);
+  }
+  .confirm-dialog .btn-primary:hover {
+    filter: brightness(1.08);
+  }
   .footer {
     max-width: 1200px;
     margin: 2.5rem auto 0;
@@ -333,6 +377,16 @@
     </table>
   </div>
 </div>
+
+<dialog id="download-confirm-dialog" class="confirm-dialog">
+  <form method="dialog">
+    <p class="confirm-message">Download <strong id="download-confirm-key"></strong>?</p>
+    <div class="confirm-actions">
+      <button type="submit" value="cancel" class="btn btn-secondary">Cancel</button>
+      <button type="submit" value="confirm" class="btn btn-primary" autofocus>Download</button>
+    </div>
+  </form>
+</dialog>
 
 <p class="footer">&copy; {{COPYRIGHT_YEAR}} Nils Witt &middot; go-backup-tool {{VERSION}}</p>
 
