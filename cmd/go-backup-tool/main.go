@@ -4,8 +4,9 @@
 package main
 
 import (
-	"go-backup-tool/internal/backup"
 	"os"
+
+	"nilswitt.dev/go-backup-tool/internal/backup"
 )
 
 func main() {

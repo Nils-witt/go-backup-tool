@@ -15,7 +15,7 @@ COPY internal/ internal/
 # CGO is off on purpose: the sqlite driver (modernc.org/sqlite) is pure Go,
 # so the binary builds static with no libc/gcc dependency in the final image.
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X go-backup-tool/internal/backup.version=${VERSION} -X go-backup-tool/internal/backup.commit=${COMMIT}" -o /out/go-backup-tool ./cmd/go-backup-tool
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X nilswitt.dev/go-backup-tool/internal/version.Version=${VERSION} -X nilswitt.dev/go-backup-tool/internal/version.Commit=${COMMIT}" -o /out/go-backup-tool ./cmd/go-backup-tool
 
 FROM alpine:latest
 

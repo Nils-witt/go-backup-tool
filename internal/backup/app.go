@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
 // newLogger builds the structured logger every subsystem writes its
@@ -92,6 +94,8 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 
 	log, logs := newRunLogger(stderr, rc)
+
+	log.Info("go-backup-tool starting", "version", version.Version, "commit", version.Commit)
 
 	identity := loadServerIdentityAtStartup(log, rc.keysDir)
 

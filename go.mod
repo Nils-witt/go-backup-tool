@@ -1,4 +1,4 @@
-module go-backup-tool
+module nilswitt.dev/go-backup-tool
 
 go 1.27
 

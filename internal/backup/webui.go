@@ -17,11 +17,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
 // webUIServer wraps the HTTP server behind the -listen web UI, letting
@@ -788,8 +789,8 @@ func renderLoginPage(errMsg, next string, showPassword, showSSO bool) string {
 		Next:         next,
 		ShowPassword: showPassword,
 		ShowSSO:      showSSO,
-		Version:      displayVersion(),
-		Commit:       displayCommit(),
+		Version:      version.Version,
+		Commit:       version.Commit,
 		Year:         time.Now().Year(),
 	}
 	if err := loginPageTemplate.Execute(&buf, data); err != nil {
@@ -1066,63 +1067,7 @@ var dashboardJS string
 // re-renders the job/target table.
 var dashboardHTML = strings.NewReplacer(
 	"{{DASHBOARD_JS}}", dashboardJS,
-	"{{VERSION}}", displayVersion(),
-	"{{COMMIT}}", displayCommit(),
+	"{{VERSION}}", version.Version,
+	"{{COMMIT}}", version.Commit,
 	"{{COPYRIGHT_YEAR}}", strconv.Itoa(time.Now().Year()),
 ).Replace(dashboardHTMLSrc)
-
-// version is the build version. It's set at release time via
-// `-X go-backup-tool/internal/backup.version=...` (see .goreleaser.yaml's
-// ldflags); a local `go build` leaves it at "dev".
-var version = "dev"
-
-// commit is the build's full git commit hash. It's set at release time via
-// `-X go-backup-tool/internal/backup.commit=...` (see .goreleaser.yaml's
-// ldflags); a local `go build` leaves it at "dev".
-var commit = "dev"
-
-// displayVersion resolves the version shown in the dashboard footer,
-// falling back to the version recorded by `go install` (unavailable to
-// ldflags, which only reach main-package builds) when version wasn't set at
-// build time.
-func displayVersion() string {
-	if version != "dev" {
-		return version
-	}
-
-	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
-		return info.Main.Version
-	}
-
-	return version
-}
-
-// displayCommit resolves the short commit hash shown in the dashboard
-// footer, falling back to the revision recorded by the Go toolchain's VCS
-// stamping (unavailable to ldflags, which only reach main-package builds)
-// when commit wasn't set at build time.
-func displayCommit() string {
-	if commit != "dev" {
-		return shortCommit(commit)
-	}
-
-	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, s := range info.Settings {
-			if s.Key == "vcs.revision" {
-				return shortCommit(s.Value)
-			}
-		}
-	}
-
-	return commit
-}
-
-// shortCommit truncates a full commit hash to a 12-character abbreviation
-// for display, matching the length GitHub uses in its own UI.
-func shortCommit(hash string) string {
-	if len(hash) > 12 {
-		return hash[:12]
-	}
-
-	return hash
-}

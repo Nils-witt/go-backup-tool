@@ -14,8 +14,8 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X go-backup-tool/internal/backup.version={{.Version}}
-      - -X go-backup-tool/internal/backup.commit={{.ShortCommit}}
+      - -X nilswitt.dev/go-backup-tool/internal/version.Version={{.Version}}
+      - -X nilswitt.dev/go-backup-tool/internal/version.Commit={{.ShortCommit}}
 
 archives:
   - formats: [tar.gz]

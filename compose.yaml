@@ -9,8 +9,8 @@
 # volume) so those .db files are easy to inspect/back up from the host too.
 services:
   go-backup-tool:
-    build: .
-    # image: ghcr.io/nilswitt/go-backup-tool:latest # use instead of build: once published
+    # build: .
+    image: ghcr.io/nils-witt/go-backup-tool:local # use instead of build: once published
     restart: unless-stopped
     volumes:
       - ./config.yaml:/data/config.yaml:ro
