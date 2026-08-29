@@ -15,6 +15,7 @@ builds:
     ldflags:
       - -s -w
       - -X go-backup-tool/internal/backup.version={{.Version}}
+      - -X go-backup-tool/internal/backup.commit={{.ShortCommit}}
 
 archives:
   - formats: [tar.gz]

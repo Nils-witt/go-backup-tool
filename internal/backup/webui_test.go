@@ -19,7 +19,7 @@ func TestHandleDashboardServesHTML(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 
-	handleDashboard(rec, req)
+	handleDashboard(dashboardHTML)(rec, req)
 
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Errorf("Content-Type = %q, want text/html prefix", ct)

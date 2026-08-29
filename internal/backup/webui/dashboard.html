@@ -50,9 +50,23 @@
     color: var(--fg);
     font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
+  .top-bar {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+  }
   h1 {
     font-size: 1.25rem;
     margin: 0 0 .25rem;
+  }
+  .logout-link {
+    color: var(--muted);
+    font-size: .85rem;
+    text-decoration: none;
+  }
+  .logout-link:hover {
+    text-decoration: underline;
   }
   .sub {
     color: var(--muted);
@@ -322,10 +336,16 @@
     font-size: .78rem;
     text-align: center;
   }
+  .footer a {
+    color: inherit;
+  }
 </style>
 </head>
 <body>
-<h1>go-backup-tool</h1>
+<div class="top-bar">
+  <h1>go-backup-tool</h1>
+  <a class="logout-link" href="/logout"{{LOGOUT_HIDDEN}}>Log out</a>
+</div>
 <p class="sub" id="updated">loading&hellip;</p>
 <div class="grid" id="jobs"></div>
 
@@ -388,7 +408,7 @@
   </form>
 </dialog>
 
-<p class="footer">&copy; {{COPYRIGHT_YEAR}} Nils Witt &middot; go-backup-tool {{VERSION}}</p>
+<p class="footer">&copy; {{COPYRIGHT_YEAR}} Witt, Nils &middot; Backup-Tool &middot; <a href="https://github.com/Nils-witt/go-backup-tool">GitHub</a> &middot; {{VERSION}} &middot; {{COMMIT}}</p>
 
 <script>
 {{DASHBOARD_JS}}

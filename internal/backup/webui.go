@@ -117,8 +117,10 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 		return requireWebUISession(authEnabled, uiSessions, false, h)
 	}
 
+	dashboardPage := strings.Replace(dashboardHTML, "{{LOGOUT_HIDDEN}}", logoutLinkAttr(authEnabled), 1)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", page(handleDashboard))
+	mux.HandleFunc("GET /", page(handleDashboard(dashboardPage)))
 	mux.HandleFunc("GET /api/status", api(handleStatus(store)))
 	mux.HandleFunc("GET /api/logs", api(handleLogs(logs)))
 	mux.HandleFunc("GET /api/identity", api(handleIdentity(identity)))
@@ -767,6 +769,7 @@ type loginPageData struct {
 	ShowPassword bool
 	ShowSSO      bool
 	Version      string
+	Commit       string
 	Year         int
 }
 
@@ -786,6 +789,7 @@ func renderLoginPage(errMsg, next string, showPassword, showSSO bool) string {
 		ShowPassword: showPassword,
 		ShowSSO:      showSSO,
 		Version:      displayVersion(),
+		Commit:       displayCommit(),
 		Year:         time.Now().Year(),
 	}
 	if err := loginPageTemplate.Execute(&buf, data); err != nil {
@@ -1022,10 +1026,26 @@ func bearerToken(r *http.Request) (string, bool) {
 }
 
 // handleDashboard serves the static dashboard page, which polls
-// /api/status itself; the page has no server-rendered state.
-func handleDashboard(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = io.WriteString(w, dashboardHTML)
+// /api/status itself; the page has no server-rendered state beyond whether
+// its "Log out" link is shown, which is baked into html once at startup
+// (see startWebUI) based on authEnabled, since a login-less deployment has
+// no session for that link to end.
+func handleDashboard(html string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, html)
+	}
+}
+
+// logoutLinkAttr returns the dashboard's "{{LOGOUT_HIDDEN}}" substitution
+// (see dashboardHTML/handleDashboard): the "Log out" link is hidden unless
+// authEnabled, mirroring requireWebUISession's own gating condition.
+func logoutLinkAttr(authEnabled bool) string {
+	if authEnabled {
+		return ""
+	}
+
+	return " hidden"
 }
 
 // dashboardHTMLSrc is the dashboard page's markup and CSS, kept in its own
@@ -1047,6 +1067,7 @@ var dashboardJS string
 var dashboardHTML = strings.NewReplacer(
 	"{{DASHBOARD_JS}}", dashboardJS,
 	"{{VERSION}}", displayVersion(),
+	"{{COMMIT}}", displayCommit(),
 	"{{COPYRIGHT_YEAR}}", strconv.Itoa(time.Now().Year()),
 ).Replace(dashboardHTMLSrc)
 
@@ -1054,6 +1075,11 @@ var dashboardHTML = strings.NewReplacer(
 // `-X go-backup-tool/internal/backup.version=...` (see .goreleaser.yaml's
 // ldflags); a local `go build` leaves it at "dev".
 var version = "dev"
+
+// commit is the build's full git commit hash. It's set at release time via
+// `-X go-backup-tool/internal/backup.commit=...` (see .goreleaser.yaml's
+// ldflags); a local `go build` leaves it at "dev".
+var commit = "dev"
 
 // displayVersion resolves the version shown in the dashboard footer,
 // falling back to the version recorded by `go install` (unavailable to
@@ -1069,4 +1095,34 @@ func displayVersion() string {
 	}
 
 	return version
+}
+
+// displayCommit resolves the short commit hash shown in the dashboard
+// footer, falling back to the revision recorded by the Go toolchain's VCS
+// stamping (unavailable to ldflags, which only reach main-package builds)
+// when commit wasn't set at build time.
+func displayCommit() string {
+	if commit != "dev" {
+		return shortCommit(commit)
+	}
+
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			if s.Key == "vcs.revision" {
+				return shortCommit(s.Value)
+			}
+		}
+	}
+
+	return commit
+}
+
+// shortCommit truncates a full commit hash to a 12-character abbreviation
+// for display, matching the length GitHub uses in its own UI.
+func shortCommit(hash string) string {
+	if len(hash) > 12 {
+		return hash[:12]
+	}
+
+	return hash
 }

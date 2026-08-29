@@ -19,6 +19,7 @@
   label { font-size:.85rem; color:var(--muted); }
   .divider { color:var(--muted); font-size:.8rem; text-align:center; margin:1rem 0; }
   .footer { color:var(--muted); font-size:.75rem; text-align:center; margin-top:1.5rem; }
+  .footer a { color:inherit; }
 </style>
 </head>
 <body>
@@ -40,6 +41,6 @@
 <a class="sso" href="/login/oidc?next={{.Next}}">Log in with SSO</a>
 {{end}}
 </div>
-<p class="footer">&copy; {{.Year}} Nils Witt &middot; go-backup-tool {{.Version}}</p>
+<p class="footer">&copy; {{.Year}} Witt, Nils &middot; Backup-Tool &middot; <a href="https://github.com/Nils-witt/go-backup-tool">GitHub</a> &middot; {{.Version}} &middot; {{.Commit}}</p>
 </body>
 </html>
