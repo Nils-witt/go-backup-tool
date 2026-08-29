@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
@@ -88,7 +89,7 @@ type Server struct {
 // identity" section, so an operator can read off this instance's UUID and
 // public key without digging through its keys-dir: on disk; a nil identity
 // (loadServerIdentityAtStartup failed at startup) hides that section.
-func StartWebUI(addr string, store *backup.StatusStore, receivers map[string]backup.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger, db *sql.DB, logs *LogRingBuffer, webUIUsername, webUIPassword string, oidcAuth *OIDCAuth, identity *backup.ServerIdentity, trustProxyHeaders bool, registerExtraRoutes func(*http.ServeMux)) *Server {
+func StartWebUI(addr string, store *backup.StatusStore, receivers map[string]backup.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger, db *sql.DB, logs *LogRingBuffer, webUIUsername, webUIPassword string, oidcAuth *OIDCAuth, identity *identity.ServerIdentity, trustProxyHeaders bool, registerExtraRoutes func(*http.ServeMux)) *Server {
 	var lc net.ListenConfig
 
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
@@ -321,7 +322,7 @@ type identityJSON struct {
 // nil (loadServerIdentityAtStartup failed at startup, or the receiver API
 // isn't used by any type: remote target) serves a zero-value identityJSON,
 // which the dashboard's JS treats as "no identity to show".
-func handleIdentity(identity *backup.ServerIdentity) http.HandlerFunc {
+func handleIdentity(identity *identity.ServerIdentity) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		var out identityJSON
 
@@ -392,7 +393,7 @@ func handleReceiverFiles(receivers map[string]backup.ResolvedReceiver, log *slog
 
 // LogBufferCapacity is how many of the most recent log lines StartWebUI's
 // LogRingBuffer keeps for the dashboard's log viewer (see handleLogs).
-const LogBufferCapacity = 1000
+const LogBufferCapacity = 500
 
 // LogRingBuffer is a bounded, concurrency-safe in-memory tail of the most
 // recent log lines written to it, for the web UI's log viewer (see

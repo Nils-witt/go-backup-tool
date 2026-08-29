@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/remoteAuth"
 )
 
 // RegisterRoutes mounts the receiver API's PUT/DELETE object endpoints on
@@ -125,7 +126,7 @@ func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers map[str
 	}
 
 	token, hasToken := bearerToken(r)
-	if !hasToken || backup.VerifyRemoteAuthToken(token, recv.PublicKey, recv.ID) != nil {
+	if !hasToken || remoteAuth.VerifyRemoteAuthToken(token, recv.PublicKey, recv.ID) != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return backup.ResolvedReceiver{}, false
 	}

@@ -1,4 +1,4 @@
-package backup
+package identity
 
 import (
 	"crypto/rand"
@@ -11,24 +11,14 @@ import (
 	"path/filepath"
 )
 
-const (
-	// defaultServerKeyDir is where ensureServerKeyPair stores the server's
-	// RSA key pair by default.
-	defaultServerKeyDir = "data/keys"
-
-	serverPrivateKeyFile = "server.key"
-	serverPublicKeyFile  = "server.pub"
-	serverKeyBits        = 4096
-)
-
 // ensureServerKeyPair makes sure an RSA 4096 server key pair exists under
 // dir (server.key holding the PKCS#1 private key, server.pub the PKIX
 // public key, both PEM-encoded), generating one if dir/server.key is
 // missing. See loadServerIdentity, which reads server.key back to sign
 // outgoing type: remote target requests.
 func ensureServerKeyPair(dir string, log *slog.Logger) error {
-	privPath := filepath.Join(dir, serverPrivateKeyFile)
-	pubPath := filepath.Join(dir, serverPublicKeyFile)
+	privPath := filepath.Join(dir, ServerPrivateKeyFile)
+	pubPath := filepath.Join(dir, ServerPublicKeyFile)
 
 	if _, err := os.Stat(privPath); err == nil {
 		return nil
@@ -40,7 +30,7 @@ func ensureServerKeyPair(dir string, log *slog.Logger) error {
 		return fmt.Errorf("creating %s: %w", dir, err)
 	}
 
-	key, err := rsa.GenerateKey(rand.Reader, serverKeyBits)
+	key, err := rsa.GenerateKey(rand.Reader, ServerKeyBits)
 	if err != nil {
 		return fmt.Errorf("generating RSA key: %w", err)
 	}
@@ -68,7 +58,7 @@ func ensureServerKeyPair(dir string, log *slog.Logger) error {
 		return fmt.Errorf("writing %s: %w", pubPath, err)
 	}
 
-	log.Info("generated server RSA key pair", "dir", dir, "bits", serverKeyBits)
+	log.Info("generated server RSA key pair", "dir", dir, "bits", ServerKeyBits)
 
 	return nil
 }

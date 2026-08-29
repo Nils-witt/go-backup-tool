@@ -1,4 +1,4 @@
-package backup
+package identity
 
 import (
 	"path/filepath"

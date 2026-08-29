@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 )
 
 // outstandingUploadCheckInterval is how often monitorOutstandingUploads
@@ -23,14 +24,14 @@ type OutstandingUploadMonitor struct {
 	db         *sql.DB
 	jobsByName map[string]*backup.Config
 	store      *backup.StatusStore
-	identity   *backup.ServerIdentity
+	identity   *identity.ServerIdentity
 	log        *slog.Logger
 }
 
 // NewOutstandingUploadMonitor builds a monitor sharing db/store/identity/log
 // across every outstanding upload it retries, scoped to jobsByName (the
 // jobs configured for this run).
-func NewOutstandingUploadMonitor(db *sql.DB, jobsByName map[string]*backup.Config, store *backup.StatusStore, identity *backup.ServerIdentity, log *slog.Logger) *OutstandingUploadMonitor {
+func NewOutstandingUploadMonitor(db *sql.DB, jobsByName map[string]*backup.Config, store *backup.StatusStore, identity *identity.ServerIdentity, log *slog.Logger) *OutstandingUploadMonitor {
 	return &OutstandingUploadMonitor{db: db, jobsByName: jobsByName, store: store, identity: identity, log: log}
 }
 

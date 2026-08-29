@@ -1,4 +1,4 @@
-package backup
+package remoteAuth
 
 import (
 	"crypto/rand"
@@ -11,11 +11,18 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 )
 
-// testServerIdentity builds a serverIdentity backed by a fresh (test-speed)
-// RSA key, for tests that need a sender's identity to sign a remote-target
-// request with — a real run instead gets one from loadServerIdentity, backed
-// by the persistent 4096-bit key under data/keys.
-func testServerIdentity(t *testing.T) *ServerIdentity {
+// testIdentity is a sender's uuid and RSA private key, for tests that need
+// one to sign a remote-target request with — a real run instead gets one
+// from loadServerIdentity, backed by the persistent 4096-bit key under
+// data/keys.
+type testIdentity struct {
+	uuid       string
+	privateKey *rsa.PrivateKey
+}
+
+// testServerIdentity builds a testIdentity backed by a fresh (test-speed)
+// RSA key.
+func testServerIdentity(t *testing.T) *testIdentity {
 	t.Helper()
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -23,7 +30,7 @@ func testServerIdentity(t *testing.T) *ServerIdentity {
 		t.Fatalf("generating RSA key: %v", err)
 	}
 
-	return &ServerIdentity{uuid: "test-sender-uuid", privateKey: key}
+	return &testIdentity{uuid: "test-sender-uuid", privateKey: key}
 }
 
 func TestSignAndVerifyRemoteAuthToken(t *testing.T) {

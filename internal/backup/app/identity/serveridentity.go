@@ -1,4 +1,4 @@
-package backup
+package identity
 
 import (
 	"crypto/rsa"
@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+
+	"nilswitt.dev/go-backup-tool/internal/backup/remoteAuth"
 )
 
 // ServerIdentity is this instance's persistent identity: a UUID (see
@@ -32,14 +34,14 @@ type ServerIdentity struct {
 // start over a problem that may not affect every job. dir is the config
 // file's resolved keys-dir: (see runConfig.keysDir), defaulting to
 // defaultServerKeyDir when unset.
-func LoadServerIdentityAtStartup(log *slog.Logger, dir string) *ServerIdentity {
+func LoadServerIdentityAtStartup(log *slog.Logger, dir string) (*ServerIdentity, error) {
 	identity, err := loadServerIdentity(dir, log)
 	if err != nil {
 		log.Warn("loading server identity", "dir", dir, "err", err)
-		return nil
+		return nil, err
 	}
 
-	return identity
+	return identity, nil
 }
 
 // loadServerIdentity ensures dir holds a server key pair and UUID
@@ -62,7 +64,7 @@ func loadServerIdentity(dir string, log *slog.Logger) (*ServerIdentity, error) {
 		return nil, fmt.Errorf("loading server private key: %w", err)
 	}
 
-	pubPEM, err := os.ReadFile(filepath.Join(dir, serverPublicKeyFile)) //nolint:gosec // path is the operator-configured/default key dir plus a fixed literal, not user input
+	pubPEM, err := os.ReadFile(filepath.Join(dir, ServerPublicKeyFile)) //nolint:gosec // path is the operator-configured/default key dir plus a fixed literal, not user input
 	if err != nil {
 		return nil, fmt.Errorf("loading server public key: %w", err)
 	}
@@ -94,14 +96,14 @@ func (si *ServerIdentity) PublicKeyPEM() string {
 // destination receiver's id), for uploadToRemote/deleteRemoteObject's
 // Authorization: Bearer header.
 func (si *ServerIdentity) SignRequest(audience string) (string, error) {
-	return SignRemoteAuthToken(si.privateKey, si.uuid, audience)
+	return remoteAuth.SignRemoteAuthToken(si.privateKey, si.uuid, audience)
 }
 
 // loadServerPrivateKey reads and parses dir/server.key (written by
 // ensureServerKeyPair), the PEM-encoded PKCS#1 RSA private key this
 // instance signs outgoing remote-target requests with.
 func loadServerPrivateKey(dir string) (*rsa.PrivateKey, error) {
-	path := filepath.Join(dir, serverPrivateKeyFile)
+	path := filepath.Join(dir, ServerPrivateKeyFile)
 
 	data, err := os.ReadFile(path) //nolint:gosec // path is the operator-configured/default key dir plus a fixed literal, not user input
 	if err != nil {

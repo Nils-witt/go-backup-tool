@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/remoteAuth"
 )
 
 func TestRemoteObjectURL(t *testing.T) {
@@ -66,7 +67,7 @@ func TestUploadToRemote(t *testing.T) {
 		t.Fatalf("Authorization = %q, want it to start with %q", gotAuth, prefix)
 	}
 
-	if err := backup.VerifyRemoteAuthToken(strings.TrimPrefix(gotAuth, prefix), &key.PublicKey, "instance-a"); err != nil {
+	if err := remoteAuth.VerifyRemoteAuthToken(strings.TrimPrefix(gotAuth, prefix), &key.PublicKey, "instance-a"); err != nil {
 		t.Errorf("token sent as Authorization did not verify: %v", err)
 	}
 

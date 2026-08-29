@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 )
 
 type stringSlice []string
@@ -80,7 +81,7 @@ type Config struct {
 	// target's requests. Nil means loadServerIdentity failed at startup (see
 	// its own doc comment); any job with a remote target then fails that
 	// target's uploads until a later run's Identity loads successfully.
-	Identity *ServerIdentity
+	Identity *identity.ServerIdentity
 }
 
 // jobTargetRef is one targets: entry as written in a job: a server name
@@ -511,7 +512,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 
 	keysDir := strings.TrimSpace(fileCfg.KeysDir)
 	if keysDir == "" {
-		keysDir = defaultServerKeyDir
+		keysDir = identity.DefaultServerKeyDir
 	}
 
 	report, err := resolveReportSettings(fileCfg.Report)

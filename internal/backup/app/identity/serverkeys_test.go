@@ -1,4 +1,4 @@
-package backup
+package identity
 
 import (
 	"crypto/x509"
@@ -17,7 +17,7 @@ func TestEnsureServerKeyPairGeneratesRSA4096(t *testing.T) {
 		t.Fatalf("ensureServerKeyPair() unexpected error: %v", err)
 	}
 
-	privPEM, err := os.ReadFile(filepath.Join(dir, serverPrivateKeyFile)) //nolint:gosec // dir is t.TempDir() plus fixed test literals
+	privPEM, err := os.ReadFile(filepath.Join(dir, ServerPrivateKeyFile)) //nolint:gosec // dir is t.TempDir() plus fixed test literals
 	if err != nil {
 		t.Fatalf("reading private key: %v", err)
 	}
@@ -32,11 +32,11 @@ func TestEnsureServerKeyPairGeneratesRSA4096(t *testing.T) {
 		t.Fatalf("parsing private key: %v", err)
 	}
 
-	if bits := key.N.BitLen(); bits != serverKeyBits {
-		t.Errorf("private key size = %d bits, want %d", bits, serverKeyBits)
+	if bits := key.N.BitLen(); bits != ServerKeyBits {
+		t.Errorf("private key size = %d bits, want %d", bits, ServerKeyBits)
 	}
 
-	pubPEM, err := os.ReadFile(filepath.Join(dir, serverPublicKeyFile)) //nolint:gosec // dir is t.TempDir() plus fixed test literals
+	pubPEM, err := os.ReadFile(filepath.Join(dir, ServerPublicKeyFile)) //nolint:gosec // dir is t.TempDir() plus fixed test literals
 	if err != nil {
 		t.Fatalf("reading public key: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestEnsureServerKeyPairIsIdempotent(t *testing.T) {
 		t.Fatalf("first ensureServerKeyPair() unexpected error: %v", err)
 	}
 
-	privPath := filepath.Join(dir, serverPrivateKeyFile)
+	privPath := filepath.Join(dir, ServerPrivateKeyFile)
 
 	before, err := os.ReadFile(privPath) //nolint:gosec // privPath is t.TempDir() plus fixed test literals
 	if err != nil {

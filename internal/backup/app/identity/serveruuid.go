@@ -1,4 +1,4 @@
-package backup
+package identity
 
 import (
 	"fmt"
@@ -13,7 +13,6 @@ import (
 // serverUUIDFile is the name ensureServerUUID stores this instance's
 // persistent identity under, inside defaultServerKeyDir (the same directory
 // ensureServerKeyPair uses for the RSA key pair).
-const serverUUIDFile = "server.uuid"
 
 // ensureServerUUID returns dir/server.uuid's contents, generating and
 // persisting a fresh random UUID there first if the file doesn't exist yet.
@@ -22,7 +21,7 @@ const serverUUIDFile = "server.uuid"
 // restarts for as long as dir is preserved. See loadServerIdentity, which
 // uses this as a signed request's issuer.
 func ensureServerUUID(dir string, log *slog.Logger) (string, error) {
-	path := filepath.Join(dir, serverUUIDFile)
+	path := filepath.Join(dir, ServerUUIDFile)
 
 	existing, err := os.ReadFile(path) //nolint:gosec // path is dir (the operator-configured/default key dir) plus a fixed literal, not user input
 	if err == nil {

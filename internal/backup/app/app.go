@@ -1,9 +1,6 @@
-// Package app is go-backup-tool's composition root: it parses flags, wires
-// together the core config/identity/state layer (internal/backup), the
-// backup pipeline (internal/backup/pipeline), the web UI dashboard
-// (internal/backup/webui), and the receiver API
-// (internal/backup/receiver), and runs until every job finishes or the
-// process is asked to stop.
+// Package app wires up and runs a backup-tool process: parsing flags,
+// loading the server identity, starting the web UI and receiver API, and
+// scheduling every configured job.
 package app
 
 import (
@@ -20,31 +17,17 @@ import (
 	"syscall"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
 	"nilswitt.dev/go-backup-tool/internal/backup/webui"
 	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
-// newLogger builds the structured logger every subsystem writes its
-// diagnostic output through: timestamped, level-tagged lines to w. level
-// gates verbosity — at the default (info) a run reports what it did (jobs
-// started, objects written, warnings); at debug it additionally reports how
-// (pipeline stage transitions, per-target timing, schedule/catch-up
-// decisions), which is noisy for routine runs but valuable when
-// troubleshooting one that isn't behaving as expected.
 func newLogger(w io.Writer, level slog.Level) *slog.Logger {
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
 }
 
-// newRunLogger builds the logger runWithContext uses for the whole run, plus
-// (only when rc.Listen enables the web UI and rc.LogViewer opts into its log
-// viewer) the ring buffer backing that viewer (see webui.LogRingBuffer,
-// handleLogs). Without a web UI to serve it back out, or with the viewer
-// left off, that buffer would just be memory nothing ever reads (or an
-// operator deliberately didn't want served over HTTP), so the returned
-// *webui.LogRingBuffer is nil in both cases and log writes straight to
-// stderr.
 func newRunLogger(stderr io.Writer, rc *backup.RunConfig) (*slog.Logger, *webui.LogRingBuffer) {
 	if rc.Listen == "" || !rc.LogViewer {
 		return newLogger(stderr, rc.LogLevel), nil
@@ -82,6 +65,37 @@ func Run(args []string, stderr io.Writer) int {
 	return runWithContext(ctx, args, stderr)
 }
 
+// startWebUIIfConfigured starts the web UI dashboard and receiver API (see
+// webui.StartWebUI, receiver.RegisterRoutes) when rc.Listen is set, along
+// with the stale-receiver webhook monitor (see
+// receiver.MonitorStaleReceivers). It returns nil, doing nothing else, when
+// rc.Listen is unset.
+func startWebUIIfConfigured(ctx context.Context, rc *backup.RunConfig, store *backup.StatusStore, stateDB *sql.DB, logs *webui.LogRingBuffer, serverIdentity *identity.ServerIdentity, log *slog.Logger) *webui.Server {
+	if rc.Listen == "" {
+		return nil
+	}
+
+	// Shared between the dashboard's read-only receiver views (served by
+	// webui.StartWebUI) and the receiver API's write path (served by
+	// receiver.RegisterRoutes on the same mux), so a write is reflected
+	// in the dashboard immediately.
+	receiverStore := backup.NewReceiverStatusStore(rc.Receivers)
+	if stateDB != nil {
+		receiver.SeedReceiverStatusFromState(ctx, stateDB, rc.Receivers, receiverStore, log)
+	}
+
+	receiver.SweepStartupReceiverRetention(ctx, stateDB, rc.Receivers, log)
+
+	oAuth := webui.SetupOIDCAuth(ctx, rc.OIDC, log)
+	srv := webui.StartWebUI(rc.Listen, store, rc.Receivers, receiverStore, log, stateDB, logs, rc.WebUIUsername, rc.WebUIPassword, oAuth, serverIdentity, rc.TrustProxyHeaders, func(mux *http.ServeMux) {
+		receiver.RegisterRoutes(mux, rc.Receivers, receiverStore, log, stateDB)
+	})
+
+	go receiver.MonitorStaleReceivers(ctx, rc.Receivers, log)
+
+	return srv
+}
+
 // runWithContext is Run's implementation, taking an externally supplied base
 // context instead of deriving one from OS signals. This lets a Windows
 // service (see service_windows.go) drive shutdown from Service Control
@@ -106,7 +120,11 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 
 	log.Info("go-backup-tool starting", "version", version.Version, "commit", version.Commit)
 
-	identity := backup.LoadServerIdentityAtStartup(log, rc.KeysDir)
+	serverIdentity, err := identity.LoadServerIdentityAtStartup(log, rc.KeysDir)
+	if err != nil {
+		log.Error("loading server identity", "err", err)
+		return 1
+	}
 
 	if rc.Timeout > 0 {
 		var cancel context.CancelFunc
@@ -144,7 +162,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		pipeline.SeedStatusFromState(ctx, stateDB, rc.Jobs, store, log)
 	}
 
-	r := pipeline.NewRunner(log, store, stateDB, identity)
+	r := pipeline.NewRunner(log, store, stateDB, serverIdentity)
 
 	if stateDB != nil {
 		jobsByName := make(map[string]*backup.Config, len(rc.Jobs))
@@ -152,7 +170,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 			jobsByName[j.Name] = j
 		}
 
-		monitor := pipeline.NewOutstandingUploadMonitor(stateDB, jobsByName, store, identity, log)
+		monitor := pipeline.NewOutstandingUploadMonitor(stateDB, jobsByName, store, serverIdentity, log)
 
 		go monitor.Run(ctx)
 	}
@@ -162,27 +180,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	// RunDailyReportLoop itself no-ops when report.enabled isn't set.
 	go pipeline.RunDailyReportLoop(ctx, rc, stateDB, log)
 
-	var srv *webui.Server
-
-	if rc.Listen != "" {
-		// Shared between the dashboard's read-only receiver views (served by
-		// webui.StartWebUI) and the receiver API's write path (served by
-		// receiver.RegisterRoutes on the same mux), so a write is reflected
-		// in the dashboard immediately.
-		receiverStore := backup.NewReceiverStatusStore(rc.Receivers)
-		if stateDB != nil {
-			receiver.SeedReceiverStatusFromState(ctx, stateDB, rc.Receivers, receiverStore, log)
-		}
-
-		receiver.SweepStartupReceiverRetention(ctx, stateDB, rc.Receivers, log)
-
-		oAuth := webui.SetupOIDCAuth(ctx, rc.OIDC, log)
-		srv = webui.StartWebUI(rc.Listen, store, rc.Receivers, receiverStore, log, stateDB, logs, rc.WebUIUsername, rc.WebUIPassword, oAuth, identity, rc.TrustProxyHeaders, func(mux *http.ServeMux) {
-			receiver.RegisterRoutes(mux, rc.Receivers, receiverStore, log, stateDB)
-		})
-
-		go receiver.MonitorStaleReceivers(ctx, rc.Receivers, log)
-	}
+	srv := startWebUIIfConfigured(ctx, rc, store, stateDB, logs, serverIdentity, log)
 
 	var wg sync.WaitGroup
 

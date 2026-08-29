@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 )
 
 // Runner tracks whether any job run has failed across the concurrently
@@ -17,14 +18,14 @@ import (
 type Runner struct {
 	log      *slog.Logger
 	store    *backup.StatusStore
-	stateDB  *sql.DB                // nil only if the db couldn't be opened
-	identity *backup.ServerIdentity // nil if loadServerIdentity failed at startup; see Config.Identity
+	stateDB  *sql.DB                  // nil only if the db couldn't be opened
+	identity *identity.ServerIdentity // nil if loadServerIdentity failed at startup; see Config.Identity
 	failed   atomic.Bool
 }
 
 // NewRunner builds a Runner sharing store/stateDB/identity across every job
 // scheduled through it in this run.
-func NewRunner(log *slog.Logger, store *backup.StatusStore, stateDB *sql.DB, identity *backup.ServerIdentity) *Runner {
+func NewRunner(log *slog.Logger, store *backup.StatusStore, stateDB *sql.DB, identity *identity.ServerIdentity) *Runner {
 	return &Runner{log: log, store: store, stateDB: stateDB, identity: identity}
 }
 

@@ -1,4 +1,6 @@
-package backup
+// Package remoteAuth signs and verifies the short-lived JWTs a backup-tool
+// instance uses to authenticate its own requests to a remote target.
+package remoteAuth
 
 import (
 	"crypto/rsa"
