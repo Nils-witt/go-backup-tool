@@ -16,7 +16,7 @@ import (
 func openTestRetentionDB(t *testing.T) *sql.DB {
 	t.Helper()
 
-	db, err := openScheduleStateDB(t.Context(), filepath.Join(t.TempDir(), "state.db"))
+	db, err := OpenScheduleStateDB(t.Context(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatalf("openScheduleStateDB() unexpected error: %v", err)
 	}
@@ -54,14 +54,14 @@ func TestRecordLocalWriteNoRetentionIsNoop(t *testing.T) {
 
 	dir := t.TempDir()
 	db := openTestRetentionDB(t)
-	cfg := &config{key: "backup.gpg", stateDB: db}
-	tgt := &target{serverName: "nas", kind: serverKindLocal, bucket: "sub", localPath: dir}
+	cfg := &Config{Key: "backup.gpg", StateDB: db}
+	tgt := &Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "sub", LocalPath: dir}
 
-	if err := recordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
-		t.Fatalf("recordLocalWrite() unexpected error: %v", err)
+	if err := RecordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
+		t.Fatalf("RecordLocalWrite() unexpected error: %v", err)
 	}
 
-	if got := countRetentionRows(t, db, localObjectPath(cfg, tgt)); got != 0 {
+	if got := countRetentionRows(t, db, LocalObjectPath(cfg, tgt)); got != 0 {
 		t.Errorf("retention rows = %d, want 0 when retention is unset", got)
 	}
 }
@@ -70,15 +70,15 @@ func TestRecordLocalWriteNilStateDBIsNoop(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	cfg := &config{key: "backup.gpg"} // stateDB left nil
-	tgt := &target{serverName: "nas", kind: serverKindLocal, bucket: "sub", localPath: dir, retention: time.Hour}
+	cfg := &Config{Key: "backup.gpg"} // stateDB left nil
+	tgt := &Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
 
-	if err := writeLocalObject(cfg, tgt, strings.NewReader("data")); err != nil {
-		t.Fatalf("writeLocalObject() unexpected error: %v", err)
+	if err := WriteLocalObject(cfg, tgt, strings.NewReader("data")); err != nil {
+		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
 	}
 
-	if err := recordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
-		t.Fatalf("recordLocalWrite() unexpected error: %v", err)
+	if err := RecordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
+		t.Fatalf("RecordLocalWrite() unexpected error: %v", err)
 	}
 }
 
@@ -87,23 +87,23 @@ func TestRecordLocalWriteTracksObject(t *testing.T) {
 
 	dir := t.TempDir()
 	db := openTestRetentionDB(t)
-	cfg := &config{key: "backup.gpg", stateDB: db}
-	tgt := &target{serverName: "nas", kind: serverKindLocal, bucket: "sub", localPath: dir, retention: time.Hour}
+	cfg := &Config{Key: "backup.gpg", StateDB: db}
+	tgt := &Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
 
-	if err := writeLocalObject(cfg, tgt, strings.NewReader("data")); err != nil {
-		t.Fatalf("writeLocalObject() unexpected error: %v", err)
+	if err := WriteLocalObject(cfg, tgt, strings.NewReader("data")); err != nil {
+		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
 	}
 
-	if err := recordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
-		t.Fatalf("recordLocalWrite() unexpected error: %v", err)
+	if err := RecordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
+		t.Fatalf("RecordLocalWrite() unexpected error: %v", err)
 	}
 
-	path := localObjectPath(cfg, tgt)
+	path := LocalObjectPath(cfg, tgt)
 	if got := countRetentionRows(t, db, path); got != 1 {
 		t.Errorf("retention rows for %q = %d, want 1", path, got)
 	}
 
-	// A well within-retention object survives the sweep recordLocalWrite
+	// A well within-retention object survives the sweep RecordLocalWrite
 	// triggers.
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("object removed by sweep despite being within retention: %v", err)
@@ -115,29 +115,29 @@ func TestRecordLocalWriteSweepsExpiredObjects(t *testing.T) {
 
 	dir := t.TempDir()
 	db := openTestRetentionDB(t)
-	tgt := &target{serverName: "nas", kind: serverKindLocal, bucket: "sub", localPath: dir, retention: time.Hour}
+	tgt := &Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
 
-	oldCfg := &config{key: "old.gpg", stateDB: db}
-	if err := writeLocalObject(oldCfg, tgt, strings.NewReader("stale")); err != nil {
-		t.Fatalf("writeLocalObject() unexpected error: %v", err)
+	oldCfg := &Config{Key: "old.gpg", StateDB: db}
+	if err := WriteLocalObject(oldCfg, tgt, strings.NewReader("stale")); err != nil {
+		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
 	}
 
-	if err := recordLocalWrite(t.Context(), oldCfg, tgt, discardLogger); err != nil {
-		t.Fatalf("recordLocalWrite() unexpected error: %v", err)
+	if err := RecordLocalWrite(t.Context(), oldCfg, tgt, discardLogger); err != nil {
+		t.Fatalf("RecordLocalWrite() unexpected error: %v", err)
 	}
 
-	oldPath := localObjectPath(oldCfg, tgt)
+	oldPath := LocalObjectPath(oldCfg, tgt)
 	setRetentionWrittenAt(t, db, oldPath, time.Now().Add(-2*time.Hour))
 
-	// A fresh write triggers recordLocalWrite's sweep, which should now
+	// A fresh write triggers RecordLocalWrite's sweep, which should now
 	// catch the backdated object above.
-	newCfg := &config{key: "new.gpg", stateDB: db}
-	if err := writeLocalObject(newCfg, tgt, strings.NewReader("fresh")); err != nil {
-		t.Fatalf("writeLocalObject() unexpected error: %v", err)
+	newCfg := &Config{Key: "new.gpg", StateDB: db}
+	if err := WriteLocalObject(newCfg, tgt, strings.NewReader("fresh")); err != nil {
+		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
 	}
 
-	if err := recordLocalWrite(t.Context(), newCfg, tgt, discardLogger); err != nil {
-		t.Fatalf("recordLocalWrite() unexpected error: %v", err)
+	if err := RecordLocalWrite(t.Context(), newCfg, tgt, discardLogger); err != nil {
+		t.Fatalf("RecordLocalWrite() unexpected error: %v", err)
 	}
 
 	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
@@ -148,7 +148,7 @@ func TestRecordLocalWriteSweepsExpiredObjects(t *testing.T) {
 		t.Errorf("retention rows for expired %q = %d, want 0", oldPath, got)
 	}
 
-	newPath := localObjectPath(newCfg, tgt)
+	newPath := LocalObjectPath(newCfg, tgt)
 	if _, err := os.Stat(newPath); err != nil {
 		t.Errorf("fresh object removed by sweep: %v", err)
 	}
@@ -159,18 +159,18 @@ func TestSweepRetentionForTargetIgnoresMissingFile(t *testing.T) {
 
 	dir := t.TempDir()
 	db := openTestRetentionDB(t)
-	cfg := &config{key: "gone.gpg", stateDB: db}
-	tgt := &target{serverName: "nas", kind: serverKindLocal, bucket: "sub", localPath: dir, retention: time.Hour}
+	cfg := &Config{Key: "gone.gpg", StateDB: db}
+	tgt := &Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
 
-	if err := writeLocalObject(cfg, tgt, strings.NewReader("data")); err != nil {
-		t.Fatalf("writeLocalObject() unexpected error: %v", err)
+	if err := WriteLocalObject(cfg, tgt, strings.NewReader("data")); err != nil {
+		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
 	}
 
-	if err := recordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
-		t.Fatalf("recordLocalWrite() unexpected error: %v", err)
+	if err := RecordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
+		t.Fatalf("RecordLocalWrite() unexpected error: %v", err)
 	}
 
-	path := localObjectPath(cfg, tgt)
+	path := LocalObjectPath(cfg, tgt)
 	setRetentionWrittenAt(t, db, path, time.Now().Add(-2*time.Hour))
 
 	// The file is gone from disk (e.g. removed by hand) but its db record
@@ -179,8 +179,8 @@ func TestSweepRetentionForTargetIgnoresMissingFile(t *testing.T) {
 		t.Fatalf("removing test file: %v", err)
 	}
 
-	if err := sweepRetentionForTarget(t.Context(), db, tgt, discardLogger); err != nil {
-		t.Fatalf("sweepRetentionForTarget() unexpected error: %v", err)
+	if err := SweepRetentionForTarget(t.Context(), db, tgt, discardLogger); err != nil {
+		t.Fatalf("SweepRetentionForTarget() unexpected error: %v", err)
 	}
 
 	if got := countRetentionRows(t, db, path); got != 0 {
@@ -191,10 +191,10 @@ func TestSweepRetentionForTargetIgnoresMissingFile(t *testing.T) {
 func TestSweepRetentionForTargetNilDBIsNoop(t *testing.T) {
 	t.Parallel()
 
-	tgt := &target{serverName: "nas", kind: serverKindLocal, bucket: "sub", localPath: t.TempDir(), retention: time.Hour}
+	tgt := &Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "sub", LocalPath: t.TempDir(), Retention: time.Hour}
 
-	if err := sweepRetentionForTarget(t.Context(), nil, tgt, discardLogger); err != nil {
-		t.Fatalf("sweepRetentionForTarget() unexpected error: %v", err)
+	if err := SweepRetentionForTarget(t.Context(), nil, tgt, discardLogger); err != nil {
+		t.Fatalf("SweepRetentionForTarget() unexpected error: %v", err)
 	}
 }
 
@@ -203,24 +203,24 @@ func TestRemoveRetentionRecord(t *testing.T) {
 
 	dir := t.TempDir()
 	db := openTestRetentionDB(t)
-	cfg := &config{key: "backup.gpg", stateDB: db}
-	tgt := &target{serverName: "nas", kind: serverKindLocal, bucket: "sub", localPath: dir, retention: time.Hour}
+	cfg := &Config{Key: "backup.gpg", StateDB: db}
+	tgt := &Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
 
-	if err := writeLocalObject(cfg, tgt, strings.NewReader("data")); err != nil {
-		t.Fatalf("writeLocalObject() unexpected error: %v", err)
+	if err := WriteLocalObject(cfg, tgt, strings.NewReader("data")); err != nil {
+		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
 	}
 
-	if err := recordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
-		t.Fatalf("recordLocalWrite() unexpected error: %v", err)
+	if err := RecordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
+		t.Fatalf("RecordLocalWrite() unexpected error: %v", err)
 	}
 
-	path := localObjectPath(cfg, tgt)
+	path := LocalObjectPath(cfg, tgt)
 	if got := countRetentionRows(t, db, path); got != 1 {
 		t.Fatalf("retention rows for %q = %d, want 1 before removal", path, got)
 	}
 
-	if err := removeRetentionRecord(t.Context(), cfg, tgt); err != nil {
-		t.Fatalf("removeRetentionRecord() unexpected error: %v", err)
+	if err := RemoveRetentionRecord(t.Context(), cfg, tgt); err != nil {
+		t.Fatalf("RemoveRetentionRecord() unexpected error: %v", err)
 	}
 
 	if got := countRetentionRows(t, db, path); got != 0 {

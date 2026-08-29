@@ -21,7 +21,7 @@ import (
 // indentYAMLBlock) — a fixed value keeps these fixtures readable, since the
 // tests that need it don't care whose key it is, only that it's a valid
 // one. testConfigRSAPublicKey parses it back, for building the
-// resolvedReceiver a test expects parseFlags to produce.
+// resolvedReceiver a test expects ParseFlags to produce.
 const testConfigRSAPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0tEcLZdvrCAVooY+qTwb
 0Er/KU65mc7jhrs6OV5yhDjzpdLD8/oN1stMyp47XAUbIwL7Sm0EaFmqbTPkgE+E
@@ -70,14 +70,14 @@ func writeConfigFile(t *testing.T, contents string) string {
 }
 
 // singleJob asserts rc holds exactly one job and returns it.
-func singleJob(t *testing.T, rc *runConfig) *config {
+func singleJob(t *testing.T, rc *RunConfig) *Config {
 	t.Helper()
 
-	if len(rc.jobs) != 1 {
-		t.Fatalf("parseFlags() jobs = %d, want 1", len(rc.jobs))
+	if len(rc.Jobs) != 1 {
+		t.Fatalf("ParseFlags() jobs = %d, want 1", len(rc.Jobs))
 	}
 
-	return rc.jobs[0]
+	return rc.Jobs[0]
 }
 
 func TestParseFlags(t *testing.T) {
@@ -145,26 +145,26 @@ func TestParseFlags(t *testing.T) {
 
 			path := writeConfigFile(t, tt.yaml)
 
-			rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+			rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 
 			if tt.wantErr == "" {
 				if err != nil {
-					t.Fatalf("parseFlags() unexpected error: %v", err)
+					t.Fatalf("ParseFlags() unexpected error: %v", err)
 				}
 
 				if rc == nil {
-					t.Fatal("parseFlags() returned nil config with no error")
+					t.Fatal("ParseFlags() returned nil config with no error")
 				}
 
 				return
 			}
 
 			if err == nil {
-				t.Fatalf("parseFlags() expected error containing %q, got nil", tt.wantErr)
+				t.Fatalf("ParseFlags() expected error containing %q, got nil", tt.wantErr)
 			}
 
 			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("parseFlags() error = %q, want substring %q", err.Error(), tt.wantErr)
+				t.Fatalf("ParseFlags() error = %q, want substring %q", err.Error(), tt.wantErr)
 			}
 		})
 	}
@@ -175,13 +175,13 @@ func TestParseFlagsHelp(t *testing.T) {
 
 	var out bytes.Buffer
 
-	_, err := parseFlags([]string{"-h"}, &out)
+	_, err := ParseFlags([]string{"-h"}, &out)
 	if !errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("parseFlags(-h) error = %v, want flag.ErrHelp", err)
+		t.Fatalf("ParseFlags(-h) error = %v, want flag.ErrHelp", err)
 	}
 
 	if out.Len() == 0 {
-		t.Error("parseFlags(-h) wrote no usage output")
+		t.Error("ParseFlags(-h) wrote no usage output")
 	}
 }
 
@@ -189,16 +189,16 @@ func TestParseFlagsHelp(t *testing.T) {
 func TestParseFlagsNoConfigFile(t *testing.T) {
 	t.Chdir(t.TempDir())
 
-	_, err := parseFlags(nil, &bytes.Buffer{})
+	_, err := ParseFlags(nil, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "no config file found") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "no config file found")
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "no config file found")
 	}
 }
 
 func TestParseFlagsKeyTimeNotYetSubstituted(t *testing.T) {
 	t.Parallel()
 
-	// parseFlags leaves {time} in the key unresolved: substituteKeyTime
+	// ParseFlags leaves {time} in the key unresolved: substituteKeyTime
 	// (app.go) resolves it fresh immediately before every run, so a
 	// repeating job (interval) gets a distinct key on every run instead
 	// of overwriting the same object.
@@ -215,29 +215,15 @@ jobs:
     key: "prefix-{time}-suffix.gpg"
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	cfg := singleJob(t, rc)
 
-	if cfg.key != "prefix-{time}-suffix.gpg" {
-		t.Errorf("parseFlags() key = %q, want unresolved template %q", cfg.key, "prefix-{time}-suffix.gpg")
-	}
-}
-
-func TestSubstituteKeyTime(t *testing.T) {
-	t.Parallel()
-
-	got := substituteKeyTime("prefix-{time}-suffix.gpg")
-
-	if strings.Contains(got, "{time}") {
-		t.Errorf("substituteKeyTime() = %q, want {time} placeholder substituted", got)
-	}
-
-	if !strings.HasPrefix(got, "prefix-") || !strings.HasSuffix(got, "-suffix.gpg") {
-		t.Errorf("substituteKeyTime() = %q, want prefix-<timestamp>-suffix.gpg", got)
+	if cfg.Key != "prefix-{time}-suffix.gpg" {
+		t.Errorf("ParseFlags() key = %q, want unresolved template %q", cfg.Key, "prefix-{time}-suffix.gpg")
 	}
 }
 
@@ -258,21 +244,21 @@ jobs:
       - b@example.com
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	cfg := singleJob(t, rc)
 
 	want := []string{"a@example.com", "b@example.com"}
-	if len(cfg.recipients) != len(want) {
-		t.Fatalf("parseFlags() recipients = %v, want %v", cfg.recipients, want)
+	if len(cfg.Recipients) != len(want) {
+		t.Fatalf("ParseFlags() recipients = %v, want %v", cfg.Recipients, want)
 	}
 
 	for i, r := range want {
-		if cfg.recipients[i] != r {
-			t.Errorf("parseFlags() recipients[%d] = %q, want %q", i, cfg.recipients[i], r)
+		if cfg.Recipients[i] != r {
+			t.Errorf("ParseFlags() recipients[%d] = %q, want %q", i, cfg.Recipients[i], r)
 		}
 	}
 }
@@ -298,32 +284,32 @@ jobs:
       - file@example.com
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	cfg := singleJob(t, rc)
 
-	if cfg.cmd != "echo from-file" {
-		t.Errorf("cfg.cmd = %q, want %q", cfg.cmd, "echo from-file")
+	if cfg.Cmd != "echo from-file" {
+		t.Errorf("cfg.cmd = %q, want %q", cfg.Cmd, "echo from-file")
 	}
 
-	want := target{serverName: "primary", bucket: "file-bucket", region: "eu-central-1"}
-	if len(cfg.targets) != 1 || cfg.targets[0] != want {
-		t.Errorf("cfg.targets = %+v, want [%+v]", cfg.targets, want)
+	want := Target{ServerName: "primary", Bucket: "file-bucket", Region: "eu-central-1"}
+	if len(cfg.Targets) != 1 || cfg.Targets[0] != want {
+		t.Errorf("cfg.targets = %+v, want [%+v]", cfg.Targets, want)
 	}
 
-	if len(cfg.recipients) != 1 || cfg.recipients[0] != "file@example.com" {
-		t.Errorf("cfg.recipients = %v, want [file@example.com]", cfg.recipients)
+	if len(cfg.Recipients) != 1 || cfg.Recipients[0] != "file@example.com" {
+		t.Errorf("cfg.recipients = %v, want [file@example.com]", cfg.Recipients)
 	}
 
-	if rc.timeout != 5*time.Minute {
-		t.Errorf("rc.timeout = %v, want 5m", rc.timeout)
+	if rc.Timeout != 5*time.Minute {
+		t.Errorf("rc.Timeout = %v, want 5m", rc.Timeout)
 	}
 
-	if rc.listen != ":8080" {
-		t.Errorf("rc.listen = %q, want %q", rc.listen, ":8080")
+	if rc.Listen != ":8080" {
+		t.Errorf("rc.Listen = %q, want %q", rc.Listen, ":8080")
 	}
 }
 
@@ -342,13 +328,13 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	if rc.listen != "" {
-		t.Errorf("rc.listen = %q, want empty (web UI disabled by default)", rc.listen)
+	if rc.Listen != "" {
+		t.Errorf("rc.Listen = %q, want empty (web UI disabled by default)", rc.Listen)
 	}
 }
 
@@ -370,9 +356,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "webui.listen is not set") {
-		t.Fatalf("parseFlags() error = %v, want it to mention webui.listen is not set", err)
+		t.Fatalf("ParseFlags() error = %v, want it to mention webui.listen is not set", err)
 	}
 }
 
@@ -394,13 +380,13 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	if rc.listen != "" {
-		t.Errorf("rc.listen = %q, want empty (webui.enabled unset/false)", rc.listen)
+	if rc.Listen != "" {
+		t.Errorf("rc.Listen = %q, want empty (webui.enabled unset/false)", rc.Listen)
 	}
 }
 
@@ -425,17 +411,17 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	if rc.webUIUsername != "admin" {
-		t.Errorf("rc.webUIUsername = %q, want %q", rc.webUIUsername, "admin")
+	if rc.WebUIUsername != "admin" {
+		t.Errorf("rc.WebUIUsername = %q, want %q", rc.WebUIUsername, "admin")
 	}
 
-	if rc.webUIPassword != "secret" {
-		t.Errorf("rc.webUIPassword = %q, want %q", rc.webUIPassword, "secret")
+	if rc.WebUIPassword != "secret" {
+		t.Errorf("rc.WebUIPassword = %q, want %q", rc.WebUIPassword, "secret")
 	}
 }
 
@@ -458,13 +444,13 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	if rc.logViewer {
-		t.Error("rc.logViewer = true, want false (log viewer disabled by default)")
+	if rc.LogViewer {
+		t.Error("rc.LogViewer = true, want false (log viewer disabled by default)")
 	}
 }
 
@@ -488,13 +474,13 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	if !rc.logViewer {
-		t.Error("rc.logViewer = false, want true (enable-log-viewer: true set in config file)")
+	if !rc.LogViewer {
+		t.Error("rc.LogViewer = false, want true (enable-log-viewer: true set in config file)")
 	}
 }
 
@@ -515,13 +501,13 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	if rc.logLevel != slog.LevelDebug {
-		t.Errorf("rc.logLevel = %v, want %v", rc.logLevel, slog.LevelDebug)
+	if rc.LogLevel != slog.LevelDebug {
+		t.Errorf("rc.LogLevel = %v, want %v", rc.LogLevel, slog.LevelDebug)
 	}
 }
 
@@ -542,13 +528,13 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path, "-log-level", "error"}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path, "-log-level", "error"}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	if rc.logLevel != slog.LevelError {
-		t.Errorf("rc.logLevel = %v, want %v (explicit -log-level should win)", rc.logLevel, slog.LevelError)
+	if rc.LogLevel != slog.LevelError {
+		t.Errorf("rc.LogLevel = %v, want %v (explicit -log-level should win)", rc.LogLevel, slog.LevelError)
 	}
 }
 
@@ -569,20 +555,20 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil {
-		t.Fatal("parseFlags() expected error for invalid config file log-level, got nil")
+		t.Fatal("ParseFlags() expected error for invalid config file log-level, got nil")
 	}
 }
 
 func TestParseFlagsConfigFileMissingExplicit(t *testing.T) {
 	t.Parallel()
 
-	_, err := parseFlags([]string{
+	_, err := ParseFlags([]string{
 		"-config", filepath.Join(t.TempDir(), "does-not-exist.yaml"),
 	}, &bytes.Buffer{})
 	if err == nil {
-		t.Fatal("parseFlags() expected error for missing explicit -config file, got nil")
+		t.Fatal("ParseFlags() expected error for missing explicit -config file, got nil")
 	}
 }
 
@@ -628,9 +614,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil {
-		t.Fatal("parseFlags() expected error for invalid config file timeout, got nil")
+		t.Fatal("ParseFlags() expected error for invalid config file timeout, got nil")
 	}
 }
 
@@ -658,39 +644,39 @@ jobs:
       - files-only@example.com
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	if len(rc.jobs) != 2 {
-		t.Fatalf("parseFlags() jobs = %d, want 2", len(rc.jobs))
+	if len(rc.Jobs) != 2 {
+		t.Fatalf("ParseFlags() jobs = %d, want 2", len(rc.Jobs))
 	}
 
-	db, files := rc.jobs[0], rc.jobs[1]
+	db, files := rc.Jobs[0], rc.Jobs[1]
 
-	if db.name != "database" || db.cmd != "mysqldump db" {
+	if db.Name != "database" || db.Cmd != "mysqldump db" {
 		t.Errorf("db job = %+v", db)
 	}
 
-	wantDBTarget := target{serverName: "primary", bucket: "db-bucket", region: "eu-central-1"}
-	if len(db.targets) != 1 || db.targets[0] != wantDBTarget {
-		t.Errorf("db.targets = %+v, want [%+v]", db.targets, wantDBTarget)
+	wantDBTarget := Target{ServerName: "primary", Bucket: "db-bucket", Region: "eu-central-1"}
+	if len(db.Targets) != 1 || db.Targets[0] != wantDBTarget {
+		t.Errorf("db.targets = %+v, want [%+v]", db.Targets, wantDBTarget)
 	}
 
 	// db job inherits the shared recipients default.
-	if len(db.recipients) != 1 || db.recipients[0] != "default@example.com" {
-		t.Errorf("db.recipients = %v, want inherited [default@example.com]", db.recipients)
+	if len(db.Recipients) != 1 || db.Recipients[0] != "default@example.com" {
+		t.Errorf("db.recipients = %v, want inherited [default@example.com]", db.Recipients)
 	}
 
 	// files job targets a different server and overrides recipients.
-	wantFilesTarget := target{serverName: "secondary", bucket: "files-bucket", region: "us-west-2"}
-	if len(files.targets) != 1 || files.targets[0] != wantFilesTarget {
-		t.Errorf("files.targets = %+v, want [%+v]", files.targets, wantFilesTarget)
+	wantFilesTarget := Target{ServerName: "secondary", Bucket: "files-bucket", Region: "us-west-2"}
+	if len(files.Targets) != 1 || files.Targets[0] != wantFilesTarget {
+		t.Errorf("files.targets = %+v, want [%+v]", files.Targets, wantFilesTarget)
 	}
 
-	if len(files.recipients) != 1 || files.recipients[0] != "files-only@example.com" {
-		t.Errorf("files.recipients = %v, want override [files-only@example.com]", files.recipients)
+	if len(files.Recipients) != 1 || files.Recipients[0] != "files-only@example.com" {
+		t.Errorf("files.recipients = %v, want override [files-only@example.com]", files.Recipients)
 	}
 }
 
@@ -718,25 +704,25 @@ jobs:
         bucket: secondary-bucket
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	cfg := singleJob(t, rc)
 
-	want := []target{
-		{serverName: "primary", bucket: "primary-bucket", region: "eu-central-1", endpoint: "https://s3.example.com"},
-		{serverName: "offsite", bucket: "secondary-bucket", region: "us-west-2", endpoint: "https://minio.example.com", pathStyle: true},
+	want := []Target{
+		{ServerName: "primary", Bucket: "primary-bucket", Region: "eu-central-1", Endpoint: "https://s3.example.com"},
+		{ServerName: "offsite", Bucket: "secondary-bucket", Region: "us-west-2", Endpoint: "https://minio.example.com", PathStyle: true},
 	}
 
-	if len(cfg.targets) != len(want) {
-		t.Fatalf("cfg.targets = %+v, want %+v", cfg.targets, want)
+	if len(cfg.Targets) != len(want) {
+		t.Fatalf("cfg.targets = %+v, want %+v", cfg.Targets, want)
 	}
 
 	for i := range want {
-		if cfg.targets[i] != want[i] {
-			t.Errorf("cfg.targets[%d] = %+v, want %+v", i, cfg.targets[i], want[i])
+		if cfg.Targets[i] != want[i] {
+			t.Errorf("cfg.targets[%d] = %+v, want %+v", i, cfg.Targets[i], want[i])
 		}
 	}
 }
@@ -753,9 +739,9 @@ jobs:
       - bucket: b
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "targets[0]: server is required") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "targets[0]: server is required")
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "targets[0]: server is required")
 	}
 }
 
@@ -775,9 +761,9 @@ jobs:
       - server: s
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "targets[0]: bucket is required") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "targets[0]: bucket is required")
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "targets[0]: bucket is required")
 	}
 }
 
@@ -795,9 +781,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "servers[0]: name is required") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "servers[0]: name is required")
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "servers[0]: name is required")
 	}
 }
 
@@ -818,9 +804,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), `duplicate server name "dup"`) {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, `duplicate server name "dup"`)
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, `duplicate server name "dup"`)
 	}
 }
 
@@ -838,14 +824,14 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	cfg := singleJob(t, rc)
-	if len(cfg.targets) != 1 || cfg.targets[0].region != defaultRegion {
-		t.Errorf("cfg.targets = %+v, want region %q", cfg.targets, defaultRegion)
+	if len(cfg.Targets) != 1 || cfg.Targets[0].Region != defaultRegion {
+		t.Errorf("cfg.targets = %+v, want region %q", cfg.Targets, defaultRegion)
 	}
 }
 
@@ -867,16 +853,16 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	cfg := singleJob(t, rc)
 
-	want := target{serverName: "nas", kind: serverKindLocal, bucket: "b", localPath: dir}
-	if len(cfg.targets) != 1 || cfg.targets[0] != want {
-		t.Errorf("cfg.targets = %+v, want [%+v]", cfg.targets, want)
+	want := Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "b", LocalPath: dir}
+	if len(cfg.Targets) != 1 || cfg.Targets[0] != want {
+		t.Errorf("cfg.targets = %+v, want [%+v]", cfg.Targets, want)
 	}
 }
 
@@ -895,9 +881,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "path is required for type: local") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "path is required for type: local")
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "path is required for type: local")
 	}
 }
 
@@ -920,16 +906,16 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	cfg := singleJob(t, rc)
 
-	want := target{serverName: "nas", kind: serverKindLocal, bucket: "b", localPath: dir, retention: 168 * time.Hour}
-	if len(cfg.targets) != 1 || cfg.targets[0] != want {
-		t.Errorf("cfg.targets = %+v, want [%+v]", cfg.targets, want)
+	want := Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "b", LocalPath: dir, Retention: 168 * time.Hour}
+	if len(cfg.Targets) != 1 || cfg.Targets[0] != want {
+		t.Errorf("cfg.targets = %+v, want [%+v]", cfg.Targets, want)
 	}
 }
 
@@ -952,16 +938,16 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	cfg := singleJob(t, rc)
 
-	want := target{serverName: "nas", kind: serverKindLocal, bucket: "b", localPath: dir, retention: 7 * 24 * time.Hour}
-	if len(cfg.targets) != 1 || cfg.targets[0] != want {
-		t.Errorf("cfg.targets = %+v, want [%+v]", cfg.targets, want)
+	want := Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "b", LocalPath: dir, Retention: 7 * 24 * time.Hour}
+	if len(cfg.Targets) != 1 || cfg.Targets[0] != want {
+		t.Errorf("cfg.targets = %+v, want [%+v]", cfg.Targets, want)
 	}
 }
 
@@ -982,9 +968,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "retention must not be negative") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "retention must not be negative")
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "retention must not be negative")
 	}
 }
 
@@ -1003,9 +989,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "retention is not valid for type: s3") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "retention is not valid for type: s3")
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "retention is not valid for type: s3")
 	}
 }
 
@@ -1048,16 +1034,16 @@ jobs:
     recipients: [me@example.com]
 `)
 
-			rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+			rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 			if err != nil {
-				t.Fatalf("parseFlags() unexpected error: %v", err)
+				t.Fatalf("ParseFlags() unexpected error: %v", err)
 			}
 
 			cfg := singleJob(t, rc)
 
-			want := target{serverName: "nas", kind: serverKindLocal, bucket: "b", localPath: dir, retention: tt.wantRetention}
-			if len(cfg.targets) != 1 || cfg.targets[0] != want {
-				t.Errorf("cfg.targets = %+v, want [%+v]", cfg.targets, want)
+			want := Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "b", LocalPath: dir, Retention: tt.wantRetention}
+			if len(cfg.Targets) != 1 || cfg.Targets[0] != want {
+				t.Errorf("cfg.targets = %+v, want [%+v]", cfg.Targets, want)
 			}
 		})
 	}
@@ -1125,9 +1111,9 @@ jobs:
 
 			path := writeConfigFile(t, tt.yaml)
 
-			_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+			_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("parseFlags() error = %v, want substring %q", err, tt.wantErr)
+				t.Fatalf("ParseFlags() error = %v, want substring %q", err, tt.wantErr)
 			}
 		})
 	}
@@ -1150,9 +1136,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "are not valid for type: local") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "are not valid for type: local")
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "are not valid for type: local")
 	}
 }
 
@@ -1171,9 +1157,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), `unknown type "ftp"`) {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, `unknown type "ftp"`)
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, `unknown type "ftp"`)
 	}
 }
 
@@ -1195,18 +1181,18 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	cfg := singleJob(t, rc)
-	if len(cfg.targets) != 1 {
-		t.Fatalf("cfg.targets = %+v, want 1 entry", cfg.targets)
+	if len(cfg.Targets) != 1 {
+		t.Fatalf("cfg.targets = %+v, want 1 entry", cfg.Targets)
 	}
 
-	got := cfg.targets[0]
-	if got.accessKey != "AKIATEST" || got.secretKey != "shh-secret" {
+	got := cfg.Targets[0]
+	if got.AccessKey != "AKIATEST" || got.SecretKey != "shh-secret" {
 		t.Errorf("cfg.targets[0] = %+v, want accessKey %q secretKey %q", got, "AKIATEST", "shh-secret")
 	}
 }
@@ -1227,9 +1213,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "must be set together") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "must be set together")
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "must be set together")
 	}
 }
 
@@ -1258,14 +1244,14 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path, "-job", "database"}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path, "-job", "database"}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	cfg := singleJob(t, rc)
-	if cfg.name != "database" {
-		t.Errorf("cfg.name = %q, want %q", cfg.name, "database")
+	if cfg.Name != "database" {
+		t.Errorf("cfg.name = %q, want %q", cfg.Name, "database")
 	}
 }
 
@@ -1286,9 +1272,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), `"DOES_NOT_EXIST_ACCESS"`) {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, `"DOES_NOT_EXIST_ACCESS"`)
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, `"DOES_NOT_EXIST_ACCESS"`)
 	}
 }
 
@@ -1306,9 +1292,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "name is required") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "name is required")
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "name is required")
 	}
 }
 
@@ -1331,9 +1317,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "duplicate job name") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "duplicate job name")
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "duplicate job name")
 	}
 }
 
@@ -1356,14 +1342,14 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path, "-job", "files"}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path, "-job", "files"}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	cfg := singleJob(t, rc)
-	if cfg.name != "files" {
-		t.Errorf("cfg.name = %q, want %q", cfg.name, "files")
+	if cfg.Name != "files" {
+		t.Errorf("cfg.name = %q, want %q", cfg.Name, "files")
 	}
 }
 
@@ -1382,9 +1368,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path, "-job", "nope"}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path, "-job", "nope"}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "no such job") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "no such job")
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "no such job")
 	}
 }
 
@@ -1407,14 +1393,14 @@ jobs:
     targets: [{server: s, bucket: b2}]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	for _, j := range rc.jobs {
-		if j.passphrase != "secret" {
-			t.Errorf("job %q passphrase = %q, want %q", j.name, j.passphrase, "secret")
+	for _, j := range rc.Jobs {
+		if j.Passphrase != "secret" {
+			t.Errorf("job %q passphrase = %q, want %q", j.Name, j.Passphrase, "secret")
 		}
 	}
 
@@ -1437,9 +1423,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), `job "broken"`) {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, `job "broken"`)
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, `job "broken"`)
 	}
 }
 
@@ -1459,14 +1445,14 @@ jobs:
     interval: 24h
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	cfg := singleJob(t, rc)
-	if cfg.interval != 24*time.Hour {
-		t.Errorf("cfg.interval = %v, want 24h", cfg.interval)
+	if cfg.Interval != 24*time.Hour {
+		t.Errorf("cfg.interval = %v, want 24h", cfg.Interval)
 	}
 }
 
@@ -1485,13 +1471,13 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	if cfg := singleJob(t, rc); cfg.interval != 0 {
-		t.Errorf("cfg.interval = %v, want 0", cfg.interval)
+	if cfg := singleJob(t, rc); cfg.Interval != 0 {
+		t.Errorf("cfg.interval = %v, want 0", cfg.Interval)
 	}
 }
 
@@ -1511,9 +1497,9 @@ jobs:
     interval: -1h
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "interval must not be negative") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "interval must not be negative")
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "interval must not be negative")
 	}
 }
 
@@ -1544,15 +1530,15 @@ jobs:
     interval: 0
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	want := map[string]time.Duration{"hourly": time.Hour, "daily": 24 * time.Hour, "once": 0}
-	for _, j := range rc.jobs {
-		if j.interval != want[j.name] {
-			t.Errorf("job %q interval = %v, want %v", j.name, j.interval, want[j.name])
+	for _, j := range rc.Jobs {
+		if j.Interval != want[j.Name] {
+			t.Errorf("job %q interval = %v, want %v", j.Name, j.Interval, want[j.Name])
 		}
 	}
 }
@@ -1573,9 +1559,9 @@ jobs:
     interval: "not-a-duration"
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil {
-		t.Fatal("parseFlags() expected error for invalid config file interval, got nil")
+		t.Fatal("ParseFlags() expected error for invalid config file interval, got nil")
 	}
 }
 
@@ -1596,16 +1582,16 @@ jobs:
     start-time: "2026-01-01T03:00:00Z"
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	cfg := singleJob(t, rc)
 
 	want := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
-	if !cfg.startTime.Equal(want) {
-		t.Errorf("cfg.startTime = %v, want %v", cfg.startTime, want)
+	if !cfg.StartTime.Equal(want) {
+		t.Errorf("cfg.startTime = %v, want %v", cfg.StartTime, want)
 	}
 }
 
@@ -1624,13 +1610,13 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	if cfg := singleJob(t, rc); !cfg.startTime.IsZero() {
-		t.Errorf("cfg.startTime = %v, want zero", cfg.startTime)
+	if cfg := singleJob(t, rc); !cfg.StartTime.IsZero() {
+		t.Errorf("cfg.startTime = %v, want zero", cfg.StartTime)
 	}
 }
 
@@ -1651,9 +1637,9 @@ jobs:
     start-time: "not-a-timestamp"
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil {
-		t.Fatal("parseFlags() expected error for invalid config file start-time, got nil")
+		t.Fatal("ParseFlags() expected error for invalid config file start-time, got nil")
 	}
 }
 
@@ -1673,9 +1659,9 @@ jobs:
     start-time: "2026-01-01T03:00:00Z"
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "start-time requires interval") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "start-time requires interval")
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "start-time requires interval")
 	}
 }
 
@@ -1695,21 +1681,21 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	cfg := singleJob(t, rc)
 
-	want := target{
-		serverName: "sibling",
-		kind:       serverKindRemote,
-		bucket:     "from-primary",
-		endpoint:   "https://backup2.example.com:8443",
+	want := Target{
+		ServerName: "sibling",
+		Kind:       ServerKindRemote,
+		Bucket:     "from-primary",
+		Endpoint:   "https://backup2.example.com:8443",
 	}
-	if len(cfg.targets) != 1 || cfg.targets[0] != want {
-		t.Errorf("cfg.targets = %+v, want [%+v]", cfg.targets, want)
+	if len(cfg.Targets) != 1 || cfg.Targets[0] != want {
+		t.Errorf("cfg.targets = %+v, want [%+v]", cfg.Targets, want)
 	}
 }
 
@@ -1728,9 +1714,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "endpoint is required for type: remote") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "endpoint is required for type: remote")
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "endpoint is required for type: remote")
 	}
 }
 
@@ -1751,9 +1737,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "are not valid for type: remote") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "are not valid for type: remote")
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "are not valid for type: remote")
 	}
 }
 
@@ -1781,19 +1767,19 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	recv, ok := rc.receivers["from-primary"]
+	recv, ok := rc.Receivers["from-primary"]
 	if !ok {
-		t.Fatalf("rc.receivers = %+v, want an entry for %q", rc.receivers, "from-primary")
+		t.Fatalf("rc.Receivers = %+v, want an entry for %q", rc.Receivers, "from-primary")
 	}
 
-	want := resolvedReceiver{id: "from-primary", publicKey: testConfigRSAPublicKey(t), path: dir, retention: 30 * 24 * time.Hour}
+	want := ResolvedReceiver{ID: "from-primary", PublicKey: testConfigRSAPublicKey(t), Path: dir, Retention: 30 * 24 * time.Hour}
 	if !reflect.DeepEqual(recv, want) {
-		t.Errorf("rc.receivers[%q] = %+v, want %+v", "from-primary", recv, want)
+		t.Errorf("rc.Receivers[%q] = %+v, want %+v", "from-primary", recv, want)
 	}
 }
 
@@ -1816,9 +1802,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), `receiver "from-primary": public-key is required`) {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, `receiver "from-primary": public-key is required`)
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, `receiver "from-primary": public-key is required`)
 	}
 }
 
@@ -1847,9 +1833,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), `duplicate receiver id "dup"`) {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, `duplicate receiver id "dup"`)
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, `duplicate receiver id "dup"`)
 	}
 }
 
@@ -1883,28 +1869,28 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	recv, ok := rc.receivers["from-primary"]
+	recv, ok := rc.Receivers["from-primary"]
 	if !ok {
-		t.Fatalf("rc.receivers = %+v, want an entry for %q", rc.receivers, "from-primary")
+		t.Fatalf("rc.Receivers = %+v, want an entry for %q", rc.Receivers, "from-primary")
 	}
 
-	want := resolvedReceiver{
-		id: "from-primary", publicKey: testConfigRSAPublicKey(t), path: dir,
-		staleAfter: 6 * time.Hour,
-		webhook: resolvedWebhook{
-			url:     "https://alerts.example.com/hook",
-			method:  http.MethodPut,
-			headers: map[string]string{"Authorization": "Bearer webhook-token"},
-			body:    `{"text":"{receiver_id} is stale"}`,
+	want := ResolvedReceiver{
+		ID: "from-primary", PublicKey: testConfigRSAPublicKey(t), Path: dir,
+		StaleAfter: 6 * time.Hour,
+		Webhook: ResolvedWebhook{
+			URL:     "https://alerts.example.com/hook",
+			Method:  http.MethodPut,
+			Headers: map[string]string{"Authorization": "Bearer webhook-token"},
+			Body:    `{"text":"{receiver_id} is stale"}`,
 		},
 	}
 	if !reflect.DeepEqual(recv, want) {
-		t.Errorf("rc.receivers[%q] = %+v, want %+v", "from-primary", recv, want)
+		t.Errorf("rc.Receivers[%q] = %+v, want %+v", "from-primary", recv, want)
 	}
 }
 
@@ -1930,9 +1916,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "stale-after and webhook.url must be set together") {
-		t.Fatalf("parseFlags() error = %v, want substring %q", err, "stale-after and webhook.url must be set together")
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "stale-after and webhook.url must be set together")
 	}
 }
 
@@ -1951,18 +1937,18 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	cfg := singleJob(t, rc)
-	if cfg.retries != defaultRetries {
-		t.Errorf("cfg.retries = %v, want %v", cfg.retries, defaultRetries)
+	if cfg.Retries != defaultRetries {
+		t.Errorf("cfg.retries = %v, want %v", cfg.Retries, defaultRetries)
 	}
 
-	if cfg.stagingDir != "" {
-		t.Errorf("cfg.stagingDir = %q, want empty (OS default temp dir)", cfg.stagingDir)
+	if cfg.StagingDir != "" {
+		t.Errorf("cfg.stagingDir = %q, want empty (OS default temp dir)", cfg.StagingDir)
 	}
 }
 
@@ -1983,18 +1969,18 @@ jobs:
     staging-dir: /var/lib/go-backup-tool/staging
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	cfg := singleJob(t, rc)
-	if cfg.retries != 5 {
-		t.Errorf("cfg.retries = %v, want 5", cfg.retries)
+	if cfg.Retries != 5 {
+		t.Errorf("cfg.retries = %v, want 5", cfg.Retries)
 	}
 
-	if cfg.stagingDir != "/var/lib/go-backup-tool/staging" {
-		t.Errorf("cfg.stagingDir = %q, want %q", cfg.stagingDir, "/var/lib/go-backup-tool/staging")
+	if cfg.StagingDir != "/var/lib/go-backup-tool/staging" {
+		t.Errorf("cfg.stagingDir = %q, want %q", cfg.StagingDir, "/var/lib/go-backup-tool/staging")
 	}
 }
 
@@ -2022,21 +2008,21 @@ jobs:
     gpg-homedir: /opt/gpg/home
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	wantBin := map[string]string{"default-gpg": "/usr/local/bin/gpg2", "custom-gpg": "/opt/gpg/bin/gpg"}
 	wantHomedir := map[string]string{"default-gpg": "/etc/go-backup-tool/gnupg", "custom-gpg": "/opt/gpg/home"}
 
-	for _, j := range rc.jobs {
-		if j.gpgBin != wantBin[j.name] {
-			t.Errorf("job %q gpgBin = %q, want %q", j.name, j.gpgBin, wantBin[j.name])
+	for _, j := range rc.Jobs {
+		if j.GPGBin != wantBin[j.Name] {
+			t.Errorf("job %q gpgBin = %q, want %q", j.Name, j.GPGBin, wantBin[j.Name])
 		}
 
-		if j.gpgHomedir != wantHomedir[j.name] {
-			t.Errorf("job %q gpgHomedir = %q, want %q", j.name, j.gpgHomedir, wantHomedir[j.name])
+		if j.GPGHomedir != wantHomedir[j.Name] {
+			t.Errorf("job %q gpgHomedir = %q, want %q", j.Name, j.GPGHomedir, wantHomedir[j.Name])
 		}
 	}
 }
@@ -2063,16 +2049,16 @@ jobs:
     retries: 7
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
 	want := map[string]int{"default-retries": 2, "custom-retries": 7}
 
-	for _, j := range rc.jobs {
-		if j.retries != want[j.name] {
-			t.Errorf("job %q retries = %v, want %v", j.name, j.retries, want[j.name])
+	for _, j := range rc.Jobs {
+		if j.Retries != want[j.Name] {
+			t.Errorf("job %q retries = %v, want %v", j.Name, j.Retries, want[j.Name])
 		}
 	}
 }
@@ -2102,22 +2088,22 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	want := oidcSettings{
-		enabled:      true,
-		issuer:       "https://idp.example.com",
-		clientID:     "my-client",
-		clientSecret: "s3cr3t",
-		redirectURL:  "https://backups.example.com/login/oidc/callback",
-		scopes:       []string{"profile", "email"},
+	want := OIDCSettings{
+		Enabled:      true,
+		Issuer:       "https://idp.example.com",
+		ClientID:     "my-client",
+		ClientSecret: "s3cr3t",
+		RedirectURL:  "https://backups.example.com/login/oidc/callback",
+		Scopes:       []string{"profile", "email"},
 	}
 
-	if !reflect.DeepEqual(rc.oidc, want) {
-		t.Errorf("rc.oidc = %+v, want %+v", rc.oidc, want)
+	if !reflect.DeepEqual(rc.OIDC, want) {
+		t.Errorf("rc.OIDC = %+v, want %+v", rc.OIDC, want)
 	}
 }
 
@@ -2147,13 +2133,13 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	if !reflect.DeepEqual(rc.oidc.scopes, []string{"groups"}) {
-		t.Errorf("rc.oidc.scopes = %v, want [groups]", rc.oidc.scopes)
+	if !reflect.DeepEqual(rc.OIDC.Scopes, []string{"groups"}) {
+		t.Errorf("rc.OIDC.Scopes = %v, want [groups]", rc.OIDC.Scopes)
 	}
 }
 
@@ -2180,9 +2166,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "webui.enabled is not") {
-		t.Fatalf("parseFlags() error = %v, want it to mention webui.enabled is not", err)
+		t.Fatalf("ParseFlags() error = %v, want it to mention webui.enabled is not", err)
 	}
 }
 
@@ -2253,9 +2239,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-			_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+			_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 			if err == nil || !strings.Contains(err.Error(), tc.wantErrHas) {
-				t.Fatalf("parseFlags() error = %v, want substring %q", err, tc.wantErrHas)
+				t.Fatalf("ParseFlags() error = %v, want substring %q", err, tc.wantErrHas)
 			}
 		})
 	}
@@ -2280,13 +2266,13 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	if rc.oidc.enabled {
-		t.Error("rc.oidc.enabled = true, want false (oidc: not configured)")
+	if rc.OIDC.Enabled {
+		t.Error("rc.OIDC.Enabled = true, want false (oidc: not configured)")
 	}
 }
 
@@ -2316,28 +2302,28 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	want := reportSettings{
-		enabled:    true,
-		to:         []string{"ops@example.com"},
-		from:       "backups@example.com",
-		sendHour:   6,
-		sendMinute: 30,
-		smtp: smtpSettings{
-			host:     "smtp.example.com",
-			port:     2525,
-			username: "backups@example.com",
-			password: "s3cr3t",
-			security: smtpSecurityNone,
+	want := ReportSettings{
+		Enabled:    true,
+		To:         []string{"ops@example.com"},
+		From:       "backups@example.com",
+		SendHour:   6,
+		SendMinute: 30,
+		SMTP: SMTPSettings{
+			Host:     "smtp.example.com",
+			Port:     2525,
+			Username: "backups@example.com",
+			Password: "s3cr3t",
+			Security: SMTPSecurityNone,
 		},
 	}
 
-	if !reflect.DeepEqual(rc.report, want) {
-		t.Errorf("rc.report = %+v, want %+v", rc.report, want)
+	if !reflect.DeepEqual(rc.Report, want) {
+		t.Errorf("rc.Report = %+v, want %+v", rc.Report, want)
 	}
 }
 
@@ -2356,13 +2342,13 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("parseFlags() unexpected error: %v", err)
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	if rc.report.enabled {
-		t.Error("rc.report.enabled = true, want false (report: not configured)")
+	if rc.Report.Enabled {
+		t.Error("rc.Report.Enabled = true, want false (report: not configured)")
 	}
 }
 
@@ -2386,8 +2372,8 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := parseFlags([]string{"-config", path}, &bytes.Buffer{})
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "report.to") {
-		t.Fatalf("parseFlags() error = %v, want it to mention report.to", err)
+		t.Fatalf("ParseFlags() error = %v, want it to mention report.to", err)
 	}
 }

@@ -6,17 +6,17 @@ import (
 	"time"
 )
 
-func newTestStore() (*statusStore, *config) {
-	cfg := &config{
-		name:     "test",
-		interval: time.Minute,
-		targets: []target{
-			{serverName: "primary", bucket: "b1", kind: serverKindS3},
-			{serverName: "nas", bucket: "b2", kind: serverKindLocal},
+func newTestStore() (*StatusStore, *Config) {
+	cfg := &Config{
+		Name:     "test",
+		Interval: time.Minute,
+		Targets: []Target{
+			{ServerName: "primary", Bucket: "b1", Kind: ServerKindS3},
+			{ServerName: "nas", Bucket: "b2", Kind: ServerKindLocal},
 		},
 	}
 
-	return newStatusStore([]*config{cfg}), cfg
+	return NewStatusStore([]*Config{cfg}), cfg
 }
 
 func TestFormatBytes(t *testing.T) {
@@ -47,27 +47,27 @@ func TestOverallState(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		states []runState
-		want   runState
+		states []RunState
+		want   RunState
 	}{
-		{"all ok", []runState{stateOK, stateOK}, stateOK},
-		{"all failed", []runState{stateFailed, stateFailed}, stateFailed},
-		{"mixed", []runState{stateOK, stateFailed}, stateIncomplete},
-		{"single ok", []runState{stateOK}, stateOK},
-		{"single failed", []runState{stateFailed}, stateFailed},
+		{"all ok", []RunState{StateOK, StateOK}, StateOK},
+		{"all failed", []RunState{StateFailed, StateFailed}, StateFailed},
+		{"mixed", []RunState{StateOK, StateFailed}, StateIncomplete},
+		{"single ok", []RunState{StateOK}, StateOK},
+		{"single failed", []RunState{StateFailed}, StateFailed},
 		// A target still running counts the same as failed here: only a
 		// state of stateOK counts as succeeded, so overallState never
 		// reports ok or incomplete for a job that isn't actually done yet.
-		{"one running, one ok", []runState{stateRunning, stateOK}, stateIncomplete},
+		{"one running, one ok", []RunState{StateRunning, StateOK}, StateIncomplete},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			targets := make([]targetSnapshot, len(tt.states))
+			targets := make([]TargetSnapshot, len(tt.states))
 			for i, s := range tt.states {
-				targets[i] = targetSnapshot{State: s}
+				targets[i] = TargetSnapshot{State: s}
 			}
 
 			if got := overallState(targets); got != tt.want {
@@ -81,14 +81,14 @@ func TestNewStatusStoreStartsIdle(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore()
-	snap := store.snapshot()
+	snap := store.Snapshot()
 
 	if len(snap) != 1 {
 		t.Fatalf("snapshot() = %d jobs, want 1", len(snap))
 	}
 
 	j := snap[0]
-	if j.Name != "test" || j.State != stateIdle || j.Interval != "1m0s" {
+	if j.Name != "test" || j.State != StateIdle || j.Interval != "1m0s" {
 		t.Errorf("snapshot()[0] = %+v, want idle job %q with interval 1m0s", j, "test")
 	}
 
@@ -97,7 +97,7 @@ func TestNewStatusStoreStartsIdle(t *testing.T) {
 	}
 
 	for i, tgt := range j.Targets {
-		if tgt.State != stateIdle {
+		if tgt.State != StateIdle {
 			t.Errorf("target[%d].State = %q, want idle", i, tgt.State)
 		}
 	}
@@ -108,17 +108,17 @@ func TestStatusStoreLifecycleSuccess(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	store.starting("test")
-	store.targetDone("test", 0, nil)
-	store.targetDone("test", 1, nil)
+	store.Starting("test")
+	store.TargetDone("test", 0, nil)
+	store.TargetDone("test", 1, nil)
 
-	if got := store.finished("test", nil, 2048); got != stateOK {
+	if got := store.Finished("test", nil, 2048); got != StateOK {
 		t.Errorf("finished() = %q, want ok", got)
 	}
 
-	snap := store.snapshot()[0]
+	snap := store.Snapshot()[0]
 
-	if snap.State != stateOK {
+	if snap.State != StateOK {
 		t.Errorf("job State = %q, want ok", snap.State)
 	}
 
@@ -131,7 +131,7 @@ func TestStatusStoreLifecycleSuccess(t *testing.T) {
 	}
 
 	for i, tgt := range snap.Targets {
-		if tgt.State != stateOK {
+		if tgt.State != StateOK {
 			t.Errorf("target[%d].State = %q, want ok", i, tgt.State)
 		}
 	}
@@ -148,17 +148,17 @@ func TestStatusStoreLifecycleIncomplete(t *testing.T) {
 	store, _ := newTestStore()
 	boom := errors.New("boom")
 
-	store.starting("test")
-	store.targetDone("test", 0, nil)
-	store.targetDone("test", 1, boom)
+	store.Starting("test")
+	store.TargetDone("test", 0, nil)
+	store.TargetDone("test", 1, boom)
 
-	if got := store.finished("test", boom, 2048); got != stateIncomplete {
+	if got := store.Finished("test", boom, 2048); got != StateIncomplete {
 		t.Errorf("finished() = %q, want incomplete", got)
 	}
 
-	snap := store.snapshot()[0]
+	snap := store.Snapshot()[0]
 
-	if snap.State != stateIncomplete || snap.Error != "boom" {
+	if snap.State != StateIncomplete || snap.Error != "boom" {
 		t.Errorf("job = {state: %q, error: %q}, want {incomplete, boom}", snap.State, snap.Error)
 	}
 
@@ -166,11 +166,11 @@ func TestStatusStoreLifecycleIncomplete(t *testing.T) {
 		t.Errorf("job Size = %q, want %q (one target did get a complete copy)", snap.Size, "2.0 KiB")
 	}
 
-	if snap.Targets[0].State != stateOK {
+	if snap.Targets[0].State != StateOK {
 		t.Errorf("target[0].State = %q, want ok", snap.Targets[0].State)
 	}
 
-	if snap.Targets[1].State != stateFailed || snap.Targets[1].Error != "boom" {
+	if snap.Targets[1].State != StateFailed || snap.Targets[1].Error != "boom" {
 		t.Errorf("target[1] = {state: %q, error: %q}, want {failed, boom}", snap.Targets[1].State, snap.Targets[1].Error)
 	}
 }
@@ -184,17 +184,17 @@ func TestStatusStoreLifecycleTotalFailure(t *testing.T) {
 	store, _ := newTestStore()
 	boom := errors.New("boom")
 
-	store.starting("test")
-	store.targetDone("test", 0, boom)
-	store.targetDone("test", 1, boom)
+	store.Starting("test")
+	store.TargetDone("test", 0, boom)
+	store.TargetDone("test", 1, boom)
 
-	if got := store.finished("test", boom, 0); got != stateFailed {
+	if got := store.Finished("test", boom, 0); got != StateFailed {
 		t.Errorf("finished() = %q, want failed", got)
 	}
 
-	snap := store.snapshot()[0]
+	snap := store.Snapshot()[0]
 
-	if snap.State != stateFailed || snap.Error != "boom" {
+	if snap.State != StateFailed || snap.Error != "boom" {
 		t.Errorf("job = {state: %q, error: %q}, want {failed, boom}", snap.State, snap.Error)
 	}
 
@@ -202,7 +202,7 @@ func TestStatusStoreLifecycleTotalFailure(t *testing.T) {
 		t.Errorf("job Size = %q after every target failed, want empty (no successful write to report)", snap.Size)
 	}
 
-	if snap.Targets[0].State != stateFailed || snap.Targets[1].State != stateFailed {
+	if snap.Targets[0].State != StateFailed || snap.Targets[1].State != StateFailed {
 		t.Errorf("targets = %+v, want both failed", snap.Targets)
 	}
 }
@@ -213,18 +213,18 @@ func TestStatusStoreStartingResetsPriorError(t *testing.T) {
 	store, _ := newTestStore()
 	boom := errors.New("boom")
 
-	store.starting("test")
-	store.targetDone("test", 0, boom)
-	store.finished("test", boom, 0)
+	store.Starting("test")
+	store.TargetDone("test", 0, boom)
+	store.Finished("test", boom, 0)
 
-	store.starting("test")
+	store.Starting("test")
 
-	snap := store.snapshot()[0]
-	if snap.State != stateRunning || snap.Error != "" {
+	snap := store.Snapshot()[0]
+	if snap.State != StateRunning || snap.Error != "" {
 		t.Errorf("job after restart = {state: %q, error: %q}, want {running, \"\"}", snap.State, snap.Error)
 	}
 
-	if snap.Targets[0].State != stateRunning || snap.Targets[0].Error != "" {
+	if snap.Targets[0].State != StateRunning || snap.Targets[0].Error != "" {
 		t.Errorf("target[0] after restart = {state: %q, error: %q}, want {running, \"\"}", snap.Targets[0].State, snap.Targets[0].Error)
 	}
 }
@@ -236,14 +236,14 @@ func TestStatusStoreUnknownJobAndTargetAreNoOps(t *testing.T) {
 
 	// None of these name/index an existing job or target; they must not
 	// panic and must leave the known job's status untouched.
-	store.starting("nope")
-	store.targetDone("nope", 0, nil)
-	store.targetDone("test", 99, nil)
-	store.targetDone("test", -1, nil)
-	store.finished("nope", nil, 0)
+	store.Starting("nope")
+	store.TargetDone("nope", 0, nil)
+	store.TargetDone("test", 99, nil)
+	store.TargetDone("test", -1, nil)
+	store.Finished("nope", nil, 0)
 
-	snap := store.snapshot()[0]
-	if snap.State != stateIdle {
+	snap := store.Snapshot()[0]
+	if snap.State != StateIdle {
 		t.Errorf("job State = %q after no-op calls, want idle", snap.State)
 	}
 }
@@ -252,11 +252,11 @@ func TestNewStatusStoreInitializesNextRunFromStartTime(t *testing.T) {
 	t.Parallel()
 
 	start := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
-	cfg := &config{name: "test", interval: time.Hour, startTime: start}
+	cfg := &Config{Name: "test", Interval: time.Hour, StartTime: start}
 
-	store := newStatusStore([]*config{cfg})
+	store := NewStatusStore([]*Config{cfg})
 
-	if got := store.snapshot()[0].NextRun; !got.Equal(start) {
+	if got := store.Snapshot()[0].NextRun; !got.Equal(start) {
 		t.Errorf("snapshot()[0].NextRun = %v, want %v", got, start)
 	}
 }
@@ -266,7 +266,7 @@ func TestNewStatusStoreNextRunZeroWithoutStartTime(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	if got := store.snapshot()[0].NextRun; !got.IsZero() {
+	if got := store.Snapshot()[0].NextRun; !got.IsZero() {
 		t.Errorf("snapshot()[0].NextRun = %v, want zero", got)
 	}
 }
@@ -277,14 +277,14 @@ func TestStatusStoreSetNextRun(t *testing.T) {
 	store, _ := newTestStore()
 
 	want := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
-	store.setNextRun("test", want)
+	store.SetNextRun("test", want)
 
-	if got := store.snapshot()[0].NextRun; !got.Equal(want) {
+	if got := store.Snapshot()[0].NextRun; !got.Equal(want) {
 		t.Errorf("snapshot()[0].NextRun = %v, want %v", got, want)
 	}
 
 	// Unknown job name must not panic and must not create an entry.
-	store.setNextRun("nope", want)
+	store.SetNextRun("nope", want)
 }
 
 func TestStatusStoreSeedLastRunSuccess(t *testing.T) {
@@ -295,11 +295,11 @@ func TestStatusStoreSeedLastRunSuccess(t *testing.T) {
 	start := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
 	end := start.Add(5 * time.Second)
 
-	store.seedLastRun("test", lastRun{Start: start, End: end, State: stateOK, Size: 2048})
+	store.SeedLastRun("test", LastRun{Start: start, End: end, State: StateOK, Size: 2048})
 
-	snap := store.snapshot()[0]
+	snap := store.Snapshot()[0]
 
-	if snap.State != stateOK {
+	if snap.State != StateOK {
 		t.Errorf("job State = %q, want ok", snap.State)
 	}
 
@@ -324,11 +324,11 @@ func TestStatusStoreSeedLastRunFailure(t *testing.T) {
 	start := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
 	end := start.Add(time.Second)
 
-	store.seedLastRun("test", lastRun{Start: start, End: end, State: stateFailed, Error: "boom"})
+	store.SeedLastRun("test", LastRun{Start: start, End: end, State: StateFailed, Error: "boom"})
 
-	snap := store.snapshot()[0]
+	snap := store.Snapshot()[0]
 
-	if snap.State != stateFailed || snap.Error != "boom" {
+	if snap.State != StateFailed || snap.Error != "boom" {
 		t.Errorf("job = {state: %q, error: %q}, want {failed, boom}", snap.State, snap.Error)
 	}
 
@@ -345,11 +345,11 @@ func TestStatusStoreSeedLastRunIncomplete(t *testing.T) {
 	start := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
 	end := start.Add(time.Second)
 
-	store.seedLastRun("test", lastRun{Start: start, End: end, State: stateIncomplete, Error: "boom", Size: 2048})
+	store.SeedLastRun("test", LastRun{Start: start, End: end, State: StateIncomplete, Error: "boom", Size: 2048})
 
-	snap := store.snapshot()[0]
+	snap := store.Snapshot()[0]
 
-	if snap.State != stateIncomplete || snap.Error != "boom" {
+	if snap.State != StateIncomplete || snap.Error != "boom" {
 		t.Errorf("job = {state: %q, error: %q}, want {incomplete, boom}", snap.State, snap.Error)
 	}
 
@@ -363,10 +363,10 @@ func TestStatusStoreSeedLastRunUnknownJobIsNoOp(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	store.seedLastRun("nope", lastRun{State: stateOK})
+	store.SeedLastRun("nope", LastRun{State: StateOK})
 
-	snap := store.snapshot()[0]
-	if snap.State != stateIdle {
+	snap := store.Snapshot()[0]
+	if snap.State != StateIdle {
 		t.Errorf("job State = %q after seeding an unknown job, want idle", snap.State)
 	}
 }
@@ -376,11 +376,11 @@ func TestStatusStoreSnapshotIsIndependentCopy(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	snap := store.snapshot()
-	snap[0].Targets[0].State = stateFailed
+	snap := store.Snapshot()
+	snap[0].Targets[0].State = StateFailed
 
-	fresh := store.snapshot()
-	if fresh[0].Targets[0].State != stateIdle {
+	fresh := store.Snapshot()
+	if fresh[0].Targets[0].State != StateIdle {
 		t.Error("mutating a snapshot's target slice leaked back into the store")
 	}
 }

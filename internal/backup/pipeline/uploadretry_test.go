@@ -1,4 +1,4 @@
-package backup
+package pipeline
 
 import (
 	"context"
@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"nilswitt.dev/go-backup-tool/internal/backup"
 )
 
 // TestOutstandingUploadMonitorProcessAllSequential verifies that
@@ -57,24 +59,24 @@ func TestOutstandingUploadMonitorProcessAllSequential(t *testing.T) {
 	ctx := context.Background()
 	identity := testServerIdentity(t)
 
-	jobA := &config{name: "job-a", retries: 3, targets: []target{{serverName: "a", kind: serverKindRemote, endpoint: srvA.URL, bucket: "b"}}}
-	jobB := &config{name: "job-b", retries: 3, targets: []target{{serverName: "b", kind: serverKindRemote, endpoint: srvB.URL, bucket: "b"}}}
+	jobA := &backup.Config{Name: "job-a", Retries: 3, Targets: []backup.Target{{ServerName: "a", Kind: backup.ServerKindRemote, Endpoint: srvA.URL, Bucket: "b"}}}
+	jobB := &backup.Config{Name: "job-b", Retries: 3, Targets: []backup.Target{{ServerName: "b", Kind: backup.ServerKindRemote, Endpoint: srvB.URL, Bucket: "b"}}}
 
 	pathA := stageTestContent(t, "hello a")
 	pathB := stageTestContent(t, "hello b")
 
-	if err := queueOutstandingUpload(ctx, db, "job-a", 0, pathA, "key-a.gpg", time.Now(), errors.New("boom a")); err != nil {
-		t.Fatalf("queueOutstandingUpload() job-a error: %v", err)
+	if err := backup.QueueOutstandingUpload(ctx, db, "job-a", 0, pathA, "key-a.gpg", time.Now(), errors.New("boom a")); err != nil {
+		t.Fatalf("backup.QueueOutstandingUpload() job-a error: %v", err)
 	}
 
-	if err := queueOutstandingUpload(ctx, db, "job-b", 0, pathB, "key-b.gpg", time.Now(), errors.New("boom b")); err != nil {
-		t.Fatalf("queueOutstandingUpload() job-b error: %v", err)
+	if err := backup.QueueOutstandingUpload(ctx, db, "job-b", 0, pathB, "key-b.gpg", time.Now(), errors.New("boom b")); err != nil {
+		t.Fatalf("backup.QueueOutstandingUpload() job-b error: %v", err)
 	}
 
-	store := newStatusStore([]*config{jobA, jobB})
-	monitor := &outstandingUploadMonitor{
+	store := backup.NewStatusStore([]*backup.Config{jobA, jobB})
+	monitor := &OutstandingUploadMonitor{
 		db:         db,
-		jobsByName: map[string]*config{"job-a": jobA, "job-b": jobB},
+		jobsByName: map[string]*backup.Config{"job-a": jobA, "job-b": jobB},
 		store:      store,
 		identity:   identity,
 		log:        discardLogger,
@@ -94,13 +96,13 @@ func TestOutstandingUploadMonitorProcessAllSequential(t *testing.T) {
 		t.Errorf("processAll() took %v, want at least 60ms (two sequential 30ms attempts)", elapsed)
 	}
 
-	rows, err := listOutstandingUploads(ctx, db)
+	rows, err := backup.ListOutstandingUploads(ctx, db)
 	if err != nil {
-		t.Fatalf("listOutstandingUploads() error: %v", err)
+		t.Fatalf("backup.ListOutstandingUploads() error: %v", err)
 	}
 
 	if len(rows) != 0 {
-		t.Errorf("listOutstandingUploads() after both succeed = %+v, want none", rows)
+		t.Errorf("backup.ListOutstandingUploads() after both succeed = %+v, want none", rows)
 	}
 }
 
@@ -115,39 +117,39 @@ func TestOutstandingUploadMonitorSuccessResolvesRow(t *testing.T) {
 	db := openTestStateDB(t)
 	ctx := context.Background()
 
-	job := &config{name: "job-a", retries: 3, targets: []target{{serverName: "nas", kind: serverKindLocal, bucket: "sub", localPath: dir}}}
+	job := &backup.Config{Name: "job-a", Retries: 3, Targets: []backup.Target{{ServerName: "nas", Kind: backup.ServerKindLocal, Bucket: "sub", LocalPath: dir}}}
 	stagingPath := stageTestContent(t, "hello")
 
-	if err := queueOutstandingUpload(ctx, db, "job-a", 0, stagingPath, "key.gpg", time.Now(), errors.New("boom")); err != nil {
-		t.Fatalf("queueOutstandingUpload() error: %v", err)
+	if err := backup.QueueOutstandingUpload(ctx, db, "job-a", 0, stagingPath, "key.gpg", time.Now(), errors.New("boom")); err != nil {
+		t.Fatalf("backup.QueueOutstandingUpload() error: %v", err)
 	}
 
-	store := newStatusStore([]*config{job})
-	monitor := &outstandingUploadMonitor{db: db, jobsByName: map[string]*config{"job-a": job}, store: store, log: discardLogger}
+	store := backup.NewStatusStore([]*backup.Config{job})
+	monitor := &OutstandingUploadMonitor{db: db, jobsByName: map[string]*backup.Config{"job-a": job}, store: store, log: discardLogger}
 
 	monitor.processAll(ctx)
 
-	rows, err := listOutstandingUploads(ctx, db)
+	rows, err := backup.ListOutstandingUploads(ctx, db)
 	if err != nil {
-		t.Fatalf("listOutstandingUploads() error: %v", err)
+		t.Fatalf("backup.ListOutstandingUploads() error: %v", err)
 	}
 
 	if len(rows) != 0 {
-		t.Fatalf("listOutstandingUploads() = %+v, want none after success", rows)
+		t.Fatalf("backup.ListOutstandingUploads() = %+v, want none after success", rows)
 	}
 
-	snap := store.snapshot()[0]
-	if snap.Targets[0].State != stateOK {
-		t.Errorf("store target state = %q, want %q", snap.Targets[0].State, stateOK)
+	snap := store.Snapshot()[0]
+	if snap.Targets[0].State != backup.StateOK {
+		t.Errorf("store target state = %q, want %q", snap.Targets[0].State, backup.StateOK)
 	}
 
-	targetRuns, err := readTargetRuns(ctx, db, "job-a")
+	targetRuns, err := backup.ReadTargetRuns(ctx, db, "job-a")
 	if err != nil {
-		t.Fatalf("readTargetRuns() error: %v", err)
+		t.Fatalf("backup.ReadTargetRuns() error: %v", err)
 	}
 
-	if len(targetRuns) != 1 || targetRuns[0].State != stateOK {
-		t.Errorf("readTargetRuns() = %+v, want a single ok entry", targetRuns)
+	if len(targetRuns) != 1 || targetRuns[0].State != backup.StateOK {
+		t.Errorf("backup.ReadTargetRuns() = %+v, want a single ok entry", targetRuns)
 	}
 
 	if _, err := os.Stat(stagingPath); !errors.Is(err, os.ErrNotExist) {
@@ -176,20 +178,20 @@ func TestOutstandingUploadMonitorGivesUpAfterMaxAttempts(t *testing.T) {
 	// retries: 2 means 2 total attempts; queuing with attempts: 1 (as if the
 	// initial in-run attempt already failed) means this retry is the second
 	// and last one.
-	job := &config{
-		name:     "job-a",
-		retries:  2,
-		identity: testServerIdentity(t),
-		targets:  []target{{serverName: "always-down", kind: serverKindRemote, endpoint: srv.URL, bucket: "b"}},
+	job := &backup.Config{
+		Name:     "job-a",
+		Retries:  2,
+		Identity: testServerIdentity(t),
+		Targets:  []backup.Target{{ServerName: "always-down", Kind: backup.ServerKindRemote, Endpoint: srv.URL, Bucket: "b"}},
 	}
 	stagingPath := stageTestContent(t, "hello")
 
-	if err := queueOutstandingUpload(ctx, db, "job-a", 0, stagingPath, "key.gpg", time.Now(), errors.New("first failure")); err != nil {
-		t.Fatalf("queueOutstandingUpload() error: %v", err)
+	if err := backup.QueueOutstandingUpload(ctx, db, "job-a", 0, stagingPath, "key.gpg", time.Now(), errors.New("first failure")); err != nil {
+		t.Fatalf("backup.QueueOutstandingUpload() error: %v", err)
 	}
 
-	store := newStatusStore([]*config{job})
-	monitor := &outstandingUploadMonitor{db: db, jobsByName: map[string]*config{"job-a": job}, store: store, identity: job.identity, log: discardLogger}
+	store := backup.NewStatusStore([]*backup.Config{job})
+	monitor := &OutstandingUploadMonitor{db: db, jobsByName: map[string]*backup.Config{"job-a": job}, store: store, identity: job.Identity, log: discardLogger}
 
 	monitor.processAll(ctx)
 
@@ -197,13 +199,13 @@ func TestOutstandingUploadMonitorGivesUpAfterMaxAttempts(t *testing.T) {
 		t.Errorf("requests = %d, want 1 (this retry's own attempt)", got)
 	}
 
-	rows, err := listOutstandingUploads(ctx, db)
+	rows, err := backup.ListOutstandingUploads(ctx, db)
 	if err != nil {
-		t.Fatalf("listOutstandingUploads() error: %v", err)
+		t.Fatalf("backup.ListOutstandingUploads() error: %v", err)
 	}
 
 	if len(rows) != 0 {
-		t.Fatalf("listOutstandingUploads() = %+v, want none (max attempts reached, row dropped)", rows)
+		t.Fatalf("backup.ListOutstandingUploads() = %+v, want none (max attempts reached, row dropped)", rows)
 	}
 
 	if _, err := os.Stat(stagingPath); !errors.Is(err, os.ErrNotExist) {
@@ -238,21 +240,21 @@ func TestOutstandingUploadMonitorMissingStagedFileGivesUpImmediately(t *testing.
 	db := openTestStateDB(t)
 	ctx := context.Background()
 
-	job := &config{
-		name:     "job-a",
-		retries:  5,
-		identity: testServerIdentity(t),
-		targets:  []target{{serverName: "would-succeed", kind: serverKindRemote, endpoint: srv.URL, bucket: "b"}},
+	job := &backup.Config{
+		Name:     "job-a",
+		Retries:  5,
+		Identity: testServerIdentity(t),
+		Targets:  []backup.Target{{ServerName: "would-succeed", Kind: backup.ServerKindRemote, Endpoint: srv.URL, Bucket: "b"}},
 	}
 
 	missingPath := filepath.Join(t.TempDir(), "gone.staged")
 
-	if err := queueOutstandingUpload(ctx, db, "job-a", 0, missingPath, "key.gpg", time.Now(), errors.New("boom")); err != nil {
-		t.Fatalf("queueOutstandingUpload() error: %v", err)
+	if err := backup.QueueOutstandingUpload(ctx, db, "job-a", 0, missingPath, "key.gpg", time.Now(), errors.New("boom")); err != nil {
+		t.Fatalf("backup.QueueOutstandingUpload() error: %v", err)
 	}
 
-	store := newStatusStore([]*config{job})
-	monitor := &outstandingUploadMonitor{db: db, jobsByName: map[string]*config{"job-a": job}, store: store, identity: job.identity, log: discardLogger}
+	store := backup.NewStatusStore([]*backup.Config{job})
+	monitor := &OutstandingUploadMonitor{db: db, jobsByName: map[string]*backup.Config{"job-a": job}, store: store, identity: job.Identity, log: discardLogger}
 
 	monitor.processAll(ctx)
 
@@ -260,13 +262,13 @@ func TestOutstandingUploadMonitorMissingStagedFileGivesUpImmediately(t *testing.
 		t.Errorf("requests = %d, want 0 (the upload must never be attempted with no staged file)", got)
 	}
 
-	rows, err := listOutstandingUploads(ctx, db)
+	rows, err := backup.ListOutstandingUploads(ctx, db)
 	if err != nil {
-		t.Fatalf("listOutstandingUploads() error: %v", err)
+		t.Fatalf("backup.ListOutstandingUploads() error: %v", err)
 	}
 
 	if len(rows) != 0 {
-		t.Fatalf("listOutstandingUploads() = %+v, want none (row dropped immediately)", rows)
+		t.Fatalf("backup.ListOutstandingUploads() = %+v, want none (row dropped immediately)", rows)
 	}
 }
 
@@ -281,21 +283,21 @@ func TestOutstandingUploadMonitorSkipsUnknownJob(t *testing.T) {
 	ctx := context.Background()
 	stagingPath := stageTestContent(t, "hello")
 
-	if err := queueOutstandingUpload(ctx, db, "ghost-job", 0, stagingPath, "key.gpg", time.Now(), errors.New("boom")); err != nil {
-		t.Fatalf("queueOutstandingUpload() error: %v", err)
+	if err := backup.QueueOutstandingUpload(ctx, db, "ghost-job", 0, stagingPath, "key.gpg", time.Now(), errors.New("boom")); err != nil {
+		t.Fatalf("backup.QueueOutstandingUpload() error: %v", err)
 	}
 
-	store := newStatusStore(nil)
-	monitor := &outstandingUploadMonitor{db: db, jobsByName: map[string]*config{}, store: store, log: discardLogger}
+	store := backup.NewStatusStore(nil)
+	monitor := &OutstandingUploadMonitor{db: db, jobsByName: map[string]*backup.Config{}, store: store, log: discardLogger}
 
 	monitor.processAll(ctx)
 
-	rows, err := listOutstandingUploads(ctx, db)
+	rows, err := backup.ListOutstandingUploads(ctx, db)
 	if err != nil {
-		t.Fatalf("listOutstandingUploads() error: %v", err)
+		t.Fatalf("backup.ListOutstandingUploads() error: %v", err)
 	}
 
 	if len(rows) != 1 {
-		t.Fatalf("listOutstandingUploads() = %+v, want the row left untouched", rows)
+		t.Fatalf("backup.ListOutstandingUploads() = %+v, want the row left untouched", rows)
 	}
 }

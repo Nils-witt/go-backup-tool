@@ -17,7 +17,7 @@ import (
 // latency, not an entire backup run.
 const remoteAuthTokenTTL = 5 * time.Minute
 
-// signRemoteAuthToken builds a short-lived RS256-signed JSON Web Token,
+// SignRemoteAuthToken builds a short-lived RS256-signed JSON Web Token,
 // signed with privateKey (this instance's own RSA key — see
 // loadServerIdentity), identifying this instance as issuer (its persistent
 // UUID — see ensureServerUUID) and scoped to audience (the destination
@@ -27,7 +27,7 @@ const remoteAuthTokenTTL = 5 * time.Minute
 // this instance's public key, configured on its matching receivers: entry
 // (see authorizeReceiver in webui.go), replacing the shared bearer token
 // previously used for receiver auth.
-func signRemoteAuthToken(privateKey *rsa.PrivateKey, issuer, audience string) (string, error) {
+func SignRemoteAuthToken(privateKey *rsa.PrivateKey, issuer, audience string) (string, error) {
 	signer, err := jose.NewSigner(
 		jose.SigningKey{Algorithm: jose.RS256, Key: privateKey},
 		(&jose.SignerOptions{}).WithType("JWT"),
@@ -53,14 +53,14 @@ func signRemoteAuthToken(privateKey *rsa.PrivateKey, issuer, audience string) (s
 	return token, nil
 }
 
-// verifyRemoteAuthToken parses raw as a JWT, verifies its RS256 signature
+// VerifyRemoteAuthToken parses raw as a JWT, verifies its RS256 signature
 // against publicKey (the sender's public key, as configured on the
 // matching receivers: entry's public-key: — see fileReceiver.PublicKey),
 // and checks it's currently valid (exp/nbf/iat, with jwt.Claims.Validate's
 // default one-minute clock-skew leeway) and scoped to audience (this
 // receiver's own id). See signRemoteAuthToken for what a sender puts in the
 // token.
-func verifyRemoteAuthToken(raw string, publicKey *rsa.PublicKey, audience string) error {
+func VerifyRemoteAuthToken(raw string, publicKey *rsa.PublicKey, audience string) error {
 	token, err := jwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.RS256})
 	if err != nil {
 		return fmt.Errorf("parsing token: %w", err)

@@ -33,54 +33,54 @@ func (s *stringSlice) Set(v string) error {
 	return nil
 }
 
-// config holds one backup job's parameters.
-type config struct {
-	name       string // job name, from its jobs: entry; always set
-	cmd        string
-	key        string         // may still contain the {time} placeholder; resolved fresh per run
+// Config holds one backup job's parameters.
+type Config struct {
+	Name       string // job name, from its jobs: entry; always set
+	Cmd        string
+	Key        string         // may still contain the {time} placeholder; resolved fresh per run
 	targetRefs []jobTargetRef // raw targets: entries, resolved against servers by resolveJobTargets
-	targets    []target       // resolved destinations; empty until resolveJobTargets runs
-	recipients stringSlice
-	symmetric  bool
-	armor      bool
-	gpgBin     string
-	gpgHomedir string
-	interval   time.Duration // repeat every interval; 0 runs the job once
-	startTime  time.Time     // anchors the interval grid; zero means "run immediately, then every interval"
-	passphrase string        // resolved from GPG_PASSPHRASE when symmetric
+	Targets    []Target       // resolved destinations; empty until resolveJobTargets runs
+	Recipients stringSlice
+	Symmetric  bool
+	Armor      bool
+	GPGBin     string
+	GPGHomedir string
+	Interval   time.Duration // repeat every interval; 0 runs the job once
+	StartTime  time.Time     // anchors the interval grid; zero means "run immediately, then every interval"
+	Passphrase string        // resolved from GPG_PASSPHRASE when symmetric
 
-	// stagingDir is the directory the encrypted backup is written to before
+	// StagingDir is the directory the encrypted backup is written to before
 	// any target upload starts (see stageBackup); empty means the OS default
 	// temp directory (os.CreateTemp's behavior when given "").
-	stagingDir string
+	StagingDir string
 
-	// retries is the total number of attempts allowed for each target's
+	// Retries is the total number of attempts allowed for each target's
 	// upload (1 means no retry) before that target is permanently abandoned:
 	// its first attempt happens in-run (see uploadStagedToTargets), and any
 	// further attempts happen roughly once a minute afterward, persisted as
 	// an outstanding upload and driven by monitorOutstandingUploads
 	// (uploadretry.go) rather than an immediate in-run retry loop. Retries
-	// are per target: one target exhausting its retries doesn't affect any
+	// are per target: one target exhausting its Retries doesn't affect any
 	// other target's attempts, and none of them re-run the backup command or
 	// gpg, since every attempt re-reads the same already-staged local file.
-	retries int
+	Retries int
 
-	// stateDB is the shared state/retention sqlite database (see
+	// StateDB is the shared state/retention sqlite database (see
 	// schedule_state.go and retention.go), set on each run's own copy of its
-	// job's config by runner.runOnce so recordLocalWrite/removeRetentionRecord
+	// job's config by runner.runOnce so RecordLocalWrite/RemoveRetentionRecord
 	// reach it without every function in the upload call chain needing its
 	// own db parameter. Nil disables retention tracking for this run (e.g.
-	// the db couldn't be opened at startup) — see recordLocalWrite.
-	stateDB *sql.DB
+	// the db couldn't be opened at startup) — see RecordLocalWrite.
+	StateDB *sql.DB
 
-	// identity is this instance's own persistent identity (see
+	// Identity is this instance's own persistent Identity (see
 	// loadServerIdentity), set on each run's own copy of its job's config by
 	// runner.runOnce the same way stateDB is. uploadToRemote/
 	// deleteRemoteObject (pipeline.go) use it to sign a type: remote
 	// target's requests. Nil means loadServerIdentity failed at startup (see
 	// its own doc comment); any job with a remote target then fails that
-	// target's uploads until a later run's identity loads successfully.
-	identity *serverIdentity
+	// target's uploads until a later run's Identity loads successfully.
+	Identity *ServerIdentity
 }
 
 // jobTargetRef is one targets: entry as written in a job: a server name
@@ -98,58 +98,59 @@ type jobTargetRef struct {
 	retention time.Duration
 }
 
-// serverKind distinguishes a servers: entry's destination type. The zero
+// ServerKind distinguishes a servers: entry's destination type. The zero
 // value is serverKindS3, so existing config files (and target literals in
 // tests) that never set type: keep working unchanged.
-type serverKind string
+type ServerKind string
 
+// The ServerKind values a servers: entry's type: can resolve to.
 const (
-	serverKindS3     serverKind = ""       // default; type: s3 also selects this
-	serverKindLocal  serverKind = "local"  // type: local
-	serverKindRemote serverKind = "remote" // type: remote
+	ServerKindS3     ServerKind = ""       // default; type: s3 also selects this
+	ServerKindLocal  ServerKind = "local"  // type: local
+	ServerKindRemote ServerKind = "remote" // type: remote
 )
 
 // parseServerKind validates a fileServer's Type field, defaulting an unset
 // or explicit "s3" value to serverKindS3.
-func parseServerKind(t string) (serverKind, error) {
+func parseServerKind(t string) (ServerKind, error) {
 	switch strings.TrimSpace(t) {
 	case "", "s3":
-		return serverKindS3, nil
-	case string(serverKindLocal):
-		return serverKindLocal, nil
-	case string(serverKindRemote):
-		return serverKindRemote, nil
+		return ServerKindS3, nil
+	case string(ServerKindLocal):
+		return ServerKindLocal, nil
+	case string(ServerKindRemote):
+		return ServerKindRemote, nil
 	default:
-		return "", fmt.Errorf("unknown type %q (want \"s3\", %q, or %q)", t, serverKindLocal, serverKindRemote)
+		return "", fmt.Errorf("unknown type %q (want \"s3\", %q, or %q)", t, ServerKindLocal, ServerKindRemote)
 	}
 }
 
 // serverKindLabel names kind for an error message, since serverKindS3's
 // zero value ("") is never what a config file author actually wrote.
-func serverKindLabel(kind serverKind) string {
-	if kind == serverKindS3 {
+func serverKindLabel(kind ServerKind) string {
+	if kind == ServerKindS3 {
 		return "s3"
 	}
 
 	return string(kind)
 }
 
-// target is one upload destination for a job, fully resolved from a
+// Target is one upload destination for a job, fully resolved from a
 // jobTargetRef against its named server. A job uploads the same encrypted
 // object to every one of its targets. Its kind determines which of the
 // fields below apply: s3 (the default) uses bucket/region/endpoint/
 // pathStyle/credentials; local uses only bucket (as a subdirectory of
 // localPath) and localPath itself; remote uses bucket (as the id sent to
-// the destination instance) and endpoint. A remote target authenticates
+// the destination instance) and endpoint. A remote Target authenticates
 // with the run's own cfg.identity (see uploadToRemote/deleteRemoteObject in
-// pipeline.go), not a field on target itself.
-type target struct {
-	serverName string // the servers: entry this came from, for diagnostics
-	kind       serverKind
-	bucket     string
-	region     string
-	endpoint   string
-	pathStyle  bool
+// pipeline.go), not a field on Target itself.
+type Target struct {
+	ServerName string // the servers: entry this came from, for diagnostics
+	Kind       ServerKind
+	Bucket     string
+	Region     string
+	Endpoint   string
+	PathStyle  bool
 
 	// accessKeyEnv/secretKeyEnv are the server's configured env var names
 	// (set at config-build time); accessKey/secretKey are their resolved
@@ -158,92 +159,92 @@ type target struct {
 	// default credential chain. Unused for a local target.
 	accessKeyEnv string
 	secretKeyEnv string
-	accessKey    string
-	secretKey    string
+	AccessKey    string
+	SecretKey    string
 
-	// localPath is the local server's root directory (only set when
+	// LocalPath is the local server's root directory (only set when
 	// kind == serverKindLocal). The object is written to
-	// localPath/bucket/key, mirroring the S3 bucket/key layout.
-	localPath string
+	// LocalPath/bucket/key, mirroring the S3 bucket/key layout.
+	LocalPath string
 
-	// retention is how long a local target's written objects are kept
+	// Retention is how long a local target's written objects are kept
 	// before they're deleted automatically (only set when
 	// kind == serverKindLocal). Zero means no automatic expiry. Normally
-	// the server's retention:, but a job's targets: entry may override it
+	// the server's Retention:, but a job's targets: entry may override it
 	// for that job's own writes (see resolveJobTargets); either way, this
-	// resolved value is what recordLocalWrite stamps on each write. See
-	// retention.go.
-	retention time.Duration
+	// resolved value is what RecordLocalWrite stamps on each write. See
+	// Retention.go.
+	Retention time.Duration
 }
 
-// runConfig is the result of parseFlags: one or more jobs to run, plus the
+// RunConfig is the result of ParseFlags: one or more jobs to run, plus the
 // overall run timeout and the optional web UI listen address.
-type runConfig struct {
-	jobs       []*config
-	timeout    time.Duration
-	listen     string // empty disables the web UI; see resolveWebUIListen
-	configPath string // where the config file was loaded from; state db lives alongside it
-	logLevel   slog.Level
-	receivers  map[string]resolvedReceiver // this instance's receiver API entries, keyed by id; see receiver.go
+type RunConfig struct {
+	Jobs       []*Config
+	Timeout    time.Duration
+	Listen     string // empty disables the web UI; see resolveWebUIListen
+	ConfigPath string // where the config file was loaded from; state db lives alongside it
+	LogLevel   slog.Level
+	Receivers  map[string]ResolvedReceiver // this instance's receiver API entries, keyed by id; see receiver.go
 
-	// keysDir is where this instance's persistent identity (its RSA key pair
+	// KeysDir is where this instance's persistent identity (its RSA key pair
 	// and UUID — see loadServerIdentity) is stored. Defaults to
 	// defaultServerKeyDir when the config file's top-level keys-dir: is
 	// unset.
-	keysDir string
+	KeysDir string
 
-	// webUIUsername/webUIPassword, when both set, gate the entire web UI
+	// WebUIUsername/WebUIPassword, when both set, gate the entire web UI
 	// (the dashboard and its /api/... endpoints, including per-receiver
 	// file downloads; not the receiver API, which keeps its own
 	// per-receiver public-key-verified JWT auth) behind a login page and
 	// session cookie — see requireWebUISession/handleWebUILogin in
 	// webui.go. Empty
-	// webUIUsername disables the check, leaving the web UI open as before.
-	webUIUsername string
-	webUIPassword string
+	// WebUIUsername disables the check, leaving the web UI open as before.
+	WebUIUsername string
+	WebUIPassword string
 
-	// logViewer enables the web UI's live log viewer (served over
+	// LogViewer enables the web UI's live log viewer (served over
 	// /api/logs, see handleLogs/newRunLogger). Off by default: unless
-	// webUIUsername/webUIPassword above are set, the dashboard has no login
+	// WebUIUsername/WebUIPassword above are set, the dashboard has no login
 	// of its own, so anyone who can reach it would otherwise see this
 	// process's raw log output, which may include operator detail (paths,
 	// error text) an operator might not want exposed that widely.
-	logViewer bool
+	LogViewer bool
 
-	// trustProxyHeaders, when set, makes the web UI derive the client
+	// TrustProxyHeaders, when set, makes the web UI derive the client
 	// address it records (login/download logs, access log) from
 	// proxy-supplied headers rather than the raw TCP connection — see
 	// fileWebUI.TrustProxyHeaders and clientAddr in webui.go.
-	trustProxyHeaders bool
+	TrustProxyHeaders bool
 
-	// oidc, when its Enabled field is set, lets a browser log into the web
+	// OIDC, when its Enabled field is set, lets a browser log into the web
 	// UI via an OpenID Connect provider instead of (or alongside, if
-	// webUIUsername/webUIPassword are also set) the dashboard's own
+	// WebUIUsername/WebUIPassword are also set) the dashboard's own
 	// username/password form — see newOIDCAuth/handleOIDCLogin/
 	// handleOIDCCallback in oidc.go. Any account the provider itself
 	// authenticates is let in: this doesn't further restrict who's allowed
 	// by email or domain, so scoping who can authenticate is left to the
 	// provider (e.g. a dedicated app registration or realm).
-	oidc oidcSettings
+	OIDC OIDCSettings
 
-	// report, when its enabled field is set, sends a daily email summarizing
+	// Report, when its enabled field is set, sends a daily email summarizing
 	// this instance's receiver activity (files received per receiver, any
 	// errors, and any receiver currently stale) — see report.go. Independent
 	// of the web UI: a daily report is useful for anyone monitoring
 	// receivers by inbox, not just those watching the dashboard.
-	report reportSettings
+	Report ReportSettings
 }
 
-// oidcSettings is runConfig's resolved form of the config file's
+// OIDCSettings is runConfig's resolved form of the config file's
 // webui.oidc: entry (see fileWebUIOIDC), used to build an *oidcAuth (see
 // newOIDCAuth in oidc.go) once the web UI starts.
-type oidcSettings struct {
-	enabled      bool
-	issuer       string
-	clientID     string
-	clientSecret string
-	redirectURL  string
-	scopes       []string
+type OIDCSettings struct {
+	Enabled      bool
+	Issuer       string
+	ClientID     string
+	ClientSecret string
+	RedirectURL  string
+	Scopes       []string
 }
 
 // Built-in defaults for fields a job's or server's config file entry
@@ -344,7 +345,7 @@ type fileConfig struct {
 	KeysDir   string         `yaml:"keys-dir"`  // where this instance's persistent identity (RSA key pair + UUID) is stored; defaults to defaultServerKeyDir
 	Servers   []fileServer   `yaml:"servers"`
 	Jobs      []fileJob      `yaml:"jobs"`
-	Receivers []fileReceiver `yaml:"receivers"`
+	Receivers []FileReceiver `yaml:"receivers"`
 	WebUI     fileWebUI      `yaml:"webui"`
 	Report    fileReport     `yaml:"report"`
 }
@@ -432,7 +433,7 @@ type fileWebUIOIDC struct {
 	Scopes []string `yaml:"scopes"`
 }
 
-// parseFlags parses args (typically os.Args[1:]) into a runConfig, writing
+// ParseFlags parses args (typically os.Args[1:]) into a runConfig, writing
 // usage output to out on error or -h/-help. It takes an explicit argument
 // list and a fresh FlagSet (rather than the package-level flag.CommandLine)
 // so it can be called repeatedly and in isolation from tests.
@@ -449,7 +450,7 @@ type fileWebUIOIDC struct {
 // fresh by the caller immediately before every run (see substituteKeyTime),
 // not here, so a job with a nonzero interval doesn't overwrite the same
 // object on every repeat.
-func parseFlags(args []string, out io.Writer) (*runConfig, error) {
+func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 	fs := flag.NewFlagSet("go-backup-tool", flag.ContinueOnError)
 	fs.SetOutput(out)
 
@@ -518,36 +519,36 @@ func parseFlags(args []string, out io.Writer) (*runConfig, error) {
 		return nil, err
 	}
 
-	return &runConfig{
-		jobs:              jobs,
-		timeout:           timeout,
-		listen:            listen,
-		configPath:        configPath,
-		logLevel:          level,
-		receivers:         receivers,
-		keysDir:           keysDir,
-		webUIUsername:     strings.TrimSpace(fileCfg.WebUI.Username),
-		webUIPassword:     fileCfg.WebUI.Password,
-		logViewer:         fileCfg.WebUI.LogViewer,
-		trustProxyHeaders: fileCfg.WebUI.TrustProxyHeaders,
-		oidc:              oidc,
-		report:            report,
+	return &RunConfig{
+		Jobs:              jobs,
+		Timeout:           timeout,
+		Listen:            listen,
+		ConfigPath:        configPath,
+		LogLevel:          level,
+		Receivers:         receivers,
+		KeysDir:           keysDir,
+		WebUIUsername:     strings.TrimSpace(fileCfg.WebUI.Username),
+		WebUIPassword:     fileCfg.WebUI.Password,
+		LogViewer:         fileCfg.WebUI.LogViewer,
+		TrustProxyHeaders: fileCfg.WebUI.TrustProxyHeaders,
+		OIDC:              oidc,
+		Report:            report,
 	}, nil
 }
 
 // resolveWebUISettings resolves cfg (the config file's webui: entry) into
 // its listen address (see resolveWebUIListen) and its SSO settings (see
-// resolveOIDCSettings), the two pieces of runConfig parseFlags derives from
+// resolveOIDCSettings), the two pieces of runConfig ParseFlags derives from
 // webui: that need validation beyond a plain field copy.
-func resolveWebUISettings(cfg fileWebUI) (listen string, oidc oidcSettings, err error) {
+func resolveWebUISettings(cfg fileWebUI) (listen string, oidc OIDCSettings, err error) {
 	listen, err = resolveWebUIListen(cfg)
 	if err != nil {
-		return "", oidcSettings{}, err
+		return "", OIDCSettings{}, err
 	}
 
 	oidc, err = resolveOIDCSettings(cfg.OIDC, listen)
 	if err != nil {
-		return "", oidcSettings{}, err
+		return "", OIDCSettings{}, err
 	}
 
 	return listen, oidc, nil
@@ -561,13 +562,13 @@ func resolveWebUISettings(cfg fileWebUI) (listen string, oidc oidcSettings, err 
 // itself enabled (there'd be no dashboard to log into), or without every one
 // of issuer/client-id/client-secret/redirect-url set, since newOIDCAuth
 // needs all four to talk to the provider.
-func resolveOIDCSettings(cfg fileWebUIOIDC, listen string) (oidcSettings, error) {
+func resolveOIDCSettings(cfg fileWebUIOIDC, listen string) (OIDCSettings, error) {
 	if !cfg.Enabled {
-		return oidcSettings{}, nil
+		return OIDCSettings{}, nil
 	}
 
 	if listen == "" {
-		return oidcSettings{}, errors.New("webui.oidc.enabled is true but webui.enabled is not")
+		return OIDCSettings{}, errors.New("webui.oidc.enabled is true but webui.enabled is not")
 	}
 
 	issuer := strings.TrimSpace(cfg.Issuer)
@@ -583,7 +584,7 @@ func resolveOIDCSettings(cfg fileWebUIOIDC, listen string) (oidcSettings, error)
 
 	for _, r := range required {
 		if r.val == "" {
-			return oidcSettings{}, fmt.Errorf("webui.oidc.enabled is true but webui.oidc.%s is not set", r.name)
+			return OIDCSettings{}, fmt.Errorf("webui.oidc.enabled is true but webui.oidc.%s is not set", r.name)
 		}
 	}
 
@@ -592,13 +593,13 @@ func resolveOIDCSettings(cfg fileWebUIOIDC, listen string) (oidcSettings, error)
 		scopes = []string{"profile", "email"}
 	}
 
-	return oidcSettings{
-		enabled:      true,
-		issuer:       issuer,
-		clientID:     clientID,
-		clientSecret: cfg.ClientSecret,
-		redirectURL:  redirectURL,
-		scopes:       scopes,
+	return OIDCSettings{
+		Enabled:      true,
+		Issuer:       issuer,
+		ClientID:     clientID,
+		ClientSecret: cfg.ClientSecret,
+		RedirectURL:  redirectURL,
+		Scopes:       scopes,
 	}, nil
 }
 
@@ -684,7 +685,7 @@ func parseLogLevel(s string) (slog.Level, error) {
 // An empty jobs: list is only allowed when the web UI is enabled, since that
 // still leaves the web UI (and receiver API) as a reason to run; otherwise
 // the process would start and immediately have nothing to do.
-func resolveJobs(fileCfg *fileConfig, listen string) ([]*config, error) {
+func resolveJobs(fileCfg *fileConfig, listen string) ([]*Config, error) {
 	if len(fileCfg.Jobs) == 0 && listen == "" {
 		return nil, errors.New("config file must define at least one job under a jobs list, or set webui.enabled: true to run without any")
 	}
@@ -695,13 +696,13 @@ func resolveJobs(fileCfg *fileConfig, listen string) ([]*config, error) {
 // buildJobsFromFile builds one *config per entry in fileCfg.Jobs, layering
 // fileCfg's top-level fields as defaults under each entry's own fields and
 // resolving each job's targets: against fileCfg.Servers.
-func buildJobsFromFile(fileCfg *fileConfig) ([]*config, error) {
+func buildJobsFromFile(fileCfg *fileConfig) ([]*Config, error) {
 	servers, err := buildServers(fileCfg.Servers)
 	if err != nil {
 		return nil, err
 	}
 
-	jobs := make([]*config, 0, len(fileCfg.Jobs))
+	jobs := make([]*Config, 0, len(fileCfg.Jobs))
 	seen := make(map[string]bool, len(fileCfg.Jobs))
 
 	for i, fj := range fileCfg.Jobs {
@@ -717,7 +718,7 @@ func buildJobsFromFile(fileCfg *fileConfig) ([]*config, error) {
 		seen[name] = true
 
 		cfg := newConfigDefaults()
-		cfg.name = name
+		cfg.Name = name
 
 		if err := applyFileJob(cfg, &fileCfg.fileJob); err != nil {
 			return nil, fmt.Errorf("job %q: %w", name, err)
@@ -762,7 +763,7 @@ func buildServers(fileServers []fileServer) (map[string]resolvedServer, error) {
 			return nil, fmt.Errorf("server %q: %w", name, err)
 		}
 
-		if kind == serverKindLocal {
+		if kind == ServerKindLocal {
 			server, err := buildLocalServer(name, &fs)
 			if err != nil {
 				return nil, err
@@ -773,7 +774,7 @@ func buildServers(fileServers []fileServer) (map[string]resolvedServer, error) {
 			continue
 		}
 
-		if kind == serverKindRemote {
+		if kind == ServerKindRemote {
 			server, err := buildRemoteServer(name, &fs)
 			if err != nil {
 				return nil, err
@@ -826,7 +827,7 @@ func buildLocalServer(name string, fs *fileServer) (resolvedServer, error) {
 		return resolvedServer{}, fmt.Errorf("server %q: %w", name, err)
 	}
 
-	return resolvedServer{name: name, kind: serverKindLocal, path: fs.Path, retention: retention}, nil
+	return resolvedServer{name: name, kind: ServerKindLocal, path: fs.Path, retention: retention}, nil
 }
 
 // buildRemoteServer validates and builds a resolvedServer for a type: remote
@@ -842,7 +843,7 @@ func buildRemoteServer(name string, fs *fileServer) (resolvedServer, error) {
 		return resolvedServer{}, fmt.Errorf("server %q: region/path-style/access-key-env/secret-key-env/path/retention are not valid for type: remote", name)
 	}
 
-	return resolvedServer{name: name, kind: serverKindRemote, endpoint: fs.Endpoint}, nil
+	return resolvedServer{name: name, kind: ServerKindRemote, endpoint: fs.Endpoint}, nil
 }
 
 // parseRetention parses a local server's retention: string into a
@@ -932,7 +933,7 @@ func parseDayDuration(s string) (time.Duration, error) {
 // point; resolveTargetCredentials reads their values later.
 type resolvedServer struct {
 	name         string
-	kind         serverKind
+	kind         ServerKind
 	region       string
 	endpoint     string
 	pathStyle    bool
@@ -946,12 +947,12 @@ type resolvedServer struct {
 // targets:) against servers, building cfg.targets. A job with no target
 // references at all is left with an empty cfg.targets; validateJob reports
 // that as an error.
-func resolveJobTargets(cfg *config, servers map[string]resolvedServer) error {
+func resolveJobTargets(cfg *Config, servers map[string]resolvedServer) error {
 	if len(cfg.targetRefs) == 0 {
 		return nil
 	}
 
-	cfg.targets = make([]target, len(cfg.targetRefs))
+	cfg.Targets = make([]Target, len(cfg.targetRefs))
 
 	for i, ref := range cfg.targetRefs {
 		if strings.TrimSpace(ref.server) == "" {
@@ -970,24 +971,24 @@ func resolveJobTargets(cfg *config, servers map[string]resolvedServer) error {
 		retention := server.retention
 
 		if ref.retention > 0 {
-			if server.kind != serverKindLocal {
+			if server.kind != ServerKindLocal {
 				return fmt.Errorf("targets[%d]: retention is not valid for server %q (type %s; local only)", i, ref.server, serverKindLabel(server.kind))
 			}
 
 			retention = ref.retention
 		}
 
-		cfg.targets[i] = target{
-			serverName:   server.name,
-			kind:         server.kind,
-			bucket:       ref.bucket,
-			region:       server.region,
-			endpoint:     server.endpoint,
-			pathStyle:    server.pathStyle,
+		cfg.Targets[i] = Target{
+			ServerName:   server.name,
+			Kind:         server.kind,
+			Bucket:       ref.bucket,
+			Region:       server.region,
+			Endpoint:     server.endpoint,
+			PathStyle:    server.pathStyle,
 			accessKeyEnv: server.accessKeyEnv,
 			secretKeyEnv: server.secretKeyEnv,
-			localPath:    server.path,
-			retention:    retention,
+			LocalPath:    server.path,
+			Retention:    retention,
 		}
 	}
 
@@ -1000,25 +1001,25 @@ func resolveJobTargets(cfg *config, servers map[string]resolvedServer) error {
 // filtering has narrowed jobs down to what will actually run. A target
 // whose server configured no credentials is left with none, and
 // newS3Client falls back to the AWS SDK's default credential chain for it.
-func resolveTargetCredentials(jobs []*config) error {
+func resolveTargetCredentials(jobs []*Config) error {
 	for _, j := range jobs {
-		for i := range j.targets {
-			t := &j.targets[i]
+		for i := range j.Targets {
+			t := &j.Targets[i]
 			if t.accessKeyEnv == "" {
 				continue
 			}
 
 			accessKey := os.Getenv(t.accessKeyEnv)
 			if accessKey == "" {
-				return fmt.Errorf("server %q: environment variable %q (access-key-env) is not set", t.serverName, t.accessKeyEnv)
+				return fmt.Errorf("server %q: environment variable %q (access-key-env) is not set", t.ServerName, t.accessKeyEnv)
 			}
 
 			secretKey := os.Getenv(t.secretKeyEnv)
 			if secretKey == "" {
-				return fmt.Errorf("server %q: environment variable %q (secret-key-env) is not set", t.serverName, t.secretKeyEnv)
+				return fmt.Errorf("server %q: environment variable %q (secret-key-env) is not set", t.ServerName, t.secretKeyEnv)
 			}
 
-			t.accessKey, t.secretKey = accessKey, secretKey
+			t.AccessKey, t.SecretKey = accessKey, secretKey
 		}
 	}
 
@@ -1027,17 +1028,17 @@ func resolveTargetCredentials(jobs []*config) error {
 
 // newConfigDefaults returns a *config with the built-in defaults applied to
 // every job before its config file fields are layered on top.
-func newConfigDefaults() *config {
-	return &config{
-		key:     defaultKeyPattern,
-		gpgBin:  defaultGPGBin,
-		retries: defaultRetries,
+func newConfigDefaults() *Config {
+	return &Config{
+		Key:     defaultKeyPattern,
+		GPGBin:  defaultGPGBin,
+		Retries: defaultRetries,
 	}
 }
 
 // prepareJobs narrows jobs to the one named by jobFilter (if any), validates
 // them, and resolves their passphrases and target credentials.
-func prepareJobs(jobs []*config, jobFilter string) ([]*config, error) {
+func prepareJobs(jobs []*Config, jobFilter string) ([]*Config, error) {
 	jobs, err := applyJobFilter(jobs, jobFilter)
 	if err != nil {
 		return nil, err
@@ -1060,14 +1061,14 @@ func prepareJobs(jobs []*config, jobFilter string) ([]*config, error) {
 
 // applyJobFilter applies -job, if given, restricting jobs to the single
 // named job. It's an error to name a job that doesn't exist.
-func applyJobFilter(jobs []*config, jobFilter string) ([]*config, error) {
+func applyJobFilter(jobs []*Config, jobFilter string) ([]*Config, error) {
 	if jobFilter == "" {
 		return jobs, nil
 	}
 
 	for _, j := range jobs {
-		if j.name == jobFilter {
-			return []*config{j}, nil
+		if j.Name == jobFilter {
+			return []*Config{j}, nil
 		}
 	}
 
@@ -1075,7 +1076,7 @@ func applyJobFilter(jobs []*config, jobFilter string) ([]*config, error) {
 }
 
 // validateJobs validates every job, returning the first error found.
-func validateJobs(jobs []*config) error {
+func validateJobs(jobs []*Config) error {
 	for _, j := range jobs {
 		if err := validateJob(j); err != nil {
 			return err
@@ -1087,40 +1088,40 @@ func validateJobs(jobs []*config) error {
 
 // validateJob checks that a single job's parameters are complete and
 // self-consistent.
-func validateJob(cfg *config) error {
+func validateJob(cfg *Config) error {
 	switch {
-	case strings.TrimSpace(cfg.cmd) == "":
-		return jobError(cfg, errors.New("cmd is required"))
-	case len(cfg.targets) == 0:
-		return jobError(cfg, errors.New("at least one target is required (see targets: and servers:)"))
-	case cfg.symmetric && len(cfg.recipients) > 0:
-		return jobError(cfg, errors.New("symmetric cannot be combined with recipients"))
-	case !cfg.symmetric && len(cfg.recipients) == 0:
-		return jobError(cfg, errors.New("specify at least one recipient, or set symmetric: true"))
-	case cfg.interval < 0:
-		return jobError(cfg, errors.New("interval must not be negative"))
-	case !cfg.startTime.IsZero() && cfg.interval <= 0:
-		return jobError(cfg, errors.New("start-time requires interval"))
+	case strings.TrimSpace(cfg.Cmd) == "":
+		return JobError(cfg, errors.New("cmd is required"))
+	case len(cfg.Targets) == 0:
+		return JobError(cfg, errors.New("at least one target is required (see targets: and servers:)"))
+	case cfg.Symmetric && len(cfg.Recipients) > 0:
+		return JobError(cfg, errors.New("symmetric cannot be combined with recipients"))
+	case !cfg.Symmetric && len(cfg.Recipients) == 0:
+		return JobError(cfg, errors.New("specify at least one recipient, or set symmetric: true"))
+	case cfg.Interval < 0:
+		return JobError(cfg, errors.New("interval must not be negative"))
+	case !cfg.StartTime.IsZero() && cfg.Interval <= 0:
+		return JobError(cfg, errors.New("start-time requires interval"))
 	}
 
 	return nil
 }
 
-// jobError prefixes err with cfg's job name, so validation and passphrase
+// JobError prefixes err with cfg's job name, so validation and passphrase
 // errors are attributable to the job that caused them.
-func jobError(cfg *config, err error) error {
-	return fmt.Errorf("job %q: %w", cfg.name, err)
+func JobError(cfg *Config, err error) error {
+	return fmt.Errorf("job %q: %w", cfg.Name, err)
 }
 
 // resolvePassphrases reads GPG_PASSPHRASE once (if any job needs it) and
 // assigns it to every symmetric job, then clears it from the environment.
 // All symmetric jobs in a run share the same passphrase; per-job passphrases
 // aren't supported.
-func resolvePassphrases(jobs []*config) error {
+func resolvePassphrases(jobs []*Config) error {
 	needsPassphrase := false
 
 	for _, j := range jobs {
-		if j.symmetric {
+		if j.Symmetric {
 			needsPassphrase = true
 
 			break
@@ -1142,8 +1143,8 @@ func resolvePassphrases(jobs []*config) error {
 	_ = os.Unsetenv("GPG_PASSPHRASE")
 
 	for _, j := range jobs {
-		if j.symmetric {
-			j.passphrase = passphrase
+		if j.Symmetric {
+			j.Passphrase = passphrase
 		}
 	}
 
@@ -1189,22 +1190,22 @@ func applyBool(dst *bool, val bool) {
 // applyFileJob fills any field of cfg that fj sets, leaving the rest (its
 // current value, typically a built-in default or a shared top-level
 // default already applied) untouched.
-func applyFileJob(cfg *config, fj *fileJob) error {
-	applyString(&cfg.cmd, fj.Cmd)
-	applyString(&cfg.key, fj.Key)
-	applyString(&cfg.gpgBin, fj.GPGBin)
-	applyString(&cfg.gpgHomedir, fj.GPGHomedir)
-	applyString(&cfg.stagingDir, fj.StagingDir)
+func applyFileJob(cfg *Config, fj *fileJob) error {
+	applyString(&cfg.Cmd, fj.Cmd)
+	applyString(&cfg.Key, fj.Key)
+	applyString(&cfg.GPGBin, fj.GPGBin)
+	applyString(&cfg.GPGHomedir, fj.GPGHomedir)
+	applyString(&cfg.StagingDir, fj.StagingDir)
 
-	applyBool(&cfg.symmetric, fj.Symmetric)
-	applyBool(&cfg.armor, fj.Armor)
+	applyBool(&cfg.Symmetric, fj.Symmetric)
+	applyBool(&cfg.Armor, fj.Armor)
 
 	// fj.Retries == 0 is indistinguishable from "not set in this fj" (YAML's
 	// zero value for an omitted int), same ambiguity applyBool documents for
 	// bool fields; retries: 0 wouldn't be a meaningful setting anyway (there
 	// would be no attempts at all), so treating it as unset costs nothing.
 	if fj.Retries > 0 {
-		cfg.retries = fj.Retries
+		cfg.Retries = fj.Retries
 	}
 
 	if len(fj.Targets) > 0 {
@@ -1221,7 +1222,7 @@ func applyFileJob(cfg *config, fj *fileJob) error {
 	}
 
 	if len(fj.Recipients) > 0 {
-		cfg.recipients = append(stringSlice(nil), fj.Recipients...)
+		cfg.Recipients = append(stringSlice(nil), fj.Recipients...)
 	}
 
 	if fj.Interval != "" {
@@ -1230,7 +1231,7 @@ func applyFileJob(cfg *config, fj *fileJob) error {
 			return fmt.Errorf("parsing interval %q: %w", fj.Interval, err)
 		}
 
-		cfg.interval = d
+		cfg.Interval = d
 	}
 
 	if fj.StartTime != "" {
@@ -1239,7 +1240,7 @@ func applyFileJob(cfg *config, fj *fileJob) error {
 			return fmt.Errorf("parsing start-time %q: %w", fj.StartTime, err)
 		}
 
-		cfg.startTime = t
+		cfg.StartTime = t
 	}
 
 	return nil

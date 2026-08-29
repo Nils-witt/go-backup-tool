@@ -1,0 +1,75 @@
+package backup
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+)
+
+// LocalObjectPath returns the filesystem path a local target (t.Kind ==
+// ServerKindLocal) writes cfg.Key to: t.LocalPath, with t.Bucket as a
+// subdirectory, mirroring the bucket/key layout used for S3 targets so both
+// kinds share the same targets: schema.
+func LocalObjectPath(cfg *Config, t *Target) string {
+	return filepath.Join(t.LocalPath, t.Bucket, cfg.Key)
+}
+
+// WriteLocalObject streams r to the local filesystem at
+// LocalObjectPath(cfg, t), for a target whose server has type: local.
+//
+// It writes to a temporary file in the destination directory first and
+// renames it into place once fully written, so a reader never observes a
+// partially written object and a mid-stream failure leaves nothing at the
+// final path.
+func WriteLocalObject(cfg *Config, t *Target, r io.Reader) error {
+	dst := LocalObjectPath(cfg, t)
+	dir := filepath.Dir(dst)
+
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating directory %q: %w", dir, err)
+	}
+
+	tmp, err := os.CreateTemp(dir, ".*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temp file in %q: %w", dir, err)
+	}
+
+	// A successful rename below moves tmp.Name() to dst, so this Remove
+	// then finds nothing and is a harmless no-op; on any earlier error path
+	// it cleans up the leftover temp file.
+	defer func() { _ = os.Remove(tmp.Name()) }()
+
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("setting permissions on %q: %w", tmp.Name(), err)
+	}
+
+	if _, err := io.Copy(tmp, r); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("writing %q: %w", tmp.Name(), err)
+	}
+
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing %q: %w", tmp.Name(), err)
+	}
+
+	if err := os.Rename(tmp.Name(), dst); err != nil {
+		return fmt.Errorf("renaming %q to %q: %w", tmp.Name(), dst, err)
+	}
+
+	return nil
+}
+
+// DeleteLocalObject removes the file at LocalObjectPath(cfg, t), used by the
+// receiver API's DELETE endpoint (see handleDeleteObject in webui.go). A
+// file that's already gone is not an error.
+func DeleteLocalObject(cfg *Config, t *Target) error {
+	err := os.Remove(LocalObjectPath(cfg, t))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	return nil
+}

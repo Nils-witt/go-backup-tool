@@ -1,4 +1,4 @@
-package backup
+package pipeline
 
 import (
 	"context"
@@ -11,12 +11,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"nilswitt.dev/go-backup-tool/internal/backup"
 )
 
 // plainTestJob builds a job (no start-time, no interval — a one-shot run)
 // that, when run, appends "run\n" to a marker file. Used by the
 // runOnce/state-persistence tests below.
-func plainTestJob(t *testing.T, marker string) *config {
+func plainTestJob(t *testing.T, marker string) *backup.Config {
 	t.Helper()
 
 	if _, err := exec.LookPath("gpg"); err != nil {
@@ -25,15 +27,15 @@ func plainTestJob(t *testing.T, marker string) *config {
 
 	t.Setenv("MARKER_FILE", marker)
 
-	return &config{
-		name:       "test",
-		cmd:        `echo run >> "$MARKER_FILE"`,
-		key:        "backup-{time}.gpg",
-		symmetric:  true,
-		passphrase: "unit-test-passphrase",
-		gpgBin:     "gpg",
-		targets: []target{
-			{serverName: "nas", kind: serverKindLocal, bucket: "sub", localPath: t.TempDir()},
+	return &backup.Config{
+		Name:       "test",
+		Cmd:        `echo run >> "$MARKER_FILE"`,
+		Key:        "backup-{time}.gpg",
+		Symmetric:  true,
+		Passphrase: "unit-test-passphrase",
+		GPGBin:     "gpg",
+		Targets: []backup.Target{
+			{ServerName: "nas", Kind: backup.ServerKindLocal, Bucket: "sub", LocalPath: t.TempDir()},
 		},
 	}
 }
@@ -48,28 +50,28 @@ func TestRunOnceRecordsLastRunToStateDB(t *testing.T) { //nolint:paralleltest //
 
 	job := plainTestJob(t, marker)
 
-	stateDB, err := openScheduleStateDB(context.Background(), filepath.Join(dir, "state.db"))
+	stateDB, err := backup.OpenScheduleStateDB(context.Background(), filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("openScheduleStateDB() error: %v", err)
+		t.Fatalf("OpenScheduleStateDB() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = stateDB.Close() })
 
-	store := newStatusStore([]*config{job})
-	r := &runner{log: discardLogger, store: store, stateDB: stateDB}
+	store := backup.NewStatusStore([]*backup.Config{job})
+	r := &Runner{log: discardLogger, store: store, stateDB: stateDB}
 
 	r.runOnce(context.Background(), job)
 
-	run, ok, err := readLastRun(context.Background(), stateDB, job.name)
+	run, ok, err := backup.ReadLastRun(context.Background(), stateDB, job.Name)
 	if err != nil {
-		t.Fatalf("readLastRun() error: %v", err)
+		t.Fatalf("ReadLastRun() error: %v", err)
 	}
 
 	if !ok {
-		t.Fatal("readLastRun() ok = false after runOnce, want true")
+		t.Fatal("ReadLastRun() ok = false after runOnce, want true")
 	}
 
-	if run.State != stateOK {
+	if run.State != backup.StateOK {
 		t.Errorf("run.State = %q, want ok", run.State)
 	}
 
@@ -85,7 +87,7 @@ func TestRunOnceRecordsLastRunToStateDB(t *testing.T) { //nolint:paralleltest //
 // /api/status can show one target as done while another is still running,
 // rather than every target flipping from running to its final state
 // together only once the whole job completes. See runPipeline's
-// onTargetDone and runOnce's wiring of it to store.targetDone.
+// onTargetDone and runOnce's wiring of it to store.TargetDone.
 func TestRunOnceRefreshesEachTargetIndependently(t *testing.T) {
 	if _, err := exec.LookPath("gpg"); err != nil {
 		t.Skip("gpg not found in PATH, skipping")
@@ -106,21 +108,21 @@ func TestRunOnceRefreshesEachTargetIndependently(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	job := &config{
-		name:       "test",
-		cmd:        "echo hi",
-		key:        "backup-{time}.gpg",
-		symmetric:  true,
-		passphrase: "unit-test-passphrase",
-		gpgBin:     "gpg",
-		targets: []target{
-			{serverName: "slow-remote", kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"},
-			{serverName: "fast-local", kind: serverKindLocal, bucket: "sub", localPath: dir},
+	job := &backup.Config{
+		Name:       "test",
+		Cmd:        "echo hi",
+		Key:        "backup-{time}.gpg",
+		Symmetric:  true,
+		Passphrase: "unit-test-passphrase",
+		GPGBin:     "gpg",
+		Targets: []backup.Target{
+			{ServerName: "slow-remote", Kind: backup.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"},
+			{ServerName: "fast-local", Kind: backup.ServerKindLocal, Bucket: "sub", LocalPath: dir},
 		},
 	}
 
-	store := newStatusStore([]*config{job})
-	r := &runner{log: discardLogger, store: store, identity: testServerIdentity(t)}
+	store := backup.NewStatusStore([]*backup.Config{job})
+	r := &Runner{log: discardLogger, store: store, identity: testServerIdentity(t)}
 
 	done := make(chan struct{})
 
@@ -140,16 +142,16 @@ func TestRunOnceRefreshesEachTargetIndependently(t *testing.T) {
 			t.Fatal("timed out waiting for the fast local target to finish independently of the slow remote target")
 		}
 
-		snap := store.snapshot()
+		snap := store.Snapshot()
 		remoteState := snap[0].Targets[0].State
 		localState := snap[0].Targets[1].State
 
-		if localState == stateOK {
-			if remoteState != stateRunning {
+		if localState == backup.StateOK {
+			if remoteState != backup.StateRunning {
 				close(release)
 				<-done
 
-				t.Fatalf("local target finished, but remote target state = %q, want %q (it should still be in flight, held by the test)", remoteState, stateRunning)
+				t.Fatalf("local target finished, but remote target state = %q, want %q (it should still be in flight, held by the test)", remoteState, backup.StateRunning)
 			}
 
 			break
@@ -161,13 +163,13 @@ func TestRunOnceRefreshesEachTargetIndependently(t *testing.T) {
 	close(release)
 	<-done
 
-	snap := store.snapshot()
-	if snap[0].Targets[0].State != stateOK {
-		t.Errorf("remote target final state = %q, want %q", snap[0].Targets[0].State, stateOK)
+	snap := store.Snapshot()
+	if snap[0].Targets[0].State != backup.StateOK {
+		t.Errorf("remote target final state = %q, want %q", snap[0].Targets[0].State, backup.StateOK)
 	}
 
-	if snap[0].Targets[1].State != stateOK {
-		t.Errorf("local target final state = %q, want %q", snap[0].Targets[1].State, stateOK)
+	if snap[0].Targets[1].State != backup.StateOK {
+		t.Errorf("local target final state = %q, want %q", snap[0].Targets[1].State, backup.StateOK)
 	}
 }
 
@@ -187,39 +189,39 @@ func TestRunOnceReportsIncompleteWhenSomeTargetsFail(t *testing.T) {
 	dir := t.TempDir()
 
 	// Make the "bad" target's parent directory path a regular file, so
-	// writeLocalObject's os.MkdirAll for it fails deterministically.
+	// WriteLocalObject's os.MkdirAll for it fails deterministically.
 	badParent := filepath.Join(dir, "blocked")
 	if err := os.WriteFile(badParent, []byte("not a directory"), 0o600); err != nil {
 		t.Fatalf("setting up blocked path: %v", err)
 	}
 
-	job := &config{
-		name:       "test",
-		cmd:        "echo hi",
-		key:        "backup-{time}.gpg",
-		symmetric:  true,
-		passphrase: "unit-test-passphrase",
-		gpgBin:     "gpg",
-		targets: []target{
-			{serverName: "bad", kind: serverKindLocal, bucket: "blocked/sub", localPath: dir},
-			{serverName: "good", kind: serverKindLocal, bucket: "sub", localPath: dir},
+	job := &backup.Config{
+		Name:       "test",
+		Cmd:        "echo hi",
+		Key:        "backup-{time}.gpg",
+		Symmetric:  true,
+		Passphrase: "unit-test-passphrase",
+		GPGBin:     "gpg",
+		Targets: []backup.Target{
+			{ServerName: "bad", Kind: backup.ServerKindLocal, Bucket: "blocked/sub", LocalPath: dir},
+			{ServerName: "good", Kind: backup.ServerKindLocal, Bucket: "sub", LocalPath: dir},
 		},
 	}
 
-	stateDB, err := openScheduleStateDB(context.Background(), filepath.Join(dir, "state.db"))
+	stateDB, err := backup.OpenScheduleStateDB(context.Background(), filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("openScheduleStateDB() error: %v", err)
+		t.Fatalf("OpenScheduleStateDB() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = stateDB.Close() })
 
-	store := newStatusStore([]*config{job})
-	r := &runner{log: discardLogger, store: store, stateDB: stateDB}
+	store := backup.NewStatusStore([]*backup.Config{job})
+	r := &Runner{log: discardLogger, store: store, stateDB: stateDB}
 
 	r.runOnce(context.Background(), job)
 
-	snap := store.snapshot()[0]
-	if snap.State != stateIncomplete {
+	snap := store.Snapshot()[0]
+	if snap.State != backup.StateIncomplete {
 		t.Errorf("job State = %q, want incomplete", snap.State)
 	}
 
@@ -227,11 +229,11 @@ func TestRunOnceReportsIncompleteWhenSomeTargetsFail(t *testing.T) {
 		t.Error("job Size is empty, want the backup's size (the good target got a complete copy)")
 	}
 
-	if snap.Targets[0].State != stateFailed {
+	if snap.Targets[0].State != backup.StateFailed {
 		t.Errorf("bad target state = %q, want failed", snap.Targets[0].State)
 	}
 
-	if snap.Targets[1].State != stateOK {
+	if snap.Targets[1].State != backup.StateOK {
 		t.Errorf("good target state = %q, want ok", snap.Targets[1].State)
 	}
 
@@ -239,16 +241,16 @@ func TestRunOnceReportsIncompleteWhenSomeTargetsFail(t *testing.T) {
 		t.Error("r.failed = false, want true (an incomplete run still fails the process's exit code)")
 	}
 
-	run, ok, err := readLastRun(context.Background(), stateDB, job.name)
+	run, ok, err := backup.ReadLastRun(context.Background(), stateDB, job.Name)
 	if err != nil {
-		t.Fatalf("readLastRun() error: %v", err)
+		t.Fatalf("ReadLastRun() error: %v", err)
 	}
 
 	if !ok {
-		t.Fatal("readLastRun() ok = false, want true")
+		t.Fatal("ReadLastRun() ok = false, want true")
 	}
 
-	if run.State != stateIncomplete {
+	if run.State != backup.StateIncomplete {
 		t.Errorf("persisted run.State = %q, want incomplete", run.State)
 	}
 
@@ -259,9 +261,9 @@ func TestRunOnceReportsIncompleteWhenSomeTargetsFail(t *testing.T) {
 
 // TestRunOnceKeepsStagedFileUntilOutstandingUploadResolves is an end-to-end
 // check (real gpg, real runOnce) that a job's staged file survives past
-// runOnce returning when a target fails and cfg.retries allows a later
+// runOnce returning when a target fails and cfg.Retries allows a later
 // retry: the failure is queued as an outstanding upload (see
-// queueOutstandingUpload) instead of the old behavior of exhausting retries
+// QueueOutstandingUpload) instead of the old behavior of exhausting retries
 // in place and deleting the staged file unconditionally — the file must
 // stick around for monitorOutstandingUploads to retry from later.
 func TestRunOnceKeepsStagedFileUntilOutstandingUploadResolves(t *testing.T) {
@@ -275,36 +277,36 @@ func TestRunOnceKeepsStagedFileUntilOutstandingUploadResolves(t *testing.T) {
 	stagingDir := t.TempDir()
 
 	// Make the target's parent directory path a regular file, so
-	// writeLocalObject's os.MkdirAll for it fails deterministically, every
+	// WriteLocalObject's os.MkdirAll for it fails deterministically, every
 	// attempt, forever.
 	badParent := filepath.Join(dir, "blocked")
 	if err := os.WriteFile(badParent, []byte("not a directory"), 0o600); err != nil {
 		t.Fatalf("setting up blocked path: %v", err)
 	}
 
-	job := &config{
-		name:       "test",
-		cmd:        "echo hi",
-		key:        "backup-{time}.gpg",
-		symmetric:  true,
-		passphrase: "unit-test-passphrase",
-		gpgBin:     "gpg",
-		stagingDir: stagingDir,
-		retries:    3,
-		targets: []target{
-			{serverName: "bad", kind: serverKindLocal, bucket: "blocked/sub", localPath: dir},
+	job := &backup.Config{
+		Name:       "test",
+		Cmd:        "echo hi",
+		Key:        "backup-{time}.gpg",
+		Symmetric:  true,
+		Passphrase: "unit-test-passphrase",
+		GPGBin:     "gpg",
+		StagingDir: stagingDir,
+		Retries:    3,
+		Targets: []backup.Target{
+			{ServerName: "bad", Kind: backup.ServerKindLocal, Bucket: "blocked/sub", LocalPath: dir},
 		},
 	}
 
-	stateDB, err := openScheduleStateDB(context.Background(), filepath.Join(dir, "state.db"))
+	stateDB, err := backup.OpenScheduleStateDB(context.Background(), filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("openScheduleStateDB() error: %v", err)
+		t.Fatalf("OpenScheduleStateDB() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = stateDB.Close() })
 
-	store := newStatusStore([]*config{job})
-	r := &runner{log: discardLogger, store: store, stateDB: stateDB}
+	store := backup.NewStatusStore([]*backup.Config{job})
+	r := &Runner{log: discardLogger, store: store, stateDB: stateDB}
 
 	r.runOnce(context.Background(), job)
 
@@ -317,13 +319,13 @@ func TestRunOnceKeepsStagedFileUntilOutstandingUploadResolves(t *testing.T) {
 		t.Fatalf("staged files in %q = %v, want exactly 1 (kept for the outstanding retry)", stagingDir, staged)
 	}
 
-	rows, err := listOutstandingUploads(context.Background(), stateDB)
+	rows, err := backup.ListOutstandingUploads(context.Background(), stateDB)
 	if err != nil {
-		t.Fatalf("listOutstandingUploads() error: %v", err)
+		t.Fatalf("ListOutstandingUploads() error: %v", err)
 	}
 
 	if len(rows) != 1 {
-		t.Fatalf("listOutstandingUploads() = %+v, want exactly 1 queued row", rows)
+		t.Fatalf("ListOutstandingUploads() = %+v, want exactly 1 queued row", rows)
 	}
 
 	if rows[0].StagingPath != staged[0] {
@@ -345,28 +347,28 @@ func TestRunOnceDeletesStagedFileWhenNoTargetsOutstanding(t *testing.T) {
 	dir := t.TempDir()
 	stagingDir := t.TempDir()
 
-	job := &config{
-		name:       "test",
-		cmd:        "echo hi",
-		key:        "backup-{time}.gpg",
-		symmetric:  true,
-		passphrase: "unit-test-passphrase",
-		gpgBin:     "gpg",
-		stagingDir: stagingDir,
-		targets: []target{
-			{serverName: "good", kind: serverKindLocal, bucket: "sub", localPath: dir},
+	job := &backup.Config{
+		Name:       "test",
+		Cmd:        "echo hi",
+		Key:        "backup-{time}.gpg",
+		Symmetric:  true,
+		Passphrase: "unit-test-passphrase",
+		GPGBin:     "gpg",
+		StagingDir: stagingDir,
+		Targets: []backup.Target{
+			{ServerName: "good", Kind: backup.ServerKindLocal, Bucket: "sub", LocalPath: dir},
 		},
 	}
 
-	stateDB, err := openScheduleStateDB(context.Background(), filepath.Join(dir, "state.db"))
+	stateDB, err := backup.OpenScheduleStateDB(context.Background(), filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("openScheduleStateDB() error: %v", err)
+		t.Fatalf("OpenScheduleStateDB() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = stateDB.Close() })
 
-	store := newStatusStore([]*config{job})
-	r := &runner{log: discardLogger, store: store, stateDB: stateDB}
+	store := backup.NewStatusStore([]*backup.Config{job})
+	r := &Runner{log: discardLogger, store: store, stateDB: stateDB}
 
 	r.runOnce(context.Background(), job)
 
@@ -381,42 +383,56 @@ func TestRunOnceDeletesStagedFileWhenNoTargetsOutstanding(t *testing.T) {
 }
 
 // TestSeedStatusFromStateAcrossRestart simulates a restart: a first runner
-// (with its own statusStore) runs a job and persists its outcome; a second,
-// independent statusStore — standing in for the fresh one a restarted
-// process builds — is seeded from that same state db and must already show
-// the prior run instead of starting idle.
+// (with its own status store) runs a job and persists its outcome; a
+// second, independent status store — standing in for the fresh one a
+// restarted process builds — is seeded from that same state db and must
+// already show the prior run instead of starting idle.
 func TestSeedStatusFromStateAcrossRestart(t *testing.T) { //nolint:paralleltest // plainTestJob calls t.Setenv, which is incompatible with t.Parallel
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "marker")
 
 	job := plainTestJob(t, marker)
 
-	stateDB, err := openScheduleStateDB(context.Background(), filepath.Join(dir, "state.db"))
+	stateDB, err := backup.OpenScheduleStateDB(context.Background(), filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("openScheduleStateDB() error: %v", err)
+		t.Fatalf("OpenScheduleStateDB() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = stateDB.Close() })
 
-	firstStore := newStatusStore([]*config{job})
-	r := &runner{log: discardLogger, store: firstStore, stateDB: stateDB}
+	firstStore := backup.NewStatusStore([]*backup.Config{job})
+	r := &Runner{log: discardLogger, store: firstStore, stateDB: stateDB}
 	r.runOnce(context.Background(), job)
 
-	restartedStore := newStatusStore([]*config{job})
+	restartedStore := backup.NewStatusStore([]*backup.Config{job})
 
-	if got := restartedStore.snapshot()[0].State; got != stateIdle {
+	if got := restartedStore.Snapshot()[0].State; got != backup.StateIdle {
 		t.Fatalf("restartedStore before seeding: State = %q, want idle", got)
 	}
 
-	seedStatusFromState(context.Background(), stateDB, []*config{job}, restartedStore, discardLogger)
+	SeedStatusFromState(context.Background(), stateDB, []*backup.Config{job}, restartedStore, discardLogger)
 
-	snap := restartedStore.snapshot()[0]
-	if snap.State != stateOK {
+	snap := restartedStore.Snapshot()[0]
+	if snap.State != backup.StateOK {
 		t.Errorf("restartedStore after seeding: State = %q, want ok", snap.State)
 	}
 
 	if snap.LastStart.IsZero() || snap.LastEnd.IsZero() {
 		t.Error("restartedStore after seeding: LastStart/LastEnd still zero, want the prior run's times")
+	}
+}
+
+func TestSubstituteKeyTime(t *testing.T) {
+	t.Parallel()
+
+	got := substituteKeyTime("prefix-{time}-suffix.gpg")
+
+	if strings.Contains(got, "{time}") {
+		t.Errorf("substituteKeyTime() = %q, want {time} placeholder substituted", got)
+	}
+
+	if !strings.HasPrefix(got, "prefix-") || !strings.HasSuffix(got, "-suffix.gpg") {
+		t.Errorf("substituteKeyTime() = %q, want prefix-<timestamp>-suffix.gpg", got)
 	}
 }
 
@@ -536,9 +552,9 @@ func TestWaitUntilContextCanceled(t *testing.T) {
 }
 
 // startTimeTestJob builds a job that, when run, appends "run\n" to a marker
-// file — used by the schedule() integration tests below to count executions
+// file — used by the Schedule() integration tests below to count executions
 // without depending on exact timing of gpg/sh subprocess output.
-func startTimeTestJob(t *testing.T, marker string, startTime time.Time, interval time.Duration) *config {
+func startTimeTestJob(t *testing.T, marker string, startTime time.Time, interval time.Duration) *backup.Config {
 	t.Helper()
 
 	if _, err := exec.LookPath("gpg"); err != nil {
@@ -547,17 +563,17 @@ func startTimeTestJob(t *testing.T, marker string, startTime time.Time, interval
 
 	t.Setenv("MARKER_FILE", marker)
 
-	return &config{
-		name:       "test",
-		cmd:        `echo run >> "$MARKER_FILE"`,
-		key:        "backup-{time}.gpg",
-		symmetric:  true,
-		passphrase: "unit-test-passphrase",
-		gpgBin:     "gpg",
-		interval:   interval,
-		startTime:  startTime,
-		targets: []target{
-			{serverName: "nas", kind: serverKindLocal, bucket: "sub", localPath: t.TempDir()},
+	return &backup.Config{
+		Name:       "test",
+		Cmd:        `echo run >> "$MARKER_FILE"`,
+		Key:        "backup-{time}.gpg",
+		Symmetric:  true,
+		Passphrase: "unit-test-passphrase",
+		GPGBin:     "gpg",
+		Interval:   interval,
+		StartTime:  startTime,
+		Targets: []backup.Target{
+			{ServerName: "nas", Kind: backup.ServerKindLocal, Bucket: "sub", LocalPath: t.TempDir()},
 		},
 	}
 }
@@ -579,7 +595,7 @@ func countMarkerRuns(t *testing.T, marker string) int {
 
 // TestScheduleStartTimeCatchesUpMissedRun covers the "real missed run"
 // case: start-time is long overdue and no success is recorded (no state db
-// at all here, matching an unopened/unavailable state db), so schedule must
+// at all here, matching an unopened/unavailable state db), so Schedule must
 // fire a single catch-up run right away rather than waiting for the next
 // grid slot.
 func TestScheduleStartTimeCatchesUpMissedRun(t *testing.T) { //nolint:paralleltest // startTimeTestJob calls t.Setenv, which is incompatible with t.Parallel
@@ -588,13 +604,13 @@ func TestScheduleStartTimeCatchesUpMissedRun(t *testing.T) { //nolint:parallelte
 
 	job := startTimeTestJob(t, marker, time.Now().Add(-10*time.Minute), time.Second)
 
-	store := newStatusStore([]*config{job})
-	r := &runner{log: discardLogger, store: store}
+	store := backup.NewStatusStore([]*backup.Config{job})
+	r := &Runner{log: discardLogger, store: store}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 
-	r.schedule(ctx, job)
+	r.Schedule(ctx, job)
 
 	if got := countMarkerRuns(t, marker); got != 1 {
 		t.Errorf("marker recorded %d runs, want exactly 1 (one immediate catch-up run, no extra runs before the next 1s grid slot)", got)
@@ -604,7 +620,7 @@ func TestScheduleStartTimeCatchesUpMissedRun(t *testing.T) { //nolint:parallelte
 // TestScheduleStartTimeSkipsCatchUpWhenAlreadyRecorded covers the "not
 // actually missed" case: start-time's most recent due slot already has a
 // recorded success (as if this is an ordinary restart shortly after an
-// on-time run), so schedule must not fire an extra run and should instead
+// on-time run), so Schedule must not fire an extra run and should instead
 // wait for the next future grid slot.
 func TestScheduleStartTimeSkipsCatchUpWhenAlreadyRecorded(t *testing.T) { //nolint:paralleltest // startTimeTestJob calls t.Setenv, which is incompatible with t.Parallel
 	dir := t.TempDir()
@@ -615,9 +631,9 @@ func TestScheduleStartTimeSkipsCatchUpWhenAlreadyRecorded(t *testing.T) { //noli
 
 	job := startTimeTestJob(t, marker, startTime, interval)
 
-	stateDB, err := openScheduleStateDB(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	stateDB, err := backup.OpenScheduleStateDB(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
-		t.Fatalf("openScheduleStateDB() error: %v", err)
+		t.Fatalf("OpenScheduleStateDB() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = stateDB.Close() })
@@ -627,53 +643,19 @@ func TestScheduleStartTimeSkipsCatchUpWhenAlreadyRecorded(t *testing.T) { //noli
 		t.Fatal("lastDueSlot() ok = false, want true (start-time is in the past)")
 	}
 
-	if err := writeLastSuccess(context.Background(), stateDB, job.name, due); err != nil {
-		t.Fatalf("writeLastSuccess() error: %v", err)
+	if err := backup.WriteLastSuccess(context.Background(), stateDB, job.Name, due); err != nil {
+		t.Fatalf("WriteLastSuccess() error: %v", err)
 	}
 
-	store := newStatusStore([]*config{job})
-	r := &runner{log: discardLogger, store: store, stateDB: stateDB}
+	store := backup.NewStatusStore([]*backup.Config{job})
+	r := &Runner{log: discardLogger, store: store, stateDB: stateDB}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 
-	r.schedule(ctx, job)
+	r.Schedule(ctx, job)
 
 	if got := countMarkerRuns(t, marker); got != 0 {
 		t.Errorf("marker recorded %d runs, want 0 (already-covered slot must not trigger a catch-up run)", got)
-	}
-}
-
-// TestNewRunLoggerLogViewerGate covers newRunLogger's *logRingBuffer
-// decision: it must only wire one up (so /api/logs has anything to serve)
-// when both the web UI is enabled (listen:) and the operator opted into the
-// log viewer (enable-log-viewer:) — never from listen: alone, since unlike
-// file downloads the dashboard has no login guarding the viewer.
-func TestNewRunLoggerLogViewerGate(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		listen    string
-		logViewer bool
-		wantLogs  bool
-	}{
-		{name: "no web UI, viewer unset", listen: "", logViewer: false, wantLogs: false},
-		{name: "no web UI, viewer enabled", listen: "", logViewer: true, wantLogs: false},
-		{name: "web UI, viewer unset", listen: ":0", logViewer: false, wantLogs: false},
-		{name: "web UI, viewer enabled", listen: ":0", logViewer: true, wantLogs: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			rc := &runConfig{listen: tt.listen, logViewer: tt.logViewer}
-
-			_, logs := newRunLogger(io.Discard, rc)
-			if got := logs != nil; got != tt.wantLogs {
-				t.Errorf("newRunLogger() logs != nil = %v, want %v", got, tt.wantLogs)
-			}
-		})
 	}
 }

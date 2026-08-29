@@ -1,4 +1,4 @@
-package backup
+package webui
 
 import (
 	"crypto"
@@ -18,6 +18,8 @@ import (
 	"time"
 
 	josejwk "github.com/go-jose/go-jose/v4"
+
+	"nilswitt.dev/go-backup-tool/internal/backup"
 )
 
 // fakeOIDCProvider is a minimal OpenID Connect provider backed by an
@@ -164,13 +166,13 @@ func TestOIDCLoginAndCallback(t *testing.T) {
 	provider := newFakeOIDCProvider(t, clientID)
 	provider.email.Store("person@example.com")
 
-	auth, err := newOIDCAuth(t.Context(), oidcSettings{
-		enabled:      true,
-		issuer:       provider.issuer(),
-		clientID:     clientID,
-		clientSecret: "test-secret",
-		redirectURL:  "https://backups.example.com/login/oidc/callback",
-		scopes:       []string{"profile", "email"},
+	auth, err := newOIDCAuth(t.Context(), backup.OIDCSettings{
+		Enabled:      true,
+		Issuer:       provider.issuer(),
+		ClientID:     clientID,
+		ClientSecret: "test-secret",
+		RedirectURL:  "https://backups.example.com/login/oidc/callback",
+		Scopes:       []string{"profile", "email"},
 	})
 	if err != nil {
 		t.Fatalf("newOIDCAuth() unexpected error: %v", err)
@@ -230,7 +232,7 @@ func TestOIDCLoginAndCallback(t *testing.T) {
 		t.Fatalf("callback cookies = %+v, want one %s cookie", cookies, webUISessionCookie)
 	}
 
-	assertSoleLoginEvent(t, db, loginEvent{Username: "person@example.com", Method: "oidc", Success: true})
+	assertSoleLoginEvent(t, db, backup.LoginEvent{Username: "person@example.com", Method: "oidc", Success: true})
 
 	if !sessions.valid(cookies[0].Value) {
 		t.Error("the session cookie's value isn't a valid session")
@@ -240,10 +242,10 @@ func TestOIDCLoginAndCallback(t *testing.T) {
 // assertSoleLoginEvent fails t unless db's login log holds exactly one
 // event matching want's Username/Method/Success (its At/RemoteAddr/Detail
 // are ignored, since callers only care about identity/kind/outcome here).
-func assertSoleLoginEvent(t *testing.T, db *sql.DB, want loginEvent) {
+func assertSoleLoginEvent(t *testing.T, db *sql.DB, want backup.LoginEvent) {
 	t.Helper()
 
-	events, err := readLoginEvents(t.Context(), db, 10)
+	events, err := backup.ReadLoginEvents(t.Context(), db, 10)
 	if err != nil {
 		t.Fatalf("readLoginEvents() error: %v", err)
 	}
@@ -258,12 +260,12 @@ func TestOIDCCallbackUnknownStateRejected(t *testing.T) {
 
 	provider := newFakeOIDCProvider(t, "test-client")
 
-	auth, err := newOIDCAuth(t.Context(), oidcSettings{
-		enabled:      true,
-		issuer:       provider.issuer(),
-		clientID:     "test-client",
-		clientSecret: "test-secret",
-		redirectURL:  "https://backups.example.com/login/oidc/callback",
+	auth, err := newOIDCAuth(t.Context(), backup.OIDCSettings{
+		Enabled:      true,
+		Issuer:       provider.issuer(),
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+		RedirectURL:  "https://backups.example.com/login/oidc/callback",
 	})
 	if err != nil {
 		t.Fatalf("newOIDCAuth() unexpected error: %v", err)
@@ -291,12 +293,12 @@ func TestOIDCCallbackProviderErrorRejected(t *testing.T) {
 
 	provider := newFakeOIDCProvider(t, "test-client")
 
-	auth, err := newOIDCAuth(t.Context(), oidcSettings{
-		enabled:      true,
-		issuer:       provider.issuer(),
-		clientID:     "test-client",
-		clientSecret: "test-secret",
-		redirectURL:  "https://backups.example.com/login/oidc/callback",
+	auth, err := newOIDCAuth(t.Context(), backup.OIDCSettings{
+		Enabled:      true,
+		Issuer:       provider.issuer(),
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+		RedirectURL:  "https://backups.example.com/login/oidc/callback",
 	})
 	if err != nil {
 		t.Fatalf("newOIDCAuth() unexpected error: %v", err)
@@ -365,12 +367,12 @@ func TestOIDCPendingStoreConsumeExpired(t *testing.T) {
 func TestNewOIDCAuthBadIssuerFails(t *testing.T) {
 	t.Parallel()
 
-	_, err := newOIDCAuth(t.Context(), oidcSettings{
-		enabled:      true,
-		issuer:       "http://127.0.0.1:1", // nothing listening there
-		clientID:     "test-client",
-		clientSecret: "test-secret",
-		redirectURL:  "https://backups.example.com/login/oidc/callback",
+	_, err := newOIDCAuth(t.Context(), backup.OIDCSettings{
+		Enabled:      true,
+		Issuer:       "http://127.0.0.1:1", // nothing listening there
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+		RedirectURL:  "https://backups.example.com/login/oidc/callback",
 	})
 	if err == nil {
 		t.Fatal("newOIDCAuth() with an unreachable issuer = nil error, want non-nil")

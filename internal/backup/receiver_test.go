@@ -1,19 +1,14 @@
 package backup
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
-	"sync"
 	"testing"
 	"time"
 )
@@ -59,14 +54,14 @@ func TestSanitizeObjectKey(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got, err := sanitizeObjectKey(tt.key)
+		got, err := SanitizeObjectKey(tt.key)
 		if (err != nil) != tt.wantErr {
-			t.Errorf("sanitizeObjectKey(%q) error = %v, wantErr %v", tt.key, err, tt.wantErr)
+			t.Errorf("SanitizeObjectKey(%q) error = %v, wantErr %v", tt.key, err, tt.wantErr)
 			continue
 		}
 
 		if err == nil && got != tt.key {
-			t.Errorf("sanitizeObjectKey(%q) = %q, want unchanged", tt.key, got)
+			t.Errorf("SanitizeObjectKey(%q) = %q, want unchanged", tt.key, got)
 		}
 	}
 }
@@ -77,7 +72,7 @@ func TestBuildReceivers(t *testing.T) {
 	pemA, pubA := testReceiverPublicKeyPEM(t)
 	pemB, pubB := testReceiverPublicKeyPEM(t)
 
-	receivers, err := buildReceivers([]fileReceiver{
+	receivers, err := buildReceivers([]FileReceiver{
 		{ID: "a", PublicKey: pemA, Path: "/mnt/a"},
 		{ID: "b", PublicKey: pemB, Path: "/mnt/b", Retention: "7d"},
 	})
@@ -85,9 +80,9 @@ func TestBuildReceivers(t *testing.T) {
 		t.Fatalf("buildReceivers() unexpected error: %v", err)
 	}
 
-	want := map[string]resolvedReceiver{
-		"a": {id: "a", publicKey: pubA, path: "/mnt/a"},
-		"b": {id: "b", publicKey: pubB, path: "/mnt/b", retention: 7 * 24 * time.Hour},
+	want := map[string]ResolvedReceiver{
+		"a": {ID: "a", PublicKey: pubA, Path: "/mnt/a"},
+		"b": {ID: "b", PublicKey: pubB, Path: "/mnt/b", Retention: 7 * 24 * time.Hour},
 	}
 
 	if len(receivers) != len(want) {
@@ -106,7 +101,7 @@ func TestBuildReceiversRequiresID(t *testing.T) {
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
-	_, err := buildReceivers([]fileReceiver{{PublicKey: pemText, Path: "/mnt/a"}})
+	_, err := buildReceivers([]FileReceiver{{PublicKey: pemText, Path: "/mnt/a"}})
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for missing id, got nil")
 	}
@@ -117,7 +112,7 @@ func TestBuildReceiversRequiresPath(t *testing.T) {
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
-	_, err := buildReceivers([]fileReceiver{{ID: "a", PublicKey: pemText}})
+	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText}})
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for missing path, got nil")
 	}
@@ -126,7 +121,7 @@ func TestBuildReceiversRequiresPath(t *testing.T) {
 func TestBuildReceiversRequiresPublicKey(t *testing.T) {
 	t.Parallel()
 
-	_, err := buildReceivers([]fileReceiver{{ID: "a", Path: "/mnt/a"}})
+	_, err := buildReceivers([]FileReceiver{{ID: "a", Path: "/mnt/a"}})
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for missing public-key, got nil")
 	}
@@ -135,7 +130,7 @@ func TestBuildReceiversRequiresPublicKey(t *testing.T) {
 func TestBuildReceiversRejectsInvalidPublicKey(t *testing.T) {
 	t.Parallel()
 
-	_, err := buildReceivers([]fileReceiver{{ID: "a", PublicKey: "not a PEM key", Path: "/mnt/a"}})
+	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: "not a PEM key", Path: "/mnt/a"}})
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for invalid public-key, got nil")
 	}
@@ -152,7 +147,7 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEF4MRFTT9HV60ttWqYkFekzGqdpVY
 If1SoUSBRfFVHGlXZJjmfRQxikr35aLMtrCtQ4GvhyLhd81I0HfA3+H0gg==
 -----END PUBLIC KEY-----`
 
-	_, err := buildReceivers([]fileReceiver{{ID: "a", PublicKey: ecPublicKeyPEM, Path: "/mnt/a"}})
+	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: ecPublicKeyPEM, Path: "/mnt/a"}})
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for a non-RSA public-key, got nil")
 	}
@@ -161,15 +156,15 @@ If1SoUSBRfFVHGlXZJjmfRQxikr35aLMtrCtQ4GvhyLhd81I0HfA3+H0gg==
 func TestListReceiverFilesMissingRoot(t *testing.T) {
 	t.Parallel()
 
-	recv := resolvedReceiver{id: "a", path: filepath.Join(t.TempDir(), "does-not-exist")}
+	recv := ResolvedReceiver{ID: "a", Path: filepath.Join(t.TempDir(), "does-not-exist")}
 
-	files, err := listReceiverFiles(recv)
+	files, err := ListReceiverFiles(recv)
 	if err != nil {
-		t.Fatalf("listReceiverFiles() unexpected error: %v", err)
+		t.Fatalf("ListReceiverFiles() unexpected error: %v", err)
 	}
 
 	if len(files) != 0 {
-		t.Errorf("listReceiverFiles() = %+v, want empty", files)
+		t.Errorf("ListReceiverFiles() = %+v, want empty", files)
 	}
 }
 
@@ -196,15 +191,15 @@ func TestListReceiverFilesListsNestedObjectsSortedByCreatedTimeAscending(t *test
 		t.Fatalf("os.Chtimes(%q) unexpected error: %v", newerPath, err)
 	}
 
-	recv := resolvedReceiver{id: "a", path: root}
+	recv := ResolvedReceiver{ID: "a", Path: root}
 
-	files, err := listReceiverFiles(recv)
+	files, err := ListReceiverFiles(recv)
 	if err != nil {
-		t.Fatalf("listReceiverFiles() unexpected error: %v", err)
+		t.Fatalf("ListReceiverFiles() unexpected error: %v", err)
 	}
 
 	if len(files) != 2 {
-		t.Fatalf("listReceiverFiles() = %+v, want 2 entries", files)
+		t.Fatalf("ListReceiverFiles() = %+v, want 2 entries", files)
 	}
 
 	if files[0].Key != "subdir/a.gpg" || files[0].Size != 1 {
@@ -267,17 +262,17 @@ func TestBuildReceiversStaleAfterAndWebhook(t *testing.T) {
 
 	pemText, pub := testReceiverPublicKeyPEM(t)
 
-	receivers, err := buildReceivers([]fileReceiver{
+	receivers, err := buildReceivers([]FileReceiver{
 		{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h", Webhook: fileWebhook{URL: "https://example.com/hook"}},
 	})
 	if err != nil {
 		t.Fatalf("buildReceivers() unexpected error: %v", err)
 	}
 
-	want := resolvedReceiver{
-		id: "a", publicKey: pub, path: "/mnt/a",
-		staleAfter: 6 * time.Hour,
-		webhook:    resolvedWebhook{url: "https://example.com/hook", method: http.MethodPost},
+	want := ResolvedReceiver{
+		ID: "a", PublicKey: pub, Path: "/mnt/a",
+		StaleAfter: 6 * time.Hour,
+		Webhook:    ResolvedWebhook{URL: "https://example.com/hook", Method: http.MethodPost},
 	}
 
 	if got := receivers["a"]; !reflect.DeepEqual(got, want) {
@@ -290,7 +285,7 @@ func TestBuildReceiversStaleAfterRequiresWebhook(t *testing.T) {
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
-	_, err := buildReceivers([]fileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h"}})
+	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h"}})
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for stale-after without webhook.url, got nil")
 	}
@@ -301,7 +296,7 @@ func TestBuildReceiversWebhookRequiresStaleAfter(t *testing.T) {
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
-	_, err := buildReceivers([]fileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", Webhook: fileWebhook{URL: "https://example.com/hook"}}})
+	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", Webhook: fileWebhook{URL: "https://example.com/hook"}}})
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for webhook.url without stale-after, got nil")
 	}
@@ -312,7 +307,7 @@ func TestBuildReceiversWebhookMethodHeadersAndBody(t *testing.T) {
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
-	receivers, err := buildReceivers([]fileReceiver{
+	receivers, err := buildReceivers([]FileReceiver{
 		{
 			ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h",
 			Webhook: fileWebhook{
@@ -327,18 +322,18 @@ func TestBuildReceiversWebhookMethodHeadersAndBody(t *testing.T) {
 		t.Fatalf("buildReceivers() unexpected error: %v", err)
 	}
 
-	want := resolvedWebhook{
-		url:    "https://example.com/hook",
-		method: http.MethodPut, // lowercase "put" in the config file is normalized to uppercase
-		headers: map[string]string{
+	want := ResolvedWebhook{
+		URL:    "https://example.com/hook",
+		Method: http.MethodPut, // lowercase "put" in the config file is normalized to uppercase
+		Headers: map[string]string{
 			"Content-Type":  "application/json; charset=utf-8",
 			"Authorization": "Bearer tok",
 		},
-		body: `{"text":"{receiver_id} stale since {last_received}"}`,
+		Body: `{"text":"{receiver_id} stale since {last_received}"}`,
 	}
 
-	if got := receivers["a"].webhook; !reflect.DeepEqual(got, want) {
-		t.Errorf("buildReceivers()[%q].webhook = %+v, want %+v", "a", got, want)
+	if got := receivers["a"].Webhook; !reflect.DeepEqual(got, want) {
+		t.Errorf("buildReceivers()[%q].Webhook = %+v, want %+v", "a", got, want)
 	}
 }
 
@@ -347,14 +342,14 @@ func TestBuildReceiversWebhookMethodDefaultsToPost(t *testing.T) {
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
-	receivers, err := buildReceivers([]fileReceiver{
+	receivers, err := buildReceivers([]FileReceiver{
 		{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h", Webhook: fileWebhook{URL: "https://example.com/hook"}},
 	})
 	if err != nil {
 		t.Fatalf("buildReceivers() unexpected error: %v", err)
 	}
 
-	if got := receivers["a"].webhook.method; got != http.MethodPost {
+	if got := receivers["a"].Webhook.Method; got != http.MethodPost {
 		t.Errorf("webhook.method = %q, want %q when unset", got, http.MethodPost)
 	}
 }
@@ -364,7 +359,7 @@ func TestBuildReceiversWebhookBodyRequiresURL(t *testing.T) {
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
-	_, err := buildReceivers([]fileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", Webhook: fileWebhook{Body: "custom"}}})
+	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", Webhook: fileWebhook{Body: "custom"}}})
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for webhook.body without webhook.url, got nil")
 	}
@@ -375,7 +370,7 @@ func TestBuildReceiversWebhookHeadersRequireURL(t *testing.T) {
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
-	_, err := buildReceivers([]fileReceiver{
+	_, err := buildReceivers([]FileReceiver{
 		{ID: "a", PublicKey: pemText, Path: "/mnt/a", Webhook: fileWebhook{Headers: map[string]string{"X-Test": "y"}}},
 	})
 	if err == nil {
@@ -388,39 +383,24 @@ func TestBuildReceiversWebhookMethodRequiresURL(t *testing.T) {
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
-	_, err := buildReceivers([]fileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", Webhook: fileWebhook{Method: "PUT"}}})
+	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", Webhook: fileWebhook{Method: "PUT"}}})
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for webhook.method without webhook.url, got nil")
-	}
-}
-
-func TestRenderStaleWebhookPayload(t *testing.T) {
-	t.Parallel()
-
-	recv := resolvedReceiver{id: "a", path: "/mnt/a", staleAfter: 6 * time.Hour}
-	tmpl := "{receiver_id} at {path} stale after {stale_after}, last received {last_received}"
-	lastSeen := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-
-	got := renderStaleWebhookPayload(tmpl, recv, lastSeen)
-	want := "a at /mnt/a stale after 6h0m0s, last received 2026-01-02T03:04:05Z"
-
-	if got != want {
-		t.Errorf("renderStaleWebhookPayload() = %q, want %q", got, want)
 	}
 }
 
 func TestLastReceivedAtMissingRoot(t *testing.T) {
 	t.Parallel()
 
-	recv := resolvedReceiver{id: "a", path: filepath.Join(t.TempDir(), "does-not-exist")}
+	recv := ResolvedReceiver{ID: "a", Path: filepath.Join(t.TempDir(), "does-not-exist")}
 
-	_, ok, err := lastReceivedAt(recv)
+	_, ok, err := LastReceivedAt(recv)
 	if err != nil {
-		t.Fatalf("lastReceivedAt() unexpected error: %v", err)
+		t.Fatalf("LastReceivedAt() unexpected error: %v", err)
 	}
 
 	if ok {
-		t.Error("lastReceivedAt() ok = true, want false for a missing root")
+		t.Error("LastReceivedAt() ok = true, want false for a missing root")
 	}
 }
 
@@ -449,344 +429,35 @@ func TestLastReceivedAtReturnsNewestModTime(t *testing.T) {
 
 	// A hidden temp file, if it were counted, would appear newest of all
 	// (its default mtime is "now"), so this also verifies it's skipped.
-	got, ok, err := lastReceivedAt(resolvedReceiver{id: "a", path: root})
+	got, ok, err := LastReceivedAt(ResolvedReceiver{ID: "a", Path: root})
 	if err != nil {
-		t.Fatalf("lastReceivedAt() unexpected error: %v", err)
+		t.Fatalf("LastReceivedAt() unexpected error: %v", err)
 	}
 
 	if !ok {
-		t.Fatal("lastReceivedAt() ok = false, want true")
+		t.Fatal("LastReceivedAt() ok = false, want true")
 	}
 
 	if !got.Equal(newerTime) {
-		t.Errorf("lastReceivedAt() = %v, want %v", got, newerTime)
-	}
-}
-
-// webhookCall is one request captured by a test webhook server (see
-// newTestWebhookServer).
-type webhookCall struct {
-	payload staleReceiverPayload
-}
-
-// newTestWebhookServer starts an httptest.Server that decodes every request
-// body as a staleReceiverPayload and appends it to calls, guarded by mu so
-// tests can safely read it after the monitor's check has returned.
-func newTestWebhookServer(t *testing.T, mu *sync.Mutex, calls *[]webhookCall) *httptest.Server {
-	t.Helper()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload staleReceiverPayload
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Errorf("webhook server: decoding request body: %v", err)
-		}
-
-		mu.Lock()
-
-		*calls = append(*calls, webhookCall{payload: payload})
-		mu.Unlock()
-
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	t.Cleanup(srv.Close)
-
-	return srv
-}
-
-func TestStaleReceiverMonitorCheckFreshFileDoesNotFire(t *testing.T) {
-	t.Parallel()
-
-	var (
-		mu    sync.Mutex
-		calls []webhookCall
-	)
-
-	srv := newTestWebhookServer(t, &mu, &calls)
-
-	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "recent.gpg"), "a")
-
-	recv := resolvedReceiver{id: "a", path: root, staleAfter: time.Hour, webhook: resolvedWebhook{url: srv.URL, method: http.MethodPost}}
-
-	newStaleReceiverMonitor().check(recv, discardLogger)
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if len(calls) != 0 {
-		t.Errorf("webhook calls = %+v, want none for a fresh file", calls)
-	}
-}
-
-func TestStaleReceiverMonitorCheckStaleFileFires(t *testing.T) {
-	t.Parallel()
-
-	var (
-		mu    sync.Mutex
-		calls []webhookCall
-	)
-
-	srv := newTestWebhookServer(t, &mu, &calls)
-
-	root := t.TempDir()
-	stale := filepath.Join(root, "old.gpg")
-	writeFile(t, stale, "a")
-
-	staleTime := time.Now().Add(-2 * time.Hour)
-	if err := os.Chtimes(stale, staleTime, staleTime); err != nil {
-		t.Fatalf("Chtimes(%q): %v", stale, err)
-	}
-
-	recv := resolvedReceiver{id: "recv-a", path: root, staleAfter: time.Hour, webhook: resolvedWebhook{url: srv.URL, method: http.MethodPost}}
-
-	monitor := newStaleReceiverMonitor()
-	monitor.check(recv, discardLogger)
-
-	mu.Lock()
-	if len(calls) != 1 {
-		mu.Unlock()
-		t.Fatalf("webhook calls = %d, want 1 for a stale file", len(calls))
-	}
-
-	got := calls[0].payload
-	mu.Unlock()
-
-	if got.ReceiverID != "recv-a" || got.Path != root || got.StaleAfter != time.Hour.String() || got.LastReceived.IsZero() {
-		t.Errorf("webhook payload = %+v, want receiver_id recv-a, path %q, stale_after %q, non-zero last_received", got, root, time.Hour.String())
-	}
-
-	// A second check of the same still-stale gap must not fire again.
-	monitor.check(recv, discardLogger)
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if len(calls) != 1 {
-		t.Errorf("webhook calls = %d after a second check of the same gap, want still 1", len(calls))
-	}
-}
-
-func TestStaleReceiverMonitorCheckNeverReceivedDoesNotFire(t *testing.T) {
-	t.Parallel()
-
-	var (
-		mu    sync.Mutex
-		calls []webhookCall
-	)
-
-	srv := newTestWebhookServer(t, &mu, &calls)
-
-	recv := resolvedReceiver{id: "a", path: t.TempDir(), staleAfter: time.Hour, webhook: resolvedWebhook{url: srv.URL, method: http.MethodPost}}
-
-	newStaleReceiverMonitor().check(recv, discardLogger)
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if len(calls) != 0 {
-		t.Errorf("webhook calls = %+v, want none when nothing has ever been received", calls)
-	}
-}
-
-func TestStaleReceiverMonitorCheckRefiresAfterGapReopens(t *testing.T) {
-	t.Parallel()
-
-	var (
-		mu    sync.Mutex
-		calls []webhookCall
-	)
-
-	srv := newTestWebhookServer(t, &mu, &calls)
-
-	root := t.TempDir()
-	f := filepath.Join(root, "file.gpg")
-	writeFile(t, f, "a")
-
-	staleTime := time.Now().Add(-2 * time.Hour)
-	if err := os.Chtimes(f, staleTime, staleTime); err != nil {
-		t.Fatalf("Chtimes(%q): %v", f, err)
-	}
-
-	recv := resolvedReceiver{id: "a", path: root, staleAfter: time.Hour, webhook: resolvedWebhook{url: srv.URL, method: http.MethodPost}}
-
-	monitor := newStaleReceiverMonitor()
-	monitor.check(recv, discardLogger)
-
-	// A fresh file arrives, clearing the gap.
-	writeFile(t, f, "b")
-	monitor.check(recv, discardLogger)
-
-	// Stale again.
-	if err := os.Chtimes(f, staleTime, staleTime); err != nil {
-		t.Fatalf("Chtimes(%q): %v", f, err)
-	}
-
-	monitor.check(recv, discardLogger)
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if len(calls) != 2 {
-		t.Errorf("webhook calls = %d, want 2 (one per gap)", len(calls))
-	}
-}
-
-func TestStaleReceiverMonitorCheckDisabledIsNoop(t *testing.T) {
-	t.Parallel()
-
-	var (
-		mu    sync.Mutex
-		calls []webhookCall
-	)
-
-	srv := newTestWebhookServer(t, &mu, &calls)
-
-	recv := resolvedReceiver{id: "a", path: t.TempDir(), webhook: resolvedWebhook{url: srv.URL, method: http.MethodPost}} // staleAfter left at zero
-
-	newStaleReceiverMonitor().check(recv, discardLogger)
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if len(calls) != 0 {
-		t.Errorf("webhook calls = %+v, want none when stale-after is unset", calls)
-	}
-}
-
-func TestStaleReceiverMonitorCheckUsesCustomMethodHeadersAndBody(t *testing.T) {
-	t.Parallel()
-
-	var (
-		mu          sync.Mutex
-		gotMethod   string
-		gotBody     string
-		gotCT       string
-		gotAuth     string
-		requestSeen bool
-	)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("webhook server: reading request body: %v", err)
-		}
-
-		mu.Lock()
-
-		gotMethod = r.Method
-		gotBody = string(body)
-		gotCT = r.Header.Get("Content-Type")
-		gotAuth = r.Header.Get("Authorization")
-		requestSeen = true
-		mu.Unlock()
-
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
-
-	root := t.TempDir()
-	stale := filepath.Join(root, "old.gpg")
-	writeFile(t, stale, "a")
-
-	staleTime := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	if err := os.Chtimes(stale, staleTime, staleTime); err != nil {
-		t.Fatalf("Chtimes(%q): %v", stale, err)
-	}
-
-	recv := resolvedReceiver{
-		id: "recv-a", path: root, staleAfter: time.Hour,
-		webhook: resolvedWebhook{
-			url:     srv.URL,
-			method:  http.MethodPut,
-			headers: map[string]string{"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer tok"},
-			body:    `{"text":"receiver {receiver_id} has been quiet since {last_received}"}`,
-		},
-	}
-
-	newStaleReceiverMonitor().check(recv, discardLogger)
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if !requestSeen {
-		t.Fatal("webhook server: no request received")
-	}
-
-	if gotMethod != http.MethodPut {
-		t.Errorf("webhook method = %q, want %q", gotMethod, http.MethodPut)
-	}
-
-	wantBody := `{"text":"receiver recv-a has been quiet since 2026-01-02T03:04:05Z"}`
-	if gotBody != wantBody {
-		t.Errorf("webhook body = %q, want %q", gotBody, wantBody)
-	}
-
-	if gotCT != "application/json; charset=utf-8" {
-		t.Errorf("webhook Content-Type = %q, want %q", gotCT, "application/json; charset=utf-8")
-	}
-
-	if gotAuth != "Bearer tok" {
-		t.Errorf("webhook Authorization = %q, want %q", gotAuth, "Bearer tok")
-	}
-}
-
-func TestStaleReceiverMonitorCheckDefaultContentTypeWhenNoHeadersSet(t *testing.T) {
-	t.Parallel()
-
-	var (
-		mu    sync.Mutex
-		gotCT string
-	)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		gotCT = r.Header.Get("Content-Type")
-		mu.Unlock()
-
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
-
-	root := t.TempDir()
-	stale := filepath.Join(root, "old.gpg")
-	writeFile(t, stale, "a")
-
-	staleTime := time.Now().Add(-2 * time.Hour)
-	if err := os.Chtimes(stale, staleTime, staleTime); err != nil {
-		t.Fatalf("Chtimes(%q): %v", stale, err)
-	}
-
-	recv := resolvedReceiver{
-		id: "a", path: root, staleAfter: time.Hour,
-		webhook: resolvedWebhook{url: srv.URL, method: http.MethodPost},
-	}
-
-	newStaleReceiverMonitor().check(recv, discardLogger)
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if gotCT != defaultStaleWebhookContentType {
-		t.Errorf("webhook Content-Type = %q, want %q", gotCT, defaultStaleWebhookContentType)
+		t.Errorf("LastReceivedAt() = %v, want %v", got, newerTime)
 	}
 }
 
 func TestReceiverStatusStoreSeedLastEventSuccess(t *testing.T) {
 	t.Parallel()
 
-	receivers := map[string]resolvedReceiver{"a": {id: "a", path: t.TempDir()}}
-	store := newReceiverStatusStore(receivers)
+	receivers := map[string]ResolvedReceiver{"a": {ID: "a", Path: t.TempDir()}}
+	store := NewReceiverStatusStore(receivers)
 
 	at := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
-	store.seedLastEvent("a", receiverEvent{At: at, ReceiverID: "a", Kind: receiverEventReceive, Key: "obj.gpg", Success: true})
+	store.SeedLastEvent("a", ReceiverEvent{At: at, ReceiverID: "a", Kind: ReceiverEventReceive, Key: "obj.gpg", Success: true})
 
-	snap := store.snapshot()
+	snap := store.Snapshot()
 	if len(snap) != 1 {
 		t.Fatalf("snapshot() = %+v, want 1 entry", snap)
 	}
 
-	if snap[0].State != stateOK || snap[0].LastKey != "obj.gpg" || !snap[0].LastSeen.Equal(at) || snap[0].Error != "" {
+	if snap[0].State != StateOK || snap[0].LastKey != "obj.gpg" || !snap[0].LastSeen.Equal(at) || snap[0].Error != "" {
 		t.Errorf("snapshot()[0] = %+v, want state ok, last_key obj.gpg, last_seen %v, no error", snap[0], at)
 	}
 }
@@ -794,18 +465,18 @@ func TestReceiverStatusStoreSeedLastEventSuccess(t *testing.T) {
 func TestReceiverStatusStoreSeedLastEventFailure(t *testing.T) {
 	t.Parallel()
 
-	receivers := map[string]resolvedReceiver{"a": {id: "a", path: t.TempDir()}}
-	store := newReceiverStatusStore(receivers)
+	receivers := map[string]ResolvedReceiver{"a": {ID: "a", Path: t.TempDir()}}
+	store := NewReceiverStatusStore(receivers)
 
 	at := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
-	store.seedLastEvent("a", receiverEvent{At: at, ReceiverID: "a", Kind: receiverEventDelete, Key: "obj.gpg", Success: false, Error: "disk full"})
+	store.SeedLastEvent("a", ReceiverEvent{At: at, ReceiverID: "a", Kind: ReceiverEventDelete, Key: "obj.gpg", Success: false, Error: "disk full"})
 
-	snap := store.snapshot()
+	snap := store.Snapshot()
 	if len(snap) != 1 {
 		t.Fatalf("snapshot() = %+v, want 1 entry", snap)
 	}
 
-	if snap[0].State != stateFailed || snap[0].Error != "disk full" {
+	if snap[0].State != StateFailed || snap[0].Error != "disk full" {
 		t.Errorf("snapshot()[0] = %+v, want state failed with error %q", snap[0], "disk full")
 	}
 }
@@ -813,46 +484,11 @@ func TestReceiverStatusStoreSeedLastEventFailure(t *testing.T) {
 func TestReceiverStatusStoreSeedLastEventUnknownReceiverIsNoop(t *testing.T) {
 	t.Parallel()
 
-	store := newReceiverStatusStore(map[string]resolvedReceiver{})
+	store := NewReceiverStatusStore(map[string]ResolvedReceiver{})
 
-	store.seedLastEvent("does-not-exist", receiverEvent{Success: true})
+	store.SeedLastEvent("does-not-exist", ReceiverEvent{Success: true})
 
-	if snap := store.snapshot(); len(snap) != 0 {
+	if snap := store.Snapshot(); len(snap) != 0 {
 		t.Errorf("snapshot() = %+v, want none", snap)
-	}
-}
-
-func TestSeedReceiverStatusFromState(t *testing.T) {
-	t.Parallel()
-
-	db := openTestStateDB(t)
-	ctx := context.Background()
-
-	at := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
-	if err := recordReceiverEvent(ctx, db, receiverEvent{At: at, ReceiverID: "a", Kind: receiverEventReceive, Key: "obj.gpg", Success: true}); err != nil {
-		t.Fatalf("recordReceiverEvent() error: %v", err)
-	}
-
-	receivers := map[string]resolvedReceiver{
-		"a": {id: "a", path: t.TempDir()},
-		"b": {id: "b", path: t.TempDir()}, // no events recorded: stays idle
-	}
-	store := newReceiverStatusStore(receivers)
-
-	seedReceiverStatusFromState(ctx, db, receivers, store, discardLogger)
-
-	snap := store.snapshot()
-
-	byID := make(map[string]receiverSnapshot, len(snap))
-	for _, s := range snap {
-		byID[s.ID] = s
-	}
-
-	if got := byID["a"]; got.State != stateOK || got.LastKey != "obj.gpg" || !got.LastSeen.Equal(at) {
-		t.Errorf("receiver a = %+v, want state ok, last_key obj.gpg, last_seen %v", got, at)
-	}
-
-	if got := byID["b"]; got.State != stateIdle {
-		t.Errorf("receiver b = %+v, want state idle", got)
 	}
 }

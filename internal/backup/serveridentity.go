@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 )
 
-// serverIdentity is this instance's persistent identity: a UUID (see
+// ServerIdentity is this instance's persistent identity: a UUID (see
 // ensureServerUUID) and the RSA private key (see ensureServerKeyPair) it
 // signs outgoing type: remote target requests with (see
 // signRemoteAuthToken, used by uploadToRemote/deleteRemoteObject in
@@ -19,20 +19,20 @@ import (
 // publicKeyPEM is that same public key, PEM-encoded, so the web UI dashboard
 // (see handleIdentity) can display it for an operator to paste into a
 // receiving instance's config.
-type serverIdentity struct {
+type ServerIdentity struct {
 	uuid         string
 	privateKey   *rsa.PrivateKey
 	publicKeyPEM string
 }
 
-// loadServerIdentityAtStartup calls loadServerIdentity, logging (rather than
+// LoadServerIdentityAtStartup calls loadServerIdentity, logging (rather than
 // failing the run over) any error and returning nil in that case — a
 // type: remote target's uploads then fail individually (see
 // remoteAuthHeader in pipeline.go) rather than the whole run refusing to
 // start over a problem that may not affect every job. dir is the config
 // file's resolved keys-dir: (see runConfig.keysDir), defaulting to
 // defaultServerKeyDir when unset.
-func loadServerIdentityAtStartup(log *slog.Logger, dir string) *serverIdentity {
+func LoadServerIdentityAtStartup(log *slog.Logger, dir string) *ServerIdentity {
 	identity, err := loadServerIdentity(dir, log)
 	if err != nil {
 		log.Warn("loading server identity", "dir", dir, "err", err)
@@ -47,7 +47,7 @@ func loadServerIdentityAtStartup(log *slog.Logger, dir string) *serverIdentity {
 // ensureServerUUID), then loads them into a serverIdentity. See
 // loadServerIdentityAtStartup, which runWithContext (app.go) calls once at
 // startup.
-func loadServerIdentity(dir string, log *slog.Logger) (*serverIdentity, error) {
+func loadServerIdentity(dir string, log *slog.Logger) (*ServerIdentity, error) {
 	if err := ensureServerKeyPair(dir, log); err != nil {
 		return nil, fmt.Errorf("ensuring server key pair: %w", err)
 	}
@@ -67,7 +67,34 @@ func loadServerIdentity(dir string, log *slog.Logger) (*serverIdentity, error) {
 		return nil, fmt.Errorf("loading server public key: %w", err)
 	}
 
-	return &serverIdentity{uuid: id, privateKey: key, publicKeyPEM: string(pubPEM)}, nil
+	return &ServerIdentity{uuid: id, privateKey: key, publicKeyPEM: string(pubPEM)}, nil
+}
+
+// NewTestServerIdentity builds a ServerIdentity directly from uuid and
+// privateKey, for tests in other packages that need one without touching
+// disk (see LoadServerIdentity for the real, on-disk-backed constructor).
+func NewTestServerIdentity(uuid string, privateKey *rsa.PrivateKey) *ServerIdentity {
+	return &ServerIdentity{uuid: uuid, privateKey: privateKey}
+}
+
+// UUID returns this instance's persistent UUID (see ensureServerUUID).
+func (si *ServerIdentity) UUID() string {
+	return si.uuid
+}
+
+// PublicKeyPEM returns this instance's PEM-encoded RSA public key, for
+// display to an operator (see handleIdentity) to paste into a receiving
+// instance's config.
+func (si *ServerIdentity) PublicKeyPEM() string {
+	return si.publicKeyPEM
+}
+
+// SignRequest signs a fresh short-lived JWT (see SignRemoteAuthToken)
+// identifying this instance as issuer and scoped to audience (the
+// destination receiver's id), for uploadToRemote/deleteRemoteObject's
+// Authorization: Bearer header.
+func (si *ServerIdentity) SignRequest(audience string) (string, error) {
+	return SignRemoteAuthToken(si.privateKey, si.uuid, audience)
 }
 
 // loadServerPrivateKey reads and parses dir/server.key (written by

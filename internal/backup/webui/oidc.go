@@ -1,4 +1,4 @@
-package backup
+package webui
 
 import (
 	"context"
@@ -10,58 +10,60 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
+
+	"nilswitt.dev/go-backup-tool/internal/backup"
 )
 
-// oidcAuth wraps everything the dashboard's SSO login (see
+// OIDCAuth wraps everything the dashboard's SSO login (see
 // handleOIDCLogin/handleOIDCCallback) needs once a provider has been
 // discovered: the oauth2 client config used to build the authorization URL
 // and exchange a code, and the ID token verifier checked against that same
 // provider's JWKS.
-type oidcAuth struct {
+type OIDCAuth struct {
 	oauth2Config oauth2.Config
 	verifier     *oidc.IDTokenVerifier
 }
 
-// newOIDCAuth builds an *oidcAuth for cfg by fetching its provider's
+// newOIDCAuth builds an *OIDCAuth for cfg by fetching its provider's
 // discovery document (issuer + "/.well-known/openid-configuration"), which
 // requires a live network call — the reason this isn't done in config.go's
-// parseFlags, whose errors are meant to be flag/config-shape problems, not
+// ParseFlags, whose errors are meant to be flag/config-shape problems, not
 // network ones. Called once at startup (see runWithContext in app.go) when
-// cfg.enabled; a returned error means the provider couldn't be reached or
+// cfg.Enabled; a returned error means the provider couldn't be reached or
 // doesn't speak OIDC discovery, which the caller treats as a soft failure —
 // logging a warning and running the web UI without SSO rather than failing
 // the whole process over an IdP that's down.
-func newOIDCAuth(ctx context.Context, cfg oidcSettings) (*oidcAuth, error) {
-	provider, err := oidc.NewProvider(ctx, cfg.issuer)
+func newOIDCAuth(ctx context.Context, cfg backup.OIDCSettings) (*OIDCAuth, error) {
+	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
 	if err != nil {
 		return nil, err
 	}
 
-	return &oidcAuth{
+	return &OIDCAuth{
 		oauth2Config: oauth2.Config{
-			ClientID:     cfg.clientID,
-			ClientSecret: cfg.clientSecret,
-			RedirectURL:  cfg.redirectURL,
+			ClientID:     cfg.ClientID,
+			ClientSecret: cfg.ClientSecret,
+			RedirectURL:  cfg.RedirectURL,
 			Endpoint:     provider.Endpoint(),
-			Scopes:       append([]string{oidc.ScopeOpenID}, cfg.scopes...),
+			Scopes:       append([]string{oidc.ScopeOpenID}, cfg.Scopes...),
 		},
-		verifier: provider.Verifier(&oidc.Config{ClientID: cfg.clientID}),
+		verifier: provider.Verifier(&oidc.Config{ClientID: cfg.ClientID}),
 	}, nil
 }
 
-// setupOIDCAuth builds an *oidcAuth for cfg (see newOIDCAuth) when
-// cfg.enabled, treating a discovery failure as a soft failure: it logs a
+// SetupOIDCAuth builds an *OIDCAuth for cfg (see newOIDCAuth) when
+// cfg.Enabled, treating a discovery failure as a soft failure: it logs a
 // warning and returns nil, running the web UI without SSO rather than
 // failing the whole process over an IdP that's unreachable at startup. A
 // disabled cfg (the common case) is a silent no-op.
-func setupOIDCAuth(ctx context.Context, cfg oidcSettings, log *slog.Logger) *oidcAuth {
-	if !cfg.enabled {
+func SetupOIDCAuth(ctx context.Context, cfg backup.OIDCSettings, log *slog.Logger) *OIDCAuth {
+	if !cfg.Enabled {
 		return nil
 	}
 
 	auth, err := newOIDCAuth(ctx, cfg)
 	if err != nil {
-		log.Warn("oidc: setting up provider failed, SSO login disabled", "issuer", cfg.issuer, "err", err)
+		log.Warn("oidc: setting up provider failed, SSO login disabled", "issuer", cfg.Issuer, "err", err)
 		return nil
 	}
 
@@ -140,7 +142,7 @@ func (s *oidcPendingStore) consume(state string) (oidcPending, bool) {
 // handleOIDCLogin serves GET /login/oidc: it starts a new in-flight login
 // (see oidcPendingStore) for next (see safeNextPath) and redirects the
 // browser to auth's provider to authenticate.
-func handleOIDCLogin(auth *oidcAuth, pending *oidcPendingStore) http.HandlerFunc {
+func handleOIDCLogin(auth *OIDCAuth, pending *oidcPendingStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		next := safeNextPath(r.URL.Query().Get("next"))
 
@@ -166,15 +168,15 @@ func handleOIDCLogin(auth *oidcAuth, pending *oidcPendingStore) http.HandlerFunc
 // the in-flight login's next. db, when non-nil, gets every attempt appended
 // to the login log (see recordLoginEvent), win or lose, mirroring
 // handleWebUILogin's own recording.
-func handleOIDCCallback(auth *oidcAuth, pending *oidcPendingStore, sessions *sessionStore, log *slog.Logger, db *sql.DB, trustProxyHeaders bool) http.HandlerFunc {
+func handleOIDCCallback(auth *OIDCAuth, pending *oidcPendingStore, sessions *sessionStore, log *slog.Logger, db *sql.DB, trustProxyHeaders bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		record := func(username, detail string, success bool) {
 			if db == nil {
 				return
 			}
 
-			ev := loginEvent{At: time.Now(), Username: username, Method: "oidc", Success: success, RemoteAddr: clientAddr(r, trustProxyHeaders), Detail: detail}
-			if err := recordLoginEvent(r.Context(), db, ev); err != nil {
+			ev := backup.LoginEvent{At: time.Now(), Username: username, Method: "oidc", Success: success, RemoteAddr: clientAddr(r, trustProxyHeaders), Detail: detail}
+			if err := backup.RecordLoginEvent(r.Context(), db, ev); err != nil {
 				log.Warn("oidc: recording login event failed", "err", err)
 			}
 		}

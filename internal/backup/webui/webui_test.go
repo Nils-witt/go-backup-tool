@@ -1,4 +1,4 @@
-package backup
+package webui
 
 import (
 	"encoding/json"
@@ -11,7 +11,18 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"nilswitt.dev/go-backup-tool/internal/backup"
 )
+
+// writeFile writes contents to path, failing the test on any error.
+func writeFile(t *testing.T, path, contents string) {
+	t.Helper()
+
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("writing file: %v", err)
+	}
+}
 
 func TestHandleDashboardServesHTML(t *testing.T) {
 	t.Parallel()
@@ -34,7 +45,7 @@ func TestHandleStatusServesJSON(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore()
-	store.starting("test")
+	store.Starting("test")
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/status", nil)
 	rec := httptest.NewRecorder()
@@ -45,12 +56,12 @@ func TestHandleStatusServesJSON(t *testing.T) {
 		t.Errorf("Content-Type = %q, want application/json prefix", ct)
 	}
 
-	var jobs []jobSnapshot
+	var jobs []backup.JobSnapshot
 	if err := json.Unmarshal(rec.Body.Bytes(), &jobs); err != nil {
 		t.Fatalf("decoding response body: %v", err)
 	}
 
-	if len(jobs) != 1 || jobs[0].Name != "test" || jobs[0].State != stateRunning {
+	if len(jobs) != 1 || jobs[0].Name != "test" || jobs[0].State != backup.StateRunning {
 		t.Errorf("jobs = %+v, want one running job named test", jobs)
 	}
 }
@@ -67,17 +78,17 @@ func TestHandleReceiverStatusIncludesStaleness(t *testing.T) {
 		t.Fatalf("Chtimes(%q): %v", stale, err)
 	}
 
-	receivers := map[string]resolvedReceiver{
-		"a": {id: "a", path: root, staleAfter: time.Hour, webhook: resolvedWebhook{url: "https://example.com/hook", method: http.MethodPost}},
+	receivers := map[string]backup.ResolvedReceiver{
+		"a": {ID: "a", Path: root, StaleAfter: time.Hour, Webhook: backup.ResolvedWebhook{URL: "https://example.com/hook", Method: http.MethodPost}},
 	}
-	store := newReceiverStatusStore(receivers)
+	store := backup.NewReceiverStatusStore(receivers)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers", nil)
 	rec := httptest.NewRecorder()
 
 	handleReceiverStatus(receivers, store, discardLogger)(rec, req)
 
-	var snapshots []receiverSnapshot
+	var snapshots []backup.ReceiverSnapshot
 	if err := json.Unmarshal(rec.Body.Bytes(), &snapshots); err != nil {
 		t.Fatalf("decoding response body: %v", err)
 	}
@@ -97,17 +108,17 @@ func TestHandleReceiverStatusFreshFileIsNotStale(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "recent.gpg"), "a")
 
-	receivers := map[string]resolvedReceiver{
-		"a": {id: "a", path: root, staleAfter: time.Hour, webhook: resolvedWebhook{url: "https://example.com/hook", method: http.MethodPost}},
+	receivers := map[string]backup.ResolvedReceiver{
+		"a": {ID: "a", Path: root, StaleAfter: time.Hour, Webhook: backup.ResolvedWebhook{URL: "https://example.com/hook", Method: http.MethodPost}},
 	}
-	store := newReceiverStatusStore(receivers)
+	store := backup.NewReceiverStatusStore(receivers)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers", nil)
 	rec := httptest.NewRecorder()
 
 	handleReceiverStatus(receivers, store, discardLogger)(rec, req)
 
-	var snapshots []receiverSnapshot
+	var snapshots []backup.ReceiverSnapshot
 	if err := json.Unmarshal(rec.Body.Bytes(), &snapshots); err != nil {
 		t.Fatalf("decoding response body: %v", err)
 	}
@@ -120,15 +131,15 @@ func TestHandleReceiverStatusFreshFileIsNotStale(t *testing.T) {
 func TestHandleReceiverStatusWithoutStaleAfterOmitsStaleness(t *testing.T) {
 	t.Parallel()
 
-	receivers := map[string]resolvedReceiver{"a": {id: "a", path: t.TempDir()}}
-	store := newReceiverStatusStore(receivers)
+	receivers := map[string]backup.ResolvedReceiver{"a": {ID: "a", Path: t.TempDir()}}
+	store := backup.NewReceiverStatusStore(receivers)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers", nil)
 	rec := httptest.NewRecorder()
 
 	handleReceiverStatus(receivers, store, discardLogger)(rec, req)
 
-	var snapshots []receiverSnapshot
+	var snapshots []backup.ReceiverSnapshot
 	if err := json.Unmarshal(rec.Body.Bytes(), &snapshots); err != nil {
 		t.Fatalf("decoding response body: %v", err)
 	}
@@ -143,12 +154,12 @@ func TestStartWebUIServesRequests(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, nil, "", "", nil, nil, false)
+	srv := StartWebUI("127.0.0.1:0", store, nil, nil, discardLogger, nil, nil, "", "", nil, nil, false, nil)
 	if srv == nil {
-		t.Fatal("startWebUI() = nil, want a running server")
+		t.Fatal("StartWebUI() = nil, want a running server")
 	}
 
-	t.Cleanup(srv.shutdown)
+	t.Cleanup(srv.Shutdown)
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+srv.addr+"/api/status", nil)
 	if err != nil {
@@ -267,12 +278,12 @@ func TestStartWebUIWithLoginRequiresSession(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := startWebUI("127.0.0.1:0", store, nil, discardLogger, nil, nil, "admin", "secret", nil, nil, false)
+	srv := StartWebUI("127.0.0.1:0", store, nil, nil, discardLogger, nil, nil, "admin", "secret", nil, nil, false, nil)
 	if srv == nil {
-		t.Fatal("startWebUI() = nil, want a running server")
+		t.Fatal("StartWebUI() = nil, want a running server")
 	}
 
-	t.Cleanup(srv.shutdown)
+	t.Cleanup(srv.Shutdown)
 
 	client := &http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -334,7 +345,7 @@ func TestHandleReceiverFilesServesJSON(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "backup.gpg"), "data")
 
-	receivers := map[string]resolvedReceiver{"a": {id: "a", path: root}}
+	receivers := map[string]backup.ResolvedReceiver{"a": {ID: "a", Path: root}}
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/files", nil)
 	req.SetPathValue("id", "a")
@@ -347,7 +358,7 @@ func TestHandleReceiverFilesServesJSON(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 
-	var files []receiverFile
+	var files []backup.ReceiverFile
 	if err := json.Unmarshal(rec.Body.Bytes(), &files); err != nil {
 		t.Fatalf("decoding response body: %v", err)
 	}
@@ -365,7 +376,7 @@ func TestHandleReceiverFilesUnknownID(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleReceiverFiles(map[string]resolvedReceiver{}, discardLogger)(rec, req)
+	handleReceiverFiles(map[string]backup.ResolvedReceiver{}, discardLogger)(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
@@ -378,10 +389,10 @@ func TestStartWebUIBadAddrReturnsNil(t *testing.T) {
 	store, _ := newTestStore()
 
 	// Port 0 is valid (means "pick one"); an unparseable address is not.
-	srv := startWebUI("not-a-valid-address", store, nil, discardLogger, nil, nil, "", "", nil, nil, false)
+	srv := StartWebUI("not-a-valid-address", store, nil, nil, discardLogger, nil, nil, "", "", nil, nil, false, nil)
 	if srv != nil {
-		t.Cleanup(srv.shutdown)
-		t.Fatal("startWebUI() with an invalid address = non-nil, want nil")
+		t.Cleanup(srv.Shutdown)
+		t.Fatal("StartWebUI() with an invalid address = non-nil, want nil")
 	}
 }
 
@@ -391,7 +402,7 @@ func TestHandleDownloadFileServesContent(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "backup.gpg"), "secret data")
 
-	receivers := map[string]resolvedReceiver{"a": {id: "a", path: root}}
+	receivers := map[string]backup.ResolvedReceiver{"a": {ID: "a", Path: root}}
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/backup.gpg", nil)
 	req.SetPathValue("id", "a")
@@ -523,7 +534,7 @@ func TestHandleWebUILogoutRevokesSession(t *testing.T) {
 func TestLogRingBufferSnapshotOrdersOldestFirst(t *testing.T) {
 	t.Parallel()
 
-	buf := newLogRingBuffer(3)
+	buf := NewLogRingBuffer(3)
 
 	for _, line := range []string{"one\n", "two\n", "three\n"} {
 		if _, err := buf.Write([]byte(line)); err != nil {
@@ -542,7 +553,7 @@ func TestLogRingBufferSnapshotOrdersOldestFirst(t *testing.T) {
 func TestLogRingBufferEvictsOldestPastCapacity(t *testing.T) {
 	t.Parallel()
 
-	buf := newLogRingBuffer(2)
+	buf := NewLogRingBuffer(2)
 
 	for _, line := range []string{"one\n", "two\n", "three\n"} {
 		if _, err := buf.Write([]byte(line)); err != nil {
@@ -561,7 +572,7 @@ func TestLogRingBufferEvictsOldestPastCapacity(t *testing.T) {
 func TestHandleLogsServesJSON(t *testing.T) {
 	t.Parallel()
 
-	buf := newLogRingBuffer(10)
+	buf := NewLogRingBuffer(10)
 	_, _ = buf.Write([]byte("level=INFO msg=hello\n"))
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/logs", nil)
@@ -689,7 +700,7 @@ func TestHandleWebUILoginRecordsLoginEvents(t *testing.T) {
 
 	handleWebUILogin("admin", "secret", false, sessions, db, discardLogger, false)(rec, req)
 
-	events, err := readLoginEvents(t.Context(), db, 10)
+	events, err := backup.ReadLoginEvents(t.Context(), db, 10)
 	if err != nil {
 		t.Fatalf("readLoginEvents() error: %v", err)
 	}
@@ -723,7 +734,7 @@ func TestHandleWebUILoginWithTrustProxyHeadersRecordsForwardedAddr(t *testing.T)
 
 	handleWebUILogin("admin", "secret", false, sessions, db, discardLogger, true)(rec, req)
 
-	events, err := readLoginEvents(t.Context(), db, 10)
+	events, err := backup.ReadLoginEvents(t.Context(), db, 10)
 	if err != nil {
 		t.Fatalf("readLoginEvents() error: %v", err)
 	}
@@ -738,7 +749,7 @@ func TestHandleLoginEventsServesJSON(t *testing.T) {
 
 	db := openTestStateDB(t)
 
-	if err := recordLoginEvent(t.Context(), db, loginEvent{At: time.Now(), Username: "admin", Method: "password", Success: true, RemoteAddr: "127.0.0.1:1"}); err != nil {
+	if err := backup.RecordLoginEvent(t.Context(), db, backup.LoginEvent{At: time.Now(), Username: "admin", Method: "password", Success: true, RemoteAddr: "127.0.0.1:1"}); err != nil {
 		t.Fatalf("recordLoginEvent() error: %v", err)
 	}
 
@@ -793,7 +804,7 @@ func TestHandleDownloadFileRecordsDownloadEvents(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "backup.gpg"), "secret data")
 
-	receivers := map[string]resolvedReceiver{"a": {id: "a", path: root}}
+	receivers := map[string]backup.ResolvedReceiver{"a": {ID: "a", Path: root}}
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/backup.gpg", nil)
 	req.SetPathValue("id", "a")
@@ -810,7 +821,7 @@ func TestHandleDownloadFileRecordsDownloadEvents(t *testing.T) {
 
 	handleDownloadFile(receivers, discardLogger, db, sessions, false)(httptest.NewRecorder(), req)
 
-	events, err := readDownloadEvents(t.Context(), db, 10)
+	events, err := backup.ReadDownloadEvents(t.Context(), db, 10)
 	if err != nil {
 		t.Fatalf("readDownloadEvents() error: %v", err)
 	}
@@ -833,7 +844,7 @@ func TestHandleDownloadEventsServesJSON(t *testing.T) {
 
 	db := openTestStateDB(t)
 
-	if err := recordDownloadEvent(t.Context(), db, downloadEvent{At: time.Now(), Username: "admin", ReceiverID: "a", Key: "backup.gpg", Success: true, RemoteAddr: "127.0.0.1:1"}); err != nil {
+	if err := backup.RecordDownloadEvent(t.Context(), db, backup.DownloadEvent{At: time.Now(), Username: "admin", ReceiverID: "a", Key: "backup.gpg", Success: true, RemoteAddr: "127.0.0.1:1"}); err != nil {
 		t.Fatalf("recordDownloadEvent() error: %v", err)
 	}
 

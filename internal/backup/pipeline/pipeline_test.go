@@ -1,4 +1,4 @@
-package backup
+package pipeline
 
 import (
 	"context"
@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"nilswitt.dev/go-backup-tool/internal/backup"
 )
 
 func TestEnvironWithout(t *testing.T) {
@@ -41,13 +43,13 @@ func TestWriteLocalObject(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	cfg := &config{key: "backup.gpg"}
-	tgt := &target{kind: serverKindLocal, bucket: "sub", localPath: dir}
+	cfg := &backup.Config{Key: "backup.gpg"}
+	tgt := &backup.Target{Kind: backup.ServerKindLocal, Bucket: "sub", LocalPath: dir}
 
 	const content = "ciphertext bytes"
 
-	if err := writeLocalObject(cfg, tgt, strings.NewReader(content)); err != nil {
-		t.Fatalf("writeLocalObject() unexpected error: %v", err)
+	if err := backup.WriteLocalObject(cfg, tgt, strings.NewReader(content)); err != nil {
+		t.Fatalf("backup.WriteLocalObject() unexpected error: %v", err)
 	}
 
 	wantPath := filepath.Join(dir, "sub", "backup.gpg")
@@ -76,14 +78,14 @@ func TestWriteLocalObjectCreatesMissingDirectories(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	cfg := &config{key: "backup.gpg"}
-	tgt := &target{kind: serverKindLocal, bucket: "does/not/exist", localPath: dir}
+	cfg := &backup.Config{Key: "backup.gpg"}
+	tgt := &backup.Target{Kind: backup.ServerKindLocal, Bucket: "does/not/exist", LocalPath: dir}
 
-	if err := writeLocalObject(cfg, tgt, strings.NewReader("x")); err != nil {
-		t.Fatalf("writeLocalObject() unexpected error: %v", err)
+	if err := backup.WriteLocalObject(cfg, tgt, strings.NewReader("x")); err != nil {
+		t.Fatalf("backup.WriteLocalObject() unexpected error: %v", err)
 	}
 
-	if _, err := os.Stat(localObjectPath(cfg, tgt)); err != nil {
+	if _, err := os.Stat(backup.LocalObjectPath(cfg, tgt)); err != nil {
 		t.Errorf("written file not found: %v", err)
 	}
 }
@@ -92,19 +94,19 @@ func TestDeleteLocalObject(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	cfg := &config{key: "backup.gpg"}
-	tgt := &target{kind: serverKindLocal, bucket: "sub", localPath: dir}
+	cfg := &backup.Config{Key: "backup.gpg"}
+	tgt := &backup.Target{Kind: backup.ServerKindLocal, Bucket: "sub", LocalPath: dir}
 
-	if err := writeLocalObject(cfg, tgt, strings.NewReader("x")); err != nil {
-		t.Fatalf("writeLocalObject() unexpected error: %v", err)
+	if err := backup.WriteLocalObject(cfg, tgt, strings.NewReader("x")); err != nil {
+		t.Fatalf("backup.WriteLocalObject() unexpected error: %v", err)
 	}
 
-	if err := deleteLocalObject(cfg, tgt); err != nil {
-		t.Fatalf("deleteLocalObject() unexpected error: %v", err)
+	if err := backup.DeleteLocalObject(cfg, tgt); err != nil {
+		t.Fatalf("backup.DeleteLocalObject() unexpected error: %v", err)
 	}
 
-	if _, err := os.Stat(localObjectPath(cfg, tgt)); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("file still exists after deleteLocalObject(): err = %v", err)
+	if _, err := os.Stat(backup.LocalObjectPath(cfg, tgt)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("file still exists after backup.DeleteLocalObject(): err = %v", err)
 	}
 }
 
@@ -112,11 +114,11 @@ func TestDeleteLocalObjectMissingFileIsNotError(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	cfg := &config{key: "backup.gpg"}
-	tgt := &target{kind: serverKindLocal, bucket: "sub", localPath: dir}
+	cfg := &backup.Config{Key: "backup.gpg"}
+	tgt := &backup.Target{Kind: backup.ServerKindLocal, Bucket: "sub", LocalPath: dir}
 
-	if err := deleteLocalObject(cfg, tgt); err != nil {
-		t.Errorf("deleteLocalObject() on missing file = %v, want nil", err)
+	if err := backup.DeleteLocalObject(cfg, tgt); err != nil {
+		t.Errorf("backup.DeleteLocalObject() on missing file = %v, want nil", err)
 	}
 }
 
@@ -127,7 +129,7 @@ func TestDeleteLocalObjectMissingFileIsNotError(t *testing.T) {
 func stageTestContent(t *testing.T, content string) string {
 	t.Helper()
 
-	path, n, err := stageBackup(&config{}, strings.NewReader(content))
+	path, n, err := stageBackup(&backup.Config{}, strings.NewReader(content))
 	if err != nil {
 		t.Fatalf("stageBackup() unexpected error: %v", err)
 	}
@@ -171,16 +173,16 @@ func TestUploadStagedToTargetsLocal(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	cfg := &config{
-		key: "backup.gpg",
-		targets: []target{
-			{serverName: "nas", kind: serverKindLocal, bucket: "sub", localPath: dir},
+	cfg := &backup.Config{
+		Key: "backup.gpg",
+		Targets: []backup.Target{
+			{ServerName: "nas", Kind: backup.ServerKindLocal, Bucket: "sub", LocalPath: dir},
 		},
 	}
 
 	const content = "hello from the pipeline"
 
-	onDone, results := collectTargetDone(len(cfg.targets))
+	onDone, results := collectTargetDone(len(cfg.Targets))
 
 	err := uploadStagedToTargets(t.Context(), cfg, stageTestContent(t, content), onDone, discardLogger)
 	if err != nil {
@@ -191,7 +193,7 @@ func TestUploadStagedToTargetsLocal(t *testing.T) {
 		t.Fatalf("uploadStagedToTargets() reported target results = %v, want [nil]", targetErrs)
 	}
 
-	got, err := os.ReadFile(localObjectPath(cfg, &cfg.targets[0]))
+	got, err := os.ReadFile(backup.LocalObjectPath(cfg, &cfg.Targets[0]))
 	if err != nil {
 		t.Fatalf("reading written file: %v", err)
 	}
@@ -218,17 +220,17 @@ func TestUploadStagedToTargetsContinuesAfterOneTargetFails(t *testing.T) {
 		t.Fatalf("setting up blocked path: %v", err)
 	}
 
-	cfg := &config{
-		key: "backup.gpg",
-		targets: []target{
-			{serverName: "bad", kind: serverKindLocal, bucket: "blocked/sub", localPath: dir},
-			{serverName: "good", kind: serverKindLocal, bucket: "sub", localPath: dir},
+	cfg := &backup.Config{
+		Key: "backup.gpg",
+		Targets: []backup.Target{
+			{ServerName: "bad", Kind: backup.ServerKindLocal, Bucket: "blocked/sub", LocalPath: dir},
+			{ServerName: "good", Kind: backup.ServerKindLocal, Bucket: "sub", LocalPath: dir},
 		},
 	}
 
 	const content = "hello from the pipeline"
 
-	onDone, results := collectTargetDone(len(cfg.targets))
+	onDone, results := collectTargetDone(len(cfg.Targets))
 
 	err := uploadStagedToTargets(t.Context(), cfg, stageTestContent(t, content), onDone, discardLogger)
 	if err == nil {
@@ -244,7 +246,7 @@ func TestUploadStagedToTargetsContinuesAfterOneTargetFails(t *testing.T) {
 		t.Errorf("uploadStagedToTargets() good target err = %v, want nil (other target's failure shouldn't affect it)", targetErrs[1])
 	}
 
-	got, err := os.ReadFile(localObjectPath(cfg, &cfg.targets[1]))
+	got, err := os.ReadFile(backup.LocalObjectPath(cfg, &cfg.Targets[1]))
 	if err != nil {
 		t.Fatalf("reading good target's written file: %v", err)
 	}
@@ -265,12 +267,12 @@ func TestUploadStagedToTargetsIsolatesSlowTarget(t *testing.T) {
 
 	dir := t.TempDir()
 
-	cfg := &config{
-		key:      "backup.gpg",
-		identity: testServerIdentity(t),
-		targets: []target{
-			{serverName: "sibling-instance", kind: serverKindRemote, endpoint: "http://10.255.255.1:8050", bucket: "from-primary"},
-			{serverName: "nas", kind: serverKindLocal, bucket: "my-backup-bucket-local", localPath: dir},
+	cfg := &backup.Config{
+		Key:      "backup.gpg",
+		Identity: testServerIdentity(t),
+		Targets: []backup.Target{
+			{ServerName: "sibling-instance", Kind: backup.ServerKindRemote, Endpoint: "http://10.255.255.1:8050", Bucket: "from-primary"},
+			{ServerName: "nas", Kind: backup.ServerKindLocal, Bucket: "my-backup-bucket-local", LocalPath: dir},
 		},
 	}
 
@@ -279,7 +281,7 @@ func TestUploadStagedToTargetsIsolatesSlowTarget(t *testing.T) {
 
 	const content = "hello from the pipeline"
 
-	onDone, results := collectTargetDone(len(cfg.targets))
+	onDone, results := collectTargetDone(len(cfg.Targets))
 
 	err := uploadStagedToTargets(ctx, cfg, stageTestContent(t, content), onDone, discardLogger)
 	if err == nil {
@@ -295,7 +297,7 @@ func TestUploadStagedToTargetsIsolatesSlowTarget(t *testing.T) {
 		t.Errorf("uploadStagedToTargets() local target err = %v, want nil (the remote target's failure shouldn't affect it)", targetErrs[1])
 	}
 
-	got, readErr := os.ReadFile(localObjectPath(cfg, &cfg.targets[1]))
+	got, readErr := os.ReadFile(backup.LocalObjectPath(cfg, &cfg.Targets[1]))
 	if readErr != nil {
 		t.Fatalf("reading local target's written file: %v", readErr)
 	}
@@ -323,18 +325,18 @@ func TestUploadStagedToTargetsQueuesFailureForRetry(t *testing.T) {
 
 	stateDB := openTestStateDB(t)
 
-	cfg := &config{
-		name:     "job-a",
-		key:      "backup.gpg",
-		retries:  3,
-		identity: testServerIdentity(t),
-		stateDB:  stateDB,
-		targets:  []target{{serverName: "always-down", kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"}},
+	cfg := &backup.Config{
+		Name:     "job-a",
+		Key:      "backup.gpg",
+		Retries:  3,
+		Identity: testServerIdentity(t),
+		StateDB:  stateDB,
+		Targets:  []backup.Target{{ServerName: "always-down", Kind: backup.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}},
 	}
 
 	stagingPath := stageTestContent(t, "hello")
 
-	onDone, results := collectTargetDone(len(cfg.targets))
+	onDone, results := collectTargetDone(len(cfg.Targets))
 
 	if err := uploadStagedToTargets(t.Context(), cfg, stagingPath, onDone, discardLogger); err == nil {
 		t.Fatal("uploadStagedToTargets() error = nil, want non-nil")
@@ -348,13 +350,13 @@ func TestUploadStagedToTargetsQueuesFailureForRetry(t *testing.T) {
 		t.Fatalf("uploadStagedToTargets() reported target results = %v, want [<err>]", targetErrs)
 	}
 
-	rows, err := listOutstandingUploads(t.Context(), stateDB)
+	rows, err := backup.ListOutstandingUploads(t.Context(), stateDB)
 	if err != nil {
-		t.Fatalf("listOutstandingUploads() error: %v", err)
+		t.Fatalf("backup.ListOutstandingUploads() error: %v", err)
 	}
 
 	if len(rows) != 1 {
-		t.Fatalf("listOutstandingUploads() = %+v, want exactly 1 queued row", rows)
+		t.Fatalf("backup.ListOutstandingUploads() = %+v, want exactly 1 queued row", rows)
 	}
 
 	if rows[0].JobName != "job-a" || rows[0].TargetIdx != 0 || rows[0].StagingPath != stagingPath {
@@ -381,15 +383,15 @@ func TestUploadStagedToTargetsNoQueueWhenNoRetriesConfigured(t *testing.T) {
 
 	stateDB := openTestStateDB(t)
 
-	cfg := &config{
-		name:     "job-a",
-		key:      "backup.gpg", // retries left at 0
-		identity: testServerIdentity(t),
-		stateDB:  stateDB,
-		targets:  []target{{serverName: "always-down", kind: serverKindRemote, endpoint: srv.URL, bucket: "instance-a"}},
+	cfg := &backup.Config{
+		Name:     "job-a",
+		Key:      "backup.gpg", // retries left at 0
+		Identity: testServerIdentity(t),
+		StateDB:  stateDB,
+		Targets:  []backup.Target{{ServerName: "always-down", Kind: backup.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}},
 	}
 
-	onDone, _ := collectTargetDone(len(cfg.targets))
+	onDone, _ := collectTargetDone(len(cfg.Targets))
 
 	if err := uploadStagedToTargets(t.Context(), cfg, stageTestContent(t, "hello"), onDone, discardLogger); err == nil {
 		t.Fatal("uploadStagedToTargets() error = nil, want non-nil")
@@ -399,13 +401,13 @@ func TestUploadStagedToTargetsNoQueueWhenNoRetriesConfigured(t *testing.T) {
 		t.Errorf("requests = %d, want 1", got)
 	}
 
-	rows, err := listOutstandingUploads(t.Context(), stateDB)
+	rows, err := backup.ListOutstandingUploads(t.Context(), stateDB)
 	if err != nil {
-		t.Fatalf("listOutstandingUploads() error: %v", err)
+		t.Fatalf("backup.ListOutstandingUploads() error: %v", err)
 	}
 
 	if len(rows) != 0 {
-		t.Fatalf("listOutstandingUploads() = %+v, want none (retries=1 means no retry queued)", rows)
+		t.Fatalf("backup.ListOutstandingUploads() = %+v, want none (retries=1 means no retry queued)", rows)
 	}
 }
 
@@ -414,15 +416,15 @@ func TestBuildGPGCommand(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		cfg            *config
+		cfg            *backup.Config
 		wantArgs       []string // exact args, in order
 		wantPassphrase bool
 	}{
 		{
 			name: "recipient mode, single recipient",
-			cfg: &config{
-				gpgBin:     "gpg",
-				recipients: stringSlice{"me@example.com"},
+			cfg: &backup.Config{
+				GPGBin:     "gpg",
+				Recipients: []string{"me@example.com"},
 			},
 			wantArgs: []string{
 				"--batch", "--yes", "--trust-model", "always", "--encrypt",
@@ -431,11 +433,11 @@ func TestBuildGPGCommand(t *testing.T) {
 		},
 		{
 			name: "recipient mode, multiple recipients plus armor and homedir",
-			cfg: &config{
-				gpgBin:     "gpg",
-				recipients: stringSlice{"a@example.com", "b@example.com"},
-				armor:      true,
-				gpgHomedir: "/tmp/gnupg-test",
+			cfg: &backup.Config{
+				GPGBin:     "gpg",
+				Recipients: []string{"a@example.com", "b@example.com"},
+				Armor:      true,
+				GPGHomedir: "/tmp/gnupg-test",
 			},
 			wantArgs: []string{
 				"--batch", "--yes", "--homedir", "/tmp/gnupg-test", "--armor",
@@ -445,9 +447,9 @@ func TestBuildGPGCommand(t *testing.T) {
 		},
 		{
 			name: "symmetric mode",
-			cfg: &config{
-				gpgBin:    "gpg",
-				symmetric: true,
+			cfg: &backup.Config{
+				GPGBin:    "gpg",
+				Symmetric: true,
 			},
 			wantArgs: []string{
 				"--batch", "--yes",
@@ -528,7 +530,7 @@ func TestSymmetricEncryptDecryptRoundTrip(t *testing.T) {
 		passphrase = "unit-test-passphrase"
 	)
 
-	cfg := &config{gpgBin: "gpg", symmetric: true}
+	cfg := &backup.Config{GPGBin: "gpg", Symmetric: true}
 
 	cmd, passphraseWriter, passphraseReadEnd, err := buildGPGCommand(t.Context(), cfg)
 	if err != nil {

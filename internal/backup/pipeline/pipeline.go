@@ -1,4 +1,9 @@
-package backup
+// Package pipeline runs a configured backup job end to end: executing its
+// command, encrypting the output with gpg, staging it locally, and
+// uploading it to every target — plus the background work that keeps a run
+// healthy afterward: scheduling repeats, retrying failed uploads, sweeping
+// expired local objects, and sending the daily receiver report.
+package pipeline
 
 import (
 	"bytes"
@@ -12,7 +17,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -24,6 +28,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+
+	"nilswitt.dev/go-backup-tool/internal/backup"
 )
 
 // remoteHTTPClient is shared by every remote target's upload/delete
@@ -64,20 +70,20 @@ func environWithout(names ...string) []string {
 // back, unlike a live streaming design where a target could already have a
 // complete-but-truncated object by the time the failure is noticed), and
 // each target then uploads from that same stable file independently — so a
-// target that fails is retried (see queueOutstandingUpload and
+// target that fails is retried (see backup.QueueOutstandingUpload and
 // monitorOutstandingUploads in uploadretry.go) by re-reading the file,
 // without re-running the backup command or gpg and without affecting any
 // other target's own attempts.
 //
-// cfg.cmd is run through the platform shell ("sh -c" on every OS but
+// cfg.Cmd is run through the platform shell ("sh -c" on every OS but
 // Windows, "cmd /C" there — see newSourceCommand) deliberately: it lets an
 // operator pass a full shell pipeline (e.g. "mysqldump db | gzip") as the
-// backup source. cfg.cmd is operator-supplied CLI configuration, not
+// backup source. cfg.Cmd is operator-supplied CLI configuration, not
 // untrusted external input, so this is the intended behavior rather than a
 // command-injection risk.
 //
 // onTargetDone, if non-nil, is called exactly once per target — index-
-// aligned with cfg.targets — as soon as that target's own outcome is known
+// aligned with cfg.Targets — as soon as that target's own outcome is known
 // (nil means it succeeded), independently of every other target and of the
 // job as a whole: a target that finishes early (or fails) is reported right
 // away rather than waiting for the slowest target, or any retries, to
@@ -92,7 +98,7 @@ func environWithout(names ...string) []string {
 // (they all upload from the same staged file), for callers that want to
 // report the backup's size; it's 0 if the pipeline failed before staging
 // finished.
-func runPipeline(ctx context.Context, cfg *config, log *slog.Logger, onTargetDone func(index int, err error)) (bytesWritten int64, err error) {
+func runPipeline(ctx context.Context, cfg *backup.Config, log *slog.Logger, onTargetDone func(index int, err error)) (bytesWritten int64, err error) {
 	// Guarantees the onTargetDone contract above even on an early return:
 	// uploadStagedToTargets reports each target itself once it starts, so
 	// this only fires for a failure earlier in the pipeline, and it always
@@ -102,7 +108,7 @@ func runPipeline(ctx context.Context, cfg *config, log *slog.Logger, onTargetDon
 
 	defer func() {
 		if !uploadStarted {
-			for i := range cfg.targets {
+			for i := range cfg.Targets {
 				onTargetDone(i, err)
 			}
 		}
@@ -113,7 +119,7 @@ func runPipeline(ctx context.Context, cfg *config, log *slog.Logger, onTargetDon
 		return 0, err
 	}
 
-	log.Debug("staging encrypted backup", "dir", cfg.stagingDir)
+	log.Debug("staging encrypted backup", "dir", cfg.StagingDir)
 
 	stagingPath, bytesWritten, stageErr := stageBackup(cfg, gpgOut)
 
@@ -123,7 +129,7 @@ func runPipeline(ctx context.Context, cfg *config, log *slog.Logger, onTargetDon
 	sourceErr := sourceCmd.Wait()
 
 	if stageErr == nil {
-		defer cleanupStagedFileIfIdle(ctx, cfg.stateDB, stagingPath, log)
+		defer cleanupStagedFileIfIdle(ctx, cfg.StateDB, stagingPath, log)
 	}
 
 	// Only upload if every earlier stage genuinely succeeded: staging a
@@ -136,13 +142,13 @@ func runPipeline(ctx context.Context, cfg *config, log *slog.Logger, onTargetDon
 	var uploadErr error
 
 	if sourceErr == nil && gpgErr == nil && stageErr == nil {
-		log.Debug("uploading to targets", "targets", len(cfg.targets))
+		log.Debug("uploading to targets", "targets", len(cfg.Targets))
 
 		uploadStarted = true
 		uploadErr = uploadStagedToTargets(ctx, cfg, stagingPath, onTargetDone, log)
 	}
 
-	return bytesWritten, firstPipelineError(cfg.cmd, sourceErr, gpgErr, stageErr, uploadErr)
+	return bytesWritten, firstPipelineError(cfg.Cmd, sourceErr, gpgErr, stageErr, uploadErr)
 }
 
 // newSourceCommand builds the (not yet started) command that runs cmd
@@ -152,21 +158,21 @@ func runPipeline(ctx context.Context, cfg *config, log *slog.Logger, onTargetDon
 // runPipeline's doc comment.
 func newSourceCommand(ctx context.Context, cmd string) *exec.Cmd {
 	if runtime.GOOS == "windows" {
-		return exec.CommandContext(ctx, "cmd", "/C", cmd) //nolint:gosec // cfg.cmd is operator-supplied CLI config, not untrusted input; see runPipeline's doc comment
+		return exec.CommandContext(ctx, "cmd", "/C", cmd) //nolint:gosec // cfg.Cmd is operator-supplied CLI config, not untrusted input; see runPipeline's doc comment
 	}
 
-	return exec.CommandContext(ctx, "sh", "-c", cmd) //nolint:gosec // cfg.cmd is operator-supplied CLI config, not untrusted input; see runPipeline's doc comment
+	return exec.CommandContext(ctx, "sh", "-c", cmd) //nolint:gosec // cfg.Cmd is operator-supplied CLI config, not untrusted input; see runPipeline's doc comment
 }
 
-// startEncryptingPipeline starts cfg.cmd piped into gpg (sourceCmd's stdout
+// startEncryptingPipeline starts cfg.Cmd piped into gpg (sourceCmd's stdout
 // wired to gpgCmd's stdin) and returns both commands, already started, plus
 // gpgOut: gpg's stdout, ready for the caller to drain (e.g. via stageBackup)
 // into the encrypted backup. The caller is responsible for Wait-ing on both
 // commands once gpgOut has been fully read, per exec.Cmd.StdoutPipe's
 // documented contract — gpgCmd first, since sourceCmd's exit only matters
 // once gpg (its downstream reader) is done with it.
-func startEncryptingPipeline(ctx context.Context, cfg *config, log *slog.Logger) (sourceCmd, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
-	sourceCmd = newSourceCommand(ctx, cfg.cmd)
+func startEncryptingPipeline(ctx context.Context, cfg *backup.Config, log *slog.Logger) (sourceCmd, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
+	sourceCmd = newSourceCommand(ctx, cfg.Cmd)
 	sourceCmd.Stderr = &logWriter{log: log, msg: "command stderr"}
 	// The backup command may be arbitrary and its output/behavior is
 	// outside our control; make sure it can't read the encryption
@@ -193,10 +199,10 @@ func startEncryptingPipeline(ctx context.Context, cfg *config, log *slog.Logger)
 		return nil, nil, nil, fmt.Errorf("wiring gpg output: %w", err)
 	}
 
-	log.Debug("starting source command", "cmd", cfg.cmd)
+	log.Debug("starting source command", "cmd", cfg.Cmd)
 
 	if err := sourceCmd.Start(); err != nil {
-		return nil, nil, nil, fmt.Errorf("starting command %q: %w", cfg.cmd, err)
+		return nil, nil, nil, fmt.Errorf("starting command %q: %w", cfg.Cmd, err)
 	}
 
 	log.Debug("starting gpg", "args", gpgCmd.Args)
@@ -214,7 +220,7 @@ func startEncryptingPipeline(ctx context.Context, cfg *config, log *slog.Logger)
 	}
 
 	if passphraseWriter != nil {
-		if err := writePassphrase(passphraseWriter, cfg.passphrase); err != nil {
+		if err := writePassphrase(passphraseWriter, cfg.Passphrase); err != nil {
 			return nil, nil, nil, err
 		}
 	}
@@ -258,15 +264,15 @@ func (w *logWriter) Write(p []byte) (int, error) {
 }
 
 // stageBackup drains r (the gpg pipeline's stdout) into a private temporary
-// file under cfg.stagingDir (the OS default temp directory if unset). The
+// file under cfg.StagingDir (the OS default temp directory if unset). The
 // returned path holds the complete encrypted backup once err is nil; the
 // caller owns removing it once every target has finished uploading from it.
 //
 // bytesWritten reports how many bytes were read from r even on error (e.g.
 // a disk-full mid-write), since runPipeline still wants that for its own
 // return value and logging.
-func stageBackup(cfg *config, r io.Reader) (path string, bytesWritten int64, err error) {
-	f, err := os.CreateTemp(cfg.stagingDir, "go-backup-tool-*.staged")
+func stageBackup(cfg *backup.Config, r io.Reader) (path string, bytesWritten int64, err error) {
+	f, err := os.CreateTemp(cfg.StagingDir, "go-backup-tool-*.staged")
 	if err != nil {
 		return "", 0, fmt.Errorf("creating staging file: %w", err)
 	}
@@ -304,8 +310,8 @@ func writePassphrase(w io.WriteCloser, passphrase string) error {
 
 // targetLabel identifies t in log/error messages, naming both the server it
 // came from and its bucket, so multi-server setups are easy to debug.
-func targetLabel(t *target) string {
-	return fmt.Sprintf("server %q, bucket %q", t.serverName, t.bucket)
+func targetLabel(t *backup.Target) string {
+	return fmt.Sprintf("server %q, bucket %q", t.ServerName, t.Bucket)
 }
 
 // firstPipelineError reports the first failure among the pipeline's stages,
@@ -336,18 +342,18 @@ func firstPipelineError(cmd string, sourceErr, gpgErr, stageErr, uploadErr error
 // end of that same pipe, which the caller must close in the parent process
 // once the command has started (see the comment at its call site in
 // runPipeline).
-func buildGPGCommand(ctx context.Context, cfg *config) (cmd *exec.Cmd, passphraseWriter io.WriteCloser, passphraseReadEnd *os.File, err error) {
+func buildGPGCommand(ctx context.Context, cfg *backup.Config) (cmd *exec.Cmd, passphraseWriter io.WriteCloser, passphraseReadEnd *os.File, err error) {
 	args := []string{"--batch", "--yes"}
 
-	if cfg.gpgHomedir != "" {
-		args = append(args, "--homedir", cfg.gpgHomedir)
+	if cfg.GPGHomedir != "" {
+		args = append(args, "--homedir", cfg.GPGHomedir)
 	}
 
-	if cfg.armor {
+	if cfg.Armor {
 		args = append(args, "--armor")
 	}
 
-	if cfg.symmetric {
+	if cfg.Symmetric {
 		pr, pw, pipeErr := os.Pipe()
 		if pipeErr != nil {
 			return nil, nil, nil, fmt.Errorf("creating passphrase pipe: %w", pipeErr)
@@ -360,12 +366,12 @@ func buildGPGCommand(ctx context.Context, cfg *config) (cmd *exec.Cmd, passphras
 		args = append(args, "--pinentry-mode", "loopback", "--passphrase-fd", "3", "--symmetric")
 	} else {
 		args = append(args, "--trust-model", "always", "--encrypt")
-		for _, r := range cfg.recipients {
+		for _, r := range cfg.Recipients {
 			args = append(args, "--recipient", r)
 		}
 	}
 
-	cmd = exec.CommandContext(ctx, cfg.gpgBin, args...) //nolint:gosec // cfg.gpgBin/args are operator-supplied CLI config, not untrusted input
+	cmd = exec.CommandContext(ctx, cfg.GPGBin, args...) //nolint:gosec // cfg.GPGBin/args are operator-supplied CLI config, not untrusted input
 	if passphraseReadEnd != nil {
 		cmd.ExtraFiles = []*os.File{passphraseReadEnd}
 	}
@@ -379,12 +385,12 @@ func buildGPGCommand(ctx context.Context, cfg *config) (cmd *exec.Cmd, passphras
 // credential/region resolution (env vars, shared config, IAM roles, ...).
 // The optional custom endpoint and path-style addressing support
 // self-hosted S3 servers.
-func newS3Client(ctx context.Context, t *target) (*s3.Client, error) {
-	opts := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(t.region)}
+func newS3Client(ctx context.Context, t *backup.Target) (*s3.Client, error) {
+	opts := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(t.Region)}
 
-	if t.accessKey != "" {
+	if t.AccessKey != "" {
 		opts = append(opts, awsconfig.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(t.accessKey, t.secretKey, ""),
+			credentials.NewStaticCredentialsProvider(t.AccessKey, t.SecretKey, ""),
 		))
 	}
 
@@ -394,25 +400,25 @@ func newS3Client(ctx context.Context, t *target) (*s3.Client, error) {
 	}
 
 	return s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-		if t.endpoint != "" {
-			o.BaseEndpoint = aws.String(t.endpoint)
+		if t.Endpoint != "" {
+			o.BaseEndpoint = aws.String(t.Endpoint)
 		}
 
-		o.UsePathStyle = t.pathStyle
+		o.UsePathStyle = t.PathStyle
 	}), nil
 }
 
 // uploadStagedToTargets uploads the already-staged backup at stagingPath
-// (see stageBackup) to every one of cfg.targets, each independently and
+// (see stageBackup) to every one of cfg.Targets, each independently and
 // concurrently: every target opens its own handle on stagingPath, so one
 // target being slow or blocked doesn't affect any other's progress the way
 // funneling them all through a single shared reader would.
 //
 // Each target gets exactly one attempt here. A target whose attempt fails is
-// queued as an outstanding upload (see queueOutstandingUpload) for
+// queued as an outstanding upload (see backup.QueueOutstandingUpload) for
 // monitorOutstandingUploads (uploadretry.go) to retry roughly once a minute,
-// up to cfg.retries total attempts, instead of retrying immediately in place
-// — unless cfg.retries allows no more than this one attempt, in which case
+// up to cfg.Retries total attempts, instead of retrying immediately in place
+// — unless cfg.Retries allows no more than this one attempt, in which case
 // the failure is permanent for this run, matching the old behavior for a
 // job with no retries configured. onTargetDone (see its doc on runPipeline)
 // is called for target i the moment this attempt's outcome is known,
@@ -422,14 +428,14 @@ func newS3Client(ctx context.Context, t *target) (*s3.Client, error) {
 //
 // It returns the combined error via errors.Join, for callers that just want
 // to know whether anything failed.
-func uploadStagedToTargets(ctx context.Context, cfg *config, stagingPath string, onTargetDone func(index int, err error), log *slog.Logger) error {
-	targetErrs := make([]error, len(cfg.targets))
-	maxAttempts := max(cfg.retries, 1)
+func uploadStagedToTargets(ctx context.Context, cfg *backup.Config, stagingPath string, onTargetDone func(index int, err error), log *slog.Logger) error {
+	targetErrs := make([]error, len(cfg.Targets))
+	maxAttempts := max(cfg.Retries, 1)
 
 	var wg sync.WaitGroup
 
-	for i := range cfg.targets {
-		t := &cfg.targets[i]
+	for i := range cfg.Targets {
+		t := &cfg.Targets[i]
 
 		log.Debug("target upload starting", "target", targetLabel(t))
 
@@ -460,7 +466,7 @@ func uploadStagedToTargets(ctx context.Context, cfg *config, stagingPath string,
 // queued as an outstanding upload for monitorOutstandingUploads
 // (uploadretry.go) to retry later; otherwise the failure is permanent for
 // this run, matching a job with no retries configured.
-func queueOrLogTargetFailure(ctx context.Context, cfg *config, index int, t *target, stagingPath string, maxAttempts int, duration time.Duration, err error, log *slog.Logger) {
+func queueOrLogTargetFailure(ctx context.Context, cfg *backup.Config, index int, t *backup.Target, stagingPath string, maxAttempts int, duration time.Duration, err error, log *slog.Logger) {
 	if maxAttempts <= 1 {
 		log.Warn("target upload failed", "target", targetLabel(t), "duration", duration, "err", err)
 		return
@@ -468,13 +474,13 @@ func queueOrLogTargetFailure(ctx context.Context, cfg *config, index int, t *tar
 
 	log.Warn("target upload failed, queuing for retry", "target", targetLabel(t), "duration", duration, "max_attempts", maxAttempts, "err", err)
 
-	if qerr := queueOutstandingUpload(ctx, cfg.stateDB, cfg.name, index, stagingPath, cfg.key, time.Now(), err); qerr != nil {
+	if qerr := backup.QueueOutstandingUpload(ctx, cfg.StateDB, cfg.Name, index, stagingPath, cfg.Key, time.Now(), err); qerr != nil {
 		log.Error("failed to queue outstanding upload; this target will not be retried", "target", targetLabel(t), "err", qerr)
 	}
 }
 
 // cleanupStagedFileIfIdle removes path once no outstanding_uploads row still
-// references it (see queueOutstandingUpload/countOutstandingUploadsForPath),
+// references it (see backup.QueueOutstandingUpload/backup.CountOutstandingUploadsForPath),
 // called once runPipeline's own upload attempts are done, and again by
 // monitorOutstandingUploads (uploadretry.go) after each retry that resolves a
 // queued upload (success or giving up). A nil db means state tracking isn't
@@ -487,7 +493,7 @@ func cleanupStagedFileIfIdle(ctx context.Context, db *sql.DB, path string, log *
 		return
 	}
 
-	n, err := countOutstandingUploadsForPath(ctx, db, path)
+	n, err := backup.CountOutstandingUploadsForPath(ctx, db, path)
 	if err != nil {
 		log.Warn("checking outstanding uploads before removing staged file; leaving it in place", "path", path, "err", err)
 		return
@@ -502,20 +508,20 @@ func cleanupStagedFileIfIdle(ctx context.Context, db *sql.DB, path string, log *
 
 // uploadTargetAttempt runs a single upload attempt for target t, reading
 // stagingPath fresh from the start.
-func uploadTargetAttempt(ctx context.Context, cfg *config, t *target, stagingPath string, log *slog.Logger) error {
+func uploadTargetAttempt(ctx context.Context, cfg *backup.Config, t *backup.Target, stagingPath string, log *slog.Logger) error {
 	f, err := os.Open(stagingPath) //nolint:gosec // stagingPath is our own staging file (see stageBackup), not user input
 	if err != nil {
 		return fmt.Errorf("opening staged backup: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
-	switch t.kind {
-	case serverKindLocal:
-		if err := writeLocalObject(cfg, t, f); err != nil {
+	switch t.Kind {
+	case backup.ServerKindLocal:
+		if err := backup.WriteLocalObject(cfg, t, f); err != nil {
 			return err
 		}
 
-		if err := recordLocalWrite(ctx, cfg, t, log); err != nil {
+		if err := backup.RecordLocalWrite(ctx, cfg, t, log); err != nil {
 			// Retention tracking is best-effort auxiliary bookkeeping: the
 			// backup itself already succeeded, so a db hiccup here shouldn't
 			// fail the whole target (or trigger a retry of the upload).
@@ -524,10 +530,10 @@ func uploadTargetAttempt(ctx context.Context, cfg *config, t *target, stagingPat
 
 		return nil
 
-	case serverKindRemote:
-		return uploadToRemote(ctx, cfg, t, f)
+	case backup.ServerKindRemote:
+		return UploadToRemote(ctx, cfg, t, f)
 
-	case serverKindS3:
+	case backup.ServerKindS3:
 		client, err := newS3Client(ctx, t)
 		if err != nil {
 			return fmt.Errorf("setting up s3 client: %w", err)
@@ -552,106 +558,40 @@ func uploadTargetAttempt(ctx context.Context, cfg *config, t *target, stagingPat
 // but as of writing transfermanager is still pre-1.0 (v0.3.x) with no API
 // stability guarantee, so manager remains the safer dependency choice.
 // Revisit once transfermanager reaches a stable v1 release.
-func uploadToS3(ctx context.Context, client *s3.Client, cfg *config, t *target, r io.Reader) error {
+func uploadToS3(ctx context.Context, client *s3.Client, cfg *backup.Config, t *backup.Target, r io.Reader) error {
 	uploader := manager.NewUploader(client) //nolint:staticcheck // see deprecation note above
 
 	_, err := uploader.Upload(ctx, &s3.PutObjectInput{ //nolint:staticcheck // see deprecation note above
-		Bucket: aws.String(t.bucket),
-		Key:    aws.String(cfg.key),
+		Bucket: aws.String(t.Bucket),
+		Key:    aws.String(cfg.Key),
 		Body:   r,
 	})
 
 	return err
 }
 
-// localObjectPath returns the filesystem path a local target (t.kind ==
-// serverKindLocal) writes cfg.key to: t.localPath, with t.bucket as a
-// subdirectory, mirroring the bucket/key layout used for S3 targets so both
-// kinds share the same targets: schema.
-func localObjectPath(cfg *config, t *target) string {
-	return filepath.Join(t.localPath, t.bucket, cfg.key)
-}
-
-// writeLocalObject streams r to the local filesystem at
-// localObjectPath(cfg, t), for a target whose server has type: local.
-//
-// It writes to a temporary file in the destination directory first and
-// renames it into place once fully written, so a reader never observes a
-// partially written object and a mid-stream failure leaves nothing at the
-// final path.
-func writeLocalObject(cfg *config, t *target, r io.Reader) error {
-	dst := localObjectPath(cfg, t)
-	dir := filepath.Dir(dst)
-
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("creating directory %q: %w", dir, err)
-	}
-
-	tmp, err := os.CreateTemp(dir, ".*.tmp")
-	if err != nil {
-		return fmt.Errorf("creating temp file in %q: %w", dir, err)
-	}
-
-	// A successful rename below moves tmp.Name() to dst, so this Remove
-	// then finds nothing and is a harmless no-op; on any earlier error path
-	// it cleans up the leftover temp file.
-	defer func() { _ = os.Remove(tmp.Name()) }()
-
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("setting permissions on %q: %w", tmp.Name(), err)
-	}
-
-	if _, err := io.Copy(tmp, r); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("writing %q: %w", tmp.Name(), err)
-	}
-
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("closing %q: %w", tmp.Name(), err)
-	}
-
-	if err := os.Rename(tmp.Name(), dst); err != nil {
-		return fmt.Errorf("renaming %q to %q: %w", tmp.Name(), dst, err)
-	}
-
-	return nil
-}
-
-// deleteLocalObject removes the file at localObjectPath(cfg, t), used by the
-// receiver API's DELETE endpoint (see handleDeleteObject in webui.go). A
-// file that's already gone is not an error.
-func deleteLocalObject(cfg *config, t *target) error {
-	err := os.Remove(localObjectPath(cfg, t))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-
-	return nil
-}
-
-// remoteObjectURL returns the URL a remote target (t.kind ==
-// serverKindRemote) uploads/deletes key at: t.endpoint's
-// /api/v1/objects/{bucket}/{key}, where t.bucket is the id identifying the
+// RemoteObjectURL returns the URL a remote target (t.Kind ==
+// backup.ServerKindRemote) uploads/deletes key at: t.Endpoint's
+// /api/v1/objects/{bucket}/{key}, where t.Bucket is the id identifying the
 // destination instance's storage path (see receiver.go) and key is
 // path-escaped since it may contain characters not otherwise safe in a URL
 // path segment.
-func remoteObjectURL(t *target, key string) string {
+func RemoteObjectURL(t *backup.Target, key string) string {
 	return fmt.Sprintf("%s/api/v1/objects/%s/%s",
-		strings.TrimSuffix(t.endpoint, "/"), url.PathEscape(t.bucket), url.PathEscape(key))
+		strings.TrimSuffix(t.Endpoint, "/"), url.PathEscape(t.Bucket), url.PathEscape(key))
 }
 
-// remoteAuthHeader signs a fresh JWT with cfg.identity (this instance's own
-// RSA key and UUID — see loadServerIdentity) scoped to t.bucket (the
+// remoteAuthHeader signs a fresh JWT with cfg.Identity (this instance's own
+// RSA key and UUID — see loadServerIdentity) scoped to t.Bucket (the
 // destination instance's receiver id) and formats it as an Authorization:
-// Bearer header value, for uploadToRemote/deleteRemoteObject. Errors if
-// cfg.identity is nil, meaning loadServerIdentity failed at startup.
-func remoteAuthHeader(cfg *config, t *target) (string, error) {
-	if cfg.identity == nil {
+// Bearer header value, for UploadToRemote/DeleteRemoteObject. Errors if
+// cfg.Identity is nil, meaning loadServerIdentity failed at startup.
+func remoteAuthHeader(cfg *backup.Config, t *backup.Target) (string, error) {
+	if cfg.Identity == nil {
 		return "", errors.New("no server identity available (see startup log for why loadServerIdentity failed)")
 	}
 
-	token, err := signRemoteAuthToken(cfg.identity.privateKey, cfg.identity.uuid, t.bucket)
+	token, err := cfg.Identity.SignRequest(t.Bucket)
 	if err != nil {
 		return "", fmt.Errorf("signing request: %w", err)
 	}
@@ -659,18 +599,18 @@ func remoteAuthHeader(cfg *config, t *target) (string, error) {
 	return "Bearer " + token, nil
 }
 
-// uploadToRemote streams r as the body of a PUT request to another
+// UploadToRemote streams r as the body of a PUT request to another
 // go-backup-tool instance's receiver API (target t, kind ==
-// serverKindRemote), authenticated with a JWT signed by this instance's own
+// backup.ServerKindRemote), authenticated with a JWT signed by this instance's own
 // identity (see remoteAuthHeader). r is streamed directly as the request
 // body, never buffered.
-func uploadToRemote(ctx context.Context, cfg *config, t *target, r io.Reader) error {
+func UploadToRemote(ctx context.Context, cfg *backup.Config, t *backup.Target, r io.Reader) error {
 	auth, err := remoteAuthHeader(cfg, t)
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, remoteObjectURL(t, cfg.key), r)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, RemoteObjectURL(t, cfg.Key), r)
 	if err != nil {
 		return fmt.Errorf("building request: %w", err)
 	}
@@ -691,21 +631,21 @@ func uploadToRemote(ctx context.Context, cfg *config, t *target, r io.Reader) er
 	return nil
 }
 
-// deleteRemoteObject removes the object at target t's destination instance
-// (bucket as id, cfg.key as key): the client-side counterpart of the
+// DeleteRemoteObject removes the object at target t's destination instance
+// (bucket as id, cfg.Key as key): the client-side counterpart of the
 // receiver API's DELETE endpoint (see handleDeleteObject in webui.go). The
 // pipeline itself has no caller for this — staging the backup locally
 // before any target upload starts means a failed run never leaves a target
 // with a partial object to clean up — but it remains available (and
 // tested against the real receiver handler, see remote_test.go) as part of
 // the receiver API's client surface.
-func deleteRemoteObject(ctx context.Context, cfg *config, t *target) error {
+func DeleteRemoteObject(ctx context.Context, cfg *backup.Config, t *backup.Target) error {
 	auth, err := remoteAuthHeader(cfg, t)
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, remoteObjectURL(t, cfg.key), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, RemoteObjectURL(t, cfg.Key), nil)
 	if err != nil {
 		return fmt.Errorf("building request: %w", err)
 	}

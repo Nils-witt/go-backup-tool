@@ -1,4 +1,11 @@
-package backup
+// Package webui implements go-backup-tool's web UI: the live status
+// dashboard, its login/session handling (including optional OIDC SSO, see
+// oidc.go), and the read-only views of receiver state and files it shows
+// alongside a job's own status. It shares one HTTP server/mux with the
+// receiver API (internal/backup/receiver) via StartWebUI's
+// registerExtraRoutes hook, so the composition root can mount both on the
+// same listen address without this package importing that one.
+package webui
 
 import (
 	"context"
@@ -22,20 +29,21 @@ import (
 	"sync"
 	"time"
 
+	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
-// webUIServer wraps the HTTP server behind the -listen web UI, letting
-// callers shut it down cleanly (see startWebUI/shutdown).
-type webUIServer struct {
+// Server wraps the HTTP server behind the -listen web UI, letting
+// callers shut it down cleanly (see StartWebUI/shutdown).
+type Server struct {
 	http *http.Server
 	done chan struct{}
 	addr string // the listener's actual bound address, e.g. resolved from ":0"
 }
 
-// startWebUI binds addr and starts an HTTP server serving a live dashboard
+// StartWebUI binds addr and starts an HTTP server serving a live dashboard
 // of store's job/target statuses (see dashboardHTML and handleStatus), plus
-// the receiver API (see handleReceiveObject/handleDeleteObject) for any
+// the receiver API (see HandleReceiveObject/HandleDeleteObject) for any
 // entries in receivers — whose own live status is tracked in a
 // receiverStatusStore, seeded from each receiver's last persisted
 // receiver_events row so a restart doesn't revert every receiver to idle
@@ -54,7 +62,7 @@ type webUIServer struct {
 // by handleDownloadFile to append every file download to the download log
 // served over /api/download-events (see handleDownloadEvents) and shown in
 // the dashboard's "Download log" section; nil disables all three (see
-// recordLocalWrite/recordLoginEvent/recordDownloadEvent). logs backs the dashboard's
+// RecordLocalWrite/recordLoginEvent/recordDownloadEvent). logs backs the dashboard's
 // log viewer (served over /api/logs, see handleLogs); nil starts an empty
 // one, so passing the caller's own buffer only matters if the caller also
 // arranged for it to be written to — which newRunLogger in app.go only does
@@ -64,7 +72,7 @@ type webUIServer struct {
 // the dashboard and its /api/... endpoints (including per-receiver file
 // downloads) behind a login page and session cookie (see
 // requireWebUISession/handleWebUILogin); the receiver API
-// (handleReceiveObject/handleDeleteObject) is unaffected, since it
+// (HandleReceiveObject/HandleDeleteObject) is unaffected, since it
 // authenticates each request on its own via each receiver's own
 // public-key-verified JWT (see authorizeReceiver). An empty webUIUsername
 // leaves the web UI open, as before this was added.
@@ -80,7 +88,7 @@ type webUIServer struct {
 // identity" section, so an operator can read off this instance's UUID and
 // public key without digging through its keys-dir: on disk; a nil identity
 // (loadServerIdentityAtStartup failed at startup) hides that section.
-func startWebUI(addr string, store *statusStore, receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB, logs *logRingBuffer, webUIUsername, webUIPassword string, oidcAuth *oidcAuth, identity *serverIdentity, trustProxyHeaders bool) *webUIServer {
+func StartWebUI(addr string, store *backup.StatusStore, receivers map[string]backup.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger, db *sql.DB, logs *LogRingBuffer, webUIUsername, webUIPassword string, oidcAuth *OIDCAuth, identity *backup.ServerIdentity, trustProxyHeaders bool, registerExtraRoutes func(*http.ServeMux)) *Server {
 	var lc net.ListenConfig
 
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
@@ -90,12 +98,7 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 	}
 
 	if logs == nil {
-		logs = newLogRingBuffer(logBufferCapacity)
-	}
-
-	receiverStore := newReceiverStatusStore(receivers)
-	if db != nil {
-		seedReceiverStatusFromState(context.Background(), db, receivers, receiverStore, log)
+		logs = NewLogRingBuffer(LogBufferCapacity)
 	}
 
 	uiSessions := newSessionStore()
@@ -133,8 +136,10 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 	mux.HandleFunc("GET /logout", handleWebUILogout(uiSessions))
 	mux.HandleFunc("GET /api/login-events", api(handleLoginEvents(db, log)))
 	mux.HandleFunc("GET /api/download-events", api(handleDownloadEvents(db, log)))
-	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", handleReceiveObject(receivers, receiverStore, log, db))
-	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", handleDeleteObject(receivers, receiverStore, log, db))
+
+	if registerExtraRoutes != nil {
+		registerExtraRoutes(mux)
+	}
 
 	if oidcAuth != nil {
 		pending := newOIDCPendingStore()
@@ -142,7 +147,7 @@ func startWebUI(addr string, store *statusStore, receivers map[string]resolvedRe
 		mux.HandleFunc("GET /login/oidc/callback", handleOIDCCallback(oidcAuth, pending, uiSessions, log, db, trustProxyHeaders))
 	}
 
-	srv := &webUIServer{
+	srv := &Server{
 		http: &http.Server{Handler: logRequests(log, mux, trustProxyHeaders), ReadHeaderTimeout: 10 * time.Second},
 		done: make(chan struct{}),
 		addr: ln.Addr().String(),
@@ -259,8 +264,8 @@ func (w *statusWriter) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
-// shutdown gracefully stops the web UI server, waiting for it to finish.
-func (s *webUIServer) shutdown() {
+// Shutdown gracefully stops the web UI server, waiting for it to finish.
+func (s *Server) Shutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -270,11 +275,11 @@ func (s *webUIServer) shutdown() {
 }
 
 // handleStatus serves store's current job/target statuses as JSON.
-func handleStatus(store *statusStore) http.HandlerFunc {
+func handleStatus(store *backup.StatusStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
-		if err := json.NewEncoder(w).Encode(store.snapshot()); err != nil {
+		if err := json.NewEncoder(w).Encode(store.Snapshot()); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	}
@@ -284,9 +289,9 @@ func handleStatus(store *statusStore) http.HandlerFunc {
 // annotated with each receiver's live staleness (see
 // annotateReceiverStaleness) for any entry in receivers with stale-after:
 // set.
-func handleReceiverStatus(receivers map[string]resolvedReceiver, store *receiverStatusStore, log *slog.Logger) http.HandlerFunc {
+func handleReceiverStatus(receivers map[string]backup.ResolvedReceiver, store *backup.ReceiverStatusStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
-		snapshots := store.snapshot()
+		snapshots := store.Snapshot()
 
 		for i := range snapshots {
 			annotateReceiverStaleness(&snapshots[i], receivers[snapshots[i].ID], log)
@@ -316,12 +321,12 @@ type identityJSON struct {
 // nil (loadServerIdentityAtStartup failed at startup, or the receiver API
 // isn't used by any type: remote target) serves a zero-value identityJSON,
 // which the dashboard's JS treats as "no identity to show".
-func handleIdentity(identity *serverIdentity) http.HandlerFunc {
+func handleIdentity(identity *backup.ServerIdentity) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		var out identityJSON
 
 		if identity != nil {
-			out = identityJSON{UUID: identity.uuid, PublicKey: identity.publicKeyPEM}
+			out = identityJSON{UUID: identity.UUID(), PublicKey: identity.PublicKeyPEM()}
 		}
 
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -336,32 +341,32 @@ func handleIdentity(identity *serverIdentity) http.HandlerFunc {
 // current state on disk, for a receiver with stale-after: set; a no-op
 // otherwise. Stale mirrors staleReceiverMonitor.check's own condition — at
 // least one file received, and the most recent one older than
-// recv.staleAfter — so the dashboard never disagrees with what actually
+// recv.StaleAfter — so the dashboard never disagrees with what actually
 // fires the webhook. A lastReceivedAt failure is logged and leaves Stale
 // false rather than failing the whole /api/receivers response over one
 // receiver's directory listing.
-func annotateReceiverStaleness(snap *receiverSnapshot, recv resolvedReceiver, log *slog.Logger) {
-	if recv.staleAfter <= 0 {
+func annotateReceiverStaleness(snap *backup.ReceiverSnapshot, recv backup.ResolvedReceiver, log *slog.Logger) {
+	if recv.StaleAfter <= 0 {
 		return
 	}
 
-	snap.StaleAfter = recv.staleAfter.String()
+	snap.StaleAfter = recv.StaleAfter.String()
 
-	lastSeen, ok, err := lastReceivedAt(recv)
+	lastSeen, ok, err := backup.LastReceivedAt(recv)
 	if err != nil {
-		log.Warn("receiver: checking staleness failed", "id", recv.id, "err", err)
+		log.Warn("receiver: checking staleness failed", "id", recv.ID, "err", err)
 		return
 	}
 
-	snap.Stale = ok && time.Since(lastSeen) > recv.staleAfter
+	snap.Stale = ok && time.Since(lastSeen) > recv.StaleAfter
 }
 
 // handleReceiverFiles serves GET /api/receivers/{id}/files: the objects
 // currently stored under receiver {id}'s path (see listReceiverFiles), for
 // the web UI dashboard's per-receiver file listing. Unlike the receiver API
-// (handleReceiveObject/handleDeleteObject), this is dashboard-only and isn't
+// (HandleReceiveObject/HandleDeleteObject), this is dashboard-only and isn't
 // JWT-authenticated, matching /api/receivers.
-func handleReceiverFiles(receivers map[string]resolvedReceiver, log *slog.Logger) http.HandlerFunc {
+func handleReceiverFiles(receivers map[string]backup.ResolvedReceiver, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := receivers[r.PathValue("id")]
 		if !ok {
@@ -369,9 +374,9 @@ func handleReceiverFiles(receivers map[string]resolvedReceiver, log *slog.Logger
 			return
 		}
 
-		files, err := listReceiverFiles(recv)
+		files, err := backup.ListReceiverFiles(recv)
 		if err != nil {
-			log.Warn("receiver: listing files failed", "id", recv.id, "err", err)
+			log.Warn("receiver: listing files failed", "id", recv.ID, "err", err)
 			http.Error(w, "listing files failed", http.StatusInternalServerError)
 
 			return
@@ -385,34 +390,34 @@ func handleReceiverFiles(receivers map[string]resolvedReceiver, log *slog.Logger
 	}
 }
 
-// logBufferCapacity is how many of the most recent log lines startWebUI's
-// logRingBuffer keeps for the dashboard's log viewer (see handleLogs).
-const logBufferCapacity = 1000
+// LogBufferCapacity is how many of the most recent log lines StartWebUI's
+// LogRingBuffer keeps for the dashboard's log viewer (see handleLogs).
+const LogBufferCapacity = 1000
 
-// logRingBuffer is a bounded, concurrency-safe in-memory tail of the most
+// LogRingBuffer is a bounded, concurrency-safe in-memory tail of the most
 // recent log lines written to it, for the web UI's log viewer (see
 // handleLogs). It's an io.Writer meant to sit alongside the process's real
 // log output (see runWithContext in app.go, which fans writes out to both),
 // treating each Write call as one line — matching how a slog handler calls
 // Write exactly once per record. Lines live only in memory: a restart clears
 // it, same as the receiver status store.
-type logRingBuffer struct {
+type LogRingBuffer struct {
 	mu    sync.Mutex
 	lines []string
 	cap   int
 	start int // index of the oldest entry in lines, once lines is full
 }
 
-// newLogRingBuffer returns an empty logRingBuffer holding at most capacity
+// NewLogRingBuffer returns an empty LogRingBuffer holding at most capacity
 // lines.
-func newLogRingBuffer(capacity int) *logRingBuffer {
-	return &logRingBuffer{cap: capacity, lines: make([]string, 0, capacity)}
+func NewLogRingBuffer(capacity int) *LogRingBuffer {
+	return &LogRingBuffer{cap: capacity, lines: make([]string, 0, capacity)}
 }
 
 // Write records p, trimmed of its trailing newline, as the newest line,
 // evicting the oldest one once the buffer is at capacity. Always succeeds,
 // so a logger writing through this never fails on that account.
-func (b *logRingBuffer) Write(p []byte) (int, error) {
+func (b *LogRingBuffer) Write(p []byte) (int, error) {
 	line := strings.TrimRight(string(p), "\n")
 
 	b.mu.Lock()
@@ -429,7 +434,7 @@ func (b *logRingBuffer) Write(p []byte) (int, error) {
 }
 
 // snapshot returns the currently buffered lines, oldest first.
-func (b *logRingBuffer) snapshot() []string {
+func (b *LogRingBuffer) snapshot() []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -443,7 +448,7 @@ func (b *logRingBuffer) snapshot() []string {
 
 // handleLogs serves buf's currently buffered log lines as JSON, for the
 // dashboard's log viewer to poll.
-func handleLogs(buf *logRingBuffer) http.HandlerFunc {
+func handleLogs(buf *LogRingBuffer) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
@@ -573,7 +578,7 @@ func (s *sessionStore) authenticated(r *http.Request) bool {
 // cookie builds s's session cookie for value, or clears it when value is ""
 // (used by handleWebUILogout). Secure is only set when the request itself
 // arrived over TLS (r.TLS != nil): this process never terminates TLS on its
-// own listen: address (see startWebUI), but a reverse proxy in front of it
+// own listen: address (see StartWebUI), but a reverse proxy in front of it
 // might, in which case Go's net/http sets r.TLS for the connection it
 // accepted from that proxy. HttpOnly and SameSite=Lax are always set, so
 // the session id is never readable from JavaScript and is only ever sent on
@@ -634,7 +639,7 @@ func safeNextPath(next string) string {
 // next (see safeNextPath), typically the page that sent the browser here in
 // the first place. showSSO adds a "Log in with SSO" link to the page (see
 // renderLoginPage), pointing at /login/oidc, whenever oidc.enabled is set
-// (see startWebUI) — independently of whether a username/password is also
+// (see StartWebUI) — independently of whether a username/password is also
 // configured. An empty username with showSSO false (neither kind of login
 // configured) redirects straight to next rather than showing a form there's
 // no way to satisfy; an empty username with showSSO true shows the page
@@ -677,8 +682,8 @@ func handleWebUILogin(username, password string, showSSO bool, sessions *session
 				detail = "incorrect username or password"
 			}
 
-			ev := loginEvent{At: time.Now(), Username: submittedUser, Method: "password", Success: success, RemoteAddr: clientAddr(r, trustProxyHeaders), Detail: detail}
-			if err := recordLoginEvent(r.Context(), db, ev); err != nil {
+			ev := backup.LoginEvent{At: time.Now(), Username: submittedUser, Method: "password", Success: success, RemoteAddr: clientAddr(r, trustProxyHeaders), Detail: detail}
+			if err := backup.RecordLoginEvent(r.Context(), db, ev); err != nil {
 				log.Warn("web UI: recording login event failed", "err", err)
 			}
 		}
@@ -722,8 +727,8 @@ const loginEventsLimit = 200
 // missing dependency.
 func handleLoginEvents(db *sql.DB, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		serveEventLog(w, r, log, db, loginEventsLimit, readLoginEvents,
-			func(ev loginEvent) loginEventJSON { return loginEventJSON(ev) },
+		serveEventLog(w, r, log, db, loginEventsLimit, backup.ReadLoginEvents,
+			func(ev backup.LoginEvent) loginEventJSON { return loginEventJSON(ev) },
 			"reading login events failed")
 	}
 }
@@ -732,7 +737,7 @@ func handleLoginEvents(db *sql.DB, log *slog.Logger) http.HandlerFunc {
 // events (see readLoginEvents/readDownloadEvents), newest first, converting
 // each raw event E to its wire shape J via toJSON. db nil (state tracking
 // unavailable) serves an empty list rather than failing the request, since
-// the state db is optional (see startWebUI). Shared by handleLoginEvents
+// the state db is optional (see StartWebUI). Shared by handleLoginEvents
 // and handleDownloadEvents, whose bodies would otherwise be identical but
 // for the event/read/limit types involved.
 func serveEventLog[E, J any](w http.ResponseWriter, r *http.Request, log *slog.Logger, db *sql.DB, limit int, read func(context.Context, *sql.DB, int) ([]E, error), toJSON func(E) J, errMsg string) {
@@ -786,8 +791,8 @@ const downloadEventsLimit = 200
 // a missing dependency.
 func handleDownloadEvents(db *sql.DB, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		serveEventLog(w, r, log, db, downloadEventsLimit, readDownloadEvents,
-			func(ev downloadEvent) downloadEventJSON { return downloadEventJSON(ev) },
+		serveEventLog(w, r, log, db, downloadEventsLimit, backup.ReadDownloadEvents,
+			func(ev backup.DownloadEvent) downloadEventJSON { return downloadEventJSON(ev) },
 			"reading download events failed")
 	}
 }
@@ -816,7 +821,7 @@ func writeLoginPage(w http.ResponseWriter, page string) {
 // kept in its own file so the markup lives alongside dashboardHTMLSrc rather
 // than as a Go string literal.
 //
-//go:embed webui/login.html
+//go:embed login.html
 var loginPageTemplateSrc string
 
 // loginPageTemplate is loginPageTemplateSrc parsed once at package init.
@@ -873,7 +878,7 @@ func renderLoginPage(errMsg, next string, showPassword, showSSO bool) string {
 // listReceiverFiles/handleReceiverFiles for the metadata-only listing this
 // complements). Unlike the receiver API's own per-receiver JWT auth (see
 // authorizeReceiver), this relies entirely on the dashboard's own login (see
-// requireWebUISession, which wraps this handler in startWebUI) rather than
+// requireWebUISession, which wraps this handler in StartWebUI) rather than
 // any auth of its own, since the audience here is a person clicking a link
 // in a browser rather than another go-backup-tool instance. db, when
 // non-nil, gets every attempt appended to the download log (see
@@ -883,7 +888,7 @@ func renderLoginPage(errMsg, next string, showPassword, showSSO bool) string {
 // for a login log write failure. sessions supplies the username to record
 // (see sessionStore.usernameFor), best-effort: it's empty whenever the web
 // UI has no login configured.
-func handleDownloadFile(receivers map[string]resolvedReceiver, log *slog.Logger, db *sql.DB, sessions *sessionStore, trustProxyHeaders bool) http.HandlerFunc {
+func handleDownloadFile(receivers map[string]backup.ResolvedReceiver, log *slog.Logger, db *sql.DB, sessions *sessionStore, trustProxyHeaders bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := receivers[r.PathValue("id")]
 		if !ok {
@@ -891,7 +896,7 @@ func handleDownloadFile(receivers map[string]resolvedReceiver, log *slog.Logger,
 			return
 		}
 
-		key, err := sanitizeObjectKey(r.PathValue("key"))
+		key, err := backup.SanitizeObjectKey(r.PathValue("key"))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -902,21 +907,21 @@ func handleDownloadFile(receivers map[string]resolvedReceiver, log *slog.Logger,
 				return
 			}
 
-			ev := downloadEvent{At: time.Now(), Username: sessions.usernameFor(r), ReceiverID: recv.id, Key: key, Success: success, RemoteAddr: clientAddr(r, trustProxyHeaders), Detail: detail}
-			if err := recordDownloadEvent(r.Context(), db, ev); err != nil {
+			ev := backup.DownloadEvent{At: time.Now(), Username: sessions.usernameFor(r), ReceiverID: recv.ID, Key: key, Success: success, RemoteAddr: clientAddr(r, trustProxyHeaders), Detail: detail}
+			if err := backup.RecordDownloadEvent(r.Context(), db, ev); err != nil {
 				log.Warn("download: recording download event failed", "err", err)
 			}
 		}
 
-		path := filepath.Join(recv.path, filepath.FromSlash(key))
+		path := filepath.Join(recv.Path, filepath.FromSlash(key))
 
-		f, err := os.Open(path) //nolint:gosec // key is sanitized by sanitizeObjectKey and joined under recv.path, not attacker-controlled beyond that
+		f, err := os.Open(path) //nolint:gosec // key is sanitized by SanitizeObjectKey and joined under recv.Path, not attacker-controlled beyond that
 		if err != nil {
 			if os.IsNotExist(err) {
 				http.Error(w, "not found", http.StatusNotFound)
 				record(false, "not found")
 			} else {
-				log.Warn("download: opening file failed", "id", recv.id, "key", key, "err", err)
+				log.Warn("download: opening file failed", "id", recv.ID, "key", key, "err", err)
 				http.Error(w, "opening file failed", http.StatusInternalServerError)
 				record(false, "opening file failed")
 			}
@@ -931,98 +936,8 @@ func handleDownloadFile(receivers map[string]resolvedReceiver, log *slog.Logger,
 		record(true, "")
 
 		if _, err := io.Copy(w, f); err != nil {
-			log.Warn("download: streaming file failed", "id", recv.id, "key", key, "err", err)
+			log.Warn("download: streaming file failed", "id", recv.ID, "key", key, "err", err)
 		}
-	}
-}
-
-// handleReceiveObject serves PUT /api/v1/objects/{id}/{key...}: after
-// authorizing the request against receivers (see authorizeReceiver), it
-// writes the request body to disk exactly as a type: local target would
-// (see receiverTarget in receiver.go), so a remote target's PUT and this
-// instance's own local-target writes share the same on-disk behavior
-// (atomic temp-file-then-rename) and retention tracking. Every attempt is
-// recorded to status, win or lose, so /api/receivers reflects it.
-func handleReceiveObject(receivers map[string]resolvedReceiver, status *receiverStatusStore, log *slog.Logger, db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		recv, ok := authorizeReceiver(w, r, receivers)
-		if !ok {
-			return
-		}
-
-		key, err := sanitizeObjectKey(r.PathValue("key"))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		cfg := &config{key: key, stateDB: db}
-		t := receiverTarget(recv)
-
-		if err := writeLocalObject(cfg, t, r.Body); err != nil {
-			log.Warn("receiver: writing object failed", "id", recv.id, "key", key, "err", err)
-			status.record(recv.id, key, err)
-			recordReceiverEventBestEffort(r.Context(), db, log, recv.id, receiverEventReceive, key, 0, err)
-			http.Error(w, "writing object failed", http.StatusInternalServerError)
-
-			return
-		}
-
-		if err := recordLocalWrite(r.Context(), cfg, t, log); err != nil {
-			log.Warn("receiver: retention tracking failed", "id", recv.id, "key", key, "err", err)
-		}
-
-		status.record(recv.id, key, nil)
-
-		var size int64
-		if info, statErr := os.Stat(localObjectPath(cfg, t)); statErr == nil {
-			size = info.Size()
-		}
-
-		recordReceiverEventBestEffort(r.Context(), db, log, recv.id, receiverEventReceive, key, size, nil)
-
-		log.Info("receiver: object written", "id", recv.id, "key", key, "path", localObjectPath(cfg, t))
-		w.WriteHeader(http.StatusCreated)
-	}
-}
-
-// handleDeleteObject serves DELETE /api/v1/objects/{id}/{key...}, the
-// receiver API's client-facing counterpart to deleteRemoteObject in
-// pipeline.go. Every attempt is recorded to status, win or lose, so
-// /api/receivers reflects it.
-func handleDeleteObject(receivers map[string]resolvedReceiver, status *receiverStatusStore, log *slog.Logger, db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		recv, ok := authorizeReceiver(w, r, receivers)
-		if !ok {
-			return
-		}
-
-		key, err := sanitizeObjectKey(r.PathValue("key"))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		cfg := &config{key: key, stateDB: db}
-		t := receiverTarget(recv)
-
-		if err := deleteLocalObject(cfg, t); err != nil {
-			log.Warn("receiver: deleting object failed", "id", recv.id, "key", key, "err", err)
-			status.record(recv.id, key, err)
-			recordReceiverEventBestEffort(r.Context(), db, log, recv.id, receiverEventDelete, key, 0, err)
-			http.Error(w, "deleting object failed", http.StatusInternalServerError)
-
-			return
-		}
-
-		if err := removeRetentionRecord(r.Context(), cfg, t); err != nil {
-			log.Warn("receiver: removing retention record failed", "id", recv.id, "key", key, "err", err)
-		}
-
-		status.record(recv.id, key, nil)
-		recordReceiverEventBestEffort(r.Context(), db, log, recv.id, receiverEventDelete, key, 0, nil)
-		log.Info("receiver: object deleted", "id", recv.id, "key", key, "path", localObjectPath(cfg, t))
-		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
@@ -1036,7 +951,7 @@ func handleDeleteObject(receivers map[string]resolvedReceiver, status *receiverS
 // HTML login page as its "JSON" response). authEnabled false (neither a
 // username/password nor an OIDC provider configured) disables the check
 // entirely, leaving the web UI open — this gates the dashboard and its
-// /api/... endpoints (see startWebUI), not the receiver API, which
+// /api/... endpoints (see StartWebUI), not the receiver API, which
 // authenticates separately via each receiver's own public-key-verified JWT.
 func requireWebUISession(authEnabled bool, sessions *sessionStore, redirectOnFail bool, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1054,45 +969,10 @@ func requireWebUISession(authEnabled bool, sessions *sessionStore, redirectOnFai
 	}
 }
 
-// authorizeReceiver looks up the receiver named by the request's {id} path
-// value and verifies its Authorization: Bearer <token> header as a JWT
-// signed by that receiver's configured public-key: (see
-// verifyRemoteAuthToken/signRemoteAuthToken in remoteauth.go), writing an
-// error response and returning ok=false if either the id is unknown or the
-// token doesn't verify.
-func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers map[string]resolvedReceiver) (recv resolvedReceiver, ok bool) {
-	recv, exists := receivers[r.PathValue("id")]
-	if !exists {
-		http.Error(w, "unknown receiver id", http.StatusNotFound)
-		return resolvedReceiver{}, false
-	}
-
-	token, hasToken := bearerToken(r)
-	if !hasToken || verifyRemoteAuthToken(token, recv.publicKey, recv.id) != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return resolvedReceiver{}, false
-	}
-
-	return recv, true
-}
-
-// bearerToken extracts the token from an "Authorization: Bearer <token>"
-// request header, reporting false if the header is missing or malformed.
-func bearerToken(r *http.Request) (string, bool) {
-	const prefix = "Bearer "
-
-	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, prefix) {
-		return "", false
-	}
-
-	return strings.TrimPrefix(auth, prefix), true
-}
-
 // handleDashboard serves the static dashboard page, which polls
 // /api/status itself; the page has no server-rendered state beyond whether
 // its "Log out" link is shown, which is baked into html once at startup
-// (see startWebUI) based on authEnabled, since a login-less deployment has
+// (see StartWebUI) based on authEnabled, since a login-less deployment has
 // no session for that link to end.
 func handleDashboard(html string) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
@@ -1119,10 +999,10 @@ func logoutLinkAttr(authEnabled bool) string {
 // preserving dashboardHTML's single-self-contained-page behavior (see
 // handleDashboard).
 //
-//go:embed webui/dashboard.html
+//go:embed dashboard.html
 var dashboardHTMLSrc string
 
-//go:embed webui/dashboard.js
+//go:embed dashboard.js
 var dashboardJS string
 
 // dashboardHTML is the entire web UI: a single self-contained page (no

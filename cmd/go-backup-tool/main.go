@@ -6,9 +6,9 @@ package main
 import (
 	"os"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/app"
 )
 
 func main() {
-	os.Exit(backup.Main(os.Args[1:], os.Stderr))
+	os.Exit(app.Main(os.Args[1:], os.Stderr))
 }

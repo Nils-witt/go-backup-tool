@@ -15,7 +15,7 @@ import (
 // RSA key, for tests that need a sender's identity to sign a remote-target
 // request with — a real run instead gets one from loadServerIdentity, backed
 // by the persistent 4096-bit key under data/keys.
-func testServerIdentity(t *testing.T) *serverIdentity {
+func testServerIdentity(t *testing.T) *ServerIdentity {
 	t.Helper()
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -23,7 +23,7 @@ func testServerIdentity(t *testing.T) *serverIdentity {
 		t.Fatalf("generating RSA key: %v", err)
 	}
 
-	return &serverIdentity{uuid: "test-sender-uuid", privateKey: key}
+	return &ServerIdentity{uuid: "test-sender-uuid", privateKey: key}
 }
 
 func TestSignAndVerifyRemoteAuthToken(t *testing.T) {
@@ -31,12 +31,12 @@ func TestSignAndVerifyRemoteAuthToken(t *testing.T) {
 
 	id := testServerIdentity(t)
 
-	token, err := signRemoteAuthToken(id.privateKey, id.uuid, "receiver-a")
+	token, err := SignRemoteAuthToken(id.privateKey, id.uuid, "receiver-a")
 	if err != nil {
 		t.Fatalf("signRemoteAuthToken() unexpected error: %v", err)
 	}
 
-	if err := verifyRemoteAuthToken(token, &id.privateKey.PublicKey, "receiver-a"); err != nil {
+	if err := VerifyRemoteAuthToken(token, &id.privateKey.PublicKey, "receiver-a"); err != nil {
 		t.Errorf("verifyRemoteAuthToken() unexpected error: %v", err)
 	}
 }
@@ -47,12 +47,12 @@ func TestVerifyRemoteAuthTokenWrongPublicKey(t *testing.T) {
 	id := testServerIdentity(t)
 	other := testServerIdentity(t)
 
-	token, err := signRemoteAuthToken(id.privateKey, id.uuid, "receiver-a")
+	token, err := SignRemoteAuthToken(id.privateKey, id.uuid, "receiver-a")
 	if err != nil {
 		t.Fatalf("signRemoteAuthToken() unexpected error: %v", err)
 	}
 
-	if err := verifyRemoteAuthToken(token, &other.privateKey.PublicKey, "receiver-a"); err == nil {
+	if err := VerifyRemoteAuthToken(token, &other.privateKey.PublicKey, "receiver-a"); err == nil {
 		t.Error("verifyRemoteAuthToken() with the wrong public key = nil error, want one")
 	}
 }
@@ -62,12 +62,12 @@ func TestVerifyRemoteAuthTokenWrongAudience(t *testing.T) {
 
 	id := testServerIdentity(t)
 
-	token, err := signRemoteAuthToken(id.privateKey, id.uuid, "receiver-a")
+	token, err := SignRemoteAuthToken(id.privateKey, id.uuid, "receiver-a")
 	if err != nil {
 		t.Fatalf("signRemoteAuthToken() unexpected error: %v", err)
 	}
 
-	if err := verifyRemoteAuthToken(token, &id.privateKey.PublicKey, "receiver-b"); err == nil {
+	if err := VerifyRemoteAuthToken(token, &id.privateKey.PublicKey, "receiver-b"); err == nil {
 		t.Error("verifyRemoteAuthToken() with the wrong audience = nil error, want one")
 	}
 }
@@ -98,7 +98,7 @@ func TestVerifyRemoteAuthTokenExpired(t *testing.T) {
 		t.Fatalf("serializing token: %v", err)
 	}
 
-	err = verifyRemoteAuthToken(token, &id.privateKey.PublicKey, "receiver-a")
+	err = VerifyRemoteAuthToken(token, &id.privateKey.PublicKey, "receiver-a")
 	if err == nil || !strings.Contains(err.Error(), "expired") {
 		t.Errorf("verifyRemoteAuthToken() with an expired token error = %v, want it to mention expiry", err)
 	}
@@ -109,7 +109,7 @@ func TestVerifyRemoteAuthTokenMalformed(t *testing.T) {
 
 	id := testServerIdentity(t)
 
-	if err := verifyRemoteAuthToken("not-a-jwt", &id.privateKey.PublicKey, "receiver-a"); err == nil {
+	if err := VerifyRemoteAuthToken("not-a-jwt", &id.privateKey.PublicKey, "receiver-a"); err == nil {
 		t.Error("verifyRemoteAuthToken() with a malformed token = nil error, want one")
 	}
 }

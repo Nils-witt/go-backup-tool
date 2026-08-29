@@ -22,19 +22,19 @@ import (
 // disambiguated by the per-row server/path columns below.
 const scheduleStateDBName = ".go-backup-tool-state.db"
 
-// scheduleStateDBPath returns the state db path for the config file at
+// ScheduleStateDBPath returns the state db path for the config file at
 // configPath: a sibling file in the same directory.
-func scheduleStateDBPath(configPath string) string {
+func ScheduleStateDBPath(configPath string) string {
 	return filepath.Join(filepath.Dir(configPath), scheduleStateDBName)
 }
 
-// openScheduleStateDB opens (creating if needed) the state-tracking sqlite
+// OpenScheduleStateDB opens (creating if needed) the state-tracking sqlite
 // database at path, ensuring its schema exists. The caller must Close it.
 //
 // SetMaxOpenConns(1) serializes every access through a single connection:
 // sqlite handles one writer at a time regardless, and this *sql.DB is shared
 // across every job's goroutine for the life of the run.
-func openScheduleStateDB(ctx context.Context, path string) (*sql.DB, error) {
+func OpenScheduleStateDB(ctx context.Context, path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("opening job state db %q: %w", path, err)
@@ -250,8 +250,8 @@ func ensureRetentionSecondsColumn(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// writeLastSuccess records that job name last completed successfully at at.
-func writeLastSuccess(ctx context.Context, db *sql.DB, name string, at time.Time) error {
+// WriteLastSuccess records that job name last completed successfully at at.
+func WriteLastSuccess(ctx context.Context, db *sql.DB, name string, at time.Time) error {
 	const upsert = `INSERT INTO job_runs (name, last_success) VALUES (?, ?)
 		ON CONFLICT(name) DO UPDATE SET last_success = excluded.last_success`
 
@@ -262,9 +262,9 @@ func writeLastSuccess(ctx context.Context, db *sql.DB, name string, at time.Time
 	return nil
 }
 
-// readLastSuccess returns job name's last recorded successful run, and false
+// ReadLastSuccess returns job name's last recorded successful run, and false
 // if none is recorded yet.
-func readLastSuccess(ctx context.Context, db *sql.DB, name string) (time.Time, bool, error) {
+func ReadLastSuccess(ctx context.Context, db *sql.DB, name string) (time.Time, bool, error) {
 	var t sql.NullTime
 
 	err := db.QueryRowContext(ctx, `SELECT last_success FROM job_runs WHERE name = ?`, name).Scan(&t)
@@ -281,22 +281,22 @@ func readLastSuccess(ctx context.Context, db *sql.DB, name string) (time.Time, b
 	}
 }
 
-// lastRun is a job's most recently completed run (success or failure),
+// LastRun is a job's most recently completed run (success or failure),
 // persisted so a restart's web UI can still show when a job last ran
 // instead of reverting to "never" until it next runs (see
 // runner.recordLastRun / statusStore.seedLastRun).
-type lastRun struct {
+type LastRun struct {
 	Start time.Time
 	End   time.Time
-	State runState
+	State RunState
 	Error string
 	Size  int64
 }
 
-// writeLastRun records job name's most recently completed run, overwriting
+// WriteLastRun records job name's most recently completed run, overwriting
 // whatever was recorded for its previous run. Called for every job after
 // every run, regardless of outcome or whether the job uses start-time.
-func writeLastRun(ctx context.Context, db *sql.DB, name string, run lastRun) error {
+func WriteLastRun(ctx context.Context, db *sql.DB, name string, run LastRun) error {
 	const upsert = `INSERT INTO job_runs (name, last_run_start, last_run_end, last_run_state, last_run_error, last_run_size)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
@@ -313,10 +313,10 @@ func writeLastRun(ctx context.Context, db *sql.DB, name string, run lastRun) err
 	return nil
 }
 
-// readLastRun returns job name's most recently persisted run, and false if
+// ReadLastRun returns job name's most recently persisted run, and false if
 // none is recorded yet (including when a row exists for name only because
 // writeLastSuccess wrote it, without any last_run_* data alongside it).
-func readLastRun(ctx context.Context, db *sql.DB, name string) (lastRun, bool, error) {
+func ReadLastRun(ctx context.Context, db *sql.DB, name string) (LastRun, bool, error) {
 	var (
 		start, end     sql.NullTime
 		state, errText sql.NullString
@@ -330,27 +330,27 @@ func readLastRun(ctx context.Context, db *sql.DB, name string) (lastRun, bool, e
 
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return lastRun{}, false, nil
+		return LastRun{}, false, nil
 	case err != nil:
-		return lastRun{}, false, fmt.Errorf("reading job %q last run: %w", name, err)
+		return LastRun{}, false, fmt.Errorf("reading job %q last run: %w", name, err)
 	case !state.Valid:
-		return lastRun{}, false, nil
+		return LastRun{}, false, nil
 	}
 
-	return lastRun{
+	return LastRun{
 		Start: start.Time,
 		End:   end.Time,
-		State: runState(state.String),
+		State: RunState(state.String),
 		Error: errText.String,
 		Size:  size.Int64,
 	}, true, nil
 }
 
-// writeTargetRun records job name's target at index's just-finished
+// WriteTargetRun records job name's target at index's just-finished
 // success/failure, overwriting whatever was recorded for that target's
 // previous run. Called for every target of every run, mirroring
 // writeLastRun's per-job persistence one level down.
-func writeTargetRun(ctx context.Context, db *sql.DB, name string, index int, state runState, errText string, at time.Time) error {
+func WriteTargetRun(ctx context.Context, db *sql.DB, name string, index int, state RunState, errText string, at time.Time) error {
 	const upsert = `INSERT INTO target_runs (job_name, target_idx, run_at, state, error) VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(job_name, target_idx) DO UPDATE SET
 			run_at = excluded.run_at,
@@ -364,24 +364,24 @@ func writeTargetRun(ctx context.Context, db *sql.DB, name string, index int, sta
 	return nil
 }
 
-// targetRun is one job target's most recently persisted success/failure, as
+// TargetRun is one job target's most recently persisted success/failure, as
 // returned by readTargetRuns.
-type targetRun struct {
+type TargetRun struct {
 	Index int
-	State runState
+	State RunState
 	Error string
 }
 
-// readTargetRuns returns every target run persisted for job name, one entry
+// ReadTargetRuns returns every target run persisted for job name, one entry
 // per target index that has completed at least once.
-func readTargetRuns(ctx context.Context, db *sql.DB, name string) ([]targetRun, error) {
+func ReadTargetRuns(ctx context.Context, db *sql.DB, name string) ([]TargetRun, error) {
 	rows, err := db.QueryContext(ctx, `SELECT target_idx, state, error FROM target_runs WHERE job_name = ?`, name)
 	if err != nil {
 		return nil, fmt.Errorf("reading job %q target runs: %w", name, err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out []targetRun
+	var out []TargetRun
 
 	for rows.Next() {
 		var (
@@ -394,7 +394,7 @@ func readTargetRuns(ctx context.Context, db *sql.DB, name string) ([]targetRun, 
 			return nil, fmt.Errorf("reading job %q target runs: %w", name, err)
 		}
 
-		out = append(out, targetRun{Index: index, State: runState(state), Error: errText.String})
+		out = append(out, TargetRun{Index: index, State: RunState(state), Error: errText.String})
 	}
 
 	if err := rows.Err(); err != nil {
@@ -404,10 +404,10 @@ func readTargetRuns(ctx context.Context, db *sql.DB, name string) ([]targetRun, 
 	return out, nil
 }
 
-// outstandingUpload is one target upload that failed and still has retry
+// OutstandingUpload is one target upload that failed and still has retry
 // attempts remaining, as persisted by queueOutstandingUpload and retried by
 // monitorOutstandingUploads (uploadretry.go).
-type outstandingUpload struct {
+type OutstandingUpload struct {
 	ID          int64
 	JobName     string
 	TargetIdx   int
@@ -418,13 +418,13 @@ type outstandingUpload struct {
 	LastError   string
 }
 
-// queueOutstandingUpload records that job name's target at index failed its
+// QueueOutstandingUpload records that job name's target at index failed its
 // first upload attempt for stagingPath (as key), so monitorOutstandingUploads
 // retries it going forward instead of the old in-run retry loop. Idempotent
 // for the same (job, target, stagingPath) triple: a duplicate call (which
 // shouldn't happen in practice) leaves the existing row untouched rather than
 // erroring or inserting a second row.
-func queueOutstandingUpload(ctx context.Context, db *sql.DB, jobName string, targetIdx int, stagingPath, key string, at time.Time, uploadErr error) error {
+func QueueOutstandingUpload(ctx context.Context, db *sql.DB, jobName string, targetIdx int, stagingPath, key string, at time.Time, uploadErr error) error {
 	const insert = `INSERT INTO outstanding_uploads (job_name, target_idx, staging_path, key, queued_at, attempts, last_attempt_at, last_error)
 		VALUES (?, ?, ?, ?, ?, 1, ?, ?)
 		ON CONFLICT(job_name, target_idx, staging_path) DO NOTHING`
@@ -441,10 +441,10 @@ func queueOutstandingUpload(ctx context.Context, db *sql.DB, jobName string, tar
 	return nil
 }
 
-// listOutstandingUploads returns every queued outstanding upload, oldest
+// ListOutstandingUploads returns every queued outstanding upload, oldest
 // first, so monitorOutstandingUploads processes failures in the order they
 // occurred.
-func listOutstandingUploads(ctx context.Context, db *sql.DB) ([]outstandingUpload, error) {
+func ListOutstandingUploads(ctx context.Context, db *sql.DB) ([]OutstandingUpload, error) {
 	rows, err := db.QueryContext(ctx,
 		`SELECT id, job_name, target_idx, staging_path, key, queued_at, attempts, last_error FROM outstanding_uploads ORDER BY queued_at ASC`)
 	if err != nil {
@@ -452,11 +452,11 @@ func listOutstandingUploads(ctx context.Context, db *sql.DB) ([]outstandingUploa
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out []outstandingUpload
+	var out []OutstandingUpload
 
 	for rows.Next() {
 		var (
-			u         outstandingUpload
+			u         OutstandingUpload
 			lastError sql.NullString
 		)
 
@@ -475,10 +475,10 @@ func listOutstandingUploads(ctx context.Context, db *sql.DB) ([]outstandingUploa
 	return out, nil
 }
 
-// recordOutstandingUploadAttempt increments id's attempts and records the
+// RecordOutstandingUploadAttempt increments id's attempts and records the
 // error from its latest failed retry, called when a retry has failed again
 // but hasn't yet hit the job's max attempts (see uploadretry.go).
-func recordOutstandingUploadAttempt(ctx context.Context, db *sql.DB, id int64, at time.Time, attemptErr error) error {
+func RecordOutstandingUploadAttempt(ctx context.Context, db *sql.DB, id int64, at time.Time, attemptErr error) error {
 	const update = `UPDATE outstanding_uploads SET attempts = attempts + 1, last_attempt_at = ?, last_error = ? WHERE id = ?`
 
 	errText := ""
@@ -493,10 +493,10 @@ func recordOutstandingUploadAttempt(ctx context.Context, db *sql.DB, id int64, a
 	return nil
 }
 
-// deleteOutstandingUpload removes outstanding upload id — called once its
+// DeleteOutstandingUpload removes outstanding upload id — called once its
 // upload finally succeeds, once it's been retried the job's maximum number of
 // times, or once its staging file is confirmed permanently gone.
-func deleteOutstandingUpload(ctx context.Context, db *sql.DB, id int64) error {
+func DeleteOutstandingUpload(ctx context.Context, db *sql.DB, id int64) error {
 	if _, err := db.ExecContext(ctx, `DELETE FROM outstanding_uploads WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("deleting outstanding upload %d: %w", id, err)
 	}
@@ -504,10 +504,10 @@ func deleteOutstandingUpload(ctx context.Context, db *sql.DB, id int64) error {
 	return nil
 }
 
-// countOutstandingUploadsForPath reports how many outstanding uploads (across
+// CountOutstandingUploadsForPath reports how many outstanding uploads (across
 // every job and target) still reference stagingPath, so a caller knows
 // whether it's finally safe to delete that staged file.
-func countOutstandingUploadsForPath(ctx context.Context, db *sql.DB, stagingPath string) (int, error) {
+func CountOutstandingUploadsForPath(ctx context.Context, db *sql.DB, stagingPath string) (int, error) {
 	var n int
 
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM outstanding_uploads WHERE staging_path = ?`, stagingPath).Scan(&n); err != nil {
@@ -517,9 +517,9 @@ func countOutstandingUploadsForPath(ctx context.Context, db *sql.DB, stagingPath
 	return n, nil
 }
 
-// loginEvent is one recorded attempt to log into the dashboard, password or
+// LoginEvent is one recorded attempt to log into the dashboard, password or
 // SSO, win or lose (see recordLoginEvent/readLoginEvents).
-type loginEvent struct {
+type LoginEvent struct {
 	At         time.Time
 	Username   string // best-effort identity: the submitted username, or the SSO claim used (email, falling back to subject); may be empty for a failed SSO attempt that never got that far
 	Method     string // "password" or "oidc"
@@ -528,9 +528,9 @@ type loginEvent struct {
 	Detail     string // failure reason; empty on success
 }
 
-// recordLoginEvent appends ev to the login log. Called for every login
+// RecordLoginEvent appends ev to the login log. Called for every login
 // attempt the dashboard's handlers see, regardless of outcome.
-func recordLoginEvent(ctx context.Context, db *sql.DB, ev loginEvent) error {
+func RecordLoginEvent(ctx context.Context, db *sql.DB, ev LoginEvent) error {
 	const insert = `INSERT INTO login_events (at, username, method, success, remote_addr, detail) VALUES (?, ?, ?, ?, ?, ?)`
 
 	if _, err := db.ExecContext(ctx, insert, ev.At.UTC(), ev.Username, ev.Method, ev.Success, ev.RemoteAddr, ev.Detail); err != nil {
@@ -540,9 +540,9 @@ func recordLoginEvent(ctx context.Context, db *sql.DB, ev loginEvent) error {
 	return nil
 }
 
-// readLoginEvents returns up to limit of the most recently recorded login
+// ReadLoginEvents returns up to limit of the most recently recorded login
 // events, newest first, for the dashboard's login log view.
-func readLoginEvents(ctx context.Context, db *sql.DB, limit int) ([]loginEvent, error) {
+func ReadLoginEvents(ctx context.Context, db *sql.DB, limit int) ([]LoginEvent, error) {
 	rows, err := db.QueryContext(ctx,
 		`SELECT at, username, method, success, remote_addr, detail FROM login_events ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
@@ -550,10 +550,10 @@ func readLoginEvents(ctx context.Context, db *sql.DB, limit int) ([]loginEvent, 
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out []loginEvent
+	var out []LoginEvent
 
 	for rows.Next() {
-		var ev loginEvent
+		var ev LoginEvent
 
 		if err := rows.Scan(&ev.At, &ev.Username, &ev.Method, &ev.Success, &ev.RemoteAddr, &ev.Detail); err != nil {
 			return nil, fmt.Errorf("reading login events: %w", err)
@@ -569,9 +569,9 @@ func readLoginEvents(ctx context.Context, db *sql.DB, limit int) ([]loginEvent, 
 	return out, nil
 }
 
-// downloadEvent is one recorded attempt to download a file from the
+// DownloadEvent is one recorded attempt to download a file from the
 // dashboard, win or lose (see recordDownloadEvent/readDownloadEvents).
-type downloadEvent struct {
+type DownloadEvent struct {
 	At         time.Time
 	Username   string // best-effort identity of the logged-in dashboard session; empty when the web UI has no login configured
 	ReceiverID string
@@ -581,9 +581,9 @@ type downloadEvent struct {
 	Detail     string // failure reason; empty on success
 }
 
-// recordDownloadEvent appends ev to the download log. Called for every
+// RecordDownloadEvent appends ev to the download log. Called for every
 // download attempt handleDownloadFile sees, regardless of outcome.
-func recordDownloadEvent(ctx context.Context, db *sql.DB, ev downloadEvent) error {
+func RecordDownloadEvent(ctx context.Context, db *sql.DB, ev DownloadEvent) error {
 	const insert = `INSERT INTO download_events (at, username, receiver_id, key, success, remote_addr, detail) VALUES (?, ?, ?, ?, ?, ?, ?)`
 
 	if _, err := db.ExecContext(ctx, insert, ev.At.UTC(), ev.Username, ev.ReceiverID, ev.Key, ev.Success, ev.RemoteAddr, ev.Detail); err != nil {
@@ -593,9 +593,9 @@ func recordDownloadEvent(ctx context.Context, db *sql.DB, ev downloadEvent) erro
 	return nil
 }
 
-// readDownloadEvents returns up to limit of the most recently recorded
+// ReadDownloadEvents returns up to limit of the most recently recorded
 // download events, newest first, for the dashboard's download log view.
-func readDownloadEvents(ctx context.Context, db *sql.DB, limit int) ([]downloadEvent, error) {
+func ReadDownloadEvents(ctx context.Context, db *sql.DB, limit int) ([]DownloadEvent, error) {
 	rows, err := db.QueryContext(ctx,
 		`SELECT at, username, receiver_id, key, success, remote_addr, detail FROM download_events ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
@@ -603,10 +603,10 @@ func readDownloadEvents(ctx context.Context, db *sql.DB, limit int) ([]downloadE
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out []downloadEvent
+	var out []DownloadEvent
 
 	for rows.Next() {
-		var ev downloadEvent
+		var ev DownloadEvent
 
 		if err := rows.Scan(&ev.At, &ev.Username, &ev.ReceiverID, &ev.Key, &ev.Success, &ev.RemoteAddr, &ev.Detail); err != nil {
 			return nil, fmt.Errorf("reading download events: %w", err)
@@ -622,31 +622,31 @@ func readDownloadEvents(ctx context.Context, db *sql.DB, limit int) ([]downloadE
 	return out, nil
 }
 
-// receiverEventReceive and receiverEventDelete are the kind values
+// ReceiverEventReceive and ReceiverEventDelete are the kind values
 // recordReceiverEvent records, mirroring the two receiver API operations
 // (handleReceiveObject/handleDeleteObject in webui.go).
 const (
-	receiverEventReceive = "receive"
-	receiverEventDelete  = "delete"
+	ReceiverEventReceive = "receive"
+	ReceiverEventDelete  = "delete"
 )
 
-// receiverEvent is one recorded receiver API request, win or lose, as
+// ReceiverEvent is one recorded receiver API request, win or lose, as
 // persisted by recordReceiverEvent and summarized by report.go for the daily
 // report.
-type receiverEvent struct {
+type ReceiverEvent struct {
 	At         time.Time
 	ReceiverID string
-	Kind       string // receiverEventReceive or receiverEventDelete
+	Kind       string // ReceiverEventReceive or ReceiverEventDelete
 	Key        string
 	Size       int64 // bytes written; 0 for a delete or a failed receive
 	Success    bool
 	Error      string // failure reason; empty on success
 }
 
-// recordReceiverEvent appends ev to the receiver event log. Called for every
+// RecordReceiverEvent appends ev to the receiver event log. Called for every
 // receiver API request handleReceiveObject/handleDeleteObject serve,
 // regardless of outcome.
-func recordReceiverEvent(ctx context.Context, db *sql.DB, ev receiverEvent) error {
+func RecordReceiverEvent(ctx context.Context, db *sql.DB, ev ReceiverEvent) error {
 	const insert = `INSERT INTO receiver_events (at, receiver_id, kind, key, size, success, error) VALUES (?, ?, ?, ?, ?, ?, ?)`
 
 	if _, err := db.ExecContext(ctx, insert, ev.At.UTC(), ev.ReceiverID, ev.Kind, ev.Key, ev.Size, ev.Success, ev.Error); err != nil {
@@ -656,14 +656,14 @@ func recordReceiverEvent(ctx context.Context, db *sql.DB, ev receiverEvent) erro
 	return nil
 }
 
-// readLastReceiverEvent returns receiver id's most recently recorded
+// ReadLastReceiverEvent returns receiver id's most recently recorded
 // receiver_events row (receive or delete, win or lose), and false if none is
 // recorded yet — used to seed a restarted process's in-memory
 // receiverStatusStore (see seedReceiverStatusFromState in receiver.go) with
 // what its last request actually did, mirroring readLastRun's reasoning for
 // job status.
-func readLastReceiverEvent(ctx context.Context, db *sql.DB, id string) (receiverEvent, bool, error) {
-	var ev receiverEvent
+func ReadLastReceiverEvent(ctx context.Context, db *sql.DB, id string) (ReceiverEvent, bool, error) {
+	var ev ReceiverEvent
 
 	err := db.QueryRowContext(ctx,
 		`SELECT at, receiver_id, kind, key, size, success, error FROM receiver_events WHERE receiver_id = ? ORDER BY id DESC LIMIT 1`,
@@ -672,28 +672,28 @@ func readLastReceiverEvent(ctx context.Context, db *sql.DB, id string) (receiver
 
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return receiverEvent{}, false, nil
+		return ReceiverEvent{}, false, nil
 	case err != nil:
-		return receiverEvent{}, false, fmt.Errorf("reading receiver %q last event: %w", id, err)
+		return ReceiverEvent{}, false, fmt.Errorf("reading receiver %q last event: %w", id, err)
 	}
 
 	return ev, true, nil
 }
 
-// receiverDaySummary is one receiver's activity over a time window, as
+// ReceiverDaySummary is one receiver's activity over a time window, as
 // returned by summarizeReceiverEvents for the daily report: how many files
 // it successfully received, their total size, and how many requests (of
 // either kind) failed.
-type receiverDaySummary struct {
+type ReceiverDaySummary struct {
 	ReceiverID    string
 	FilesReceived int
 	BytesReceived int64
 	Errors        int
 }
 
-// summarizeReceiverEvents returns, in receiver id order, every receiver
+// SummarizeReceiverEvents returns, in receiver id order, every receiver
 // id's receiverDaySummary for the events recorded in [start, end).
-func summarizeReceiverEvents(ctx context.Context, db *sql.DB, start, end time.Time) ([]receiverDaySummary, error) {
+func SummarizeReceiverEvents(ctx context.Context, db *sql.DB, start, end time.Time) ([]ReceiverDaySummary, error) {
 	const query = `SELECT receiver_id,
 		SUM(CASE WHEN kind = ? AND success = 1 THEN 1 ELSE 0 END),
 		SUM(CASE WHEN kind = ? AND success = 1 THEN size ELSE 0 END),
@@ -703,16 +703,16 @@ func summarizeReceiverEvents(ctx context.Context, db *sql.DB, start, end time.Ti
 		GROUP BY receiver_id
 		ORDER BY receiver_id`
 
-	rows, err := db.QueryContext(ctx, query, receiverEventReceive, receiverEventReceive, start.UTC(), end.UTC())
+	rows, err := db.QueryContext(ctx, query, ReceiverEventReceive, ReceiverEventReceive, start.UTC(), end.UTC())
 	if err != nil {
 		return nil, fmt.Errorf("summarizing receiver events: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out []receiverDaySummary
+	var out []ReceiverDaySummary
 
 	for rows.Next() {
-		var s receiverDaySummary
+		var s ReceiverDaySummary
 
 		if err := rows.Scan(&s.ReceiverID, &s.FilesReceived, &s.BytesReceived, &s.Errors); err != nil {
 			return nil, fmt.Errorf("summarizing receiver events: %w", err)
@@ -728,9 +728,9 @@ func summarizeReceiverEvents(ctx context.Context, db *sql.DB, start, end time.Ti
 	return out, nil
 }
 
-// receiverErrorEvent is one failed receiver API request in a time window, as
+// ReceiverErrorEvent is one failed receiver API request in a time window, as
 // returned by readReceiverErrorEvents for the daily report's error listing.
-type receiverErrorEvent struct {
+type ReceiverErrorEvent struct {
 	At         time.Time
 	ReceiverID string
 	Kind       string
@@ -738,9 +738,9 @@ type receiverErrorEvent struct {
 	Error      string
 }
 
-// readReceiverErrorEvents returns every failed receiver API request
+// ReadReceiverErrorEvents returns every failed receiver API request
 // recorded in [start, end), oldest first.
-func readReceiverErrorEvents(ctx context.Context, db *sql.DB, start, end time.Time) ([]receiverErrorEvent, error) {
+func ReadReceiverErrorEvents(ctx context.Context, db *sql.DB, start, end time.Time) ([]ReceiverErrorEvent, error) {
 	rows, err := db.QueryContext(ctx,
 		`SELECT at, receiver_id, kind, key, error FROM receiver_events WHERE success = 0 AND at >= ? AND at < ? ORDER BY at ASC`,
 		start.UTC(), end.UTC())
@@ -749,10 +749,10 @@ func readReceiverErrorEvents(ctx context.Context, db *sql.DB, start, end time.Ti
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out []receiverErrorEvent
+	var out []ReceiverErrorEvent
 
 	for rows.Next() {
-		var e receiverErrorEvent
+		var e ReceiverErrorEvent
 
 		if err := rows.Scan(&e.At, &e.ReceiverID, &e.Kind, &e.Key, &e.Error); err != nil {
 			return nil, fmt.Errorf("reading receiver error events: %w", err)
