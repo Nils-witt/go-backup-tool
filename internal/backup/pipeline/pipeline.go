@@ -605,30 +605,7 @@ func remoteAuthHeader(cfg *backup.Config, t *backup.Target) (string, error) {
 // identity (see remoteAuthHeader). r is streamed directly as the request
 // body, never buffered.
 func UploadToRemote(ctx context.Context, cfg *backup.Config, t *backup.Target, r io.Reader) error {
-	auth, err := remoteAuthHeader(cfg, t)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, RemoteObjectURL(t, cfg.Key), r)
-	if err != nil {
-		return fmt.Errorf("building request: %w", err)
-	}
-
-	req.Header.Set("Authorization", auth)
-	req.Header.Set("Content-Type", "application/octet-stream")
-
-	resp, err := remoteHTTPClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("sending request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return remoteResponseError(resp)
-	}
-
-	return nil
+	return doAuthenticatedRemoteRequest(ctx, cfg, t, http.MethodPut, r, "application/octet-stream")
 }
 
 // DeleteRemoteObject removes the object at target t's destination instance
@@ -640,17 +617,30 @@ func UploadToRemote(ctx context.Context, cfg *backup.Config, t *backup.Target, r
 // tested against the real receiver handler, see remote_test.go) as part of
 // the receiver API's client surface.
 func DeleteRemoteObject(ctx context.Context, cfg *backup.Config, t *backup.Target) error {
+	return doAuthenticatedRemoteRequest(ctx, cfg, t, http.MethodDelete, nil, "")
+}
+
+// doAuthenticatedRemoteRequest signs, sends, and status-checks a method
+// request (with body, whose Content-Type is set only when contentType is
+// non-empty) to target t's receiver API — shared by UploadToRemote and
+// DeleteRemoteObject, which otherwise duplicate this build/send/check
+// sequence identically apart from method, body, and Content-Type.
+func doAuthenticatedRemoteRequest(ctx context.Context, cfg *backup.Config, t *backup.Target, method string, body io.Reader, contentType string) error {
 	auth, err := remoteAuthHeader(cfg, t)
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, RemoteObjectURL(t, cfg.Key), nil)
+	req, err := http.NewRequestWithContext(ctx, method, RemoteObjectURL(t, cfg.Key), body)
 	if err != nil {
 		return fmt.Errorf("building request: %w", err)
 	}
 
 	req.Header.Set("Authorization", auth)
+
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
 
 	resp, err := remoteHTTPClient.Do(req)
 	if err != nil {

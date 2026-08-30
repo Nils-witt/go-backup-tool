@@ -171,14 +171,7 @@ func handleOIDCLogin(auth *OIDCAuth, pending *oidcPendingStore) http.HandlerFunc
 func handleOIDCCallback(auth *OIDCAuth, pending *oidcPendingStore, sessions *sessionStore, log *slog.Logger, db *sql.DB, trustProxyHeaders bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		record := func(username, detail string, success bool) {
-			if db == nil {
-				return
-			}
-
-			ev := backup.LoginEvent{At: time.Now(), Username: username, Method: "oidc", Success: success, RemoteAddr: clientAddr(r, trustProxyHeaders), Detail: detail}
-			if err := backup.RecordLoginEvent(r.Context(), db, ev); err != nil {
-				log.Warn("oidc: recording login event failed", "err", err)
-			}
+			recordLogin(r.Context(), db, log, r, trustProxyHeaders, "oidc", "oidc", username, detail, success)
 		}
 
 		p, ok := pending.consume(r.URL.Query().Get("state"))
@@ -239,7 +232,7 @@ func handleOIDCCallback(auth *OIDCAuth, pending *oidcPendingStore, sessions *ses
 		}
 
 		record(oidcIdentity(idToken), "", true)
-		http.SetCookie(w, sessions.cookie(id, r.TLS != nil))
+		sessions.setCookie(w, r, id)
 		http.Redirect(w, r, p.next, http.StatusSeeOther)
 	}
 }

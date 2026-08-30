@@ -118,36 +118,38 @@ func sweepRetention(ctx context.Context, db *sql.DB, t *Target, log *slog.Logger
 // used when set (> 0); rows recorded before that column existed have it as
 // 0 and fall back to fallbackRetention (the calling target's current
 // retention).
-func expiredRetentionPaths(ctx context.Context, db *sql.DB, server string, now time.Time, fallbackRetention time.Duration) (paths []string, err error) {
-	rows, err := db.QueryContext(ctx, `SELECT path, written_at, retention_seconds FROM objects WHERE server = ?`, server)
-	if err != nil {
-		return nil, fmt.Errorf("querying retention rows: %w", err)
+func expiredRetentionPaths(ctx context.Context, db *sql.DB, server string, now time.Time, fallbackRetention time.Duration) ([]string, error) {
+	type objectRow struct {
+		path             string
+		writtenAt        time.Time
+		retentionSeconds int64
 	}
-	defer func() { _ = rows.Close() }()
 
-	for rows.Next() {
-		var (
-			p                string
-			writtenAt        time.Time
-			retentionSeconds int64
-		)
+	query := `SELECT path, written_at, retention_seconds FROM objects WHERE server = ?`
 
-		if err := rows.Scan(&p, &writtenAt, &retentionSeconds); err != nil {
-			return nil, fmt.Errorf("reading retention rows: %w", err)
+	rows, err := queryRows(ctx, db, "reading retention rows", query, []any{server}, func(rows *sql.Rows) (objectRow, error) {
+		var r objectRow
+		if err := rows.Scan(&r.path, &r.writtenAt, &r.retentionSeconds); err != nil {
+			return objectRow{}, err
 		}
 
-		retention := time.Duration(retentionSeconds) * time.Second
+		return r, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var paths []string
+
+	for _, r := range rows {
+		retention := time.Duration(r.retentionSeconds) * time.Second
 		if retention <= 0 {
 			retention = fallbackRetention
 		}
 
-		if writtenAt.Add(retention).Before(now) {
-			paths = append(paths, p)
+		if r.writtenAt.Add(retention).Before(now) {
+			paths = append(paths, r.path)
 		}
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading retention rows: %w", err)
 	}
 
 	return paths, nil

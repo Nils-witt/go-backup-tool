@@ -3,7 +3,6 @@ package backup
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -42,70 +41,16 @@ func OpenScheduleStateDB(ctx context.Context, path string) (*sql.DB, error) {
 
 	db.SetMaxOpenConns(1)
 
-	// last_success is used only by start-time-anchored jobs' catch-up logic
-	// (see runner.lastJobSuccess) and is nullable since a job may have
-	// persisted last-run info (below) without ever having succeeded yet.
-	// The last_run_* columns record the most recent run regardless of
-	// outcome, for every job, purely so the web UI can still show it across
-	// a restart (see runner.recordLastRun / statusStore.seedLastRun) — a
-	// distinct concept from last_success, which must keep pointing at the
-	// last *successful* run even after a later run fails.
-	const schema = `CREATE TABLE IF NOT EXISTS job_runs (
-		name           TEXT NOT NULL PRIMARY KEY,
-		last_success   TIMESTAMP,
-		last_run_start TIMESTAMP,
-		last_run_end   TIMESTAMP,
-		last_run_state TEXT,
-		last_run_error TEXT,
-		last_run_size  INTEGER
-	)`
-
-	if _, err := db.ExecContext(ctx, schema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
+	if err := execSchemaOrClose(ctx, db, path, jobRunsSchema); err != nil {
+		return nil, err
 	}
 
-	// target_runs records each job target's most recently completed
-	// success/failure, one level below job_runs, so a restart's web UI can
-	// also show a target's last outcome instead of every target reverting
-	// to "idle" until it next runs (see runner.persistTargetRun /
-	// statusStore.seedTargetRun). target_idx is index-aligned with the
-	// job's targets: as configured, matching statusStore.targetDone's
-	// existing index-alignment assumption.
-	const targetSchema = `CREATE TABLE IF NOT EXISTS target_runs (
-		job_name   TEXT NOT NULL,
-		target_idx INTEGER NOT NULL,
-		run_at     TIMESTAMP NOT NULL,
-		state      TEXT NOT NULL,
-		error      TEXT,
-		PRIMARY KEY (job_name, target_idx)
-	)`
-
-	if _, err := db.ExecContext(ctx, targetSchema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
+	if err := execSchemaOrClose(ctx, db, path, targetRunsSchema); err != nil {
+		return nil, err
 	}
 
-	// objects records every file go-backup-tool has written to a local
-	// target or receiver with retention: set, so a later sweep (see
-	// retention.go) knows what's eligible for automatic deletion.
-	// retention_seconds records the retention duration in effect when each
-	// object was written, so a later config change to a server's retention:
-	// doesn't retroactively change how long already-written objects are
-	// kept (see sweepRetention). It defaults to 0 ("unknown") so rows from
-	// before this column existed keep sweeping under the target's current
-	// retention, exactly as they did before it was added.
-	const objectsSchema = `CREATE TABLE IF NOT EXISTS objects (
-		server            TEXT NOT NULL,
-		bucket            TEXT NOT NULL,
-		path              TEXT NOT NULL PRIMARY KEY,
-		written_at        TIMESTAMP NOT NULL,
-		retention_seconds INTEGER NOT NULL DEFAULT 0
-	)`
-
-	if _, err := db.ExecContext(ctx, objectsSchema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
+	if err := execSchemaOrClose(ctx, db, path, objectsSchema); err != nil {
+		return nil, err
 	}
 
 	if err := ensureRetentionSecondsColumn(ctx, db); err != nil {
@@ -113,96 +58,155 @@ func OpenScheduleStateDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("migrating job state db %q: %w", path, err)
 	}
 
-	// outstanding_uploads records a target upload that failed and still has
-	// attempts remaining (see config.retries), so monitorOutstandingUploads
-	// (uploadretry.go) can retry it roughly once a minute instead of the old
-	// in-run, sleep-based retry loop. id is the primary key (rather than
-	// job_name+target_idx, as target_runs uses) because a repeating job can
-	// queue a new failure for the same target against a different staging
-	// path while an earlier one is still outstanding. key is the run's
-	// already-resolved object key (post {time} substitution) and must never
-	// be recomputed on retry.
-	const outstandingUploadsSchema = `CREATE TABLE IF NOT EXISTS outstanding_uploads (
-		id              INTEGER PRIMARY KEY AUTOINCREMENT,
-		job_name        TEXT NOT NULL,
-		target_idx      INTEGER NOT NULL,
-		staging_path    TEXT NOT NULL,
-		key             TEXT NOT NULL,
-		queued_at       TIMESTAMP NOT NULL,
-		attempts        INTEGER NOT NULL,
-		last_attempt_at TIMESTAMP,
-		last_error      TEXT,
-		UNIQUE (job_name, target_idx, staging_path)
-	)`
-
-	if _, err := db.ExecContext(ctx, outstandingUploadsSchema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
+	if err := execSchemaOrClose(ctx, db, path, outstandingUploadsSchema); err != nil {
+		return nil, err
 	}
 
-	// login_events records every dashboard login attempt, password or SSO,
-	// win or lose, so an operator can review who's signed in (and who's
-	// tried and failed) from the web UI (see recordLoginEvent/
-	// readLoginEvents and the dashboard's "Login log" section).
-	const loginEventsSchema = `CREATE TABLE IF NOT EXISTS login_events (
-		id          INTEGER PRIMARY KEY AUTOINCREMENT,
-		at          TIMESTAMP NOT NULL,
-		username    TEXT NOT NULL,
-		method      TEXT NOT NULL,
-		success     INTEGER NOT NULL,
-		remote_addr TEXT NOT NULL,
-		detail      TEXT NOT NULL DEFAULT ''
-	)`
-
-	if _, err := db.ExecContext(ctx, loginEventsSchema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
+	if err := execSchemaOrClose(ctx, db, path, loginEventsSchema); err != nil {
+		return nil, err
 	}
 
-	// download_events records every dashboard file download, win or lose, so
-	// an operator can see who pulled which file and when (see
-	// recordDownloadEvent/readDownloadEvents and the dashboard's "Download
-	// log" section).
-	const downloadEventsSchema = `CREATE TABLE IF NOT EXISTS download_events (
-		id          INTEGER PRIMARY KEY AUTOINCREMENT,
-		at          TIMESTAMP NOT NULL,
-		username    TEXT NOT NULL,
-		receiver_id TEXT NOT NULL,
-		key         TEXT NOT NULL,
-		success     INTEGER NOT NULL,
-		remote_addr TEXT NOT NULL,
-		detail      TEXT NOT NULL DEFAULT ''
-	)`
-
-	if _, err := db.ExecContext(ctx, downloadEventsSchema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
+	if err := execSchemaOrClose(ctx, db, path, downloadEventsSchema); err != nil {
+		return nil, err
 	}
 
-	// receiver_events records every receiver API request (PUT or DELETE)
-	// this instance has served, win or lose, regardless of whether that
-	// receiver has retention: set (unlike objects above, which only tracks
-	// writes for a receiver with retention: configured) — so the daily
-	// report (see report.go) can summarize how many files each receiver
-	// received, and any errors it hit, over a given day.
-	const receiverEventsSchema = `CREATE TABLE IF NOT EXISTS receiver_events (
-		id          INTEGER PRIMARY KEY AUTOINCREMENT,
-		at          TIMESTAMP NOT NULL,
-		receiver_id TEXT NOT NULL,
-		kind        TEXT NOT NULL,
-		key         TEXT NOT NULL,
-		size        INTEGER NOT NULL DEFAULT 0,
-		success     INTEGER NOT NULL,
-		error       TEXT NOT NULL DEFAULT ''
-	)`
-
-	if _, err := db.ExecContext(ctx, receiverEventsSchema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
+	if err := execSchemaOrClose(ctx, db, path, receiverEventsSchema); err != nil {
+		return nil, err
 	}
 
 	return db, nil
 }
+
+// execSchemaOrClose runs schema against db, closing db and wrapping the
+// error with path if it fails, so OpenScheduleStateDB doesn't repeat that
+// close-and-wrap boilerplate for each of its CREATE TABLE statements.
+func execSchemaOrClose(ctx context.Context, db *sql.DB, path, schema string) error {
+	if _, err := db.ExecContext(ctx, schema); err != nil {
+		_ = db.Close()
+		return fmt.Errorf("initializing job state db %q: %w", path, err)
+	}
+
+	return nil
+}
+
+// jobRunsSchema is job_runs: last_success is used only by start-time-
+// anchored jobs' catch-up logic (see runner.lastJobSuccess) and is nullable
+// since a job may have persisted last-run info (below) without ever having
+// succeeded yet. The last_run_* columns record the most recent run
+// regardless of outcome, for every job, purely so the web UI can still show
+// it across a restart (see runner.recordLastRun / statusStore.seedLastRun)
+// — a distinct concept from last_success, which must keep pointing at the
+// last *successful* run even after a later run fails.
+const jobRunsSchema = `CREATE TABLE IF NOT EXISTS job_runs (
+	name           TEXT NOT NULL PRIMARY KEY,
+	last_success   TIMESTAMP,
+	last_run_start TIMESTAMP,
+	last_run_end   TIMESTAMP,
+	last_run_state TEXT,
+	last_run_error TEXT,
+	last_run_size  INTEGER
+)`
+
+// targetRunsSchema is target_runs: records each job target's most recently
+// completed success/failure, one level below job_runs, so a restart's web
+// UI can also show a target's last outcome instead of every target
+// reverting to "idle" until it next runs (see runner.persistTargetRun /
+// statusStore.seedTargetRun). target_idx is index-aligned with the job's
+// targets: as configured, matching statusStore.targetDone's existing
+// index-alignment assumption.
+const targetRunsSchema = `CREATE TABLE IF NOT EXISTS target_runs (
+	job_name   TEXT NOT NULL,
+	target_idx INTEGER NOT NULL,
+	run_at     TIMESTAMP NOT NULL,
+	state      TEXT NOT NULL,
+	error      TEXT,
+	PRIMARY KEY (job_name, target_idx)
+)`
+
+// objectsSchema is objects: records every file go-backup-tool has written to
+// a local target or receiver with retention: set, so a later sweep (see
+// retention.go) knows what's eligible for automatic deletion.
+// retention_seconds records the retention duration in effect when each
+// object was written, so a later config change to a server's retention:
+// doesn't retroactively change how long already-written objects are kept
+// (see sweepRetention). It defaults to 0 ("unknown") so rows from before
+// this column existed keep sweeping under the target's current retention,
+// exactly as they did before it was added.
+const objectsSchema = `CREATE TABLE IF NOT EXISTS objects (
+	server            TEXT NOT NULL,
+	bucket            TEXT NOT NULL,
+	path              TEXT NOT NULL PRIMARY KEY,
+	written_at        TIMESTAMP NOT NULL,
+	retention_seconds INTEGER NOT NULL DEFAULT 0
+)`
+
+// outstandingUploadsSchema is outstanding_uploads: records a target upload
+// that failed and still has attempts remaining (see config.retries), so
+// monitorOutstandingUploads (uploadretry.go) can retry it roughly once a
+// minute instead of the old in-run, sleep-based retry loop. id is the
+// primary key (rather than job_name+target_idx, as target_runs uses)
+// because a repeating job can queue a new failure for the same target
+// against a different staging path while an earlier one is still
+// outstanding. key is the run's already-resolved object key (post {time}
+// substitution) and must never be recomputed on retry.
+const outstandingUploadsSchema = `CREATE TABLE IF NOT EXISTS outstanding_uploads (
+	id              INTEGER PRIMARY KEY AUTOINCREMENT,
+	job_name        TEXT NOT NULL,
+	target_idx      INTEGER NOT NULL,
+	staging_path    TEXT NOT NULL,
+	key             TEXT NOT NULL,
+	queued_at       TIMESTAMP NOT NULL,
+	attempts        INTEGER NOT NULL,
+	last_attempt_at TIMESTAMP,
+	last_error      TEXT,
+	UNIQUE (job_name, target_idx, staging_path)
+)`
+
+// loginEventsSchema is login_events: records every dashboard login attempt,
+// password or SSO, win or lose, so an operator can review who's signed in
+// (and who's tried and failed) from the web UI (see recordLoginEvent/
+// readLoginEvents and the dashboard's "Login log" section).
+const loginEventsSchema = `CREATE TABLE IF NOT EXISTS login_events (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	at          TIMESTAMP NOT NULL,
+	username    TEXT NOT NULL,
+	method      TEXT NOT NULL,
+	success     INTEGER NOT NULL,
+	remote_addr TEXT NOT NULL,
+	detail      TEXT NOT NULL DEFAULT ''
+)`
+
+// downloadEventsSchema is download_events: records every dashboard file
+// download, win or lose, so an operator can see who pulled which file and
+// when (see recordDownloadEvent/readDownloadEvents and the dashboard's
+// "Download log" section).
+const downloadEventsSchema = `CREATE TABLE IF NOT EXISTS download_events (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	at          TIMESTAMP NOT NULL,
+	username    TEXT NOT NULL,
+	receiver_id TEXT NOT NULL,
+	key         TEXT NOT NULL,
+	success     INTEGER NOT NULL,
+	remote_addr TEXT NOT NULL,
+	detail      TEXT NOT NULL DEFAULT ''
+)`
+
+// receiverEventsSchema is receiver_events: records every receiver API
+// request (PUT or DELETE) this instance has served, win or lose, regardless
+// of whether that receiver has retention: set (unlike objects above, which
+// only tracks writes for a receiver with retention: configured) — so the
+// daily report (see report.go) can summarize how many files each receiver
+// received, and any errors it hit, over a given day.
+const receiverEventsSchema = `CREATE TABLE IF NOT EXISTS receiver_events (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	at          TIMESTAMP NOT NULL,
+	receiver_id TEXT NOT NULL,
+	kind        TEXT NOT NULL,
+	key         TEXT NOT NULL,
+	size        INTEGER NOT NULL DEFAULT 0,
+	success     INTEGER NOT NULL,
+	error       TEXT NOT NULL DEFAULT ''
+)`
 
 // ensureRetentionSecondsColumn adds the retention_seconds column to objects
 // if it's missing, for a state db created before that column existed.
@@ -265,20 +269,20 @@ func WriteLastSuccess(ctx context.Context, db *sql.DB, name string, at time.Time
 // ReadLastSuccess returns job name's last recorded successful run, and false
 // if none is recorded yet.
 func ReadLastSuccess(ctx context.Context, db *sql.DB, name string) (time.Time, bool, error) {
-	var t sql.NullTime
+	errMsg := fmt.Sprintf("reading job %q state", name)
 
-	err := db.QueryRowContext(ctx, `SELECT last_success FROM job_runs WHERE name = ?`, name).Scan(&t)
+	return queryRowOptional(ctx, db, errMsg, `SELECT last_success FROM job_runs WHERE name = ?`, []any{name}, func(row *sql.Row) (time.Time, error) {
+		var t sql.NullTime
+		if err := row.Scan(&t); err != nil {
+			return time.Time{}, err
+		}
 
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return time.Time{}, false, nil
-	case err != nil:
-		return time.Time{}, false, fmt.Errorf("reading job %q state: %w", name, err)
-	case !t.Valid:
-		return time.Time{}, false, nil
-	default:
-		return t.Time, true, nil
-	}
+		if !t.Valid {
+			return time.Time{}, sql.ErrNoRows
+		}
+
+		return t.Time, nil
+	})
 }
 
 // LastRun is a job's most recently completed run (success or failure),
@@ -317,33 +321,32 @@ func WriteLastRun(ctx context.Context, db *sql.DB, name string, run LastRun) err
 // none is recorded yet (including when a row exists for name only because
 // writeLastSuccess wrote it, without any last_run_* data alongside it).
 func ReadLastRun(ctx context.Context, db *sql.DB, name string) (LastRun, bool, error) {
-	var (
-		start, end     sql.NullTime
-		state, errText sql.NullString
-		size           sql.NullInt64
-	)
+	errMsg := fmt.Sprintf("reading job %q last run", name)
+	query := `SELECT last_run_start, last_run_end, last_run_state, last_run_error, last_run_size FROM job_runs WHERE name = ?`
 
-	err := db.QueryRowContext(ctx,
-		`SELECT last_run_start, last_run_end, last_run_state, last_run_error, last_run_size FROM job_runs WHERE name = ?`,
-		name,
-	).Scan(&start, &end, &state, &errText, &size)
+	return queryRowOptional(ctx, db, errMsg, query, []any{name}, func(row *sql.Row) (LastRun, error) {
+		var (
+			start, end     sql.NullTime
+			state, errText sql.NullString
+			size           sql.NullInt64
+		)
 
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return LastRun{}, false, nil
-	case err != nil:
-		return LastRun{}, false, fmt.Errorf("reading job %q last run: %w", name, err)
-	case !state.Valid:
-		return LastRun{}, false, nil
-	}
+		if err := row.Scan(&start, &end, &state, &errText, &size); err != nil {
+			return LastRun{}, err
+		}
 
-	return LastRun{
-		Start: start.Time,
-		End:   end.Time,
-		State: RunState(state.String),
-		Error: errText.String,
-		Size:  size.Int64,
-	}, true, nil
+		if !state.Valid {
+			return LastRun{}, sql.ErrNoRows
+		}
+
+		return LastRun{
+			Start: start.Time,
+			End:   end.Time,
+			State: RunState(state.String),
+			Error: errText.String,
+			Size:  size.Int64,
+		}, nil
+	})
 }
 
 // WriteTargetRun records job name's target at index's just-finished
@@ -375,15 +378,9 @@ type TargetRun struct {
 // ReadTargetRuns returns every target run persisted for job name, one entry
 // per target index that has completed at least once.
 func ReadTargetRuns(ctx context.Context, db *sql.DB, name string) ([]TargetRun, error) {
-	rows, err := db.QueryContext(ctx, `SELECT target_idx, state, error FROM target_runs WHERE job_name = ?`, name)
-	if err != nil {
-		return nil, fmt.Errorf("reading job %q target runs: %w", name, err)
-	}
-	defer func() { _ = rows.Close() }()
+	errMsg := fmt.Sprintf("reading job %q target runs", name)
 
-	var out []TargetRun
-
-	for rows.Next() {
+	return queryRows(ctx, db, errMsg, `SELECT target_idx, state, error FROM target_runs WHERE job_name = ?`, []any{name}, func(rows *sql.Rows) (TargetRun, error) {
 		var (
 			index   int
 			state   string
@@ -391,17 +388,11 @@ func ReadTargetRuns(ctx context.Context, db *sql.DB, name string) ([]TargetRun, 
 		)
 
 		if err := rows.Scan(&index, &state, &errText); err != nil {
-			return nil, fmt.Errorf("reading job %q target runs: %w", name, err)
+			return TargetRun{}, err
 		}
 
-		out = append(out, TargetRun{Index: index, State: RunState(state), Error: errText.String})
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading job %q target runs: %w", name, err)
-	}
-
-	return out, nil
+		return TargetRun{Index: index, State: RunState(state), Error: errText.String}, nil
+	})
 }
 
 // OutstandingUpload is one target upload that failed and still has retry
@@ -445,34 +436,22 @@ func QueueOutstandingUpload(ctx context.Context, db *sql.DB, jobName string, tar
 // first, so monitorOutstandingUploads processes failures in the order they
 // occurred.
 func ListOutstandingUploads(ctx context.Context, db *sql.DB) ([]OutstandingUpload, error) {
-	rows, err := db.QueryContext(ctx,
-		`SELECT id, job_name, target_idx, staging_path, key, queued_at, attempts, last_error FROM outstanding_uploads ORDER BY queued_at ASC`)
-	if err != nil {
-		return nil, fmt.Errorf("reading outstanding uploads: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
+	query := `SELECT id, job_name, target_idx, staging_path, key, queued_at, attempts, last_error FROM outstanding_uploads ORDER BY queued_at ASC`
 
-	var out []OutstandingUpload
-
-	for rows.Next() {
+	return queryRows(ctx, db, "reading outstanding uploads", query, nil, func(rows *sql.Rows) (OutstandingUpload, error) {
 		var (
 			u         OutstandingUpload
 			lastError sql.NullString
 		)
 
 		if err := rows.Scan(&u.ID, &u.JobName, &u.TargetIdx, &u.StagingPath, &u.Key, &u.QueuedAt, &u.Attempts, &lastError); err != nil {
-			return nil, fmt.Errorf("reading outstanding uploads: %w", err)
+			return OutstandingUpload{}, err
 		}
 
 		u.LastError = lastError.String
-		out = append(out, u)
-	}
 
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading outstanding uploads: %w", err)
-	}
-
-	return out, nil
+		return u, nil
+	})
 }
 
 // RecordOutstandingUploadAttempt increments id's attempts and records the
@@ -543,30 +522,17 @@ func RecordLoginEvent(ctx context.Context, db *sql.DB, ev LoginEvent) error {
 // ReadLoginEvents returns up to limit of the most recently recorded login
 // events, newest first, for the dashboard's login log view.
 func ReadLoginEvents(ctx context.Context, db *sql.DB, limit int) ([]LoginEvent, error) {
-	rows, err := db.QueryContext(ctx,
-		`SELECT at, username, method, success, remote_addr, detail FROM login_events ORDER BY id DESC LIMIT ?`, limit)
-	if err != nil {
-		return nil, fmt.Errorf("reading login events: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
+	query := `SELECT at, username, method, success, remote_addr, detail FROM login_events ORDER BY id DESC LIMIT ?`
 
-	var out []LoginEvent
-
-	for rows.Next() {
+	return queryRows(ctx, db, "reading login events", query, []any{limit}, func(rows *sql.Rows) (LoginEvent, error) {
 		var ev LoginEvent
 
 		if err := rows.Scan(&ev.At, &ev.Username, &ev.Method, &ev.Success, &ev.RemoteAddr, &ev.Detail); err != nil {
-			return nil, fmt.Errorf("reading login events: %w", err)
+			return LoginEvent{}, err
 		}
 
-		out = append(out, ev)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading login events: %w", err)
-	}
-
-	return out, nil
+		return ev, nil
+	})
 }
 
 // DownloadEvent is one recorded attempt to download a file from the
@@ -596,30 +562,17 @@ func RecordDownloadEvent(ctx context.Context, db *sql.DB, ev DownloadEvent) erro
 // ReadDownloadEvents returns up to limit of the most recently recorded
 // download events, newest first, for the dashboard's download log view.
 func ReadDownloadEvents(ctx context.Context, db *sql.DB, limit int) ([]DownloadEvent, error) {
-	rows, err := db.QueryContext(ctx,
-		`SELECT at, username, receiver_id, key, success, remote_addr, detail FROM download_events ORDER BY id DESC LIMIT ?`, limit)
-	if err != nil {
-		return nil, fmt.Errorf("reading download events: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
+	query := `SELECT at, username, receiver_id, key, success, remote_addr, detail FROM download_events ORDER BY id DESC LIMIT ?`
 
-	var out []DownloadEvent
-
-	for rows.Next() {
+	return queryRows(ctx, db, "reading download events", query, []any{limit}, func(rows *sql.Rows) (DownloadEvent, error) {
 		var ev DownloadEvent
 
 		if err := rows.Scan(&ev.At, &ev.Username, &ev.ReceiverID, &ev.Key, &ev.Success, &ev.RemoteAddr, &ev.Detail); err != nil {
-			return nil, fmt.Errorf("reading download events: %w", err)
+			return DownloadEvent{}, err
 		}
 
-		out = append(out, ev)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading download events: %w", err)
-	}
-
-	return out, nil
+		return ev, nil
+	})
 }
 
 // ReceiverEventReceive and ReceiverEventDelete are the kind values
@@ -663,21 +616,17 @@ func RecordReceiverEvent(ctx context.Context, db *sql.DB, ev ReceiverEvent) erro
 // what its last request actually did, mirroring readLastRun's reasoning for
 // job status.
 func ReadLastReceiverEvent(ctx context.Context, db *sql.DB, id string) (ReceiverEvent, bool, error) {
-	var ev ReceiverEvent
+	errMsg := fmt.Sprintf("reading receiver %q last event", id)
+	query := `SELECT at, receiver_id, kind, key, size, success, error FROM receiver_events WHERE receiver_id = ? ORDER BY id DESC LIMIT 1`
 
-	err := db.QueryRowContext(ctx,
-		`SELECT at, receiver_id, kind, key, size, success, error FROM receiver_events WHERE receiver_id = ? ORDER BY id DESC LIMIT 1`,
-		id,
-	).Scan(&ev.At, &ev.ReceiverID, &ev.Kind, &ev.Key, &ev.Size, &ev.Success, &ev.Error)
+	return queryRowOptional(ctx, db, errMsg, query, []any{id}, func(row *sql.Row) (ReceiverEvent, error) {
+		var ev ReceiverEvent
+		if err := row.Scan(&ev.At, &ev.ReceiverID, &ev.Kind, &ev.Key, &ev.Size, &ev.Success, &ev.Error); err != nil {
+			return ReceiverEvent{}, err
+		}
 
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return ReceiverEvent{}, false, nil
-	case err != nil:
-		return ReceiverEvent{}, false, fmt.Errorf("reading receiver %q last event: %w", id, err)
-	}
-
-	return ev, true, nil
+		return ev, nil
+	})
 }
 
 // ReceiverDaySummary is one receiver's activity over a time window, as
@@ -703,29 +652,17 @@ func SummarizeReceiverEvents(ctx context.Context, db *sql.DB, start, end time.Ti
 		GROUP BY receiver_id
 		ORDER BY receiver_id`
 
-	rows, err := db.QueryContext(ctx, query, ReceiverEventReceive, ReceiverEventReceive, start.UTC(), end.UTC())
-	if err != nil {
-		return nil, fmt.Errorf("summarizing receiver events: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
+	args := []any{ReceiverEventReceive, ReceiverEventReceive, start.UTC(), end.UTC()}
 
-	var out []ReceiverDaySummary
-
-	for rows.Next() {
+	return queryRows(ctx, db, "summarizing receiver events", query, args, func(rows *sql.Rows) (ReceiverDaySummary, error) {
 		var s ReceiverDaySummary
 
 		if err := rows.Scan(&s.ReceiverID, &s.FilesReceived, &s.BytesReceived, &s.Errors); err != nil {
-			return nil, fmt.Errorf("summarizing receiver events: %w", err)
+			return ReceiverDaySummary{}, err
 		}
 
-		out = append(out, s)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("summarizing receiver events: %w", err)
-	}
-
-	return out, nil
+		return s, nil
+	})
 }
 
 // ReceiverErrorEvent is one failed receiver API request in a time window, as
@@ -741,29 +678,15 @@ type ReceiverErrorEvent struct {
 // ReadReceiverErrorEvents returns every failed receiver API request
 // recorded in [start, end), oldest first.
 func ReadReceiverErrorEvents(ctx context.Context, db *sql.DB, start, end time.Time) ([]ReceiverErrorEvent, error) {
-	rows, err := db.QueryContext(ctx,
-		`SELECT at, receiver_id, kind, key, error FROM receiver_events WHERE success = 0 AND at >= ? AND at < ? ORDER BY at ASC`,
-		start.UTC(), end.UTC())
-	if err != nil {
-		return nil, fmt.Errorf("reading receiver error events: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
+	query := `SELECT at, receiver_id, kind, key, error FROM receiver_events WHERE success = 0 AND at >= ? AND at < ? ORDER BY at ASC`
 
-	var out []ReceiverErrorEvent
-
-	for rows.Next() {
+	return queryRows(ctx, db, "reading receiver error events", query, []any{start.UTC(), end.UTC()}, func(rows *sql.Rows) (ReceiverErrorEvent, error) {
 		var e ReceiverErrorEvent
 
 		if err := rows.Scan(&e.At, &e.ReceiverID, &e.Kind, &e.Key, &e.Error); err != nil {
-			return nil, fmt.Errorf("reading receiver error events: %w", err)
+			return ReceiverErrorEvent{}, err
 		}
 
-		out = append(out, e)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading receiver error events: %w", err)
-	}
-
-	return out, nil
+		return e, nil
+	})
 }

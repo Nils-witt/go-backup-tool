@@ -168,8 +168,8 @@ func resolveSMTPSettings(cfg *fileSMTP) (SMTPSettings, error) {
 	username := strings.TrimSpace(cfg.Username)
 	passwordEnv := strings.TrimSpace(cfg.PasswordEnv)
 
-	if (username == "") != (passwordEnv == "") {
-		return SMTPSettings{}, errors.New("report.smtp.username and report.smtp.password-env must be set together")
+	if err := pairedFieldsErr("report.smtp.username", username, "report.smtp.password-env", passwordEnv); err != nil {
+		return SMTPSettings{}, err
 	}
 
 	var password string

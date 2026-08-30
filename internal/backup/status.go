@@ -90,20 +90,60 @@ func intervalString(d time.Duration) string {
 // formatBytes renders n as a human-readable, binary (1024-based) size, e.g.
 // "12.3 MB", matching the convention tools like du/ls -lh use.
 func formatBytes(n int64) string {
-	const unit = 1024
+	return FormatSize(n, 1024, "KMGTPE", true)
+}
 
+// FormatSize renders n as a human-readable size, dividing repeatedly by unit
+// (1024 for binary, 1000 for decimal) and picking the matching letter from
+// suffixes; binarySuffix appends "iB" (e.g. "MiB") instead of "B" (e.g.
+// "MB"). Shared by formatBytes here and pipeline's formatReportBytes, which
+// otherwise duplicate this exact algorithm for their own base/suffix
+// conventions.
+func FormatSize(n, unit int64, suffixes string, binarySuffix bool) string {
 	if n < unit {
 		return fmt.Sprintf("%d B", n)
 	}
 
-	div, exp := int64(unit), 0
+	div, exp := unit, 0
 
 	for m := n / unit; m >= unit; m /= unit {
 		div *= unit
 		exp++
 	}
 
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+	if binarySuffix {
+		return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), suffixes[exp])
+	}
+
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), suffixes[exp])
+}
+
+// SetOutcome sets *state/*errText to reflect err: failed/err.Error() when
+// err is non-nil, ok/"" otherwise. Shared by StatusStore.TargetDone (job
+// targets) and ReceiverStatusStore.Record (receivers), which track the same
+// shape of live status for two different kinds of item, and by
+// pipeline.Runner's target-run persistence.
+func SetOutcome(state *RunState, errText *string, err error) {
+	if err != nil {
+		*state = StateFailed
+		*errText = err.Error()
+
+		return
+	}
+
+	*state = StateOK
+	*errText = ""
+}
+
+// setSizeIfSucceeded sets *dst to size's human-readable form when state
+// indicates at least one target succeeded (ok or incomplete), leaving *dst
+// unchanged otherwise (a job's displayed size is sticky across a later
+// failed run — see Finished's doc comment). Shared by Finished and
+// SeedLastRun.
+func setSizeIfSucceeded(dst *string, state RunState, size int64) {
+	if state == StateOK || state == StateIncomplete {
+		*dst = formatBytes(size)
+	}
 }
 
 // Starting marks name as running, resetting its (and its targets') last
@@ -138,15 +178,7 @@ func (s *StatusStore) TargetDone(name string, index int, err error) {
 		return
 	}
 
-	if err != nil {
-		j.Targets[index].State = StateFailed
-		j.Targets[index].Error = err.Error()
-
-		return
-	}
-
-	j.Targets[index].State = StateOK
-	j.Targets[index].Error = ""
+	SetOutcome(&j.Targets[index].State, &j.Targets[index].Error, err)
 }
 
 // SetNextRun records job name's next scheduled run time, for display in the
@@ -198,9 +230,7 @@ func (s *StatusStore) Finished(name string, err error, size int64) RunState {
 		j.Error = err.Error()
 	}
 
-	if j.State == StateOK || j.State == StateIncomplete {
-		j.Size = formatBytes(size)
-	}
+	setSizeIfSucceeded(&j.Size, j.State, size)
 
 	return j.State
 }
@@ -247,9 +277,7 @@ func (s *StatusStore) SeedLastRun(name string, run LastRun) {
 	j.Duration = run.End.Sub(run.Start).Round(time.Millisecond).String()
 	j.Error = run.Error
 
-	if run.State == StateOK || run.State == StateIncomplete {
-		j.Size = formatBytes(run.Size)
-	}
+	setSizeIfSucceeded(&j.Size, run.State, run.Size)
 }
 
 // SeedTargetRun initializes job name's target at index from a previously

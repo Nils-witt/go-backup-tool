@@ -216,29 +216,36 @@ func resolveConfigArgAbs(args []string) ([]string, error) {
 // source registration. The service should be stopped first (-service=stop);
 // Delete only marks a running service for deletion once it stops.
 func uninstallService() error {
-	m, err := mgr.Connect()
-	if err != nil {
-		return fmt.Errorf("connecting to Windows service manager: %w", err)
-	}
-	defer m.Disconnect()
+	return withInstalledService(func(_ *mgr.Mgr, s *mgr.Service) error {
+		if err := s.Delete(); err != nil {
+			return fmt.Errorf("deleting service: %w", err)
+		}
 
-	s, err := m.OpenService(serviceName)
-	if err != nil {
-		return fmt.Errorf("service %q is not installed", serviceName)
-	}
-	defer s.Close()
+		_ = eventlog.Remove(serviceName)
 
-	if err := s.Delete(); err != nil {
-		return fmt.Errorf("deleting service: %w", err)
-	}
-
-	_ = eventlog.Remove(serviceName)
-
-	return nil
+		return nil
+	})
 }
 
 // startService starts the already-installed GoBackupTool service.
 func startService() error {
+	return withInstalledService(func(_ *mgr.Mgr, s *mgr.Service) error {
+		if err := s.Start(); err != nil {
+			return fmt.Errorf("starting service: %w", err)
+		}
+
+		return nil
+	})
+}
+
+// withInstalledService connects to the Windows service manager and opens the
+// already-installed GoBackupTool service, running fn with both and closing
+// both regardless of fn's outcome. Shared by uninstallService, startService,
+// and stopService, which otherwise repeat this connect/open/defer-close
+// boilerplate identically before their own distinct logic. installService
+// doesn't use it since it wants OpenService to fail (there being no service
+// yet to open).
+func withInstalledService(fn func(m *mgr.Mgr, s *mgr.Service) error) error {
 	m, err := mgr.Connect()
 	if err != nil {
 		return fmt.Errorf("connecting to Windows service manager: %w", err)
@@ -251,11 +258,7 @@ func startService() error {
 	}
 	defer s.Close()
 
-	if err := s.Start(); err != nil {
-		return fmt.Errorf("starting service: %w", err)
-	}
-
-	return nil
+	return fn(m, s)
 }
 
 // stopService requests the GoBackupTool service stop and waits (up to 20s)
@@ -263,38 +266,28 @@ func startService() error {
 // e.g. an upgrade or -service=uninstall doesn't race the service's own
 // shutdown.
 func stopService() error {
-	m, err := mgr.Connect()
-	if err != nil {
-		return fmt.Errorf("connecting to Windows service manager: %w", err)
-	}
-	defer m.Disconnect()
-
-	s, err := m.OpenService(serviceName)
-	if err != nil {
-		return fmt.Errorf("service %q is not installed", serviceName)
-	}
-	defer s.Close()
-
-	status, err := s.Control(svc.Stop)
-	if err != nil {
-		return fmt.Errorf("stopping service: %w", err)
-	}
-
-	deadline := time.Now().Add(20 * time.Second)
-
-	for status.State != svc.Stopped {
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for service %q to stop", serviceName)
+	return withInstalledService(func(_ *mgr.Mgr, s *mgr.Service) error {
+		status, err := s.Control(svc.Stop)
+		if err != nil {
+			return fmt.Errorf("stopping service: %w", err)
 		}
 
-		time.Sleep(300 * time.Millisecond)
+		deadline := time.Now().Add(20 * time.Second)
 
-		if status, err = s.Query(); err != nil {
-			return fmt.Errorf("querying service status: %w", err)
+		for status.State != svc.Stopped {
+			if time.Now().After(deadline) {
+				return fmt.Errorf("timed out waiting for service %q to stop", serviceName)
+			}
+
+			time.Sleep(300 * time.Millisecond)
+
+			if status, err = s.Query(); err != nil {
+				return fmt.Errorf("querying service status: %w", err)
+			}
 		}
-	}
 
-	return nil
+		return nil
+	})
 }
 
 // runAsService runs go-backup-tool's jobs under the Service Control

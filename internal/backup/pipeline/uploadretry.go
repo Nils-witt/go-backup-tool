@@ -43,19 +43,7 @@ func (m *OutstandingUploadMonitor) Run(ctx context.Context) {
 		return
 	}
 
-	m.processAll(ctx)
-
-	ticker := time.NewTicker(outstandingUploadCheckInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			m.processAll(ctx)
-		}
-	}
+	backup.RunPeriodically(ctx, outstandingUploadCheckInterval, true, func() { m.processAll(ctx) })
 }
 
 // processAll retries every currently queued outstanding upload, oldest
@@ -153,9 +141,7 @@ func (m *OutstandingUploadMonitor) processOne(ctx context.Context, row backup.Ou
 
 	m.store.TargetDone(row.JobName, row.TargetIdx, nil)
 
-	if err := backup.WriteTargetRun(ctx, m.db, row.JobName, row.TargetIdx, backup.StateOK, "", time.Now()); err != nil {
-		m.log.Warn("recording target run to state db after retry success", "job", row.JobName, "err", err)
-	}
+	writeTargetRunLogged(ctx, m.db, m.log, row.JobName, row.TargetIdx, nil, "recording target run to state db after retry success")
 
 	cleanupStagedFileIfIdle(ctx, m.db, row.StagingPath, m.log)
 }

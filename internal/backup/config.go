@@ -790,8 +790,8 @@ func buildServers(fileServers []fileServer) (map[string]resolvedServer, error) {
 			return nil, fmt.Errorf("server %q: retention is not valid for type: s3 (local only)", name)
 		}
 
-		if (fs.AccessKeyEnv == "") != (fs.SecretKeyEnv == "") {
-			return nil, fmt.Errorf("server %q: access-key-env and secret-key-env must be set together", name)
+		if err := pairedFieldsErr("access-key-env", fs.AccessKeyEnv, "secret-key-env", fs.SecretKeyEnv); err != nil {
+			return nil, fmt.Errorf("server %q: %w", name, err)
 		}
 
 		region := fs.Region
@@ -852,6 +852,19 @@ func buildRemoteServer(name string, fs *fileServer) (resolvedServer, error) {
 // value); a negative duration is rejected since "delete files from the
 // future" isn't meaningful.
 func parseRetention(s string) (time.Duration, error) {
+	return parseOptionalDayDuration("retention", s, true)
+}
+
+// parseOptionalDayDuration parses field's duration string s via
+// parseDayDuration; an empty s means unset, returning the zero duration.
+// allowZero permits a zero duration (rejecting only negative values, for
+// retention:, where "delete from the future" isn't meaningful); when false,
+// zero is rejected too (for stale-after:, where "stale after zero time" is
+// always true and so isn't a meaningful setting). Shared by parseRetention
+// and parseStaleAfter (receiver.go), which otherwise duplicate this trim/
+// empty/parse/sign-check shape with only the field name and boundary
+// differing.
+func parseOptionalDayDuration(field, s string, allowZero bool) (time.Duration, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, nil
@@ -859,14 +872,32 @@ func parseRetention(s string) (time.Duration, error) {
 
 	d, err := parseDayDuration(s)
 	if err != nil {
-		return 0, fmt.Errorf("parsing retention %q: %w", s, err)
+		return 0, fmt.Errorf("parsing %s %q: %w", field, s, err)
 	}
 
-	if d < 0 {
-		return 0, fmt.Errorf("retention must not be negative, got %q", s)
+	if allowZero && d < 0 {
+		return 0, fmt.Errorf("%s must not be negative, got %q", field, s)
+	}
+
+	if !allowZero && d <= 0 {
+		return 0, fmt.Errorf("%s must be positive, got %q", field, s)
 	}
 
 	return d, nil
+}
+
+// pairedFieldsErr returns an error if exactly one of a/b is set — the "must
+// be configured together" validation shared by access-key-env/secret-key-env
+// (buildRemoteServer) and smtp.username/smtp.password-env (report.go's
+// resolveSMTPSettings). Returns nil if the pair is consistent (both set or
+// both empty), leaving any outer wrapping (e.g. a server-name prefix) to the
+// caller.
+func pairedFieldsErr(aName, a, bName, b string) error {
+	if (a == "") != (b == "") {
+		return fmt.Errorf("%s and %s must be set together", aName, bName)
+	}
+
+	return nil
 }
 
 // dayUnitRE matches a leading "<number>d" component (e.g. "7d" or "1.5d") of

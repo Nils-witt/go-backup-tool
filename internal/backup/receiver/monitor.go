@@ -268,19 +268,7 @@ func MonitorStaleReceivers(ctx context.Context, receivers map[string]backup.Reso
 		}
 	}
 
-	checkAll()
-
-	ticker := time.NewTicker(staleReceiverCheckInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			checkAll()
-		}
-	}
+	backup.RunPeriodically(ctx, staleReceiverCheckInterval, true, checkAll)
 }
 
 // anyReceiverHasStaleAfter reports whether any entry in receivers has

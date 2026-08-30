@@ -31,19 +31,10 @@ func RegisterRoutes(mux *http.ServeMux, receivers map[string]backup.ResolvedRece
 // to status, win or lose, so /api/receivers reflects it.
 func HandleReceiveObject(receivers map[string]backup.ResolvedReceiver, status *backup.ReceiverStatusStore, log *slog.Logger, db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		recv, ok := authorizeReceiver(w, r, receivers)
+		recv, cfg, t, key, ok := resolveReceiverRequest(w, r, receivers, db)
 		if !ok {
 			return
 		}
-
-		key, err := backup.SanitizeObjectKey(r.PathValue("key"))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		cfg := &backup.Config{Key: key, StateDB: db}
-		t := backup.ReceiverTarget(recv)
 
 		if err := backup.WriteLocalObject(cfg, t, r.Body); err != nil {
 			log.Warn("receiver: writing object failed", "id", recv.ID, "key", key, "err", err)
@@ -61,7 +52,7 @@ func HandleReceiveObject(receivers map[string]backup.ResolvedReceiver, status *b
 		status.Record(recv.ID, key, nil)
 
 		var size int64
-		if info, statErr := os.Stat(backup.LocalObjectPath(cfg, t)); statErr == nil {
+		if info, statErr := os.Stat(backup.LocalObjectPath(cfg, t)); statErr == nil { //nolint:gosec // cfg.Key is resolveReceiverRequest's already-SanitizeObjectKey-validated key, not raw untrusted input
 			size = info.Size()
 		}
 
@@ -78,19 +69,10 @@ func HandleReceiveObject(receivers map[string]backup.ResolvedReceiver, status *b
 // reflects it.
 func HandleDeleteObject(receivers map[string]backup.ResolvedReceiver, status *backup.ReceiverStatusStore, log *slog.Logger, db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		recv, ok := authorizeReceiver(w, r, receivers)
+		recv, cfg, t, key, ok := resolveReceiverRequest(w, r, receivers, db)
 		if !ok {
 			return
 		}
-
-		key, err := backup.SanitizeObjectKey(r.PathValue("key"))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		cfg := &backup.Config{Key: key, StateDB: db}
-		t := backup.ReceiverTarget(recv)
 
 		if err := backup.DeleteLocalObject(cfg, t); err != nil {
 			log.Warn("receiver: deleting object failed", "id", recv.ID, "key", key, "err", err)
@@ -132,6 +114,29 @@ func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers map[str
 	}
 
 	return recv, true
+}
+
+// resolveReceiverRequest authorizes r against receivers (see
+// authorizeReceiver) and sanitizes its {key} path value (see
+// backup.SanitizeObjectKey), writing an error response and reporting ok as
+// false if either step fails. On success it also builds the cfg/t pair
+// HandleReceiveObject/HandleDeleteObject both need to reuse
+// WriteLocalObject/DeleteLocalObject as a type: local target would (see
+// backup.ReceiverTarget). Shared by both handlers, which otherwise duplicate
+// this exact preamble.
+func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers map[string]backup.ResolvedReceiver, db *sql.DB) (recv backup.ResolvedReceiver, cfg *backup.Config, t *backup.Target, key string, ok bool) {
+	recv, ok = authorizeReceiver(w, r, receivers)
+	if !ok {
+		return backup.ResolvedReceiver{}, nil, nil, "", false
+	}
+
+	key, err := backup.SanitizeObjectKey(r.PathValue("key"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return backup.ResolvedReceiver{}, nil, nil, "", false
+	}
+
+	return recv, &backup.Config{Key: key, StateDB: db}, backup.ReceiverTarget(recv), key, true
 }
 
 // bearerToken extracts the token from an "Authorization: Bearer <token>"

@@ -158,19 +158,13 @@ func (r *Runner) Schedule(ctx context.Context, job *backup.Config) {
 		r.store.SetNextRun(job.Name, time.Now().Add(job.Interval))
 		log.Debug("scheduled next run", "interval", job.Interval)
 
-		ticker := time.NewTicker(job.Interval)
-		defer ticker.Stop()
+		backup.RunPeriodically(ctx, job.Interval, false, func() {
+			r.runOnce(ctx, job)
+			r.store.SetNextRun(job.Name, time.Now().Add(job.Interval))
+			log.Debug("scheduled next run", "interval", job.Interval)
+		})
 
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				r.runOnce(ctx, job)
-				r.store.SetNextRun(job.Name, time.Now().Add(job.Interval))
-				log.Debug("scheduled next run", "interval", job.Interval)
-			}
-		}
+		return
 	}
 
 	next := job.StartTime
@@ -324,13 +318,25 @@ func (r *Runner) persistTargetRun(ctx context.Context, jobName string, index int
 		return
 	}
 
-	state, errText := backup.StateOK, ""
-	if terr != nil {
-		state, errText = backup.StateFailed, terr.Error()
-	}
+	writeTargetRunLogged(ctx, r.stateDB, r.log, jobName, index, terr, "recording target run to state db")
+}
 
-	if err := backup.WriteTargetRun(ctx, r.stateDB, jobName, index, state, errText, time.Now()); err != nil {
-		r.log.Warn("recording target run to state db", "job", jobName, "target", index, "err", err)
+// writeTargetRunLogged persists jobName/index's outcome (state/errText
+// derived from terr; nil means success) to db, logging any write failure
+// with msg via log rather than returning it — every target-run write is
+// best-effort, matching recordLastRun's own reasoning that a db hiccup here
+// shouldn't fail the run. Shared by Runner.persistTargetRun and
+// OutstandingUploadMonitor.processOne's retry-success path.
+func writeTargetRunLogged(ctx context.Context, db *sql.DB, log *slog.Logger, jobName string, index int, terr error, msg string) {
+	var (
+		state   backup.RunState
+		errText string
+	)
+
+	backup.SetOutcome(&state, &errText, terr)
+
+	if err := backup.WriteTargetRun(ctx, db, jobName, index, state, errText, time.Now()); err != nil {
+		log.Warn(msg, "job", jobName, "target", index, "err", err)
 	}
 }
 

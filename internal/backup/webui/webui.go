@@ -278,11 +278,18 @@ func (s *Server) Shutdown() {
 // handleStatus serves store's current job/target statuses as JSON.
 func handleStatus(store *backup.StatusStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		writeJSON(w, store.Snapshot())
+	}
+}
 
-		if err := json.NewEncoder(w).Encode(store.Snapshot()); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+// writeJSON encodes v as the response body with a JSON content type,
+// writing a 500 if encoding fails. Shared by every simple "serve the
+// current snapshot as JSON" handler in this file.
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
 
@@ -298,11 +305,7 @@ func handleReceiverStatus(receivers map[string]backup.ResolvedReceiver, store *b
 			annotateReceiverStaleness(&snapshots[i], receivers[snapshots[i].ID], log)
 		}
 
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-
-		if err := json.NewEncoder(w).Encode(snapshots); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+		writeJSON(w, snapshots)
 	}
 }
 
@@ -330,11 +333,7 @@ func handleIdentity(identity *identity.ServerIdentity) http.HandlerFunc {
 			out = identityJSON{UUID: identity.UUID(), PublicKey: identity.PublicKeyPEM()}
 		}
 
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-
-		if err := json.NewEncoder(w).Encode(out); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+		writeJSON(w, out)
 	}
 }
 
@@ -369,9 +368,8 @@ func annotateReceiverStaleness(snap *backup.ReceiverSnapshot, recv backup.Resolv
 // JWT-authenticated, matching /api/receivers.
 func handleReceiverFiles(receivers map[string]backup.ResolvedReceiver, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		recv, ok := receivers[r.PathValue("id")]
+		recv, ok := lookupReceiver(w, r, receivers)
 		if !ok {
-			http.Error(w, "unknown receiver id", http.StatusNotFound)
 			return
 		}
 
@@ -383,12 +381,20 @@ func handleReceiverFiles(receivers map[string]backup.ResolvedReceiver, log *slog
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-
-		if err := json.NewEncoder(w).Encode(files); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+		writeJSON(w, files)
 	}
+}
+
+// lookupReceiver returns the receiver named by r's {id} path value, writing
+// a 404 and reporting ok as false if it's unknown. Shared by
+// handleReceiverFiles and handleDownloadFile.
+func lookupReceiver(w http.ResponseWriter, r *http.Request, receivers map[string]backup.ResolvedReceiver) (backup.ResolvedReceiver, bool) {
+	recv, ok := receivers[r.PathValue("id")]
+	if !ok {
+		http.Error(w, "unknown receiver id", http.StatusNotFound)
+	}
+
+	return recv, ok
 }
 
 // LogBufferCapacity is how many of the most recent log lines StartWebUI's
@@ -451,11 +457,7 @@ func (b *LogRingBuffer) snapshot() []string {
 // dashboard's log viewer to poll.
 func handleLogs(buf *LogRingBuffer) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-
-		if err := json.NewEncoder(w).Encode(buf.snapshot()); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+		writeJSON(w, buf.snapshot())
 	}
 }
 
@@ -603,6 +605,13 @@ func (s *sessionStore) cookie(value string, secure bool) *http.Cookie {
 	return c
 }
 
+// setCookie writes s's session cookie for value onto w, using r to decide
+// whether it should be marked Secure (see cookie). Shared by every call site
+// that sets or clears the dashboard's session cookie.
+func (s *sessionStore) setCookie(w http.ResponseWriter, r *http.Request, value string) {
+	http.SetCookie(w, s.cookie(value, r.TLS != nil))
+}
+
 // randomSessionID returns a 256-bit random value hex-encoded, unguessable
 // enough to serve as a bearer session id.
 func randomSessionID() (string, error) {
@@ -677,17 +686,12 @@ func handleWebUILogin(username, password string, showSSO bool, sessions *session
 		passMatch := subtle.ConstantTimeCompare([]byte(r.FormValue("password")), []byte(password)) == 1
 		success := userMatch && passMatch
 
-		if db != nil {
-			detail := ""
-			if !success {
-				detail = "incorrect username or password"
-			}
-
-			ev := backup.LoginEvent{At: time.Now(), Username: submittedUser, Method: "password", Success: success, RemoteAddr: clientAddr(r, trustProxyHeaders), Detail: detail}
-			if err := backup.RecordLoginEvent(r.Context(), db, ev); err != nil {
-				log.Warn("web UI: recording login event failed", "err", err)
-			}
+		detail := ""
+		if !success {
+			detail = "incorrect username or password"
 		}
+
+		recordLogin(r.Context(), db, log, r, trustProxyHeaders, "password", "web UI", submittedUser, detail, success)
 
 		if !success {
 			writeLoginPage(w, renderLoginPage("incorrect username or password", next, showPassword, showSSO))
@@ -700,8 +704,27 @@ func handleWebUILogin(username, password string, showSSO bool, sessions *session
 			return
 		}
 
-		http.SetCookie(w, sessions.cookie(id, r.TLS != nil))
+		sessions.setCookie(w, r, id)
 		http.Redirect(w, r, next, http.StatusSeeOther)
+	}
+}
+
+// recordLogin appends one dashboard login attempt to db's login log (see
+// backup.RecordLoginEvent) with method/username/detail/success, warning via
+// log (tagged with source, e.g. "web UI" or "oidc") rather than failing the
+// caller's request if the write itself fails — a login must never be
+// blocked by an audit-log hiccup. A nil db is a no-op, matching
+// StartWebUI's optional db. Shared by handleWebUILogin and oidc.go's
+// handleOIDCCallback, which otherwise duplicate this event-building/
+// recording/warn-on-failure sequence.
+func recordLogin(ctx context.Context, db *sql.DB, log *slog.Logger, r *http.Request, trustProxyHeaders bool, method, source, username, detail string, success bool) {
+	if db == nil {
+		return
+	}
+
+	ev := backup.LoginEvent{At: time.Now(), Username: username, Method: method, Success: success, RemoteAddr: clientAddr(r, trustProxyHeaders), Detail: detail}
+	if err := backup.RecordLoginEvent(ctx, db, ev); err != nil {
+		log.Warn(source+": recording login event failed", "err", err)
 	}
 }
 
@@ -761,11 +784,7 @@ func serveEventLog[E, J any](w http.ResponseWriter, r *http.Request, log *slog.L
 		out[i] = toJSON(ev)
 	}
 
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-
-	if err := json.NewEncoder(w).Encode(out); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
+	writeJSON(w, out)
 }
 
 // downloadEventJSON is downloadEvent's wire shape for handleDownloadEvents,
@@ -807,7 +826,7 @@ func handleWebUILogout(sessions *sessionStore) http.HandlerFunc {
 			sessions.revoke(c.Value)
 		}
 
-		http.SetCookie(w, sessions.cookie("", r.TLS != nil))
+		sessions.setCookie(w, r, "")
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 	}
 }
@@ -891,9 +910,8 @@ func renderLoginPage(errMsg, next string, showPassword, showSSO bool) string {
 // UI has no login configured.
 func handleDownloadFile(receivers map[string]backup.ResolvedReceiver, log *slog.Logger, db *sql.DB, sessions *sessionStore, trustProxyHeaders bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		recv, ok := receivers[r.PathValue("id")]
+		recv, ok := lookupReceiver(w, r, receivers)
 		if !ok {
-			http.Error(w, "unknown receiver id", http.StatusNotFound)
 			return
 		}
 

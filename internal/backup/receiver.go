@@ -194,21 +194,7 @@ func buildWebhook(fw *fileWebhook, staleAfter time.Duration) (ResolvedWebhook, e
 // be positive, since "stale after zero (or a negative) time" is always true
 // and so isn't a meaningful setting.
 func parseStaleAfter(s string) (time.Duration, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, nil
-	}
-
-	d, err := parseDayDuration(s)
-	if err != nil {
-		return 0, fmt.Errorf("parsing stale-after %q: %w", s, err)
-	}
-
-	if d <= 0 {
-		return 0, fmt.Errorf("stale-after must be positive, got %q", s)
-	}
-
-	return d, nil
+	return parseOptionalDayDuration("stale-after", s, false)
 }
 
 // SanitizeObjectKey validates key (the {key...} wildcard segment of a
@@ -417,15 +403,7 @@ func (s *ReceiverStatusStore) Record(id, key string, err error) {
 	r.LastKey = key
 	r.LastSeen = time.Now()
 
-	if err != nil {
-		r.State = StateFailed
-		r.Error = err.Error()
-
-		return
-	}
-
-	r.State = StateOK
-	r.Error = ""
+	SetOutcome(&r.State, &r.Error, err)
 }
 
 // SeedLastEvent initializes receiver id's snapshot from ev, its most
