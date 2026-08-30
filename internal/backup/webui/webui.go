@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"io"
 	"log/slog"
@@ -27,6 +28,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
@@ -92,6 +96,12 @@ type Server struct {
 // public key without digging through its keys-dir: on disk; a nil identity
 // (loadServerIdentityAtStartup failed at startup) hides that section.
 func StartWebUI(addr string, store *backup.StatusStore, receivers map[string]backup.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger, db *sql.DB, logs *LogRingBuffer, webUIUsername, webUIPassword string, oidcAuth *OIDCAuth, identity *identity.ServerIdentity, trustProxyHeaders bool, registerExtraRoutes func(*http.ServeMux)) *Server {
+	uiSessions, err := newSessionStore()
+	if err != nil {
+		log.Error("web UI: starting session store", "err", err)
+		return nil
+	}
+
 	var lc net.ListenConfig
 
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
@@ -104,7 +114,6 @@ func StartWebUI(addr string, store *backup.StatusStore, receivers map[string]bac
 		logs = NewLogRingBuffer(LogBufferCapacity)
 	}
 
-	uiSessions := newSessionStore()
 	downloadTickets := newDownloadTicketStore()
 
 	// authEnabled mirrors requireWebUISession's own gating condition:
@@ -487,97 +496,159 @@ func bearerToken(r *http.Request) (string, bool) {
 // in again.
 const sessionTTL = 12 * time.Hour
 
-// sessionEntry is one currently valid dashboard login (see sessionStore):
-// its expiry, plus the identity that logged in, so handlers downstream of
-// requireWebUISession (e.g. handleMintDownloadTicket) can attribute what
-// they do to a username without re-deriving it from the request.
-type sessionEntry struct {
-	expires  time.Time
-	username string // best-effort identity recorded at login (see handleWebUILogin/handleOIDCCallback); may be empty
-}
+// sessionSigningKeySize is the size, in bytes, of the random HMAC key each
+// sessionStore generates at startup (see newSessionStore) to sign and
+// verify its own dashboard bearer tokens. 256 bits, matching the entropy of
+// the opaque session ids this replaced.
+const sessionSigningKeySize = 32
 
-// sessionStore tracks currently valid dashboard logins (see
-// handleWebUILogin/handleOIDCCallback), mapping each bearer token to its
-// sessionEntry. Sessions live only in this process's memory: a restart
-// invalidates every session, same as it does the receiver status store.
-// Safe for concurrent use, since login and other requests can arrive
-// concurrently.
+// sessionStore mints and verifies the dashboard's bearer tokens: signed
+// JWTs (HS256, see create) whose claims — Subject (the logged-in username)
+// and ID (a per-token jti) — are trusted once the signature checks out,
+// without needing a server-side record of every currently valid session.
+// Logout (see revoke) still needs some server-side state, since a valid
+// JWT's signature alone can't be un-signed: revoke blocklists the token's
+// jti instead of deleting a whole session record, and a jti past its own
+// token's expiry is pruned lazily the next time isRevoked looks it up
+// (never, if it's never presented again) — bounded by the logout rate over
+// sessionTTL, far smaller than tracking every active session the way the
+// previous opaque-token store did. key is generated fresh per process, so a
+// restart invalidates every session, same as before. Safe for concurrent
+// use, since login and other requests can arrive concurrently.
 type sessionStore struct {
-	mu   sync.Mutex
-	byID map[string]sessionEntry
+	key []byte
+
+	mu      sync.Mutex
+	revoked map[string]time.Time // jti -> that token's own expiry
 }
 
-// newSessionStore returns an empty sessionStore.
-func newSessionStore() *sessionStore {
-	return &sessionStore{byID: make(map[string]sessionEntry)}
+// newSessionStore returns an empty sessionStore with a freshly generated
+// signing key.
+func newSessionStore() (*sessionStore, error) {
+	key := make([]byte, sessionSigningKeySize)
+	if _, err := rand.Read(key); err != nil {
+		return nil, fmt.Errorf("generating session signing key: %w", err)
+	}
+
+	return &sessionStore{key: key, revoked: make(map[string]time.Time)}, nil
 }
 
-// create starts a new session for username, valid for sessionTTL, and
-// returns its id.
+// create mints a new bearer token for username, valid for sessionTTL.
 func (s *sessionStore) create(username string) (string, error) {
-	id, err := randomSessionID()
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.HS256, Key: s.key},
+		(&jose.SignerOptions{}).WithType("JWT"),
+	)
+	if err != nil {
+		return "", fmt.Errorf("building signer: %w", err)
+	}
+
+	jti, err := randomSessionID()
 	if err != nil {
 		return "", err
 	}
 
-	s.mu.Lock()
-	s.byID[id] = sessionEntry{expires: time.Now().Add(sessionTTL), username: username}
-	s.mu.Unlock()
-
-	return id, nil
-}
-
-// valid reports whether id names a currently unexpired session, evicting it
-// first if it has expired.
-func (s *sessionStore) valid(id string) bool {
-	if id == "" {
-		return false
+	now := time.Now()
+	claims := jwt.Claims{
+		Subject:  username,
+		ID:       jti,
+		IssuedAt: jwt.NewNumericDate(now),
+		Expiry:   jwt.NewNumericDate(now.Add(sessionTTL)),
 	}
 
+	token, err := jwt.Signed(signer).Claims(claims).Serialize()
+	if err != nil {
+		return "", fmt.Errorf("serializing token: %w", err)
+	}
+
+	return token, nil
+}
+
+// parse verifies raw's HS256 signature against s.key and that it's
+// currently unexpired, reporting its claims and ok=true only if both hold.
+// It does not check revocation — see valid/usernameFor, which do.
+func (s *sessionStore) parse(raw string) (jwt.Claims, bool) {
+	token, err := jwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.HS256})
+	if err != nil {
+		return jwt.Claims{}, false
+	}
+
+	var claims jwt.Claims
+	if err := token.Claims(s.key, &claims); err != nil {
+		return jwt.Claims{}, false
+	}
+
+	if err := claims.Validate(jwt.Expected{Time: time.Now()}); err != nil {
+		return jwt.Claims{}, false
+	}
+
+	return claims, true
+}
+
+// isRevoked reports whether jti was blocklisted by revoke and hasn't yet
+// reached its own token's expiry, evicting it first if it has — at that
+// point the token would fail parse's own expiry check anyway, so there's no
+// need to keep tracking it as revoked.
+func (s *sessionStore) isRevoked(jti string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	e, ok := s.byID[id]
+	expires, ok := s.revoked[jti]
 	if !ok {
 		return false
 	}
 
-	if time.Now().After(e.expires) {
-		delete(s.byID, id)
+	if time.Now().After(expires) {
+		delete(s.revoked, jti)
 		return false
 	}
 
 	return true
 }
 
-// usernameFor returns the username recorded (see create) for r's bearer
-// token, for handlers that want to attribute an action to whoever is
-// currently logged in (e.g. handleMintDownloadTicket's download ticket). It
-// returns "" whenever there's no currently valid token — including when the
-// web UI has no login configured at all, in which case every download is
-// logged with an empty username rather than failing to log it.
+// valid reports whether raw is a currently valid, non-revoked bearer token
+// for s.
+func (s *sessionStore) valid(raw string) bool {
+	if raw == "" {
+		return false
+	}
+
+	claims, ok := s.parse(raw)
+
+	return ok && !s.isRevoked(claims.ID)
+}
+
+// usernameFor returns the username claimed by r's bearer token, for
+// handlers that want to attribute an action to whoever is currently logged
+// in (e.g. handleMintDownloadTicket's download ticket). It returns ""
+// whenever there's no currently valid, non-revoked token — including when
+// the web UI has no login configured at all, in which case every download
+// is logged with an empty username rather than failing to log it.
 func (s *sessionStore) usernameFor(r *http.Request) string {
 	token, ok := bearerToken(r)
 	if !ok {
 		return ""
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	e, ok := s.byID[token]
-	if !ok || time.Now().After(e.expires) {
+	claims, ok := s.parse(token)
+	if !ok || s.isRevoked(claims.ID) {
 		return ""
 	}
 
-	return e.username
+	return claims.Subject
 }
 
-// revoke ends session id (a no-op if it doesn't exist), used by a logout
-// handler.
-func (s *sessionStore) revoke(id string) {
+// revoke ends the session named by bearer token raw (a no-op if it doesn't
+// parse as a currently valid token — there's then nothing to blocklist),
+// used by a logout handler.
+func (s *sessionStore) revoke(raw string) {
+	claims, ok := s.parse(raw)
+	if !ok {
+		return
+	}
+
 	s.mu.Lock()
-	delete(s.byID, id)
+	s.revoked[claims.ID] = claims.Expiry.Time()
 	s.mu.Unlock()
 }
 
@@ -593,7 +664,8 @@ func (s *sessionStore) authenticated(r *http.Request) bool {
 }
 
 // randomSessionID returns a 256-bit random value hex-encoded, unguessable
-// enough to serve as a bearer session id.
+// enough to serve as a bearer token's jti (see sessionStore.create) or an
+// OIDC state/nonce (see oidc.go).
 func randomSessionID() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {

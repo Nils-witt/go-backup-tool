@@ -179,7 +179,7 @@ func TestOIDCLoginAndCallback(t *testing.T) {
 	}
 
 	pending := newOIDCPendingStore()
-	sessions := newSessionStore()
+	sessions := newTestSessionStore(t)
 
 	// Step 1: GET /login/oidc redirects to the provider, carrying a fresh
 	// state and nonce.
@@ -293,7 +293,7 @@ func TestOIDCCallbackUnknownStateRejected(t *testing.T) {
 	}
 
 	pending := newOIDCPendingStore()
-	sessions := newSessionStore()
+	sessions := newTestSessionStore(t)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/login/oidc/callback?state=bogus&code=test-code", nil)
 	rec := httptest.NewRecorder()
@@ -322,7 +322,7 @@ func TestOIDCCallbackProviderErrorRejected(t *testing.T) {
 	}
 
 	pending := newOIDCPendingStore()
-	sessions := newSessionStore()
+	sessions := newTestSessionStore(t)
 
 	state, _, err := pending.start("/")
 	if err != nil {
@@ -431,7 +431,7 @@ func TestRenderLoginPageShowsBothWithDivider(t *testing.T) {
 func TestHandleWebUILoginPasswordPOSTNotFoundWithoutUsername(t *testing.T) {
 	t.Parallel()
 
-	sessions := newSessionStore()
+	sessions := newTestSessionStore(t)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader("username=a&password=b"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")

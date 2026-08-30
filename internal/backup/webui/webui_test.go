@@ -24,6 +24,21 @@ func writeFile(t *testing.T, path, contents string) {
 	}
 }
 
+// newTestSessionStore returns a fresh sessionStore, failing the test if key
+// generation fails (which in practice it never does — see newSessionStore).
+// Shared by every test in this package that needs one, including
+// oidc_test.go.
+func newTestSessionStore(t *testing.T) *sessionStore {
+	t.Helper()
+
+	sessions, err := newSessionStore()
+	if err != nil {
+		t.Fatalf("newSessionStore(): %v", err)
+	}
+
+	return sessions
+}
+
 func TestHandleDashboardServesHTML(t *testing.T) {
 	t.Parallel()
 
@@ -181,7 +196,7 @@ func TestRequireWebUISessionWithoutUsernameAllowsRequest(t *testing.T) {
 	t.Parallel()
 
 	called := false
-	sessions := newSessionStore()
+	sessions := newTestSessionStore(t)
 	h := requireWebUISession(false, sessions, func(http.ResponseWriter, *http.Request) { called = true })
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
@@ -202,7 +217,7 @@ func TestRequireWebUISessionReportsUnauthorizedWithoutToken(t *testing.T) {
 	t.Parallel()
 
 	called := false
-	sessions := newSessionStore()
+	sessions := newTestSessionStore(t)
 	h := requireWebUISession(true, sessions, func(http.ResponseWriter, *http.Request) { called = true })
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/status", nil)
@@ -223,7 +238,7 @@ func TestRequireWebUISessionAcceptsValidToken(t *testing.T) {
 	t.Parallel()
 
 	called := false
-	sessions := newSessionStore()
+	sessions := newTestSessionStore(t)
 
 	id, err := sessions.create("alice")
 	if err != nil {
@@ -474,7 +489,7 @@ func TestDownloadTicketStoreConsumeRejectsMismatch(t *testing.T) {
 func TestHandleWebUILoginWrongCredentialsDoesNotStartSession(t *testing.T) {
 	t.Parallel()
 
-	sessions := newSessionStore()
+	sessions := newTestSessionStore(t)
 
 	form := url.Values{"username": {"admin"}, "password": {"wrong"}}
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader(form.Encode()))
@@ -501,7 +516,7 @@ func TestHandleWebUILoginWrongCredentialsDoesNotStartSession(t *testing.T) {
 func TestHandleWebUILoginWithoutUsernameConfiguredRedirects(t *testing.T) {
 	t.Parallel()
 
-	sessions := newSessionStore()
+	sessions := newTestSessionStore(t)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/login?next=/", nil)
 	rec := httptest.NewRecorder()
@@ -520,7 +535,7 @@ func TestHandleWebUILoginWithoutUsernameConfiguredRedirects(t *testing.T) {
 func TestHandleWebUILoginCorrectCredentialsStartsSession(t *testing.T) {
 	t.Parallel()
 
-	sessions := newSessionStore()
+	sessions := newTestSessionStore(t)
 
 	form := url.Values{"username": {"admin"}, "password": {"secret"}, "next": {"/"}}
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader(form.Encode()))
@@ -551,7 +566,7 @@ func TestHandleWebUILoginCorrectCredentialsStartsSession(t *testing.T) {
 func TestHandleAPILogoutRevokesSession(t *testing.T) {
 	t.Parallel()
 
-	sessions := newSessionStore()
+	sessions := newTestSessionStore(t)
 
 	id, err := sessions.create("alice")
 	if err != nil {
@@ -723,7 +738,7 @@ func TestHandleWebUILoginRecordsLoginEvents(t *testing.T) {
 	t.Parallel()
 
 	db := openTestStateDB(t)
-	sessions := newSessionStore()
+	sessions := newTestSessionStore(t)
 
 	form := url.Values{"username": {"admin"}, "password": {"wrong"}}
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader(form.Encode()))
@@ -765,7 +780,7 @@ func TestHandleWebUILoginWithTrustProxyHeadersRecordsForwardedAddr(t *testing.T)
 	t.Parallel()
 
 	db := openTestStateDB(t)
-	sessions := newSessionStore()
+	sessions := newTestSessionStore(t)
 
 	form := url.Values{"username": {"admin"}, "password": {"secret"}}
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader(form.Encode()))

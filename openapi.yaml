@@ -441,11 +441,14 @@ components:
     webUIBearer:
       type: http
       scheme: bearer
+      bearerFormat: JWT
       description: >
-        Bearer token returned by a successful /login (or, for SSO, minted
+        HS256 JWT returned by a successful /login (or, for SSO, minted
         after the /login/oidc/callback dance and handed to the browser via
-        an inline script). Only enforced when webui.username or OIDC is
-        configured, otherwise these endpoints are open.
+        an inline script), signed with a key generated fresh per server
+        process — a restart invalidates every session. Only enforced when
+        webui.username or OIDC is configured, otherwise these endpoints are
+        open.
     receiverBearer:
       type: http
       scheme: bearer
