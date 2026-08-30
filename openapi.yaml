@@ -16,7 +16,7 @@ tags:
   - name: dashboard
     description: Read-only JSON endpoints backing the web UI dashboard
   - name: auth
-    description: Dashboard login/logout (session-cookie based)
+    description: Dashboard login/logout (bearer-token based)
   - name: receiver-api
     description: "Object ingestion API for `type: remote` targets, authenticated per-receiver via a signed JWT bearer token"
 
@@ -28,7 +28,7 @@ paths:
       operationId: getStatus
       description: Snapshot of every configured backup job and its targets, polled by the dashboard.
       security:
-        - webUISession: []
+        - webUIBearer: []
       responses:
         "200":
           description: Job statuses
@@ -48,7 +48,7 @@ paths:
       operationId: getLogs
       description: "The most recent buffered log lines (see `enable-log-viewer:` in the config file), oldest first."
       security:
-        - webUISession: []
+        - webUIBearer: []
       responses:
         "200":
           description: Buffered log lines
@@ -71,7 +71,7 @@ paths:
         fill in a `receivers:` entry on another instance. A zero-value object
         is returned if no identity was loaded at startup.
       security:
-        - webUISession: []
+        - webUIBearer: []
       responses:
         "200":
           description: Server identity
@@ -89,7 +89,7 @@ paths:
       operationId: getReceivers
       description: "Live state of every configured receiver, annotated with staleness for any receiver with `stale-after:` set."
       security:
-        - webUISession: []
+        - webUIBearer: []
       responses:
         "200":
           description: Receiver statuses
@@ -108,7 +108,7 @@ paths:
       summary: Files currently stored under a receiver
       operationId: getReceiverFiles
       security:
-        - webUISession: []
+        - webUIBearer: []
       parameters:
         - $ref: "#/components/parameters/ReceiverId"
       responses:
@@ -130,16 +130,18 @@ paths:
                 type: string
 
   /api/receivers/{id}/download/{key}:
-    get:
+    post:
       tags: [dashboard]
-      summary: Download a file stored under a receiver
-      operationId: downloadReceiverFile
+      summary: Mint a one-time download ticket for a file stored under a receiver
+      operationId: mintDownloadTicket
       description: >
-        Streams the raw content of one object. Gated by the dashboard's own
-        login session (redirects to /login on a full-page navigation rather
-        than 401ing, unlike the other /api/... endpoints).
+        Mints a short-lived (60s), single-use download ticket for this
+        receiver/key, attributed to whoever is currently logged in. The
+        dashboard's own JavaScript calls this (bearer-authenticated) right
+        before navigating the browser to the matching GET below, which — as
+        a plain page navigation — can't carry an Authorization header.
       security:
-        - webUISession: []
+        - webUIBearer: []
       parameters:
         - $ref: "#/components/parameters/ReceiverId"
         - name: key
@@ -150,16 +152,68 @@ paths:
             type: string
       responses:
         "200":
+          description: Download ticket
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ticket:
+                    type: string
+                required: [ticket]
+        "400":
+          description: Invalid object key
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Unknown receiver id
+          content:
+            text/plain:
+              schema:
+                type: string
+    get:
+      tags: [dashboard]
+      summary: Download a file stored under a receiver
+      operationId: downloadReceiverFile
+      description: >
+        Streams the raw content of one object. Authorized by a one-time
+        ticket (see the POST operation above) rather than a bearer token,
+        since this request is a plain browser navigation.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/ReceiverId"
+        - name: key
+          in: path
+          required: true
+          description: Object key, relative to the receiver's storage path (may contain "/").
+          schema:
+            type: string
+        - name: ticket
+          in: query
+          required: true
+          description: A ticket minted by POSTing to this same path.
+          schema:
+            type: string
+      responses:
+        "200":
           description: File content
           content:
             application/octet-stream:
               schema:
                 type: string
                 format: binary
-        "303":
-          description: No valid session; redirected to /login?next=...
         "400":
           description: Invalid object key
+          content:
+            text/plain:
+              schema:
+                type: string
+        "403":
+          description: Missing, invalid, expired, or already-used download ticket
           content:
             text/plain:
               schema:
@@ -178,7 +232,7 @@ paths:
       operationId: getLoginEvents
       description: The most recently recorded login attempts (up to 200), newest first.
       security:
-        - webUISession: []
+        - webUIBearer: []
       responses:
         "200":
           description: Login events
@@ -198,7 +252,7 @@ paths:
       operationId: getDownloadEvents
       description: The most recently recorded download attempts (up to 200), newest first.
       security:
-        - webUISession: []
+        - webUIBearer: []
       responses:
         "200":
           description: Download events
@@ -254,29 +308,46 @@ paths:
               required: [username, password]
       responses:
         "200":
-          description: Invalid credentials; login form re-rendered with an error
+          description: Successful login; bearer token returned as JSON
           content:
-            text/html:
+            application/json:
               schema:
-                type: string
-        "303":
-          description: Successful login; session cookie set and redirected to next
-          headers:
-            Set-Cookie:
+                type: object
+                properties:
+                  token:
+                    type: string
+                  expires_at:
+                    type: string
+                    format: date-time
+                required: [token, expires_at]
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
               schema:
-                type: string
+                type: object
+                properties:
+                  error:
+                    type: string
+                required: [error]
         "404":
           description: No username/password configured on this instance
 
-  /logout:
-    get:
+  /api/logout:
+    post:
       tags: [auth]
       summary: End the current dashboard session
       operationId: logout
-      security: []
+      description: >
+        Revokes the bearer token carried in the Authorization header, if
+        any (a missing or already-invalid one is a no-op). Always succeeds;
+        the caller is expected to discard its own copy of the token
+        regardless of the response.
+      security:
+        - webUIBearer: []
       responses:
-        "303":
-          description: Session revoked, cookie cleared, redirected to /login
+        "204":
+          description: Token revoked (or there was none to revoke)
 
   /api/v1/objects/{id}/{key}:
     put:
@@ -367,14 +438,14 @@ paths:
 
 components:
   securitySchemes:
-    webUISession:
-      type: apiKey
-      in: cookie
-      name: gbt_webui_session
+    webUIBearer:
+      type: http
+      scheme: bearer
       description: >
-        Dashboard session cookie set by a successful /login. Only enforced
-        when webui.username or OIDC is configured, otherwise these endpoints
-        are open.
+        Bearer token returned by a successful /login (or, for SSO, minted
+        after the /login/oidc/callback dance and handed to the browser via
+        an inline script). Only enforced when webui.username or OIDC is
+        configured, otherwise these endpoints are open.
     receiverBearer:
       type: http
       scheme: bearer

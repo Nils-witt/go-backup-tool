@@ -3,6 +3,8 @@ package webui
 import (
 	"context"
 	"database/sql"
+	_ "embed"
+	"html/template"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -156,6 +158,45 @@ func handleOIDCLogin(auth *OIDCAuth, pending *oidcPendingStore) http.HandlerFunc
 	}
 }
 
+// oidcCompleteTemplateSrc is the tiny bridge page handleOIDCCallback serves
+// once a login succeeds: the callback is a top-level browser redirect
+// landing, not a fetch() call the dashboard's own JS can read a token out
+// of (see handleWebUILogin's JSON response for that path), so instead this
+// page's inline <script> stores the freshly minted token itself and sends
+// the browser on its way — see writeOIDCCompletePage.
+//
+//go:embed oidc_complete.html
+var oidcCompleteTemplateSrc string
+
+// oidcCompleteTemplate is oidcCompleteTemplateSrc parsed once at package
+// init. html/template's contextual autoescaping JS-escapes Token/Next for
+// their <script> string-literal context automatically, the same way
+// loginPageTemplate escapes Next for its HTML attribute/URL contexts.
+var oidcCompleteTemplate = template.Must(template.New("oidc_complete.html").Parse(oidcCompleteTemplateSrc))
+
+// oidcCompleteData is oidcCompleteTemplate's input.
+type oidcCompleteData struct {
+	Token     string
+	ExpiresAt string
+	Next      string
+}
+
+// writeOIDCCompletePage renders oidcCompleteTemplate to w for a session that
+// just started with token, expiring at expiresAt, sending the browser on to
+// next once the token is stored client-side.
+func writeOIDCCompletePage(w http.ResponseWriter, token string, expiresAt time.Time, next string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	data := oidcCompleteData{Token: token, ExpiresAt: expiresAt.Format(time.RFC3339), Next: next}
+	if err := oidcCompleteTemplate.Execute(w, data); err != nil {
+		// oidcCompleteTemplate is a fixed, compile-time-checked template
+		// executed against a plain struct of strings, so this can't fail in
+		// practice; panicking here would be worse than a broken page for an
+		// otherwise-successful login.
+		return
+	}
+}
+
 // handleOIDCCallback serves GET /login/oidc/callback, the redirect target
 // the provider sends the browser back to once it's authenticated: it
 // resolves the in-flight login named by the callback's state parameter (see
@@ -164,9 +205,10 @@ func handleOIDCLogin(auth *OIDCAuth, pending *oidcPendingStore) http.HandlerFunc
 // oidc.IDTokenVerifier.Verify — plus the nonce, matched against the
 // in-flight login's own, guarding against a replayed token), and — once all
 // of that checks out — starts a dashboard session exactly as a successful
-// password login would (see handleWebUILogin), redirecting the browser to
-// the in-flight login's next. db, when non-nil, gets every attempt appended
-// to the login log (see recordLoginEvent), win or lose, mirroring
+// password login would (see handleWebUILogin), then serves the bridge page
+// (see writeOIDCCompletePage) that hands the browser its token and sends it
+// on to the in-flight login's next. db, when non-nil, gets every attempt
+// appended to the login log (see recordLoginEvent), win or lose, mirroring
 // handleWebUILogin's own recording.
 func handleOIDCCallback(auth *OIDCAuth, pending *oidcPendingStore, sessions *sessionStore, log *slog.Logger, db *sql.DB, trustProxyHeaders bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -232,8 +274,7 @@ func handleOIDCCallback(auth *OIDCAuth, pending *oidcPendingStore, sessions *ses
 		}
 
 		record(oidcIdentity(idToken), "", true)
-		sessions.setCookie(w, r, id)
-		http.Redirect(w, r, p.next, http.StatusSeeOther)
+		writeOIDCCompletePage(w, id, time.Now().Add(sessionTTL), p.next)
 	}
 }
 

@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>go-backup-tool &middot; signing in&hellip;</title>
+</head>
+<body>
+<script>
+sessionStorage.setItem("gbt_webui_token", "{{.Token}}");
+sessionStorage.setItem("gbt_webui_token_expires", "{{.ExpiresAt}}");
+location.replace("{{.Next}}");
+</script>
+<noscript>Continue to <a href="{{.Next}}">the dashboard</a>.</noscript>
+</body>
+</html>

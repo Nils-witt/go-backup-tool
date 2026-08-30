@@ -219,24 +219,45 @@ func TestOIDCLoginAndCallback(t *testing.T) {
 
 	handleOIDCCallback(auth, pending, sessions, discardLogger, db, false)(callbackRec, callbackReq)
 
-	if callbackRec.Code != http.StatusSeeOther {
-		t.Fatalf("callback status = %d, want %d; body = %s", callbackRec.Code, http.StatusSeeOther, callbackRec.Body.String())
+	if callbackRec.Code != http.StatusOK {
+		t.Fatalf("callback status = %d, want %d; body = %s", callbackRec.Code, http.StatusOK, callbackRec.Body.String())
 	}
 
-	if loc := callbackRec.Header().Get("Location"); loc != "/dashboard" {
-		t.Errorf("callback Location = %q, want %q", loc, "/dashboard")
-	}
+	body := callbackRec.Body.String()
 
-	cookies := callbackRec.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != webUISessionCookie {
-		t.Fatalf("callback cookies = %+v, want one %s cookie", cookies, webUISessionCookie)
+	// html/template JS-escapes "/" as "\/" inside a <script> string literal,
+	// so this looks for the escaped form rather than a literal "/dashboard".
+	if !strings.Contains(body, `location.replace("\/dashboard")`) {
+		t.Errorf("callback body doesn't send the browser on to /dashboard: %s", body)
 	}
 
 	assertSoleLoginEvent(t, db, backup.LoginEvent{Username: "person@example.com", Method: "oidc", Success: true})
 
-	if !sessions.valid(cookies[0].Value) {
-		t.Error("the session cookie's value isn't a valid session")
+	token := extractOIDCCompleteToken(t, body)
+	if !sessions.valid(token) {
+		t.Error("the embedded token isn't a valid session")
 	}
+}
+
+// extractOIDCCompleteToken pulls the bearer token embedded in an
+// oidc_complete.html response body (see writeOIDCCompletePage), failing t if
+// it's not there.
+func extractOIDCCompleteToken(t *testing.T, body string) string {
+	t.Helper()
+
+	const prefix = `sessionStorage.setItem("gbt_webui_token", "`
+
+	_, rest, ok := strings.Cut(body, prefix)
+	if !ok {
+		t.Fatalf("body doesn't embed a token: %s", body)
+	}
+
+	end := strings.Index(rest, `"`)
+	if end == -1 {
+		t.Fatalf("body's embedded token has no closing quote: %s", body)
+	}
+
+	return rest[:end]
 }
 
 // assertSoleLoginEvent fails t unless db's login log holds exactly one
@@ -281,10 +302,6 @@ func TestOIDCCallbackUnknownStateRejected(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
-	}
-
-	if len(rec.Result().Cookies()) != 0 {
-		t.Error("a session cookie was set despite an unknown state")
 	}
 }
 

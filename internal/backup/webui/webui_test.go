@@ -182,7 +182,7 @@ func TestRequireWebUISessionWithoutUsernameAllowsRequest(t *testing.T) {
 
 	called := false
 	sessions := newSessionStore()
-	h := requireWebUISession(false, sessions, true, func(http.ResponseWriter, *http.Request) { called = true })
+	h := requireWebUISession(false, sessions, func(http.ResponseWriter, *http.Request) { called = true })
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
@@ -198,37 +198,12 @@ func TestRequireWebUISessionWithoutUsernameAllowsRequest(t *testing.T) {
 	}
 }
 
-func TestRequireWebUISessionRedirectsWithoutValidSession(t *testing.T) {
+func TestRequireWebUISessionReportsUnauthorizedWithoutToken(t *testing.T) {
 	t.Parallel()
 
 	called := false
 	sessions := newSessionStore()
-	h := requireWebUISession(true, sessions, true, func(http.ResponseWriter, *http.Request) { called = true })
-
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
-	rec := httptest.NewRecorder()
-
-	h(rec, req)
-
-	if called {
-		t.Error("handler was called despite no session cookie")
-	}
-
-	if rec.Code != http.StatusSeeOther {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusSeeOther)
-	}
-
-	if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, "/login?next=") {
-		t.Errorf("Location = %q, want a /login?next=... redirect", loc)
-	}
-}
-
-func TestRequireWebUISessionReportsUnauthorizedWithoutRedirect(t *testing.T) {
-	t.Parallel()
-
-	called := false
-	sessions := newSessionStore()
-	h := requireWebUISession(true, sessions, false, func(http.ResponseWriter, *http.Request) { called = true })
+	h := requireWebUISession(true, sessions, func(http.ResponseWriter, *http.Request) { called = true })
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/status", nil)
 	rec := httptest.NewRecorder()
@@ -236,7 +211,7 @@ func TestRequireWebUISessionReportsUnauthorizedWithoutRedirect(t *testing.T) {
 	h(rec, req)
 
 	if called {
-		t.Error("handler was called despite no session cookie")
+		t.Error("handler was called despite no bearer token")
 	}
 
 	if rec.Code != http.StatusUnauthorized {
@@ -244,7 +219,7 @@ func TestRequireWebUISessionReportsUnauthorizedWithoutRedirect(t *testing.T) {
 	}
 }
 
-func TestRequireWebUISessionAcceptsValidSession(t *testing.T) {
+func TestRequireWebUISessionAcceptsValidToken(t *testing.T) {
 	t.Parallel()
 
 	called := false
@@ -255,17 +230,17 @@ func TestRequireWebUISessionAcceptsValidSession(t *testing.T) {
 		t.Fatalf("sessions.create(): %v", err)
 	}
 
-	h := requireWebUISession(true, sessions, true, func(http.ResponseWriter, *http.Request) { called = true })
+	h := requireWebUISession(true, sessions, func(http.ResponseWriter, *http.Request) { called = true })
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
-	req.AddCookie(&http.Cookie{Name: webUISessionCookie, Value: id}) //nolint:gosec // a request Cookie header, not a Set-Cookie response; Secure/HttpOnly/SameSite don't apply
+	req.Header.Set("Authorization", "Bearer "+id)
 
 	rec := httptest.NewRecorder()
 
 	h(rec, req)
 
 	if !called {
-		t.Error("handler wasn't called despite a valid session cookie")
+		t.Error("handler wasn't called despite a valid bearer token")
 	}
 
 	if rec.Code != http.StatusOK {
@@ -319,14 +294,22 @@ func TestStartWebUIWithLoginRequiresSession(t *testing.T) {
 		t.Fatalf("POST /login: %v", err)
 	}
 
-	_ = loginResp.Body.Close()
+	defer func() { _ = loginResp.Body.Close() }()
 
-	cookies := loginResp.Cookies()
-	if len(cookies) != 1 || cookies[0].Name != webUISessionCookie {
-		t.Fatalf("login cookies = %+v, want one %s cookie", cookies, webUISessionCookie)
+	if loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /login status = %d, want 200", loginResp.StatusCode)
 	}
 
-	req.AddCookie(cookies[0])
+	var loginBody loginResponseJSON
+	if err := json.NewDecoder(loginResp.Body).Decode(&loginBody); err != nil {
+		t.Fatalf("decoding login response: %v", err)
+	}
+
+	if loginBody.Token == "" {
+		t.Fatal("login response has no token")
+	}
+
+	req.Header.Set("Authorization", "Bearer "+loginBody.Token)
 
 	resp, err = client.Do(req)
 	if err != nil {
@@ -404,13 +387,20 @@ func TestHandleDownloadFileServesContent(t *testing.T) {
 
 	receivers := map[string]backup.ResolvedReceiver{"a": {ID: "a", Path: root}}
 
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/backup.gpg", nil)
+	tickets := newDownloadTicketStore()
+
+	ticket, err := tickets.create("a", "backup.gpg", "")
+	if err != nil {
+		t.Fatalf("tickets.create(): %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/backup.gpg?ticket="+ticket, nil)
 	req.SetPathValue("id", "a")
 	req.SetPathValue("key", "backup.gpg")
 
 	rec := httptest.NewRecorder()
 
-	handleDownloadFile(receivers, discardLogger, nil, newSessionStore(), false)(rec, req)
+	handleDownloadFile(receivers, discardLogger, nil, tickets, false)(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -422,6 +412,62 @@ func TestHandleDownloadFileServesContent(t *testing.T) {
 
 	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, `filename="backup.gpg"`) {
 		t.Errorf("Content-Disposition = %q, want it to name backup.gpg", cd)
+	}
+}
+
+func TestHandleDownloadFileRejectsMissingTicket(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "backup.gpg"), "secret data")
+
+	receivers := map[string]backup.ResolvedReceiver{"a": {ID: "a", Path: root}}
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/backup.gpg", nil)
+	req.SetPathValue("id", "a")
+	req.SetPathValue("key", "backup.gpg")
+
+	rec := httptest.NewRecorder()
+
+	handleDownloadFile(receivers, discardLogger, nil, newDownloadTicketStore(), false)(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
+func TestDownloadTicketStoreConsumeIsSingleUse(t *testing.T) {
+	t.Parallel()
+
+	tickets := newDownloadTicketStore()
+
+	id, err := tickets.create("a", "backup.gpg", "alice")
+	if err != nil {
+		t.Fatalf("tickets.create(): %v", err)
+	}
+
+	username, ok := tickets.consume(id, "a", "backup.gpg")
+	if !ok || username != "alice" {
+		t.Fatalf("consume() = %q, %v, want %q, true", username, ok, "alice")
+	}
+
+	if _, ok := tickets.consume(id, "a", "backup.gpg"); ok {
+		t.Error("consume() succeeded a second time for the same ticket, want single-use")
+	}
+}
+
+func TestDownloadTicketStoreConsumeRejectsMismatch(t *testing.T) {
+	t.Parallel()
+
+	tickets := newDownloadTicketStore()
+
+	id, err := tickets.create("a", "backup.gpg", "alice")
+	if err != nil {
+		t.Fatalf("tickets.create(): %v", err)
+	}
+
+	if _, ok := tickets.consume(id, "a", "other.gpg"); ok {
+		t.Error("consume() succeeded for the wrong key, want false")
 	}
 }
 
@@ -438,16 +484,17 @@ func TestHandleWebUILoginWrongCredentialsDoesNotStartSession(t *testing.T) {
 
 	handleWebUILogin("admin", "secret", false, sessions, nil, discardLogger, false)(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200 (re-rendered form)", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 
-	if !strings.Contains(rec.Body.String(), "incorrect username or password") {
+	var body loginErrorJSON
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decoding response body: %v", err)
+	}
+
+	if body.Error == "" {
 		t.Error("response body doesn't mention the incorrect credentials")
-	}
-
-	if len(rec.Result().Cookies()) != 0 {
-		t.Error("a session cookie was set despite the wrong password")
 	}
 }
 
@@ -470,7 +517,7 @@ func TestHandleWebUILoginWithoutUsernameConfiguredRedirects(t *testing.T) {
 	}
 }
 
-func TestHandleWebUILoginCorrectCredentialsStartsSessionAndRedirects(t *testing.T) {
+func TestHandleWebUILoginCorrectCredentialsStartsSession(t *testing.T) {
 	t.Parallel()
 
 	sessions := newSessionStore()
@@ -483,25 +530,25 @@ func TestHandleWebUILoginCorrectCredentialsStartsSessionAndRedirects(t *testing.
 
 	handleWebUILogin("admin", "secret", false, sessions, nil, discardLogger, false)(rec, req)
 
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
-	if loc := rec.Header().Get("Location"); loc != "/" {
-		t.Errorf("Location = %q, want %q", loc, "/")
+	var body loginResponseJSON
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decoding response body: %v", err)
 	}
 
-	cookies := rec.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != webUISessionCookie {
-		t.Fatalf("cookies = %+v, want one %s cookie", cookies, webUISessionCookie)
+	if body.Token == "" {
+		t.Fatal("response has no token")
 	}
 
-	if !sessions.valid(cookies[0].Value) {
-		t.Error("the session cookie's value isn't a valid session")
+	if !sessions.valid(body.Token) {
+		t.Error("the response token isn't a valid session")
 	}
 }
 
-func TestHandleWebUILogoutRevokesSession(t *testing.T) {
+func TestHandleAPILogoutRevokesSession(t *testing.T) {
 	t.Parallel()
 
 	sessions := newSessionStore()
@@ -511,19 +558,15 @@ func TestHandleWebUILogoutRevokesSession(t *testing.T) {
 		t.Fatalf("sessions.create(): %v", err)
 	}
 
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/logout", nil)
-	req.AddCookie(&http.Cookie{Name: webUISessionCookie, Value: id}) //nolint:gosec // a request Cookie header, not a Set-Cookie response; Secure/HttpOnly/SameSite don't apply
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/logout", nil)
+	req.Header.Set("Authorization", "Bearer "+id)
 
 	rec := httptest.NewRecorder()
 
-	handleWebUILogout(sessions)(rec, req)
+	handleAPILogout(sessions)(rec, req)
 
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
-	}
-
-	if loc := rec.Header().Get("Location"); loc != "/login" {
-		t.Errorf("Location = %q, want %q", loc, "/login")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
 
 	if sessions.valid(id) {
@@ -794,11 +837,11 @@ func TestHandleDownloadFileRecordsDownloadEvents(t *testing.T) {
 	t.Parallel()
 
 	db := openTestStateDB(t)
-	sessions := newSessionStore()
+	tickets := newDownloadTicketStore()
 
-	id, err := sessions.create("alice")
+	ticket, err := tickets.create("a", "backup.gpg", "alice")
 	if err != nil {
-		t.Fatalf("sessions.create() error: %v", err)
+		t.Fatalf("tickets.create() error: %v", err)
 	}
 
 	root := t.TempDir()
@@ -806,20 +849,30 @@ func TestHandleDownloadFileRecordsDownloadEvents(t *testing.T) {
 
 	receivers := map[string]backup.ResolvedReceiver{"a": {ID: "a", Path: root}}
 
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/backup.gpg", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/backup.gpg?ticket="+ticket, nil)
 	req.SetPathValue("id", "a")
 	req.SetPathValue("key", "backup.gpg")
-	req.AddCookie(&http.Cookie{Name: webUISessionCookie, Value: id}) //nolint:gosec // a request Cookie header, not a Set-Cookie response; Secure/HttpOnly/SameSite don't apply
 	req.RemoteAddr = "198.51.100.1:4321"
 
-	handleDownloadFile(receivers, discardLogger, db, sessions, false)(httptest.NewRecorder(), req)
+	handleDownloadFile(receivers, discardLogger, db, tickets, false)(httptest.NewRecorder(), req)
 
 	req = httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/missing.gpg", nil)
 	req.SetPathValue("id", "a")
 	req.SetPathValue("key", "missing.gpg")
 	req.RemoteAddr = "198.51.100.2:4321"
 
-	handleDownloadFile(receivers, discardLogger, db, sessions, false)(httptest.NewRecorder(), req)
+	// A missing ticket is reported as 403 without ever attempting to open
+	// the file, so it can't produce a "not found" download event; mint one
+	// for this receiver/key so the failure under test is the file lookup,
+	// not the ticket.
+	ticket2, err := tickets.create("a", "missing.gpg", "")
+	if err != nil {
+		t.Fatalf("tickets.create() error: %v", err)
+	}
+
+	req.URL.RawQuery = "ticket=" + ticket2
+
+	handleDownloadFile(receivers, discardLogger, db, tickets, false)(httptest.NewRecorder(), req)
 
 	events, err := backup.ReadDownloadEvents(t.Context(), db, 10)
 	if err != nil {

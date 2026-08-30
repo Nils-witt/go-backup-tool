@@ -1,3 +1,58 @@
+// TOKEN_KEY is the sessionStorage key the dashboard's bearer token (see
+// setToken/getToken) is kept under. sessionStorage, unlike localStorage, is
+// cleared when the tab closes, so a closed-and-reopened tab requires a
+// fresh login rather than staying signed in indefinitely.
+const TOKEN_KEY = "gbt_webui_token";
+
+function getToken() {
+  try {
+    return sessionStorage.getItem(TOKEN_KEY) || "";
+  } catch (e) {
+    return "";
+  }
+}
+
+function setToken(token) {
+  try {
+    sessionStorage.setItem(TOKEN_KEY, token);
+  } catch (e) {}
+}
+
+function clearToken() {
+  try {
+    sessionStorage.removeItem(TOKEN_KEY);
+  } catch (e) {}
+}
+
+// goToLogin clears the stored token and sends the browser to the login
+// page, remembering the current path so a successful login returns here.
+function goToLogin() {
+  clearToken();
+  window.location.href = "/login?next=" + encodeURIComponent(window.location.pathname);
+}
+
+// apiFetch wraps fetch(), attaching the stored bearer token (if any) as an
+// Authorization header on every call to the dashboard's own /api/...
+// endpoints. A 401 response means the token is missing, invalid, or
+// expired — there's no server-side redirect to fall back on (see
+// requireWebUISession in webui.go), so this sends the browser to /login
+// itself instead of letting the caller deal with an authentication failure.
+function apiFetch(url, opts) {
+  opts = opts || {};
+
+  const headers = Object.assign({}, opts.headers || {});
+  const token = getToken();
+  if (token) headers["Authorization"] = "Bearer " + token;
+
+  return fetch(url, Object.assign({}, opts, { headers: headers })).then(function (r) {
+    if (r.status === 401) {
+      goToLogin();
+      throw new Error("unauthorized");
+    }
+    return r;
+  });
+}
+
 // The Go zero time.Time serializes as "0001-01-01T00:00:00Z" rather than an
 // empty/omitted field.
 function hasTime(s) {
@@ -87,10 +142,9 @@ function renderFileList(id) {
   if (!files.length) return '<p class="meta">no files stored</p>';
 
   return '<ul class="files">' + files.map(function (f) {
-    const href = "/api/receivers/" + encodeURIComponent(id) + "/download/" + encodePathKey(f.key);
     return '<li><span class="file-key">' + escapeHtml(f.key) + '</span>' +
       '<span class="file-meta">' + fmtSize(f.size) + ' &middot; ' + fmtTime(f.mod_time) +
-      ' &middot; <a href="' + href + '" class="download-link" data-key="' + escapeHtml(f.key) + '">download</a></span></li>';
+      ' &middot; <a href="#" class="download-link" data-id="' + escapeHtml(id) + '" data-key="' + escapeHtml(f.key) + '">download</a></span></li>';
   }).join("") + '</ul>';
 }
 
@@ -105,7 +159,7 @@ function toggleReceiverFiles(id) {
   delete receiverFilesCache[id];
   renderReceivers(lastReceivers);
 
-  fetch("/api/receivers/" + encodeURIComponent(id) + "/files")
+  apiFetch("/api/receivers/" + encodeURIComponent(id) + "/files")
     .then(function (r) { return r.json(); })
     .then(function (files) {
       receiverFilesCache[id] = files;
@@ -151,27 +205,44 @@ function renderReceivers(receivers) {
   }).join("");
 }
 
+// startDownload mints a one-time download ticket (see
+// handleMintDownloadTicket in webui.go) with an authenticated request, then
+// navigates the browser to the plain GET download URL with that ticket
+// attached — a normal, browser-native download (no in-memory buffering of
+// the whole file), authorized by the ticket rather than the Authorization
+// header a navigation can't carry.
+function startDownload(id, key) {
+  const url = "/api/receivers/" + encodeURIComponent(id) + "/download/" + encodePathKey(key);
+
+  apiFetch(url, { method: "POST" })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      window.location.href = url + "?ticket=" + encodeURIComponent(data.ticket);
+    })
+    .catch(function () {});
+}
+
 // download confirmation dialog: clicking a download link opens the native
-// <dialog> in dashboard.html instead of navigating immediately; the actual
-// navigation happens on "close" only if the form's submitted value is
+// <dialog> in dashboard.html instead of downloading immediately; the actual
+// download happens on "close" only if the form's submitted value is
 // "confirm" (the Download button), so Cancel and Esc both fall through as
 // a no-op.
 const downloadDialog = document.getElementById("download-confirm-dialog");
 const downloadDialogKey = document.getElementById("download-confirm-key");
-let pendingDownloadHref = null;
+let pendingDownload = null;
 
 downloadDialog.addEventListener("close", function () {
-  if (downloadDialog.returnValue === "confirm" && pendingDownloadHref) {
-    window.location.href = pendingDownloadHref;
+  if (downloadDialog.returnValue === "confirm" && pendingDownload) {
+    startDownload(pendingDownload.id, pendingDownload.key);
   }
-  pendingDownloadHref = null;
+  pendingDownload = null;
 });
 
 document.getElementById("receivers").addEventListener("click", function (e) {
   const link = e.target.closest(".download-link");
   if (link) {
     e.preventDefault();
-    pendingDownloadHref = link.getAttribute("href");
+    pendingDownload = { id: link.dataset.id, key: link.dataset.key };
     downloadDialogKey.textContent = link.dataset.key;
     downloadDialog.showModal();
     return;
@@ -180,6 +251,21 @@ document.getElementById("receivers").addEventListener("click", function (e) {
   const btn = e.target.closest(".files-toggle");
   if (!btn) return;
   toggleReceiverFiles(btn.dataset.id);
+});
+
+// Log out: best-effort revoke the token server-side (see handleAPILogout in
+// webui.go), then always clear it locally and send the browser to /login —
+// there's no cookie or redirect for the server to clean up any more.
+document.getElementById("logout-link").addEventListener("click", function (e) {
+  e.preventDefault();
+
+  const token = getToken();
+  const headers = token ? { "Authorization": "Bearer " + token } : {};
+
+  fetch("/api/logout", { method: "POST", headers: headers }).catch(function () {}).then(function () {
+    clearToken();
+    window.location.href = "/login";
+  });
 });
 
 // renderLogs re-renders the log viewer from lines (oldest first, as served
@@ -282,7 +368,7 @@ function renderIdentity(identity) {
 let identityLoaded = false;
 
 function loadIdentity() {
-  fetch("/api/identity")
+  apiFetch("/api/identity")
     .then(function (r) { return r.json(); })
     .then(function (identity) {
       identityLoaded = true;
@@ -295,11 +381,11 @@ function refresh() {
   if (!identityLoaded) loadIdentity();
 
   Promise.all([
-    fetch("/api/status").then(function (r) { return r.json(); }),
-    fetch("/api/receivers").then(function (r) { return r.json(); }),
-    fetch("/api/logs").then(function (r) { return r.json(); }),
-    fetch("/api/login-events").then(function (r) { return r.json(); }),
-    fetch("/api/download-events").then(function (r) { return r.json(); })
+    apiFetch("/api/status").then(function (r) { return r.json(); }),
+    apiFetch("/api/receivers").then(function (r) { return r.json(); }),
+    apiFetch("/api/logs").then(function (r) { return r.json(); }),
+    apiFetch("/api/login-events").then(function (r) { return r.json(); }),
+    apiFetch("/api/download-events").then(function (r) { return r.json(); })
   ]).then(function (results) {
     render(results[0]);
     lastReceivers = results[1] || [];

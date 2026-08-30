@@ -26,8 +26,8 @@
 <div class="card">
 <h1>go-backup-tool</h1>
 {{if .ShowPassword}}
-<form method="post" action="/login">
-{{if .ErrMsg}}<p class="err">{{.ErrMsg}}</p>{{end}}
+<form method="post" action="/login" id="login-form">
+<p class="err" id="login-error"{{if not .ErrMsg}} hidden{{end}}>{{.ErrMsg}}</p>
 <label for="username">Username</label>
 <input type="text" id="username" name="username" autocomplete="username" autofocus required>
 <label for="password">Password</label>
@@ -42,5 +42,42 @@
 {{end}}
 </div>
 <p class="footer">&copy; {{.Year}} Witt, Nils &middot; Backup-Tool &middot; <a href="https://github.com/Nils-witt/go-backup-tool">GitHub</a> &middot; {{.Version}} &middot; {{.Commit}}</p>
+<script>
+// There's no cookie left for a plain form POST + server redirect to rely
+// on (see handleWebUILogin in webui.go): a successful POST /login now
+// returns the bearer token as JSON, so this stores it client-side and
+// navigates onward itself.
+var form = document.getElementById("login-form");
+if (form) {
+  form.addEventListener("submit", function (e) {
+    e.preventDefault();
+
+    var errEl = document.getElementById("login-error");
+    var next = form.elements["next"].value || "/";
+
+    fetch("/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "username=" + encodeURIComponent(form.elements["username"].value) +
+        "&password=" + encodeURIComponent(form.elements["password"].value) +
+        "&next=" + encodeURIComponent(next)
+    }).then(function (r) {
+      return r.json().then(function (data) { return { ok: r.ok, data: data }; });
+    }).then(function (result) {
+      if (!result.ok) {
+        errEl.textContent = result.data.error || "login failed";
+        errEl.hidden = false;
+        return;
+      }
+
+      try { sessionStorage.setItem("gbt_webui_token", result.data.token); } catch (e) {}
+      window.location.href = next;
+    }).catch(function () {
+      errEl.textContent = "login failed";
+      errEl.hidden = false;
+    });
+  });
+}
+</script>
 </body>
 </html>

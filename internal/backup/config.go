@@ -194,12 +194,11 @@ type RunConfig struct {
 	// unset.
 	KeysDir string
 
-	// WebUIUsername/WebUIPassword, when both set, gate the entire web UI
-	// (the dashboard and its /api/... endpoints, including per-receiver
-	// file downloads; not the receiver API, which keeps its own
-	// per-receiver public-key-verified JWT auth) behind a login page and
-	// session cookie — see requireWebUISession/handleWebUILogin in
-	// webui.go. Empty
+	// WebUIUsername/WebUIPassword, when both set, gate the web UI's
+	// /api/... endpoints (including minting a per-receiver file download
+	// ticket; not the receiver API, which keeps its own per-receiver
+	// public-key-verified JWT auth) behind a login page and a bearer token
+	// — see requireWebUISession/handleWebUILogin in webui.go. Empty
 	// WebUIUsername disables the check, leaving the web UI open as before.
 	WebUIUsername string
 	WebUIPassword string
@@ -366,10 +365,11 @@ type fileWebUI struct {
 	Listen  string `yaml:"listen"`
 
 	// Username/Password, when both set, require a browser to log in (at
-	// /login, with a session remembered via cookie) before the web UI
-	// (dashboard and its /api/... endpoints, including per-receiver file
-	// downloads) serves anything — see requireWebUISession/handleWebUILogin
-	// in webui.go. Unset (the default) leaves the web UI open, as before.
+	// /login, with a session remembered via a bearer token) before the web
+	// UI's /api/... endpoints (including minting a per-receiver file
+	// download ticket) serve anything — see
+	// requireWebUISession/handleWebUILogin in webui.go. Unset (the default)
+	// leaves the web UI open, as before.
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
 

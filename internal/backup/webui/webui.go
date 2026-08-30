@@ -1,5 +1,5 @@
 // Package webui implements go-backup-tool's web UI: the live status
-// dashboard, its login/session handling (including optional OIDC SSO, see
+// dashboard, its login/bearer-token auth (including optional OIDC SSO, see
 // oidc.go), and the read-only views of receiver state and files it shows
 // alongside a job's own status. It shares one HTTP server/mux with the
 // receiver API (internal/backup/receiver) via StartWebUI's
@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -70,9 +69,12 @@ type Server struct {
 // when the config file's enable-log-viewer: is true, so the viewer stays
 // effectively empty (and its "Logs" section hidden) unless an operator opts
 // in. webUIUsername/webUIPassword, when webUIUsername is non-empty, gate
-// the dashboard and its /api/... endpoints (including per-receiver file
-// downloads) behind a login page and session cookie (see
-// requireWebUISession/handleWebUILogin); the receiver API
+// the dashboard's /api/... endpoints (including minting a per-receiver file
+// download ticket) behind a login page and a bearer token the dashboard's
+// own JavaScript attaches as "Authorization: Bearer <token>" on every call
+// (see requireWebUISession/handleWebUILogin) — the dashboard shell itself
+// (GET /) is always served, since a bearer token can't ride along on a
+// plain page navigation the way a cookie could; the receiver API
 // (HandleReceiveObject/HandleDeleteObject) is unaffected, since it
 // authenticates each request on its own via each receiver's own
 // public-key-verified JWT (see authorizeReceiver). An empty webUIUsername
@@ -81,9 +83,9 @@ type Server struct {
 // browser log in via that provider's own "Log in with SSO" link on the
 // login page (see handleOIDCLogin/handleOIDCCallback), alongside the
 // username/password form if one is also configured; either kind of login
-// starts the same dashboard session. Login is required whenever
+// starts the same kind of bearer token. Login is required whenever
 // webUIUsername or oidcAuth is set — either alone is enough to gate the
-// dashboard.
+// dashboard's data.
 // identity, when non-nil (see loadServerIdentityAtStartup in app.go), is
 // served over /api/identity (see handleIdentity) for the dashboard's "Server
 // identity" section, so an operator can read off this instance's UUID and
@@ -103,38 +105,40 @@ func StartWebUI(addr string, store *backup.StatusStore, receivers map[string]bac
 	}
 
 	uiSessions := newSessionStore()
+	downloadTickets := newDownloadTicketStore()
 
 	// authEnabled mirrors requireWebUISession's own gating condition:
 	// either a username/password or an SSO provider is enough on its own to
-	// require a login before the dashboard serves anything.
+	// require a login before the dashboard's data is served.
 	authEnabled := webUIUsername != "" || oidcAuth != nil
 
-	// page gates a full-page navigation (the dashboard itself, or a link a
-	// person clicks, like a file download): a missing/invalid session
-	// redirects the browser to the login page. api gates a JSON endpoint
-	// polled by the dashboard's own JavaScript (fetch()): a redirect there
-	// would hand the poller an HTML login page as its "JSON" response, so
-	// it reports 401 instead — see requireWebUISession.
-	page := func(h http.HandlerFunc) http.HandlerFunc {
-		return requireWebUISession(authEnabled, uiSessions, true, h)
-	}
+	// api gates a JSON endpoint the dashboard's own JavaScript calls via
+	// fetch(): a missing/invalid/expired bearer token reports 401 rather
+	// than redirecting, since fetch() (unlike a browser navigation) can't
+	// follow a redirect into a login page and do anything useful with it —
+	// see requireWebUISession. The dashboard shell (GET /) and file
+	// downloads (GET /api/receivers/{id}/download/{key...}) aren't wrapped
+	// in this: a plain browser navigation can never carry a bearer token,
+	// so the shell is always public and downloads are authorized by a
+	// one-time ticket instead (see downloadTicketStore).
 	api := func(h http.HandlerFunc) http.HandlerFunc {
-		return requireWebUISession(authEnabled, uiSessions, false, h)
+		return requireWebUISession(authEnabled, uiSessions, h)
 	}
 
 	dashboardPage := strings.Replace(dashboardHTML, "{{LOGOUT_HIDDEN}}", logoutLinkAttr(authEnabled), 1)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", page(handleDashboard(dashboardPage)))
+	mux.HandleFunc("GET /", handleDashboard(dashboardPage))
 	mux.HandleFunc("GET /api/status", api(handleStatus(store)))
 	mux.HandleFunc("GET /api/logs", api(handleLogs(logs)))
 	mux.HandleFunc("GET /api/identity", api(handleIdentity(identity)))
 	mux.HandleFunc("GET /api/receivers", api(handleReceiverStatus(receivers, receiverStore, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/files", api(handleReceiverFiles(receivers, log)))
-	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", page(handleDownloadFile(receivers, log, db, uiSessions, trustProxyHeaders)))
+	mux.HandleFunc("POST /api/receivers/{id}/download/{key...}", api(handleMintDownloadTicket(receivers, downloadTickets, uiSessions)))
+	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", handleDownloadFile(receivers, log, db, downloadTickets, trustProxyHeaders))
 	mux.HandleFunc("GET /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions, db, log, trustProxyHeaders))
 	mux.HandleFunc("POST /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions, db, log, trustProxyHeaders))
-	mux.HandleFunc("GET /logout", handleWebUILogout(uiSessions))
+	mux.HandleFunc("POST /api/logout", handleAPILogout(uiSessions))
 	mux.HandleFunc("GET /api/login-events", api(handleLoginEvents(db, log)))
 	mux.HandleFunc("GET /api/download-events", api(handleDownloadEvents(db, log)))
 
@@ -461,29 +465,39 @@ func handleLogs(buf *LogRingBuffer) http.HandlerFunc {
 	}
 }
 
-// webUISessionCookie is the cookie a successful dashboard login (see
-// handleWebUILogin) sets, gating the dashboard and its /api/... endpoints —
-// including per-receiver file downloads — behind one login (see
-// requireWebUISession). Its value is an opaque, randomly generated session
-// id rather than the underlying username/password, so the credential never
-// needs to be re-sent (or stored client-side) once logged in.
-const webUISessionCookie = "gbt_webui_session"
+// bearerToken extracts the token from r's "Authorization: Bearer <token>"
+// header, reporting false if it's missing or malformed. Mirrors the
+// receiver API's own helper of the same name
+// (internal/backup/receiver/receiver.go); duplicated here rather than
+// shared, since it's five lines and pulling in a dependency between these
+// packages for it isn't worth it.
+func bearerToken(r *http.Request) (string, bool) {
+	const prefix = "Bearer "
 
-// sessionTTL is how long a dashboard login (see webUISessionCookie) remains
-// valid before its session expires and the browser has to log in again.
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, prefix) {
+		return "", false
+	}
+
+	return strings.TrimPrefix(auth, prefix), true
+}
+
+// sessionTTL is how long a dashboard login remains valid — i.e. how long its
+// bearer token (see sessionStore) is honored — before the browser has to log
+// in again.
 const sessionTTL = 12 * time.Hour
 
 // sessionEntry is one currently valid dashboard login (see sessionStore):
 // its expiry, plus the identity that logged in, so handlers downstream of
-// requireWebUISession (e.g. handleDownloadFile) can attribute what they do
-// to a username without re-deriving it from the request.
+// requireWebUISession (e.g. handleMintDownloadTicket) can attribute what
+// they do to a username without re-deriving it from the request.
 type sessionEntry struct {
 	expires  time.Time
 	username string // best-effort identity recorded at login (see handleWebUILogin/handleOIDCCallback); may be empty
 }
 
 // sessionStore tracks currently valid dashboard logins (see
-// webUISessionCookie/handleWebUILogin), mapping each session id to its
+// handleWebUILogin/handleOIDCCallback), mapping each bearer token to its
 // sessionEntry. Sessions live only in this process's memory: a restart
 // invalidates every session, same as it does the receiver status store.
 // Safe for concurrent use, since login and other requests can arrive
@@ -536,22 +550,22 @@ func (s *sessionStore) valid(id string) bool {
 	return true
 }
 
-// usernameFor returns the username recorded (see create) for r's session
-// cookie, for handlers that want to attribute an action to whoever is
-// currently logged in (e.g. handleDownloadFile's download log). It returns
-// "" whenever there's no currently valid session — including when the web
-// UI has no login configured at all, in which case every download is
+// usernameFor returns the username recorded (see create) for r's bearer
+// token, for handlers that want to attribute an action to whoever is
+// currently logged in (e.g. handleMintDownloadTicket's download ticket). It
+// returns "" whenever there's no currently valid token — including when the
+// web UI has no login configured at all, in which case every download is
 // logged with an empty username rather than failing to log it.
 func (s *sessionStore) usernameFor(r *http.Request) string {
-	c, err := r.Cookie(webUISessionCookie)
-	if err != nil {
+	token, ok := bearerToken(r)
+	if !ok {
 		return ""
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	e, ok := s.byID[c.Value]
+	e, ok := s.byID[token]
 	if !ok || time.Now().After(e.expires) {
 		return ""
 	}
@@ -567,49 +581,15 @@ func (s *sessionStore) revoke(id string) {
 	s.mu.Unlock()
 }
 
-// authenticated reports whether r carries a currently valid session cookie
-// for s.
+// authenticated reports whether r carries a currently valid bearer token for
+// s.
 func (s *sessionStore) authenticated(r *http.Request) bool {
-	c, err := r.Cookie(webUISessionCookie)
-	if err != nil {
+	token, ok := bearerToken(r)
+	if !ok {
 		return false
 	}
 
-	return s.valid(c.Value)
-}
-
-// cookie builds s's session cookie for value, or clears it when value is ""
-// (used by handleWebUILogout). Secure is only set when the request itself
-// arrived over TLS (r.TLS != nil): this process never terminates TLS on its
-// own listen: address (see StartWebUI), but a reverse proxy in front of it
-// might, in which case Go's net/http sets r.TLS for the connection it
-// accepted from that proxy. HttpOnly and SameSite=Lax are always set, so
-// the session id is never readable from JavaScript and is only ever sent on
-// same-site navigations.
-func (s *sessionStore) cookie(value string, secure bool) *http.Cookie {
-	c := &http.Cookie{ //nolint:gosec // Secure is intentionally conditional (see doc comment above), not a literal true, so gosec can't verify it statically
-		Name:     webUISessionCookie,
-		Value:    value,
-		Path:     "/",
-		Secure:   secure,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	}
-
-	if value == "" {
-		c.MaxAge = -1
-	} else {
-		c.Expires = time.Now().Add(sessionTTL)
-	}
-
-	return c
-}
-
-// setCookie writes s's session cookie for value onto w, using r to decide
-// whether it should be marked Secure (see cookie). Shared by every call site
-// that sets or clears the dashboard's session cookie.
-func (s *sessionStore) setCookie(w http.ResponseWriter, r *http.Request, value string) {
-	http.SetCookie(w, s.cookie(value, r.TLS != nil))
+	return s.valid(token)
 }
 
 // randomSessionID returns a 256-bit random value hex-encoded, unguessable
@@ -637,29 +617,44 @@ func safeNextPath(next string) string {
 	return next
 }
 
+// loginResponseJSON is a successful POST /login's response body: the bearer
+// token the dashboard's own JavaScript should attach to every subsequent
+// request (see dashboard.js) as "Authorization: Bearer <token>", and when it
+// stops being valid.
+type loginResponseJSON struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// loginErrorJSON is a failed POST /login's response body.
+type loginErrorJSON struct {
+	Error string `json:"error"`
+}
+
 // handleWebUILogin serves the dashboard's own login form (GET /login) and
 // its submission (POST /login), checking username/password (webui.username/
 // webui.password in the config file) with subtle.ConstantTimeCompare rather
 // than ==, so a mismatch can't be timed to learn how many leading bytes
 // were guessed correctly (authorizeReceiver's own auth is a JWT signature
-// check, not a raw comparison, so it needs no such care). A
-// successful submission starts a session (see sessionStore) and sets
-// webUISessionCookie so requireWebUISession lets the browser back in
-// without asking for credentials on every request; it then redirects to
-// next (see safeNextPath), typically the page that sent the browser here in
-// the first place. showSSO adds a "Log in with SSO" link to the page (see
-// renderLoginPage), pointing at /login/oidc, whenever oidc.enabled is set
-// (see StartWebUI) — independently of whether a username/password is also
-// configured. An empty username with showSSO false (neither kind of login
-// configured) redirects straight to next rather than showing a form there's
-// no way to satisfy; an empty username with showSSO true shows the page
-// with only the SSO link, and POST /login (which only the password form
-// submits) 404s in that case, since there's no username/password to check.
-// db, when non-nil, gets every submitted attempt appended to the login log
-// (see recordLoginEvent), win or lose, for the dashboard's login log view
-// (see handleLoginEvents); a write failure there is only logged, not
-// surfaced to the browser, since it must never block an otherwise-successful
-// login.
+// check, not a raw comparison, so it needs no such care). A successful
+// submission starts a session (see sessionStore) and reports its token as
+// JSON (loginResponseJSON) rather than a redirect: login.html's own inline
+// script stores that token (see requireWebUISession) and navigates the
+// browser to next (see safeNextPath) itself, since there's no cookie left
+// for a server-side redirect to rely on. A failed submission likewise
+// reports loginErrorJSON rather than re-rendering the page. showSSO adds a
+// "Log in with SSO" link to the page (see renderLoginPage), pointing at
+// /login/oidc, whenever oidc.enabled is set (see StartWebUI) —
+// independently of whether a username/password is also configured. An empty
+// username with showSSO false (neither kind of login configured) redirects
+// straight to next rather than showing a form there's no way to satisfy; an
+// empty username with showSSO true shows the page with only the SSO link,
+// and POST /login (which only the password form submits) 404s in that case,
+// since there's no username/password to check. db, when non-nil, gets every
+// submitted attempt appended to the login log (see recordLoginEvent), win or
+// lose, for the dashboard's login log view (see handleLoginEvents); a write
+// failure there is only logged, not surfaced to the browser, since it must
+// never block an otherwise-successful login.
 func handleWebUILogin(username, password string, showSSO bool, sessions *sessionStore, db *sql.DB, log *slog.Logger, trustProxyHeaders bool) http.HandlerFunc {
 	showPassword := username != ""
 
@@ -694,7 +689,10 @@ func handleWebUILogin(username, password string, showSSO bool, sessions *session
 		recordLogin(r.Context(), db, log, r, trustProxyHeaders, "password", "web UI", submittedUser, detail, success)
 
 		if !success {
-			writeLoginPage(w, renderLoginPage("incorrect username or password", next, showPassword, showSSO))
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(loginErrorJSON{Error: "incorrect username or password"})
+
 			return
 		}
 
@@ -704,8 +702,7 @@ func handleWebUILogin(username, password string, showSSO bool, sessions *session
 			return
 		}
 
-		sessions.setCookie(w, r, id)
-		http.Redirect(w, r, next, http.StatusSeeOther)
+		writeJSON(w, loginResponseJSON{Token: id, ExpiresAt: time.Now().Add(sessionTTL)})
 	}
 }
 
@@ -817,17 +814,19 @@ func handleDownloadEvents(db *sql.DB, log *slog.Logger) http.HandlerFunc {
 	}
 }
 
-// handleWebUILogout serves GET /logout: it revokes the requesting browser's
-// dashboard session, if any, clears its cookie, and sends it back to the
-// login page.
-func handleWebUILogout(sessions *sessionStore) http.HandlerFunc {
+// handleAPILogout serves POST /api/logout: it revokes the bearer token
+// carried in the request's Authorization header, if any — a missing or
+// already-invalid one is a no-op, since there's nothing to revoke — and
+// always reports success. Unlike the old cookie-based logout, this doesn't
+// redirect anywhere: the dashboard's own JavaScript (see dashboard.js) calls
+// this, then clears its locally stored token and navigates to /login itself.
+func handleAPILogout(sessions *sessionStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if c, err := r.Cookie(webUISessionCookie); err == nil {
-			sessions.revoke(c.Value)
+		if token, ok := bearerToken(r); ok {
+			sessions.revoke(token)
 		}
 
-		sessions.setCookie(w, r, "")
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
@@ -892,23 +891,97 @@ func renderLoginPage(errMsg, next string, showPassword, showSSO bool) string {
 	return buf.String()
 }
 
-// handleDownloadFile serves GET /api/receivers/{id}/download/{key...}: the
-// actual content of one object currently stored under receiver {id}'s path,
-// for a person to save from the dashboard's file listing (see
-// listReceiverFiles/handleReceiverFiles for the metadata-only listing this
-// complements). Unlike the receiver API's own per-receiver JWT auth (see
-// authorizeReceiver), this relies entirely on the dashboard's own login (see
-// requireWebUISession, which wraps this handler in StartWebUI) rather than
-// any auth of its own, since the audience here is a person clicking a link
-// in a browser rather than another go-backup-tool instance. db, when
-// non-nil, gets every attempt appended to the download log (see
-// recordDownloadEvent), win or lose, for the dashboard's "Download log"
-// section (see handleDownloadEvents); a write failure there is only logged,
-// not surfaced to the browser, mirroring handleWebUILogin's own tolerance
-// for a login log write failure. sessions supplies the username to record
-// (see sessionStore.usernameFor), best-effort: it's empty whenever the web
-// UI has no login configured.
-func handleDownloadFile(receivers map[string]backup.ResolvedReceiver, log *slog.Logger, db *sql.DB, sessions *sessionStore, trustProxyHeaders bool) http.HandlerFunc {
+// downloadTicketTTL is how long a minted download ticket (see
+// downloadTicketStore) stays redeemable: long enough for the dashboard's JS
+// to mint one and immediately navigate the browser to it, short enough that
+// a ticket leaking into a server log or browser history is useless almost
+// immediately.
+const downloadTicketTTL = 60 * time.Second
+
+// downloadTicketEntry is one currently valid download ticket (see
+// downloadTicketStore): the receiver/key it authorizes one download of, the
+// identity that minted it (for the download log, since the download request
+// itself carries no Authorization header to attribute it from — see
+// handleDownloadFile), and its expiry.
+type downloadTicketEntry struct {
+	receiverID string
+	key        string
+	username   string
+	expires    time.Time
+}
+
+// downloadTicketStore tracks currently valid download tickets, mapping each
+// ticket id to its downloadTicketEntry. Tickets exist so a file download can
+// stay a plain browser navigation — letting the browser handle the save
+// itself, rather than the dashboard's JavaScript buffering the whole file in
+// memory as a Blob — even though bearer-token auth can't ride along on one:
+// the dashboard's JS mints a ticket with an authenticated fetch() (see
+// handleMintDownloadTicket) and only then navigates to the download URL with
+// it attached as a query parameter (see handleDownloadFile). Safe for
+// concurrent use.
+type downloadTicketStore struct {
+	mu   sync.Mutex
+	byID map[string]downloadTicketEntry
+}
+
+// newDownloadTicketStore returns an empty downloadTicketStore.
+func newDownloadTicketStore() *downloadTicketStore {
+	return &downloadTicketStore{byID: make(map[string]downloadTicketEntry)}
+}
+
+// create mints a new ticket authorizing one download of receiverID/key,
+// attributed to username (best-effort, may be empty), valid for
+// downloadTicketTTL.
+func (s *downloadTicketStore) create(receiverID, key, username string) (string, error) {
+	id, err := randomSessionID()
+	if err != nil {
+		return "", err
+	}
+
+	s.mu.Lock()
+	s.byID[id] = downloadTicketEntry{receiverID: receiverID, key: key, username: username, expires: time.Now().Add(downloadTicketTTL)}
+	s.mu.Unlock()
+
+	return id, nil
+}
+
+// consume redeems ticket id for receiverID/key, reporting the username it
+// was minted for and ok=true only if id names a currently unexpired ticket
+// that was minted for exactly this receiver/key. Either way, id is no
+// longer valid afterwards — a ticket authorizes exactly one download,
+// successful or not, so it can't be replayed from a server log or browser
+// history.
+func (s *downloadTicketStore) consume(id, receiverID, key string) (username string, ok bool) {
+	if id == "" {
+		return "", false
+	}
+
+	s.mu.Lock()
+	e, exists := s.byID[id]
+	delete(s.byID, id)
+	s.mu.Unlock()
+
+	if !exists || time.Now().After(e.expires) || e.receiverID != receiverID || e.key != key {
+		return "", false
+	}
+
+	return e.username, true
+}
+
+// downloadTicketJSON is a freshly minted download ticket's wire shape (see
+// handleMintDownloadTicket).
+type downloadTicketJSON struct {
+	Ticket string `json:"ticket"`
+}
+
+// handleMintDownloadTicket serves POST /api/receivers/{id}/download/{key...}:
+// it mints a short-lived, single-use download ticket (see
+// downloadTicketStore) for the receiver/key named by the path, attributed to
+// whoever is currently logged in (see sessionStore.usernameFor). The
+// dashboard's JS calls this — with its Authorization: Bearer header — right
+// before navigating the browser to the matching GET, which can't carry that
+// header itself (see handleDownloadFile).
+func handleMintDownloadTicket(receivers map[string]backup.ResolvedReceiver, tickets *downloadTicketStore, sessions *sessionStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := lookupReceiver(w, r, receivers)
 		if !ok {
@@ -921,12 +994,57 @@ func handleDownloadFile(receivers map[string]backup.ResolvedReceiver, log *slog.
 			return
 		}
 
+		ticket, err := tickets.create(recv.ID, key, sessions.usernameFor(r))
+		if err != nil {
+			http.Error(w, "minting download ticket failed", http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, downloadTicketJSON{Ticket: ticket})
+	}
+}
+
+// handleDownloadFile serves GET /api/receivers/{id}/download/{key...}: the
+// actual content of one object currently stored under receiver {id}'s path,
+// for a person to save from the dashboard's file listing (see
+// listReceiverFiles/handleReceiverFiles for the metadata-only listing this
+// complements). Unlike the receiver API's own per-receiver JWT auth (see
+// authorizeReceiver), and unlike every other dashboard endpoint (see
+// requireWebUISession), this is authorized by a one-time download ticket
+// (see downloadTicketStore) rather than a bearer token: the request behind
+// this is a plain browser navigation, which can't carry an Authorization
+// header the way the dashboard's own fetch() calls can (see
+// handleMintDownloadTicket, which the dashboard's JS calls first to obtain
+// one). db, when non-nil, gets every attempt appended to the download log
+// (see recordDownloadEvent), win or lose, for the dashboard's "Download log"
+// section (see handleDownloadEvents); a write failure there is only logged,
+// not surfaced to the browser, mirroring handleWebUILogin's own tolerance
+// for a login log write failure.
+func handleDownloadFile(receivers map[string]backup.ResolvedReceiver, log *slog.Logger, db *sql.DB, tickets *downloadTicketStore, trustProxyHeaders bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		recv, ok := lookupReceiver(w, r, receivers)
+		if !ok {
+			return
+		}
+
+		key, err := backup.SanitizeObjectKey(r.PathValue("key"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		username, ok := tickets.consume(r.URL.Query().Get("ticket"), recv.ID, key)
+		if !ok {
+			http.Error(w, "missing or expired download ticket", http.StatusForbidden)
+			return
+		}
+
 		record := func(success bool, detail string) {
 			if db == nil {
 				return
 			}
 
-			ev := backup.DownloadEvent{At: time.Now(), Username: sessions.usernameFor(r), ReceiverID: recv.ID, Key: key, Success: success, RemoteAddr: clientAddr(r, trustProxyHeaders), Detail: detail}
+			ev := backup.DownloadEvent{At: time.Now(), Username: username, ReceiverID: recv.ID, Key: key, Success: success, RemoteAddr: clientAddr(r, trustProxyHeaders), Detail: detail}
 			if err := backup.RecordDownloadEvent(r.Context(), db, ev); err != nil {
 				log.Warn("download: recording download event failed", "err", err)
 			}
@@ -960,31 +1078,28 @@ func handleDownloadFile(receivers map[string]backup.ResolvedReceiver, log *slog.
 	}
 }
 
-// requireWebUISession wraps next, requiring a currently valid dashboard
-// session cookie (see sessionStore/handleWebUILogin/handleOIDCCallback)
-// before running it. A missing/invalid session either redirects the browser
-// to the login page (redirectOnFail true — for a full-page navigation, like
-// the dashboard itself or a file download link) or reports 401
-// (redirectOnFail false — for a JSON endpoint the dashboard's own
-// JavaScript polls via fetch(), which would otherwise silently receive an
-// HTML login page as its "JSON" response). authEnabled false (neither a
-// username/password nor an OIDC provider configured) disables the check
-// entirely, leaving the web UI open — this gates the dashboard and its
+// requireWebUISession wraps next, requiring a currently valid bearer token
+// (see sessionStore/handleWebUILogin/handleOIDCCallback, and bearerToken for
+// how it's read off the request) before running it. A missing, invalid, or
+// expired token reports 401 — there's no server-side redirect to a login
+// page any more, since every request this gates is a fetch() call from the
+// dashboard's own JavaScript (see dashboard.js), which reads that response
+// itself and sends the browser to /login client-side. authEnabled false
+// (neither a username/password nor an OIDC provider configured) disables
+// the check entirely, leaving the web UI open — this gates the dashboard's
 // /api/... endpoints (see StartWebUI), not the receiver API, which
-// authenticates separately via each receiver's own public-key-verified JWT.
-func requireWebUISession(authEnabled bool, sessions *sessionStore, redirectOnFail bool, next http.HandlerFunc) http.HandlerFunc {
+// authenticates separately via each receiver's own public-key-verified JWT,
+// nor file downloads, which are authorized by a one-time download ticket
+// instead (see downloadTicketStore) since that request is a plain browser
+// navigation rather than a fetch() call.
+func requireWebUISession(authEnabled bool, sessions *sessionStore, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !authEnabled || sessions.authenticated(r) {
 			next(w, r)
 			return
 		}
 
-		if !redirectOnFail {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}
 }
 
