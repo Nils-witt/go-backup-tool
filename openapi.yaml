@@ -1,0 +1,559 @@
+openapi: 3.0.3
+info:
+  title: go-backup-tool API
+  description: >
+    HTTP surface exposed by go-backup-tool's web UI process: the dashboard's
+    read-only JSON endpoints (status, receiver state, logs, audit events) and
+    the receiver API that another go-backup-tool instance's `type: remote`
+    targets write objects to. Both are served from the same listen address
+    (see `-listen` / `webui:` in the config file).
+  version: "1.0"
+servers:
+  - url: http://localhost:8080
+    description: Default web UI listen address (configurable via -listen / webui.listen)
+
+tags:
+  - name: dashboard
+    description: Read-only JSON endpoints backing the web UI dashboard
+  - name: auth
+    description: Dashboard login/logout (session-cookie based)
+  - name: receiver-api
+    description: "Object ingestion API for `type: remote` targets, authenticated per-receiver via a signed JWT bearer token"
+
+paths:
+  /api/status:
+    get:
+      tags: [dashboard]
+      summary: Current job/target statuses
+      operationId: getStatus
+      description: Snapshot of every configured backup job and its targets, polled by the dashboard.
+      security:
+        - webUISession: []
+      responses:
+        "200":
+          description: Job statuses
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/JobSnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/logs:
+    get:
+      tags: [dashboard]
+      summary: Recent log lines
+      operationId: getLogs
+      description: "The most recent buffered log lines (see `enable-log-viewer:` in the config file), oldest first."
+      security:
+        - webUISession: []
+      responses:
+        "200":
+          description: Buffered log lines
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/identity:
+    get:
+      tags: [dashboard]
+      summary: This instance's server identity
+      operationId: getIdentity
+      description: >
+        This instance's persistent UUID and PEM-encoded public key, used to
+        fill in a `receivers:` entry on another instance. A zero-value object
+        is returned if no identity was loaded at startup.
+      security:
+        - webUISession: []
+      responses:
+        "200":
+          description: Server identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Identity"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/receivers:
+    get:
+      tags: [dashboard]
+      summary: Current receiver statuses
+      operationId: getReceivers
+      description: "Live state of every configured receiver, annotated with staleness for any receiver with `stale-after:` set."
+      security:
+        - webUISession: []
+      responses:
+        "200":
+          description: Receiver statuses
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ReceiverSnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/receivers/{id}/files:
+    get:
+      tags: [dashboard]
+      summary: Files currently stored under a receiver
+      operationId: getReceiverFiles
+      security:
+        - webUISession: []
+      parameters:
+        - $ref: "#/components/parameters/ReceiverId"
+      responses:
+        "200":
+          description: Objects currently stored under this receiver's path
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ReceiverFile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Unknown receiver id
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/receivers/{id}/download/{key}:
+    get:
+      tags: [dashboard]
+      summary: Download a file stored under a receiver
+      operationId: downloadReceiverFile
+      description: >
+        Streams the raw content of one object. Gated by the dashboard's own
+        login session (redirects to /login on a full-page navigation rather
+        than 401ing, unlike the other /api/... endpoints).
+      security:
+        - webUISession: []
+      parameters:
+        - $ref: "#/components/parameters/ReceiverId"
+        - name: key
+          in: path
+          required: true
+          description: Object key, relative to the receiver's storage path (may contain "/").
+          schema:
+            type: string
+      responses:
+        "200":
+          description: File content
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "303":
+          description: No valid session; redirected to /login?next=...
+        "400":
+          description: Invalid object key
+          content:
+            text/plain:
+              schema:
+                type: string
+        "404":
+          description: Unknown receiver id, or file not found
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/login-events:
+    get:
+      tags: [dashboard]
+      summary: Recent dashboard login attempts
+      operationId: getLoginEvents
+      description: The most recently recorded login attempts (up to 200), newest first.
+      security:
+        - webUISession: []
+      responses:
+        "200":
+          description: Login events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LoginEvent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/download-events:
+    get:
+      tags: [dashboard]
+      summary: Recent file download attempts
+      operationId: getDownloadEvents
+      description: The most recently recorded download attempts (up to 200), newest first.
+      security:
+        - webUISession: []
+      responses:
+        "200":
+          description: Download events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DownloadEvent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /login:
+    get:
+      tags: [auth]
+      summary: Dashboard login page
+      operationId: getLoginPage
+      security: []
+      parameters:
+        - name: next
+          in: query
+          required: false
+          description: Same-site path to redirect to after a successful login.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Login form (HTML)
+          content:
+            text/html:
+              schema:
+                type: string
+        "303":
+          description: No login configured; redirected straight to next
+    post:
+      tags: [auth]
+      summary: Submit dashboard username/password login
+      operationId: postLogin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                next:
+                  type: string
+              required: [username, password]
+      responses:
+        "200":
+          description: Invalid credentials; login form re-rendered with an error
+          content:
+            text/html:
+              schema:
+                type: string
+        "303":
+          description: Successful login; session cookie set and redirected to next
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+        "404":
+          description: No username/password configured on this instance
+
+  /logout:
+    get:
+      tags: [auth]
+      summary: End the current dashboard session
+      operationId: logout
+      security: []
+      responses:
+        "303":
+          description: Session revoked, cookie cleared, redirected to /login
+
+  /api/v1/objects/{id}/{key}:
+    put:
+      tags: [receiver-api]
+      summary: Write (upload) an object to a receiver
+      operationId: putObject
+      description: >
+        Called by another go-backup-tool instance's `type: remote` target.
+        The request body is written to disk exactly as a `type: local`
+        target would (atomic temp-file-then-rename), and tracked for
+        retention.
+      security:
+        - receiverBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ReceiverId"
+        - $ref: "#/components/parameters/ObjectKey"
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: Object written
+        "400":
+          description: Invalid object key
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            text/plain:
+              schema:
+                type: string
+        "404":
+          description: Unknown receiver id
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          description: Writing the object failed
+          content:
+            text/plain:
+              schema:
+                type: string
+    delete:
+      tags: [receiver-api]
+      summary: Delete an object from a receiver
+      operationId: deleteObject
+      description: The client-facing counterpart to the backup pipeline's remote-delete step.
+      security:
+        - receiverBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ReceiverId"
+        - $ref: "#/components/parameters/ObjectKey"
+      responses:
+        "204":
+          description: Object deleted
+        "400":
+          description: Invalid object key
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            text/plain:
+              schema:
+                type: string
+        "404":
+          description: Unknown receiver id
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          description: Deleting the object failed
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    webUISession:
+      type: apiKey
+      in: cookie
+      name: gbt_webui_session
+      description: >
+        Dashboard session cookie set by a successful /login. Only enforced
+        when webui.username or OIDC is configured, otherwise these endpoints
+        are open.
+    receiverBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Per-receiver JWT, signed by the sending instance's private key and
+        verified against the receiver's configured public-key: (see
+        remoteAuth.SignRemoteAuthToken/VerifyRemoteAuthToken). Independent of
+        the dashboard's own session auth.
+
+  parameters:
+    ReceiverId:
+      name: id
+      in: path
+      required: true
+      description: "Receiver id, as configured under `receivers:` in the config file."
+      schema:
+        type: string
+    ObjectKey:
+      name: key
+      in: path
+      required: true
+      description: Object key, relative to the receiver's storage path (may contain "/").
+      schema:
+        type: string
+
+  responses:
+    Unauthorized:
+      description: No valid dashboard session
+      content:
+        text/plain:
+          schema:
+            type: string
+
+  schemas:
+    RunState:
+      type: string
+      description: >
+        idle: never run yet. running: currently executing. ok: last run
+        succeeded. incomplete: job only — succeeded on some targets, not
+        all. failed: last run failed.
+      enum: [idle, running, ok, incomplete, failed]
+
+    TargetSnapshot:
+      type: object
+      properties:
+        server:
+          type: string
+        bucket:
+          type: string
+        kind:
+          type: string
+        state:
+          $ref: "#/components/schemas/RunState"
+        error:
+          type: string
+      required: [server, bucket, kind, state]
+
+    JobSnapshot:
+      type: object
+      properties:
+        name:
+          type: string
+        interval:
+          type: string
+        state:
+          $ref: "#/components/schemas/RunState"
+        last_start:
+          type: string
+          format: date-time
+        last_end:
+          type: string
+          format: date-time
+        next_run:
+          type: string
+          format: date-time
+          description: Zero time if not (yet) scheduled, e.g. a one-shot job that already ran.
+        duration:
+          type: string
+        size:
+          type: string
+          description: Encrypted object size from the last successful run; sticky across a later failure.
+        error:
+          type: string
+        targets:
+          type: array
+          items:
+            $ref: "#/components/schemas/TargetSnapshot"
+      required: [name, state, last_start, last_end, next_run, targets]
+
+    Identity:
+      type: object
+      properties:
+        uuid:
+          type: string
+        public_key:
+          type: string
+          description: PEM-encoded public key.
+      required: [uuid, public_key]
+
+    ReceiverSnapshot:
+      type: object
+      properties:
+        id:
+          type: string
+        path:
+          type: string
+        retention:
+          type: string
+        state:
+          allOf:
+            - $ref: "#/components/schemas/RunState"
+          description: idle until the first object is received.
+        last_key:
+          type: string
+        last_seen:
+          type: string
+          format: date-time
+          description: Zero time if nothing has been received yet.
+        error:
+          type: string
+        stale_after:
+          type: string
+          description: "Set only when this receiver has stale-after: configured."
+        stale:
+          type: boolean
+          description: True once the most recent file is older than stale_after.
+      required: [id, path, state, last_seen]
+
+    ReceiverFile:
+      type: object
+      properties:
+        key:
+          type: string
+        size:
+          type: integer
+          format: int64
+        mod_time:
+          type: string
+          format: date-time
+      required: [key, size, mod_time]
+
+    LoginEvent:
+      type: object
+      properties:
+        at:
+          type: string
+          format: date-time
+        username:
+          type: string
+        method:
+          type: string
+          enum: [password, oidc]
+        success:
+          type: boolean
+        remote_addr:
+          type: string
+        detail:
+          type: string
+          description: Failure reason; empty on success.
+      required: [at, username, method, success, remote_addr]
+
+    DownloadEvent:
+      type: object
+      properties:
+        at:
+          type: string
+          format: date-time
+        username:
+          type: string
+        receiver_id:
+          type: string
+        key:
+          type: string
+        success:
+          type: boolean
+        remote_addr:
+          type: string
+        detail:
+          type: string
+          description: Failure reason; empty on success.
+      required: [at, username, receiver_id, key, success, remote_addr]
