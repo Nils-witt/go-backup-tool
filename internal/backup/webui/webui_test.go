@@ -31,7 +31,7 @@ func writeFile(t *testing.T, path, contents string) {
 func newTestSessionStore(t *testing.T) *sessionStore {
 	t.Helper()
 
-	sessions, err := newSessionStore()
+	sessions, err := newSessionStore(nil)
 	if err != nil {
 		t.Fatalf("newSessionStore(): %v", err)
 	}

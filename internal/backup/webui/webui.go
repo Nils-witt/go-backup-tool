@@ -10,6 +10,7 @@ package webui
 import (
 	"context"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/subtle"
 	"database/sql"
 	_ "embed"
@@ -96,7 +97,7 @@ type Server struct {
 // public key without digging through its keys-dir: on disk; a nil identity
 // (loadServerIdentityAtStartup failed at startup) hides that section.
 func StartWebUI(addr string, store *backup.StatusStore, receivers map[string]backup.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger, db *sql.DB, logs *LogRingBuffer, webUIUsername, webUIPassword string, oidcAuth *OIDCAuth, identity *identity.ServerIdentity, trustProxyHeaders bool, registerExtraRoutes func(*http.ServeMux)) *Server {
-	uiSessions, err := newSessionStore()
+	uiSessions, err := newSessionStore(identity)
 	if err != nil {
 		log.Error("web UI: starting session store", "err", err)
 		return nil
@@ -496,14 +497,8 @@ func bearerToken(r *http.Request) (string, bool) {
 // in again.
 const sessionTTL = 12 * time.Hour
 
-// sessionSigningKeySize is the size, in bytes, of the random HMAC key each
-// sessionStore generates at startup (see newSessionStore) to sign and
-// verify its own dashboard bearer tokens. 256 bits, matching the entropy of
-// the opaque session ids this replaced.
-const sessionSigningKeySize = 32
-
 // sessionStore mints and verifies the dashboard's bearer tokens: signed
-// JWTs (HS256, see create) whose claims — Subject (the logged-in username)
+// JWTs (RS256, see create) whose claims — Subject (the logged-in username)
 // and ID (a per-token jti) — are trusted once the signature checks out,
 // without needing a server-side record of every currently valid session.
 // Logout (see revoke) still needs some server-side state, since a valid
@@ -512,31 +507,48 @@ const sessionSigningKeySize = 32
 // token's expiry is pruned lazily the next time isRevoked looks it up
 // (never, if it's never presented again) — bounded by the logout rate over
 // sessionTTL, far smaller than tracking every active session the way the
-// previous opaque-token store did. key is generated fresh per process, so a
-// restart invalidates every session, same as before. Safe for concurrent
-// use, since login and other requests can arrive concurrently.
+// previous opaque-token store did. privateKey is this instance's own
+// persistent RSA key (see newSessionStore) rather than a random key
+// generated fresh per process, so unlike the HS256 scheme this replaced, a
+// restart no longer invalidates every outstanding session. Safe for
+// concurrent use, since login and other requests can arrive concurrently.
 type sessionStore struct {
-	key []byte
+	privateKey *rsa.PrivateKey
+	publicKey  *rsa.PublicKey
 
 	mu      sync.Mutex
 	revoked map[string]time.Time // jti -> that token's own expiry
 }
 
-// newSessionStore returns an empty sessionStore with a freshly generated
-// signing key.
-func newSessionStore() (*sessionStore, error) {
-	key := make([]byte, sessionSigningKeySize)
-	if _, err := rand.Read(key); err != nil {
-		return nil, fmt.Errorf("generating session signing key: %w", err)
+// newSessionStore returns an empty sessionStore that signs/verifies
+// dashboard bearer tokens with id's persistent RSA key pair (the same
+// key — ensured to exist on disk at startup, see
+// identity.LoadServerIdentityAtStartup — that SignRequest uses for
+// outgoing remote-target requests), so sessions survive a process restart.
+// If id is nil (e.g. a caller that doesn't wire up a server identity, such
+// as some tests), a fresh key pair is generated instead, matching this
+// store's previous per-process-random-key behavior.
+func newSessionStore(id *identity.ServerIdentity) (*sessionStore, error) {
+	var key *rsa.PrivateKey
+
+	if id != nil {
+		key = id.PrivateKey()
+	} else {
+		generated, err := rsa.GenerateKey(rand.Reader, identity.ServerKeyBits)
+		if err != nil {
+			return nil, fmt.Errorf("generating session signing key: %w", err)
+		}
+
+		key = generated
 	}
 
-	return &sessionStore{key: key, revoked: make(map[string]time.Time)}, nil
+	return &sessionStore{privateKey: key, publicKey: &key.PublicKey, revoked: make(map[string]time.Time)}, nil
 }
 
 // create mints a new bearer token for username, valid for sessionTTL.
 func (s *sessionStore) create(username string) (string, error) {
 	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.HS256, Key: s.key},
+		jose.SigningKey{Algorithm: jose.RS256, Key: s.privateKey},
 		(&jose.SignerOptions{}).WithType("JWT"),
 	)
 	if err != nil {
@@ -564,17 +576,17 @@ func (s *sessionStore) create(username string) (string, error) {
 	return token, nil
 }
 
-// parse verifies raw's HS256 signature against s.key and that it's
+// parse verifies raw's RS256 signature against s.publicKey and that it's
 // currently unexpired, reporting its claims and ok=true only if both hold.
 // It does not check revocation — see valid/usernameFor, which do.
 func (s *sessionStore) parse(raw string) (jwt.Claims, bool) {
-	token, err := jwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.HS256})
+	token, err := jwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.RS256})
 	if err != nil {
 		return jwt.Claims{}, false
 	}
 
 	var claims jwt.Claims
-	if err := token.Claims(s.key, &claims); err != nil {
+	if err := token.Claims(s.publicKey, &claims); err != nil {
 		return jwt.Claims{}, false
 	}
 

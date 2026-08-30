@@ -91,6 +91,15 @@ func (si *ServerIdentity) PublicKeyPEM() string {
 	return si.publicKeyPEM
 }
 
+// PrivateKey returns this instance's RSA private key, for signing other
+// RS256 JWTs that piggyback on this same persistent key pair rather than
+// minting their own — e.g. the web UI dashboard's session tokens (see
+// newSessionStore in webui.go), instead of SignRequest's own
+// audience-scoped remote-target tokens.
+func (si *ServerIdentity) PrivateKey() *rsa.PrivateKey {
+	return si.privateKey
+}
+
 // SignRequest signs a fresh short-lived JWT (see SignRemoteAuthToken)
 // identifying this instance as issuer and scoped to audience (the
 // destination receiver's id), for uploadToRemote/deleteRemoteObject's
