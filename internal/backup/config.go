@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+	"nilswitt.dev/go-backup-tool/internal/backup/app/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 )
 
@@ -245,17 +246,17 @@ type OIDCSettings struct {
 	ClientSecret string
 	RedirectURL  string
 	Scopes       []string
-}
 
-// Built-in defaults for fields a job's or server's config file entry
-// doesn't set.
-const (
-	defaultConfigPath = "config.yaml" // used when -config isn't given explicitly
-	defaultKeyPattern = "backup-{time}.gpg"
-	defaultRegion     = "us-east-1"
-	defaultGPGBin     = "gpg"
-	defaultRetries    = 3
-)
+	// DefaultPermissions is granted to every session an SSO login starts
+	// (see handleOIDCCallback in oidc.go) — OIDC has no per-account
+	// permissions of its own the way a web UI "Users" admin-managed account
+	// does (see WebUIUser in webusers.go), so every account the provider
+	// lets in gets the same fixed set. Defaults to PermissionView|
+	// PermissionDownload (see resolveOIDCSettings) when
+	// webui.oidc.default-permissions: is unset, preserving the full access
+	// every SSO login had before per-user permissions existed.
+	DefaultPermissions Permission
+}
 
 // fileJob mirrors config's per-job fields for YAML unmarshaling, used both
 // for the top-level shared defaults and for each entry under jobs:. Any
@@ -432,6 +433,14 @@ type fileWebUIOIDC struct {
 	// defaults to {"profile", "email"}, enough for most providers to return
 	// a usable display name.
 	Scopes []string `yaml:"scopes"`
+
+	// DefaultPermissions lists the dashboard permissions ("view", "download",
+	// "admin", "login-log", and/or "download-log") granted to every session
+	// an SSO login starts — see OIDCSettings.DefaultPermissions. Unset
+	// defaults to "view" and "download", matching the full access every SSO
+	// login had before per-user permissions existed; "admin", "login-log",
+	// and "download-log" are never defaulted in.
+	DefaultPermissions []string `yaml:"default-permissions"`
 }
 
 // ParseFlags parses args (typically os.Args[1:]) into a runConfig, writing
@@ -461,7 +470,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		logLevel   string
 	)
 
-	fs.StringVar(&configPath, "config", defaultConfigPath, "path to the YAML config file")
+	fs.StringVar(&configPath, "config", config.DefaultConfigPath, "path to the YAML config file")
 	fs.StringVar(&jobFilter, "job", "", "run only the named job from the config file's jobs: list")
 	fs.StringVar(&logLevel, "log-level", "info", "log verbosity: debug, info, warn, or error (overrides the config file's log-level:)")
 
@@ -594,13 +603,25 @@ func resolveOIDCSettings(cfg fileWebUIOIDC, listen string) (OIDCSettings, error)
 		scopes = []string{"profile", "email"}
 	}
 
+	defaultPerm := PermissionView | PermissionDownload
+
+	if len(cfg.DefaultPermissions) > 0 {
+		parsed, err := ParsePermissions(cfg.DefaultPermissions)
+		if err != nil {
+			return OIDCSettings{}, fmt.Errorf("webui.oidc.default-permissions: %w", err)
+		}
+
+		defaultPerm = parsed
+	}
+
 	return OIDCSettings{
-		Enabled:      true,
-		Issuer:       issuer,
-		ClientID:     clientID,
-		ClientSecret: cfg.ClientSecret,
-		RedirectURL:  redirectURL,
-		Scopes:       scopes,
+		Enabled:            true,
+		Issuer:             issuer,
+		ClientID:           clientID,
+		ClientSecret:       cfg.ClientSecret,
+		RedirectURL:        redirectURL,
+		Scopes:             scopes,
+		DefaultPermissions: defaultPerm,
 	}, nil
 }
 
@@ -796,7 +817,7 @@ func buildServers(fileServers []fileServer) (map[string]resolvedServer, error) {
 
 		region := fs.Region
 		if region == "" {
-			region = defaultRegion
+			region = config.DefaultRegion
 		}
 
 		servers[name] = resolvedServer{
@@ -1062,9 +1083,9 @@ func resolveTargetCredentials(jobs []*Config) error {
 // every job before its config file fields are layered on top.
 func newConfigDefaults() *Config {
 	return &Config{
-		Key:     defaultKeyPattern,
-		GPGBin:  defaultGPGBin,
-		Retries: defaultRetries,
+		Key:     config.DefaultKeyPattern,
+		GPGBin:  config.DefaultGPGBin,
+		Retries: config.DefaultRetries,
 	}
 }
 

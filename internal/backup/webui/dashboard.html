@@ -263,6 +263,103 @@
   table.download-events td.nowrap {
     white-space: nowrap;
   }
+  .users-card {
+    max-width: 1200px;
+    margin: 0 auto;
+    overflow-x: auto;
+  }
+  table.users-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: .82rem;
+  }
+  table.users-table th {
+    text-align: left;
+    color: var(--muted);
+    font-weight: 600;
+    font-size: .72rem;
+    text-transform: uppercase;
+    letter-spacing: .02em;
+    padding: .4rem .5rem;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  table.users-table td {
+    padding: .4rem .5rem;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  table.users-table td.username {
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+  .remove-user-link {
+    color: var(--failed);
+    font-size: .78rem;
+    text-decoration: none;
+  }
+  .remove-user-link:hover {
+    text-decoration: underline;
+  }
+  .issue-token-link, .manage-tokens-link {
+    color: var(--muted);
+    font-size: .78rem;
+    text-decoration: none;
+  }
+  .issue-token-link:hover, .manage-tokens-link:hover {
+    text-decoration: underline;
+  }
+  .revoke-token-link {
+    color: var(--failed);
+    font-size: .78rem;
+    text-decoration: none;
+  }
+  .revoke-token-link:hover {
+    text-decoration: underline;
+  }
+  .add-user-form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .6rem;
+    margin-top: .8rem;
+    padding-top: .8rem;
+    border-top: 1px solid var(--border);
+    font-size: .85rem;
+  }
+  .add-user-form input[type="text"],
+  .add-user-form input[type="password"] {
+    padding: .35rem .5rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    font-size: .85rem;
+  }
+  .add-user-form label {
+    display: flex;
+    align-items: center;
+    gap: .3rem;
+    color: var(--muted);
+  }
+  .add-user-form .btn {
+    padding: .4rem .8rem;
+    font-size: .82rem;
+    font-weight: 600;
+    border-radius: 6px;
+    border: 1px solid var(--ok);
+    background: var(--ok);
+    color: #fff;
+    cursor: pointer;
+  }
+  .add-user-form .btn:hover {
+    filter: brightness(1.08);
+  }
+  .section-hint {
+    color: var(--muted);
+    font-size: .82rem;
+    margin: 0 0 .6rem;
+  }
   .identity-card {
     max-width: 1200px;
     margin: 0 auto;
@@ -323,6 +420,27 @@
     color: #fff;
     background: var(--ok);
     border-color: var(--ok);
+  }
+  .confirm-dialog .token-days-label {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    font-size: .85rem;
+    margin: 0 0 1rem;
+  }
+  .confirm-dialog .token-days-label input {
+    width: 5.5rem;
+    padding: .3rem .4rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    font-size: .85rem;
+  }
+  .token-result-value {
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
   }
   .confirm-dialog .btn-primary:hover {
     filter: brightness(1.08);
@@ -398,12 +516,119 @@
   </div>
 </div>
 
+<div id="users-wrap" hidden>
+  <h2 class="section-title">Users</h2>
+  <div class="card users-card">
+    <table class="users-table">
+      <thead>
+        <tr><th>Username</th><th>View</th><th>Download</th><th>Login log</th><th>Download log</th><th>Admin</th><th>Created</th><th></th><th></th><th></th></tr>
+      </thead>
+      <tbody id="users-body"></tbody>
+    </table>
+    <form id="add-user-form" class="add-user-form">
+      <input type="text" id="add-user-username" placeholder="Username" autocomplete="off" required>
+      <input type="password" id="add-user-password" placeholder="Password" autocomplete="new-password" required>
+      <label><input type="checkbox" id="add-user-view" checked> View</label>
+      <label><input type="checkbox" id="add-user-download"> Download</label>
+      <label><input type="checkbox" id="add-user-login-log"> Login log</label>
+      <label><input type="checkbox" id="add-user-download-log"> Download log</label>
+      <label><input type="checkbox" id="add-user-admin"> Admin</label>
+      <button type="submit" class="btn btn-primary">Add user</button>
+    </form>
+    <p class="err" id="add-user-error" hidden></p>
+  </div>
+</div>
+
+<div id="oidc-users-wrap" hidden>
+  <h2 class="section-title">OIDC users</h2>
+  <div class="card users-card">
+    <p class="section-hint">Per-identity permission overrides for SSO logins. An identity with no override here gets the configured default permissions.</p>
+    <table class="users-table">
+      <thead>
+        <tr><th>Identity</th><th>View</th><th>Download</th><th>Login log</th><th>Download log</th><th>Admin</th><th>Updated</th><th></th></tr>
+      </thead>
+      <tbody id="oidc-users-body"></tbody>
+    </table>
+    <form id="add-oidc-user-form" class="add-user-form">
+      <input type="text" id="add-oidc-user-identity" placeholder="Email or subject" autocomplete="off" required>
+      <label><input type="checkbox" id="add-oidc-user-view" checked> View</label>
+      <label><input type="checkbox" id="add-oidc-user-download"> Download</label>
+      <label><input type="checkbox" id="add-oidc-user-login-log"> Login log</label>
+      <label><input type="checkbox" id="add-oidc-user-download-log"> Download log</label>
+      <label><input type="checkbox" id="add-oidc-user-admin"> Admin</label>
+      <button type="submit" class="btn btn-primary">Set permissions</button>
+    </form>
+    <p class="err" id="add-oidc-user-error" hidden></p>
+  </div>
+</div>
+
 <dialog id="download-confirm-dialog" class="confirm-dialog">
   <form method="dialog">
     <p class="confirm-message">Download <strong id="download-confirm-key"></strong>?</p>
     <div class="confirm-actions">
       <button type="submit" value="cancel" class="btn btn-secondary">Cancel</button>
       <button type="submit" value="confirm" class="btn btn-primary" autofocus>Download</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="delete-user-confirm-dialog" class="confirm-dialog">
+  <form method="dialog">
+    <p class="confirm-message">Remove user <strong id="delete-user-confirm-username"></strong>?</p>
+    <div class="confirm-actions">
+      <button type="submit" value="cancel" class="btn btn-secondary">Cancel</button>
+      <button type="submit" value="confirm" class="btn btn-primary" autofocus>Remove</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="tokens-dialog" class="confirm-dialog">
+  <form method="dialog">
+    <p class="confirm-message">API tokens issued for <strong id="tokens-dialog-username"></strong>.</p>
+    <table class="users-table">
+      <thead>
+        <tr><th>Issued</th><th>Expires</th><th>Status</th><th></th></tr>
+      </thead>
+      <tbody id="tokens-dialog-body"></tbody>
+    </table>
+    <div class="confirm-actions">
+      <button type="submit" value="ok" class="btn btn-primary" autofocus>Close</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="issue-token-dialog" class="confirm-dialog">
+  <form method="dialog">
+    <p class="confirm-message">Issue a long-lived API token for <strong id="issue-token-username"></strong>, carrying that user's current permissions.</p>
+    <label class="token-days-label">Valid for
+      <input type="number" id="issue-token-days" min="1" max="3650" value="365" required>
+      days
+    </label>
+    <div class="confirm-actions">
+      <button type="submit" value="cancel" class="btn btn-secondary">Cancel</button>
+      <button type="submit" value="confirm" class="btn btn-primary" autofocus>Issue</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="token-result-dialog" class="confirm-dialog">
+  <form method="dialog">
+    <p class="confirm-message">Token for <strong id="token-result-username"></strong>, valid until <span id="token-result-expiry"></span>. Copy it now &mdash; it won't be shown again.</p>
+    <textarea id="token-result-value" class="pubkey token-result-value" readonly rows="4"></textarea>
+    <p class="err" id="token-result-error" hidden></p>
+    <div class="confirm-actions">
+      <button type="button" id="token-result-copy" class="btn btn-secondary">Copy</button>
+      <button type="submit" value="ok" class="btn btn-primary" autofocus>Close</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="delete-oidc-user-confirm-dialog" class="confirm-dialog">
+  <form method="dialog">
+    <p class="confirm-message">Remove permission override for <strong id="delete-oidc-user-confirm-identity"></strong>?</p>
+    <div class="confirm-actions">
+      <button type="submit" value="cancel" class="btn btn-secondary">Cancel</button>
+      <button type="submit" value="confirm" class="btn btn-primary" autofocus>Remove</button>
     </div>
   </form>
 </dialog>

@@ -158,6 +158,23 @@ servers:
 #   username: "admin"
 #   password: "replace-with-a-long-random-password"
 #
+#   # This username/password account always has full access (view, download,
+#   # admin, login-log, and download-log) and can manage the dashboard's
+#   # "Users" section: additional accounts, each with their own password and
+#   # any combination of "view" (see job/target/receiver status, file
+#   # listings, and application logs), "download" (also pull a file's actual
+#   # content; implies "view"), "login-log" (see the dashboard's login
+#   # history — granted independently of "view"), "download-log" (see the
+#   # dashboard's file download history — granted independently of "view"/
+#   # "download"), and "admin" (also manage the "Users" section itself —
+#   # create/edit/delete other accounts, set OIDC permission overrides, and
+#   # issue long-lived API tokens; implies all of the above) — stored in the
+#   # job state db kept alongside this config file, not here. Skipping
+#   # username/password above but still wanting additional accounts isn't
+#   # supported: there'd be no admin to create them from the "Users" section
+#   # in the first place, unless oidc's own default-permissions below grants
+#   # every SSO login "admin" instead.
+#
 #   # log-viewer adds a "Logs" section to the dashboard, showing this
 #   # process's own recent log output (polled from /api/logs). Unset (the
 #   # default) leaves it off, since the dashboard has no login guarding it
@@ -194,6 +211,17 @@ servers:
 #     # scopes requested in addition to "openid" (always requested). Unset
 #     # defaults to {profile, email}.
 #     # scopes: [profile, email]
+#     # default-permissions is granted to every SSO login that has no
+#     # per-identity override set from the dashboard's "OIDC users" admin
+#     # listing — every other account the provider lets in gets this same
+#     # fixed set. Unset defaults to both "view" and
+#     # "download", the full access every SSO login had before per-user
+#     # permissions existed; "admin", "login-log", and "download-log" are
+#     # never defaulted in. Including "admin" here grants every SSO login
+#     # the dashboard's own admin access — normally overkill; prefer setting
+#     # an "admin" override on specific identities from the "Users" section
+#     # instead once at least one admin account exists to set it.
+#     # default-permissions: [view, download]
 
 jobs:
   - name: database

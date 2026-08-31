@@ -74,6 +74,18 @@ func OpenScheduleStateDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, err
 	}
 
+	if err := execSchemaOrClose(ctx, db, path, webUIUsersSchema); err != nil {
+		return nil, err
+	}
+
+	if err := execSchemaOrClose(ctx, db, path, oidcUserPermissionsSchema); err != nil {
+		return nil, err
+	}
+
+	if err := execSchemaOrClose(ctx, db, path, apiTokensSchema); err != nil {
+		return nil, err
+	}
+
 	return db, nil
 }
 

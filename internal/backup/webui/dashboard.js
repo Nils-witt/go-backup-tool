@@ -142,9 +142,12 @@ function renderFileList(id) {
   if (!files.length) return '<p class="meta">no files stored</p>';
 
   return '<ul class="files">' + files.map(function (f) {
+    const downloadLink = canDownload()
+      ? ' &middot; <a href="#" class="download-link" data-id="' + escapeHtml(id) + '" data-key="' + escapeHtml(f.key) + '">download</a>'
+      : '';
     return '<li><span class="file-key">' + escapeHtml(f.key) + '</span>' +
       '<span class="file-meta">' + fmtSize(f.size) + ' &middot; ' + fmtTime(f.mod_time) +
-      ' &middot; <a href="#" class="download-link" data-id="' + escapeHtml(id) + '" data-key="' + escapeHtml(f.key) + '">download</a></span></li>';
+      downloadLink + '</span></li>';
   }).join("") + '</ul>';
 }
 
@@ -377,22 +380,517 @@ function loadIdentity() {
     .catch(function () {});
 }
 
+// sessionInfo holds the currently authenticated session's own permissions
+// and admin status (as served by /api/session, see loadSessionInfo),
+// starting as "no access" so a page that hasn't loaded it yet (or a
+// request that failed) fails closed rather than briefly showing a
+// download link or the "Users" section it turns out the session can't
+// actually use.
+let sessionInfo = { username: "", permissions: [], admin: false, oidc_enabled: false };
+let sessionInfoLoaded = false;
+
+function canDownload() {
+  return sessionInfo.permissions.indexOf("download") !== -1;
+}
+
+function canViewLoginLog() {
+  return sessionInfo.permissions.indexOf("login-log") !== -1;
+}
+
+function canViewDownloadLog() {
+  return sessionInfo.permissions.indexOf("download-log") !== -1;
+}
+
+// sessionInfoLoaded tracks whether /api/session has been fetched yet,
+// mirroring identityLoaded above: fetched once at startup rather than on
+// every refresh() poll, since a session's own permissions don't change
+// without logging in again.
+function loadSessionInfo() {
+  apiFetch("/api/session")
+    .then(function (r) { return r.json(); })
+    .then(function (info) {
+      sessionInfoLoaded = true;
+      sessionInfo = info || sessionInfo;
+      renderReceivers(lastReceivers);
+      renderUsersSection();
+      renderOidcUsersSection();
+      loadLoginEvents();
+      loadDownloadEvents();
+    })
+    .catch(function () {});
+}
+
+// loadLoginEvents/loadDownloadEvents fetch and render the login/download
+// history independently of refresh()'s main Promise.all — each is gated on
+// its own permission (see canViewLoginLog/canViewDownloadLog) rather than
+// PermissionView, so a session lacking one shouldn't have its 403 break the
+// rest of the dashboard's refresh, and rendering an empty list for it looks
+// the same as "no events yet" rather than surfacing an error.
+function loadLoginEvents() {
+  if (!canViewLoginLog()) {
+    renderLoginEvents([]);
+    return;
+  }
+
+  apiFetch("/api/login-events")
+    .then(function (r) { return r.json(); })
+    .then(function (events) { renderLoginEvents(events); })
+    .catch(function () {});
+}
+
+function loadDownloadEvents() {
+  if (!canViewDownloadLog()) {
+    renderDownloadEvents([]);
+    return;
+  }
+
+  apiFetch("/api/download-events")
+    .then(function (r) { return r.json(); })
+    .then(function (events) { renderDownloadEvents(events); })
+    .catch(function () {});
+}
+
+// lastUsers holds the most recently fetched /api/users listing, so a
+// permission checkbox's change handler and the remove-confirmation dialog
+// don't have to re-fetch it themselves.
+let lastUsers = [];
+
+// renderUsersSection shows or hides the "Users" admin section based on
+// sessionInfo.admin (see loadSessionInfo) — every dashboard viewer gets
+// this markup, but only an admin session's own /api/users calls succeed,
+// matching the server-side requireAdmin gate this mirrors client-side —
+// and, when shown, (re-)loads its table.
+function renderUsersSection() {
+  const wrap = document.getElementById("users-wrap");
+  if (!sessionInfoLoaded || !sessionInfo.admin) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+
+  loadUsers();
+}
+
+function loadUsers() {
+  apiFetch("/api/users")
+    .then(function (r) { return r.json(); })
+    .then(function (users) {
+      lastUsers = users || [];
+      renderUsersTable(lastUsers);
+    })
+    .catch(function () {});
+}
+
+function renderUsersTable(users) {
+  document.getElementById("users-body").innerHTML = users.map(function (u) {
+    const hasView = u.permissions.indexOf("view") !== -1;
+    const hasDownload = u.permissions.indexOf("download") !== -1;
+    const hasLoginLog = u.permissions.indexOf("login-log") !== -1;
+    const hasDownloadLog = u.permissions.indexOf("download-log") !== -1;
+    const hasAdmin = u.permissions.indexOf("admin") !== -1;
+    const name = escapeHtml(u.username);
+
+    return '<tr>' +
+      '<td class="username">' + name + '</td>' +
+      '<td><input type="checkbox" class="user-perm" data-username="' + name + '" data-perm="view"' + (hasView ? ' checked' : '') + '></td>' +
+      '<td><input type="checkbox" class="user-perm" data-username="' + name + '" data-perm="download"' + (hasDownload ? ' checked' : '') + '></td>' +
+      '<td><input type="checkbox" class="user-perm" data-username="' + name + '" data-perm="login-log"' + (hasLoginLog ? ' checked' : '') + '></td>' +
+      '<td><input type="checkbox" class="user-perm" data-username="' + name + '" data-perm="download-log"' + (hasDownloadLog ? ' checked' : '') + '></td>' +
+      '<td><input type="checkbox" class="user-perm" data-username="' + name + '" data-perm="admin"' + (hasAdmin ? ' checked' : '') + '></td>' +
+      '<td>' + fmtTime(u.created_at) + '</td>' +
+      '<td><a href="#" class="issue-token-link" data-username="' + name + '">issue token</a></td>' +
+      '<td><a href="#" class="manage-tokens-link" data-username="' + name + '">tokens</a></td>' +
+      '<td><a href="#" class="remove-user-link" data-username="' + name + '">remove</a></td>' +
+      '</tr>';
+  }).join("");
+}
+
+// A permission checkbox's change re-submits that row's whole permission
+// set (not just the toggled box) as a PUT, since the API takes the full
+// set rather than a single add/remove.
+document.getElementById("users-body").addEventListener("change", function (e) {
+  const box = e.target.closest(".user-perm");
+  if (!box) return;
+
+  const row = box.closest("tr");
+  const perms = [];
+  row.querySelectorAll(".user-perm").forEach(function (input) {
+    if (input.checked) perms.push(input.dataset.perm);
+  });
+
+  apiFetch("/api/users/" + encodeURIComponent(box.dataset.username), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ permissions: perms })
+  }).catch(function () {});
+});
+
+// Removing a user goes through the same confirm-dialog pattern as a
+// download (see downloadDialog above).
+const deleteUserDialog = document.getElementById("delete-user-confirm-dialog");
+const deleteUserDialogUsername = document.getElementById("delete-user-confirm-username");
+let pendingUserDelete = null;
+
+deleteUserDialog.addEventListener("close", function () {
+  if (deleteUserDialog.returnValue === "confirm" && pendingUserDelete) {
+    apiFetch("/api/users/" + encodeURIComponent(pendingUserDelete), { method: "DELETE" })
+      .then(function () { loadUsers(); })
+      .catch(function () {});
+  }
+  pendingUserDelete = null;
+});
+
+document.getElementById("users-body").addEventListener("click", function (e) {
+  const link = e.target.closest(".remove-user-link");
+  if (!link) return;
+
+  e.preventDefault();
+  pendingUserDelete = link.dataset.username;
+  deleteUserDialogUsername.textContent = link.dataset.username;
+  deleteUserDialog.showModal();
+});
+
+// Issuing a long-lived API token for a "Users" admin-managed account: the
+// issue-token-dialog collects how many days it should be valid for, then
+// its close handler posts the request and, on success, shows the resulting
+// token once in token-result-dialog (the server never shows it again).
+const issueTokenDialog = document.getElementById("issue-token-dialog");
+const issueTokenUsername = document.getElementById("issue-token-username");
+const issueTokenDays = document.getElementById("issue-token-days");
+let pendingTokenUser = null;
+
+document.getElementById("users-body").addEventListener("click", function (e) {
+  const link = e.target.closest(".issue-token-link");
+  if (!link) return;
+
+  e.preventDefault();
+  pendingTokenUser = link.dataset.username;
+  issueTokenUsername.textContent = link.dataset.username;
+  issueTokenDays.value = "365";
+  issueTokenDialog.showModal();
+});
+
+const tokenResultDialog = document.getElementById("token-result-dialog");
+const tokenResultUsername = document.getElementById("token-result-username");
+const tokenResultExpiry = document.getElementById("token-result-expiry");
+const tokenResultValue = document.getElementById("token-result-value");
+const tokenResultError = document.getElementById("token-result-error");
+
+issueTokenDialog.addEventListener("close", function () {
+  if (issueTokenDialog.returnValue !== "confirm" || !pendingTokenUser) {
+    pendingTokenUser = null;
+    return;
+  }
+
+  const username = pendingTokenUser;
+  const days = parseInt(issueTokenDays.value, 10) || 365;
+  pendingTokenUser = null;
+
+  apiFetch("/api/users/" + encodeURIComponent(username) + "/tokens", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ days: days })
+  }).then(function (r) {
+    if (!r.ok) {
+      return r.text().then(function (msg) {
+        throw new Error(msg || "issuing token failed");
+      });
+    }
+    return r.json();
+  }).then(function (resp) {
+    tokenResultUsername.textContent = username;
+    tokenResultExpiry.textContent = fmtTime(resp.expires_at);
+    tokenResultValue.value = resp.token;
+    tokenResultError.hidden = true;
+    tokenResultDialog.showModal();
+  }).catch(function (err) {
+    tokenResultUsername.textContent = username;
+    tokenResultExpiry.textContent = "";
+    tokenResultValue.value = "";
+    tokenResultError.textContent = err.message || "issuing token failed";
+    tokenResultError.hidden = false;
+    tokenResultDialog.showModal();
+  });
+});
+
+document.getElementById("token-result-copy").addEventListener("click", function () {
+  tokenResultValue.select();
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(tokenResultValue.value).catch(function () {});
+  } else {
+    document.execCommand("copy");
+  }
+});
+
+// Managing a user's already-issued long-lived API tokens: the
+// tokens-dialog lists every token recorded for that user (see
+// handleListWebUIUserTokens in webui.go) — the raw token value itself was
+// only ever shown once, at issuance (see token-result-dialog above) — with
+// a "revoke" link per still-active one that ends it early (see
+// handleRevokeWebUIUserToken), without needing to hold the token itself.
+const tokensDialog = document.getElementById("tokens-dialog");
+const tokensDialogUsername = document.getElementById("tokens-dialog-username");
+let tokensDialogUser = null;
+
+function loadTokensDialog(username) {
+  apiFetch("/api/users/" + encodeURIComponent(username) + "/tokens")
+    .then(function (r) { return r.json(); })
+    .then(function (tokens) { renderTokensDialog(tokens || []); })
+    .catch(function () { renderTokensDialog([]); });
+}
+
+function renderTokensDialog(tokens) {
+  document.getElementById("tokens-dialog-body").innerHTML = tokens.map(function (tok) {
+    const status = tok.revoked ? badge("failed", "revoked") : badge("ok", "active");
+    const revokeCell = tok.revoked ? "" :
+      '<a href="#" class="revoke-token-link" data-jti="' + escapeHtml(tok.jti) + '">revoke</a>';
+
+    return '<tr>' +
+      '<td>' + fmtTime(tok.created_at) + '</td>' +
+      '<td>' + fmtTime(tok.expires_at) + '</td>' +
+      '<td>' + status + '</td>' +
+      '<td>' + revokeCell + '</td>' +
+      '</tr>';
+  }).join("");
+}
+
+document.getElementById("users-body").addEventListener("click", function (e) {
+  const link = e.target.closest(".manage-tokens-link");
+  if (!link) return;
+
+  e.preventDefault();
+  tokensDialogUser = link.dataset.username;
+  tokensDialogUsername.textContent = tokensDialogUser;
+  renderTokensDialog([]);
+  loadTokensDialog(tokensDialogUser);
+  tokensDialog.showModal();
+});
+
+document.getElementById("tokens-dialog-body").addEventListener("click", function (e) {
+  const link = e.target.closest(".revoke-token-link");
+  if (!link || !tokensDialogUser) return;
+
+  e.preventDefault();
+
+  const username = tokensDialogUser;
+
+  apiFetch("/api/users/" + encodeURIComponent(username) + "/tokens/" + encodeURIComponent(link.dataset.jti), {
+    method: "DELETE"
+  }).then(function () { loadTokensDialog(username); }).catch(function () {});
+});
+
+tokensDialog.addEventListener("close", function () {
+  tokensDialogUser = null;
+});
+
+// Adding a user posts the form as JSON rather than letting the browser
+// submit it as a normal form post, so the request can carry the
+// Authorization header apiFetch attaches and the response's error (if any)
+// can be shown inline instead of navigating away.
+document.getElementById("add-user-form").addEventListener("submit", function (e) {
+  e.preventDefault();
+
+  const usernameInput = document.getElementById("add-user-username");
+  const passwordInput = document.getElementById("add-user-password");
+  const viewInput = document.getElementById("add-user-view");
+  const downloadInput = document.getElementById("add-user-download");
+  const loginLogInput = document.getElementById("add-user-login-log");
+  const downloadLogInput = document.getElementById("add-user-download-log");
+  const adminInput = document.getElementById("add-user-admin");
+  const errEl = document.getElementById("add-user-error");
+
+  const perms = [];
+  if (viewInput.checked) perms.push("view");
+  if (downloadInput.checked) perms.push("download");
+  if (loginLogInput.checked) perms.push("login-log");
+  if (downloadLogInput.checked) perms.push("download-log");
+  if (adminInput.checked) perms.push("admin");
+
+  errEl.hidden = true;
+
+  apiFetch("/api/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: usernameInput.value.trim(), password: passwordInput.value, permissions: perms })
+  }).then(function (r) {
+    if (!r.ok) {
+      return r.text().then(function (msg) {
+        throw new Error(msg || "adding user failed");
+      });
+    }
+
+    usernameInput.value = "";
+    passwordInput.value = "";
+    viewInput.checked = true;
+    downloadInput.checked = false;
+    loginLogInput.checked = false;
+    downloadLogInput.checked = false;
+    adminInput.checked = false;
+    loadUsers();
+  }).catch(function (err) {
+    errEl.textContent = err.message || "adding user failed";
+    errEl.hidden = false;
+  });
+});
+
+// lastOidcUsers holds the most recently fetched /api/oidc-users listing,
+// mirroring lastUsers above.
+let lastOidcUsers = [];
+
+// renderOidcUsersSection shows or hides the "OIDC users" admin section:
+// like renderUsersSection, it's gated on sessionInfo.admin, and additionally
+// on sessionInfo.oidc_enabled — there's nothing to override when SSO isn't
+// configured at all.
+function renderOidcUsersSection() {
+  const wrap = document.getElementById("oidc-users-wrap");
+  if (!sessionInfoLoaded || !sessionInfo.admin || !sessionInfo.oidc_enabled) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+
+  loadOidcUsers();
+}
+
+function loadOidcUsers() {
+  apiFetch("/api/oidc-users")
+    .then(function (r) { return r.json(); })
+    .then(function (users) {
+      lastOidcUsers = users || [];
+      renderOidcUsersTable(lastOidcUsers);
+    })
+    .catch(function () {});
+}
+
+function renderOidcUsersTable(users) {
+  document.getElementById("oidc-users-body").innerHTML = users.map(function (u) {
+    const hasView = u.permissions.indexOf("view") !== -1;
+    const hasDownload = u.permissions.indexOf("download") !== -1;
+    const hasLoginLog = u.permissions.indexOf("login-log") !== -1;
+    const hasDownloadLog = u.permissions.indexOf("download-log") !== -1;
+    const hasAdmin = u.permissions.indexOf("admin") !== -1;
+    const identity = escapeHtml(u.identity);
+
+    return '<tr>' +
+      '<td class="username">' + identity + '</td>' +
+      '<td><input type="checkbox" class="oidc-user-perm" data-identity="' + identity + '" data-perm="view"' + (hasView ? ' checked' : '') + '></td>' +
+      '<td><input type="checkbox" class="oidc-user-perm" data-identity="' + identity + '" data-perm="download"' + (hasDownload ? ' checked' : '') + '></td>' +
+      '<td><input type="checkbox" class="oidc-user-perm" data-identity="' + identity + '" data-perm="login-log"' + (hasLoginLog ? ' checked' : '') + '></td>' +
+      '<td><input type="checkbox" class="oidc-user-perm" data-identity="' + identity + '" data-perm="download-log"' + (hasDownloadLog ? ' checked' : '') + '></td>' +
+      '<td><input type="checkbox" class="oidc-user-perm" data-identity="' + identity + '" data-perm="admin"' + (hasAdmin ? ' checked' : '') + '></td>' +
+      '<td>' + fmtTime(u.updated_at) + '</td>' +
+      '<td><a href="#" class="remove-oidc-user-link" data-identity="' + identity + '">remove</a></td>' +
+      '</tr>';
+  }).join("");
+}
+
+// A permission checkbox's change re-submits that row's whole permission
+// set as a PUT, same as the "Users" table's own handler above.
+document.getElementById("oidc-users-body").addEventListener("change", function (e) {
+  const box = e.target.closest(".oidc-user-perm");
+  if (!box) return;
+
+  const row = box.closest("tr");
+  const perms = [];
+  row.querySelectorAll(".oidc-user-perm").forEach(function (input) {
+    if (input.checked) perms.push(input.dataset.perm);
+  });
+
+  apiFetch("/api/oidc-users/" + encodeURIComponent(box.dataset.identity), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ permissions: perms })
+  }).catch(function () {});
+});
+
+const deleteOidcUserDialog = document.getElementById("delete-oidc-user-confirm-dialog");
+const deleteOidcUserDialogIdentity = document.getElementById("delete-oidc-user-confirm-identity");
+let pendingOidcUserDelete = null;
+
+deleteOidcUserDialog.addEventListener("close", function () {
+  if (deleteOidcUserDialog.returnValue === "confirm" && pendingOidcUserDelete) {
+    apiFetch("/api/oidc-users/" + encodeURIComponent(pendingOidcUserDelete), { method: "DELETE" })
+      .then(function () { loadOidcUsers(); })
+      .catch(function () {});
+  }
+  pendingOidcUserDelete = null;
+});
+
+document.getElementById("oidc-users-body").addEventListener("click", function (e) {
+  const link = e.target.closest(".remove-oidc-user-link");
+  if (!link) return;
+
+  e.preventDefault();
+  pendingOidcUserDelete = link.dataset.identity;
+  deleteOidcUserDialogIdentity.textContent = link.dataset.identity;
+  deleteOidcUserDialog.showModal();
+});
+
+// Setting an override posts the form as JSON, same as "Add user" above —
+// PUT /api/oidc-users/{identity} is an upsert, so this both creates a new
+// override and edits an existing one.
+document.getElementById("add-oidc-user-form").addEventListener("submit", function (e) {
+  e.preventDefault();
+
+  const identityInput = document.getElementById("add-oidc-user-identity");
+  const viewInput = document.getElementById("add-oidc-user-view");
+  const downloadInput = document.getElementById("add-oidc-user-download");
+  const loginLogInput = document.getElementById("add-oidc-user-login-log");
+  const downloadLogInput = document.getElementById("add-oidc-user-download-log");
+  const adminInput = document.getElementById("add-oidc-user-admin");
+  const errEl = document.getElementById("add-oidc-user-error");
+
+  const perms = [];
+  if (viewInput.checked) perms.push("view");
+  if (downloadInput.checked) perms.push("download");
+  if (loginLogInput.checked) perms.push("login-log");
+  if (downloadLogInput.checked) perms.push("download-log");
+  if (adminInput.checked) perms.push("admin");
+
+  errEl.hidden = true;
+
+  const identity = identityInput.value.trim();
+
+  apiFetch("/api/oidc-users/" + encodeURIComponent(identity), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ permissions: perms })
+  }).then(function (r) {
+    if (!r.ok) {
+      return r.text().then(function (msg) {
+        throw new Error(msg || "setting permissions failed");
+      });
+    }
+
+    identityInput.value = "";
+    viewInput.checked = true;
+    downloadInput.checked = false;
+    loginLogInput.checked = false;
+    downloadLogInput.checked = false;
+    adminInput.checked = false;
+    loadOidcUsers();
+  }).catch(function (err) {
+    errEl.textContent = err.message || "setting permissions failed";
+    errEl.hidden = false;
+  });
+});
+
 function refresh() {
   if (!identityLoaded) loadIdentity();
+  if (!sessionInfoLoaded) loadSessionInfo();
+
+  loadLoginEvents();
+  loadDownloadEvents();
 
   Promise.all([
     apiFetch("/api/status").then(function (r) { return r.json(); }),
     apiFetch("/api/receivers").then(function (r) { return r.json(); }),
-    apiFetch("/api/logs").then(function (r) { return r.json(); }),
-    apiFetch("/api/login-events").then(function (r) { return r.json(); }),
-    apiFetch("/api/download-events").then(function (r) { return r.json(); })
+    apiFetch("/api/logs").then(function (r) { return r.json(); })
   ]).then(function (results) {
     render(results[0]);
     lastReceivers = results[1] || [];
     renderReceivers(lastReceivers);
     renderLogs(results[2]);
-    renderLoginEvents(results[3]);
-    renderDownloadEvents(results[4]);
     document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
   }).catch(function (err) {
     document.getElementById("updated").textContent = "error fetching status: " + err;

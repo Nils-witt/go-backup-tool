@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"nilswitt.dev/go-backup-tool/internal/backup/app/config"
 )
 
 // testConfigRSAPublicKeyPEM is a fixed RSA public key, PEM-encoded the same
@@ -830,8 +832,8 @@ jobs:
 	}
 
 	cfg := singleJob(t, rc)
-	if len(cfg.Targets) != 1 || cfg.Targets[0].Region != defaultRegion {
-		t.Errorf("cfg.targets = %+v, want region %q", cfg.Targets, defaultRegion)
+	if len(cfg.Targets) != 1 || cfg.Targets[0].Region != config.DefaultRegion {
+		t.Errorf("cfg.targets = %+v, want region %q", cfg.Targets, config.DefaultRegion)
 	}
 }
 
@@ -1943,8 +1945,8 @@ jobs:
 	}
 
 	cfg := singleJob(t, rc)
-	if cfg.Retries != defaultRetries {
-		t.Errorf("cfg.retries = %v, want %v", cfg.Retries, defaultRetries)
+	if cfg.Retries != config.DefaultRetries {
+		t.Errorf("cfg.retries = %v, want %v", cfg.Retries, config.DefaultRetries)
 	}
 
 	if cfg.StagingDir != "" {
@@ -2094,16 +2096,84 @@ jobs:
 	}
 
 	want := OIDCSettings{
-		Enabled:      true,
-		Issuer:       "https://idp.example.com",
-		ClientID:     "my-client",
-		ClientSecret: "s3cr3t",
-		RedirectURL:  "https://backups.example.com/login/oidc/callback",
-		Scopes:       []string{"profile", "email"},
+		Enabled:            true,
+		Issuer:             "https://idp.example.com",
+		ClientID:           "my-client",
+		ClientSecret:       "s3cr3t",
+		RedirectURL:        "https://backups.example.com/login/oidc/callback",
+		Scopes:             []string{"profile", "email"},
+		DefaultPermissions: PermissionView | PermissionDownload,
 	}
 
 	if !reflect.DeepEqual(rc.OIDC, want) {
 		t.Errorf("rc.OIDC = %+v, want %+v", rc.OIDC, want)
+	}
+}
+
+func TestParseFlagsOIDCDefaultPermissions(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+webui:
+  enabled: true
+  listen: ":0"
+  oidc:
+    enabled: true
+    issuer: "https://idp.example.com"
+    client-id: "my-client"
+    client-secret: "s3cr3t"
+    redirect-url: "https://backups.example.com/login/oidc/callback"
+    default-permissions: ["view"]
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
+	}
+
+	if rc.OIDC.DefaultPermissions != PermissionView {
+		t.Errorf("rc.OIDC.DefaultPermissions = %v, want %v", rc.OIDC.DefaultPermissions, PermissionView)
+	}
+}
+
+func TestParseFlagsOIDCDefaultPermissionsRejectsUnknown(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+webui:
+  enabled: true
+  listen: ":0"
+  oidc:
+    enabled: true
+    issuer: "https://idp.example.com"
+    client-id: "my-client"
+    client-secret: "s3cr3t"
+    redirect-url: "https://backups.example.com/login/oidc/callback"
+    default-permissions: ["delete"]
+
+servers:
+  - name: s
+    region: us-east-1
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	if _, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{}); err == nil {
+		t.Fatal("ParseFlags() with an unknown webui.oidc.default-permissions entry = nil error, want one")
 	}
 }
 

@@ -83,21 +83,28 @@ type Server struct {
 // (HandleReceiveObject/HandleDeleteObject) is unaffected, since it
 // authenticates each request on its own via each receiver's own
 // public-key-verified JWT (see authorizeReceiver). An empty webUIUsername
-// leaves the web UI open, as before this was added.
+// leaves the web UI open, as before this was added. This account always
+// gets full access (view and download — see backup.Permission) and is the
+// only one that can manage the dashboard's "Users" section (see
+// requireAdmin/handleListWebUIUsers and friends): additional db-backed
+// accounts, each granted "view" and/or "download" individually (see
+// backup.WebUIUser/webusers.go), stored in db.
 // oidcAuth, when non-nil (see newOIDCAuth in oidc.go), additionally lets a
 // browser log in via that provider's own "Log in with SSO" link on the
 // login page (see handleOIDCLogin/handleOIDCCallback), alongside the
 // username/password form if one is also configured; either kind of login
-// starts the same kind of bearer token. Login is required whenever
-// webUIUsername or oidcAuth is set — either alone is enough to gate the
-// dashboard's data.
+// starts the same kind of bearer token, granting oidcAuth's own configured
+// default permissions (see backup.OIDCSettings.DefaultPermissions) rather
+// than the config-file admin's automatic full access. Login is required
+// whenever webUIUsername or oidcAuth is set — either alone is enough to
+// gate the dashboard's data.
 // identity, when non-nil (see loadServerIdentityAtStartup in app.go), is
 // served over /api/identity (see handleIdentity) for the dashboard's "Server
 // identity" section, so an operator can read off this instance's UUID and
 // public key without digging through its keys-dir: on disk; a nil identity
 // (loadServerIdentityAtStartup failed at startup) hides that section.
 func StartWebUI(addr string, store *backup.StatusStore, receivers map[string]backup.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger, db *sql.DB, logs *LogRingBuffer, webUIUsername, webUIPassword string, oidcAuth *OIDCAuth, identity *identity.ServerIdentity, trustProxyHeaders bool, registerExtraRoutes func(*http.ServeMux)) *Server {
-	uiSessions, err := newSessionStore(identity)
+	uiSessions, err := newSessionStore(identity, db)
 	if err != nil {
 		log.Error("web UI: starting session store", "err", err)
 		return nil
@@ -122,35 +129,85 @@ func StartWebUI(addr string, store *backup.StatusStore, receivers map[string]bac
 	// require a login before the dashboard's data is served.
 	authEnabled := webUIUsername != "" || oidcAuth != nil
 
-	// api gates a JSON endpoint the dashboard's own JavaScript calls via
-	// fetch(): a missing/invalid/expired bearer token reports 401 rather
-	// than redirecting, since fetch() (unlike a browser navigation) can't
-	// follow a redirect into a login page and do anything useful with it —
-	// see requireWebUISession. The dashboard shell (GET /) and file
-	// downloads (GET /api/receivers/{id}/download/{key...}) aren't wrapped
-	// in this: a plain browser navigation can never carry a bearer token,
-	// so the shell is always public and downloads are authorized by a
-	// one-time ticket instead (see downloadTicketStore).
-	api := func(h http.HandlerFunc) http.HandlerFunc {
+	// authOnly gates a JSON endpoint the dashboard's own JavaScript calls
+	// via fetch() behind nothing more than a currently valid session: a
+	// missing/invalid/expired bearer token reports 401 rather than
+	// redirecting, since fetch() (unlike a browser navigation) can't follow
+	// a redirect into a login page and do anything useful with it — see
+	// requireWebUISession. The dashboard shell (GET /) and file downloads
+	// (GET /api/receivers/{id}/download/{key...}) aren't wrapped in this: a
+	// plain browser navigation can never carry a bearer token, so the shell
+	// is always public and downloads are authorized by a one-time ticket
+	// instead (see downloadTicketStore).
+	authOnly := func(h http.HandlerFunc) http.HandlerFunc {
 		return requireWebUISession(authEnabled, uiSessions, h)
+	}
+
+	// api additionally requires the session hold backup.PermissionView (see
+	// requirePermission) — every endpoint below except /api/session (any
+	// authenticated session, regardless of its permissions, needs to be
+	// able to read its own), the login/download history endpoints (see
+	// apiLoginLog/apiDownloadLog below, their own dedicated permissions
+	// instead), and the "Users" admin endpoints (see admin below,
+	// requireAdmin's own gate instead).
+	api := func(h http.HandlerFunc) http.HandlerFunc {
+		return authOnly(requirePermission(authEnabled, uiSessions, backup.PermissionView, h))
+	}
+
+	// apiDownload requires backup.PermissionDownload instead of View,
+	// gating handleMintDownloadTicket — the one step in the download flow a
+	// bearer token actually authorizes (see downloadTicketStore's own doc
+	// comment for why the second, actual download request can't be gated
+	// the same way).
+	apiDownload := func(h http.HandlerFunc) http.HandlerFunc {
+		return authOnly(requirePermission(authEnabled, uiSessions, backup.PermissionDownload, h))
+	}
+
+	// apiLoginLog and apiDownloadLog gate the login/download history
+	// endpoints on their own dedicated permissions (see
+	// backup.PermissionViewLoginLog/PermissionViewDownloadLog) rather than
+	// api's backup.PermissionView — a session can see the rest of the
+	// dashboard without being able to see either history, and vice versa.
+	apiLoginLog := func(h http.HandlerFunc) http.HandlerFunc {
+		return authOnly(requirePermission(authEnabled, uiSessions, backup.PermissionViewLoginLog, h))
+	}
+	apiDownloadLog := func(h http.HandlerFunc) http.HandlerFunc {
+		return authOnly(requirePermission(authEnabled, uiSessions, backup.PermissionViewDownloadLog, h))
+	}
+
+	// admin requires the session belong to the config-file admin (see
+	// requireAdmin), gating the "Users" admin section's own endpoints.
+	admin := func(h http.HandlerFunc) http.HandlerFunc {
+		return authOnly(requireAdmin(authEnabled, uiSessions, webUIUsername, h))
 	}
 
 	dashboardPage := strings.Replace(dashboardHTML, "{{LOGOUT_HIDDEN}}", logoutLinkAttr(authEnabled), 1)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", handleDashboard(dashboardPage))
+	mux.HandleFunc("GET /api/session", authOnly(handleSessionInfo(uiSessions, authEnabled, webUIUsername, oidcAuth != nil)))
 	mux.HandleFunc("GET /api/status", api(handleStatus(store)))
 	mux.HandleFunc("GET /api/logs", api(handleLogs(logs)))
 	mux.HandleFunc("GET /api/identity", api(handleIdentity(identity)))
 	mux.HandleFunc("GET /api/receivers", api(handleReceiverStatus(receivers, receiverStore, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/files", api(handleReceiverFiles(receivers, log)))
-	mux.HandleFunc("POST /api/receivers/{id}/download/{key...}", api(handleMintDownloadTicket(receivers, downloadTickets, uiSessions)))
+	mux.HandleFunc("POST /api/receivers/{id}/download/{key...}", apiDownload(handleMintDownloadTicket(receivers, downloadTickets, uiSessions)))
 	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", handleDownloadFile(receivers, log, db, downloadTickets, trustProxyHeaders))
 	mux.HandleFunc("GET /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions, db, log, trustProxyHeaders))
 	mux.HandleFunc("POST /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions, db, log, trustProxyHeaders))
-	mux.HandleFunc("POST /api/logout", handleAPILogout(uiSessions))
-	mux.HandleFunc("GET /api/login-events", api(handleLoginEvents(db, log)))
-	mux.HandleFunc("GET /api/download-events", api(handleDownloadEvents(db, log)))
+	mux.HandleFunc("POST /api/logout", handleAPILogout(uiSessions, db, log))
+	mux.HandleFunc("GET /api/login-events", apiLoginLog(handleLoginEvents(db, log)))
+	mux.HandleFunc("GET /api/download-events", apiDownloadLog(handleDownloadEvents(db, log)))
+	mux.HandleFunc("GET /api/users", admin(handleListWebUIUsers(db, log)))
+	mux.HandleFunc("POST /api/users", admin(handleCreateWebUIUser(db, webUIUsername, log)))
+	mux.HandleFunc("PUT /api/users/{username}", admin(handleUpdateWebUIUser(db, log)))
+	mux.HandleFunc("DELETE /api/users/{username}", admin(handleDeleteWebUIUser(db, log)))
+	mux.HandleFunc("POST /api/users/{username}/tokens", admin(handleIssueWebUIUserToken(uiSessions, db, log)))
+	mux.HandleFunc("GET /api/users/{username}/tokens", admin(handleListWebUIUserTokens(db, log)))
+	mux.HandleFunc("DELETE /api/users/{username}/tokens/{jti}", admin(handleRevokeWebUIUserToken(uiSessions, db, log)))
+	mux.HandleFunc("GET /api/oidc-users", admin(handleListOIDCUserPermissions(db, log)))
+	mux.HandleFunc("PUT /api/oidc-users/{identity...}", admin(handleSetOIDCUserPermissions(db, log)))
+	mux.HandleFunc("DELETE /api/oidc-users/{identity...}", admin(handleDeleteOIDCUserPermissions(db, log)))
 
 	if registerExtraRoutes != nil {
 		registerExtraRoutes(mux)
@@ -510,25 +567,36 @@ const sessionTTL = 12 * time.Hour
 // previous opaque-token store did. privateKey is this instance's own
 // persistent RSA key (see newSessionStore) rather than a random key
 // generated fresh per process, so unlike the HS256 scheme this replaced, a
-// restart no longer invalidates every outstanding session. Safe for
-// concurrent use, since login and other requests can arrive concurrently.
+// restart no longer invalidates every outstanding session. db, when
+// non-nil, backs a long-lived API token's revocation (see revokeJTI and
+// backup.RevokeAPIToken) so that, unlike an interactive session's, it
+// survives a restart: newSessionStore preloads the in-memory revoked map
+// below from it, since a long-lived token (up to maxAPITokenDays) can
+// easily outlive the process that revoked it. Safe for concurrent use,
+// since login and other requests can arrive concurrently.
 type sessionStore struct {
 	privateKey *rsa.PrivateKey
 	publicKey  *rsa.PublicKey
+	db         *sql.DB
 
 	mu      sync.Mutex
 	revoked map[string]time.Time // jti -> that token's own expiry
 }
 
-// newSessionStore returns an empty sessionStore that signs/verifies
-// dashboard bearer tokens with id's persistent RSA key pair (the same
+// newSessionStore returns a sessionStore that signs/verifies dashboard
+// bearer tokens with id's persistent RSA key pair (the same
 // key — ensured to exist on disk at startup, see
 // identity.LoadServerIdentityAtStartup — that SignRequest uses for
 // outgoing remote-target requests), so sessions survive a process restart.
 // If id is nil (e.g. a caller that doesn't wire up a server identity, such
 // as some tests), a fresh key pair is generated instead, matching this
-// store's previous per-process-random-key behavior.
-func newSessionStore(id *identity.ServerIdentity) (*sessionStore, error) {
+// store's previous per-process-random-key behavior. db, when non-nil, is
+// used to preload the in-memory revocation blocklist with every
+// currently-revoked, not-yet-expired long-lived API token (see
+// backup.ListRevokedAPITokens) — otherwise a revocation made before a
+// restart would be forgotten, since a JWT's signature alone can't be
+// un-signed and the blocklist itself only lives in memory once loaded.
+func newSessionStore(id *identity.ServerIdentity, db *sql.DB) (*sessionStore, error) {
 	var key *rsa.PrivateKey
 
 	if id != nil {
@@ -542,22 +610,62 @@ func newSessionStore(id *identity.ServerIdentity) (*sessionStore, error) {
 		key = generated
 	}
 
-	return &sessionStore{privateKey: key, publicKey: &key.PublicKey, revoked: make(map[string]time.Time)}, nil
+	revoked := make(map[string]time.Time)
+
+	if db != nil {
+		tokens, err := backup.ListRevokedAPITokens(context.Background(), db, time.Now())
+		if err != nil {
+			return nil, fmt.Errorf("loading revoked API tokens: %w", err)
+		}
+
+		for _, t := range tokens {
+			revoked[t.JTI] = t.ExpiresAt
+		}
+	}
+
+	return &sessionStore{privateKey: key, publicKey: &key.PublicKey, db: db, revoked: revoked}, nil
 }
 
-// create mints a new bearer token for username, valid for sessionTTL.
-func (s *sessionStore) create(username string) (string, error) {
+// sessionClaims is the private claim a bearer token carries alongside the
+// standard jwt.Claims (see create/parse): the permissions granted at login
+// time (see backup.Permission), resolved once from whichever login path
+// authenticated the session (the config-file admin, an OIDC provider's
+// default, or a web UI "Users" admin-managed account — see
+// handleWebUILogin/handleOIDCCallback) and then trusted for the token's
+// whole lifetime, the same way Subject/ID are. A later change to that
+// account's stored permissions (see UpdateWebUIUserPermissions) therefore
+// only takes effect on that account's next login, not retroactively —
+// matching how a password change doesn't invalidate already-issued
+// sessions either.
+type sessionClaims struct {
+	Perm backup.Permission `json:"perm"`
+}
+
+// create mints a new bearer token for username granting perm, valid for
+// sessionTTL.
+func (s *sessionStore) create(username string, perm backup.Permission) (string, error) {
+	token, _, err := s.createWithTTL(username, perm, sessionTTL)
+	return token, err
+}
+
+// createWithTTL is create, generalized to a caller-chosen validity period —
+// sessionTTL for a normal interactive login (see create), or an
+// admin-chosen, much longer one for a long-lived API token (see
+// handleIssueWebUIUserToken, which also records the returned jti via
+// backup.RecordAPIToken so it can later be looked up and revoked without
+// the raw token itself).
+func (s *sessionStore) createWithTTL(username string, perm backup.Permission, ttl time.Duration) (token, jti string, err error) {
 	signer, err := jose.NewSigner(
 		jose.SigningKey{Algorithm: jose.RS256, Key: s.privateKey},
 		(&jose.SignerOptions{}).WithType("JWT"),
 	)
 	if err != nil {
-		return "", fmt.Errorf("building signer: %w", err)
+		return "", "", fmt.Errorf("building signer: %w", err)
 	}
 
-	jti, err := randomSessionID()
+	jti, err = randomSessionID()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	now := time.Now()
@@ -565,36 +673,41 @@ func (s *sessionStore) create(username string) (string, error) {
 		Subject:  username,
 		ID:       jti,
 		IssuedAt: jwt.NewNumericDate(now),
-		Expiry:   jwt.NewNumericDate(now.Add(sessionTTL)),
+		Expiry:   jwt.NewNumericDate(now.Add(ttl)),
 	}
 
-	token, err := jwt.Signed(signer).Claims(claims).Serialize()
+	token, err = jwt.Signed(signer).Claims(claims).Claims(sessionClaims{Perm: perm}).Serialize()
 	if err != nil {
-		return "", fmt.Errorf("serializing token: %w", err)
+		return "", "", fmt.Errorf("serializing token: %w", err)
 	}
 
-	return token, nil
+	return token, jti, nil
 }
 
 // parse verifies raw's RS256 signature against s.publicKey and that it's
-// currently unexpired, reporting its claims and ok=true only if both hold.
-// It does not check revocation — see valid/usernameFor, which do.
-func (s *sessionStore) parse(raw string) (jwt.Claims, bool) {
+// currently unexpired, reporting its standard and private claims (see
+// sessionClaims) and ok=true only if both hold. It does not check
+// revocation — see valid/usernameFor/permissionsFor, which do.
+func (s *sessionStore) parse(raw string) (jwt.Claims, sessionClaims, bool) {
 	token, err := jwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.RS256})
 	if err != nil {
-		return jwt.Claims{}, false
+		return jwt.Claims{}, sessionClaims{}, false
 	}
 
-	var claims jwt.Claims
-	if err := token.Claims(s.publicKey, &claims); err != nil {
-		return jwt.Claims{}, false
+	var (
+		claims jwt.Claims
+		sc     sessionClaims
+	)
+
+	if err := token.Claims(s.publicKey, &claims, &sc); err != nil {
+		return jwt.Claims{}, sessionClaims{}, false
 	}
 
 	if err := claims.Validate(jwt.Expected{Time: time.Now()}); err != nil {
-		return jwt.Claims{}, false
+		return jwt.Claims{}, sessionClaims{}, false
 	}
 
-	return claims, true
+	return claims, sc, true
 }
 
 // isRevoked reports whether jti was blocklisted by revoke and hasn't yet
@@ -625,9 +738,27 @@ func (s *sessionStore) valid(raw string) bool {
 		return false
 	}
 
-	claims, ok := s.parse(raw)
+	claims, _, ok := s.parse(raw)
 
 	return ok && !s.isRevoked(claims.ID)
+}
+
+// current looks up r's bearer token and returns its claims, reporting
+// ok=true only if it's present, currently valid (see parse), and not
+// revoked. Shared by every method below that needs a request's currently
+// authenticated session.
+func (s *sessionStore) current(r *http.Request) (jwt.Claims, sessionClaims, bool) {
+	token, ok := bearerToken(r)
+	if !ok {
+		return jwt.Claims{}, sessionClaims{}, false
+	}
+
+	claims, sc, ok := s.parse(token)
+	if !ok || s.isRevoked(claims.ID) {
+		return jwt.Claims{}, sessionClaims{}, false
+	}
+
+	return claims, sc, true
 }
 
 // usernameFor returns the username claimed by r's bearer token, for
@@ -637,42 +768,59 @@ func (s *sessionStore) valid(raw string) bool {
 // the web UI has no login configured at all, in which case every download
 // is logged with an empty username rather than failing to log it.
 func (s *sessionStore) usernameFor(r *http.Request) string {
-	token, ok := bearerToken(r)
+	claims, _, ok := s.current(r)
 	if !ok {
-		return ""
-	}
-
-	claims, ok := s.parse(token)
-	if !ok || s.isRevoked(claims.ID) {
 		return ""
 	}
 
 	return claims.Subject
 }
 
-// revoke ends the session named by bearer token raw (a no-op if it doesn't
-// parse as a currently valid token — there's then nothing to blocklist),
-// used by a logout handler.
-func (s *sessionStore) revoke(raw string) {
-	claims, ok := s.parse(raw)
+// permissionsFor returns the permissions granted to r's bearer token at the
+// time it was minted (see sessionClaims), or 0 (no permissions) whenever
+// there's no currently valid, non-revoked token.
+func (s *sessionStore) permissionsFor(r *http.Request) backup.Permission {
+	_, sc, ok := s.current(r)
 	if !ok {
-		return
+		return 0
 	}
 
+	return sc.Perm
+}
+
+// revoke ends the session named by bearer token raw, reporting its jti and
+// ok=true — or ok=false, a no-op, if raw doesn't parse as a currently valid
+// token, since there's then nothing to blocklist. Used by handleAPILogout,
+// which — when raw names a recorded long-lived API token (see
+// backup.RevokeAPIToken) rather than an ordinary interactive session, which
+// is never recorded — also persists the revocation so it survives a
+// restart (see newSessionStore's own preload of s.revoked).
+func (s *sessionStore) revoke(raw string) (jti string, ok bool) {
+	claims, _, ok := s.parse(raw)
+	if !ok {
+		return "", false
+	}
+
+	s.revokeJTI(claims.ID, claims.Expiry.Time())
+
+	return claims.ID, true
+}
+
+// revokeJTI blocklists jti in s's in-memory revocation map until expires,
+// the token's own expiry — shared by revoke (which parses expires out of a
+// raw token) and handleRevokeWebUIUserToken (which already has it from the
+// recorded backup.APIToken row, with no raw token in hand to parse).
+func (s *sessionStore) revokeJTI(jti string, expires time.Time) {
 	s.mu.Lock()
-	s.revoked[claims.ID] = claims.Expiry.Time()
+	s.revoked[jti] = expires
 	s.mu.Unlock()
 }
 
-// authenticated reports whether r carries a currently valid bearer token for
-// s.
+// authenticated reports whether r carries a currently valid, non-revoked
+// bearer token for s.
 func (s *sessionStore) authenticated(r *http.Request) bool {
-	token, ok := bearerToken(r)
-	if !ok {
-		return false
-	}
-
-	return s.valid(token)
+	_, _, ok := s.current(r)
+	return ok
 }
 
 // randomSessionID returns a 256-bit random value hex-encoded, unguessable
@@ -716,27 +864,38 @@ type loginErrorJSON struct {
 }
 
 // handleWebUILogin serves the dashboard's own login form (GET /login) and
-// its submission (POST /login), checking username/password (webui.username/
-// webui.password in the config file) with subtle.ConstantTimeCompare rather
-// than ==, so a mismatch can't be timed to learn how many leading bytes
-// were guessed correctly (authorizeReceiver's own auth is a JWT signature
-// check, not a raw comparison, so it needs no such care). A successful
-// submission starts a session (see sessionStore) and reports its token as
-// JSON (loginResponseJSON) rather than a redirect: login.html's own inline
-// script stores that token (see requireWebUISession) and navigates the
-// browser to next (see safeNextPath) itself, since there's no cookie left
-// for a server-side redirect to rely on. A failed submission likewise
-// reports loginErrorJSON rather than re-rendering the page. showSSO adds a
-// "Log in with SSO" link to the page (see renderLoginPage), pointing at
-// /login/oidc, whenever oidc.enabled is set (see StartWebUI) —
-// independently of whether a username/password is also configured. An empty
-// username with showSSO false (neither kind of login configured) redirects
-// straight to next rather than showing a form there's no way to satisfy; an
-// empty username with showSSO true shows the page with only the SSO link,
-// and POST /login (which only the password form submits) 404s in that case,
-// since there's no username/password to check. db, when non-nil, gets every
-// submitted attempt appended to the login log (see recordLoginEvent), win or
-// lose, for the dashboard's login log view (see handleLoginEvents); a write
+// its submission (POST /login). A submission is checked two ways, in order:
+// first against the single config-file admin (webui.username/webui.password),
+// using subtle.ConstantTimeCompare rather than == so a mismatch can't be
+// timed to learn how many leading bytes were guessed correctly
+// (authorizeReceiver's own auth is a JWT signature check, not a raw
+// comparison, so it needs no such care) — a match grants full access, every
+// backup.Permission bit set explicitly rather than just PermissionAdmin
+// (see the perm assignment below for why); then, if that didn't match and
+// db is non-nil,
+// against the web UI's "Users" admin-managed accounts (see
+// backup.VerifyWebUIUser/webusers.go), whose own granted permissions are
+// used instead. Note that in practice a "Users" admin-managed account can
+// only exist once an operator has used the config-file admin to create one
+// (see handleCreateWebUIUser) — so this second check only ever matters
+// when the config-file admin is also configured. A successful submission
+// starts a session (see sessionStore) carrying whichever permissions
+// matched and reports its token as JSON (loginResponseJSON) rather than a
+// redirect: login.html's own inline script stores that token (see
+// requireWebUISession) and navigates the browser to next (see
+// safeNextPath) itself, since there's no cookie left for a server-side
+// redirect to rely on. A failed submission likewise reports loginErrorJSON
+// rather than re-rendering the page. showSSO adds a "Log in with SSO" link
+// to the page (see renderLoginPage), pointing at /login/oidc, whenever
+// oidc.enabled is set (see StartWebUI) — independently of whether a
+// username/password is also configured. An empty username with showSSO
+// false (neither kind of login configured) redirects straight to next
+// rather than showing a form there's no way to satisfy; an empty username
+// with showSSO true shows the page with only the SSO link, and POST /login
+// (which only the password form submits) 404s in that case, since there's
+// no username/password to check. db, when non-nil, gets every submitted
+// attempt appended to the login log (see recordLoginEvent), win or lose,
+// for the dashboard's login log view (see handleLoginEvents); a write
 // failure there is only logged, not surfaced to the browser, since it must
 // never block an otherwise-successful login.
 func handleWebUILogin(username, password string, showSSO bool, sessions *sessionStore, db *sql.DB, log *slog.Logger, trustProxyHeaders bool) http.HandlerFunc {
@@ -761,9 +920,28 @@ func handleWebUILogin(username, password string, showSSO bool, sessions *session
 		}
 
 		submittedUser := r.FormValue("username")
+		submittedPass := r.FormValue("password")
 		userMatch := subtle.ConstantTimeCompare([]byte(submittedUser), []byte(username)) == 1
-		passMatch := subtle.ConstantTimeCompare([]byte(r.FormValue("password")), []byte(password)) == 1
+		passMatch := subtle.ConstantTimeCompare([]byte(submittedPass), []byte(password)) == 1
+
 		success := userMatch && passMatch
+		// Every bit, not just PermissionAdmin (which alone would already
+		// imply the rest via Can*) — sessionInfoJSON.Permissions only lists
+		// directly-granted names (see Permission.Names), and the
+		// dashboard's own JavaScript checks that list literally (e.g.
+		// canDownload), so a session meant to look and behave like full
+		// access needs every bit set explicitly, matching handleSessionInfo's
+		// own authEnabled-false case below.
+		perm := backup.PermissionView | backup.PermissionDownload | backup.PermissionAdmin | backup.PermissionViewLoginLog | backup.PermissionViewDownloadLog
+
+		if !success && db != nil {
+			dbPerm, ok, err := backup.VerifyWebUIUser(r.Context(), db, submittedUser, submittedPass)
+			if err != nil {
+				log.Warn("web UI: verifying db user failed", "err", err)
+			} else if ok {
+				success, perm = true, dbPerm
+			}
+		}
 
 		detail := ""
 		if !success {
@@ -780,7 +958,7 @@ func handleWebUILogin(username, password string, showSSO bool, sessions *session
 			return
 		}
 
-		id, err := sessions.create(submittedUser)
+		id, err := sessions.create(submittedUser, perm)
 		if err != nil {
 			http.Error(w, "starting session failed", http.StatusInternalServerError)
 			return
@@ -904,13 +1082,531 @@ func handleDownloadEvents(db *sql.DB, log *slog.Logger) http.HandlerFunc {
 // always reports success. Unlike the old cookie-based logout, this doesn't
 // redirect anywhere: the dashboard's own JavaScript (see dashboard.js) calls
 // this, then clears its locally stored token and navigates to /login itself.
-func handleAPILogout(sessions *sessionStore) http.HandlerFunc {
+// If the revoked token happens to be a recorded long-lived API token (see
+// backup.RecordAPIToken) rather than an ordinary interactive session — e.g.
+// a script logging its own token out — its revocation is also persisted
+// (see backup.RevokeAPIToken) so the "Users" admin section's token listing
+// reflects it and it survives a restart; db nil, or the token simply not
+// being a recorded one (backup.ErrAPITokenNotFound), are both silently
+// ignored, since an ordinary session logging out is the common case.
+func handleAPILogout(sessions *sessionStore, db *sql.DB, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if token, ok := bearerToken(r); ok {
-			sessions.revoke(token)
+			if jti, ok := sessions.revoke(token); ok && db != nil {
+				if _, err := backup.RevokeAPIToken(r.Context(), db, jti, time.Now()); err != nil && !errors.Is(err, backup.ErrAPITokenNotFound) {
+					log.Warn("web UI: persisting token revocation failed", "err", err)
+				}
+			}
 		}
 
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// sessionInfoJSON is the currently authenticated session's wire shape (see
+// handleSessionInfo), for the dashboard's own JavaScript to decide what to
+// show: a download link/button only when Permissions includes "download",
+// the login history only when Permissions includes "login-log", the
+// download history only when Permissions includes "download-log", the
+// "Users" admin section only when Admin, and its "OIDC users" listing
+// (permission overrides for SSO logins) only when both Admin and
+// OIDCEnabled.
+type sessionInfoJSON struct {
+	Username    string   `json:"username"`
+	Permissions []string `json:"permissions"`
+	Admin       bool     `json:"admin"`
+	OIDCEnabled bool     `json:"oidc_enabled"`
+}
+
+// handleSessionInfo serves GET /api/session: the currently authenticated
+// session's own username, granted permissions, whether it can reach the
+// "Users" admin section — either as the config-file admin or by holding
+// backup.PermissionAdmin (see requireAdmin) — and whether OIDC SSO is
+// configured at all — everything the dashboard's own JavaScript needs to
+// gate which sections it shows, since the server-side handlers behind those
+// sections already enforce the same rules on every actual request.
+// authEnabled false reports full access, matching every other endpoint's
+// bypass in that case (see requireWebUISession).
+func handleSessionInfo(sessions *sessionStore, authEnabled bool, adminUsername string, oidcEnabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !authEnabled {
+			writeJSON(w, sessionInfoJSON{Permissions: (backup.PermissionView | backup.PermissionDownload | backup.PermissionAdmin | backup.PermissionViewLoginLog | backup.PermissionViewDownloadLog).Names(), Admin: true, OIDCEnabled: oidcEnabled})
+			return
+		}
+
+		username := sessions.usernameFor(r)
+		perm := sessions.permissionsFor(r)
+
+		writeJSON(w, sessionInfoJSON{
+			Username:    username,
+			Permissions: perm.Names(),
+			Admin:       (username != "" && username == adminUsername) || perm.CanAdmin(),
+			OIDCEnabled: oidcEnabled,
+		})
+	}
+}
+
+// webUIUserJSON is one backup.WebUIUser's wire shape for the "Users" admin
+// API (handleListWebUIUsers/handleCreateWebUIUser), matching the
+// dashboard's own field naming (snake_case, as every other /api/...
+// endpoint here uses). It never carries a password: handleListWebUIUsers
+// doesn't have one to serve (see backup.WebUIUser), and
+// handleCreateWebUIUser/handleUpdateWebUIUser take one only in their own
+// request body, write-only.
+type webUIUserJSON struct {
+	Username    string    `json:"username"`
+	Permissions []string  `json:"permissions"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// handleListJSON adapts a backup.List*-style lookup (db, ctx) -> ([]S, error)
+// into a GET handler: an empty JSON array when db is nil, a 500 on error
+// (logged with errMsg), otherwise each item run through convert and written
+// as JSON. Shared by handleListWebUIUsers and handleListOIDCUserPermissions,
+// whose only difference is the row type and conversion.
+func handleListJSON[T, S any](db *sql.DB, log *slog.Logger, errMsg string, list func(context.Context, *sql.DB) ([]S, error), convert func(S) T) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			writeJSON(w, []T{})
+			return
+		}
+
+		items, err := list(r.Context(), db)
+		if err != nil {
+			log.Warn("web UI: "+errMsg, "err", err)
+			http.Error(w, errMsg, http.StatusInternalServerError)
+
+			return
+		}
+
+		out := make([]T, len(items))
+		for i, it := range items {
+			out[i] = convert(it)
+		}
+
+		writeJSON(w, out)
+	}
+}
+
+// handleListWebUIUsers serves GET /api/users: every web UI "Users"
+// admin-managed account, for the dashboard's "Users" admin section —
+// requireAdmin (see StartWebUI) restricts this to the config-file admin.
+func handleListWebUIUsers(db *sql.DB, log *slog.Logger) http.HandlerFunc {
+	return handleListJSON(db, log, "listing users failed", backup.ListWebUIUsers, func(u backup.WebUIUser) webUIUserJSON {
+		return webUIUserJSON{Username: u.Username, Permissions: u.Permissions.Names(), CreatedAt: u.CreatedAt}
+	})
+}
+
+// webUIUserRequestJSON is handleCreateWebUIUser/handleUpdateWebUIUser's
+// request body: Username is only used (and required) by
+// handleCreateWebUIUser, which takes it from the body rather than the path
+// the way handleUpdateWebUIUser's PUT /api/users/{username} does, since
+// there's no username in a POST /api/users path to route on yet. Password
+// is required for handleCreateWebUIUser but optional for
+// handleUpdateWebUIUser, which leaves the stored password unchanged when
+// it's omitted.
+type webUIUserRequestJSON struct {
+	Username    string   `json:"username"`
+	Password    string   `json:"password"`
+	Permissions []string `json:"permissions"`
+}
+
+// handleCreateWebUIUser serves POST /api/users: it adds a new web UI
+// "Users" admin-managed account from the request body (see
+// webUIUserRequestJSON), rejecting a username that collides with the
+// config-file admin's own (adminUsername) — that account's credentials
+// live in the config file, not this table, so it must never be shadowed
+// here — or one that's already taken (backup.ErrWebUIUserExists).
+func handleCreateWebUIUser(db *sql.DB, adminUsername string, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			http.Error(w, "user management requires the job state db", http.StatusServiceUnavailable)
+			return
+		}
+
+		var req webUIUserRequestJSON
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if req.Username == "" || req.Password == "" {
+			http.Error(w, "username and password are required", http.StatusBadRequest)
+			return
+		}
+
+		if adminUsername != "" && req.Username == adminUsername {
+			http.Error(w, "username is reserved for the configured admin account", http.StatusBadRequest)
+			return
+		}
+
+		perm, err := backup.ParsePermissions(req.Permissions)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		switch err := backup.CreateWebUIUser(r.Context(), db, req.Username, req.Password, perm); {
+		case errors.Is(err, backup.ErrWebUIUserExists):
+			http.Error(w, "user already exists", http.StatusConflict)
+		case err != nil:
+			log.Warn("web UI: creating user failed", "err", err)
+			http.Error(w, "creating user failed", http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusCreated)
+		}
+	}
+}
+
+// handleUpdateWebUIUser serves PUT /api/users/{username}: it updates the
+// named web UI "Users" admin-managed account's permissions from the
+// request body (see webUIUserRequestJSON), and its password too if one was
+// given (a blank Password leaves the stored one unchanged, so the
+// dashboard's edit form doesn't have to re-submit it on every permission
+// change).
+func handleUpdateWebUIUser(db *sql.DB, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			http.Error(w, "user management requires the job state db", http.StatusServiceUnavailable)
+			return
+		}
+
+		username := r.PathValue("username")
+
+		var req webUIUserRequestJSON
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		perm, err := backup.ParsePermissions(req.Permissions)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := backup.UpdateWebUIUserPermissions(r.Context(), db, username, perm); handleWebUIUserErr(w, log, "updating", err) {
+			return
+		}
+
+		if req.Password != "" {
+			if err := backup.UpdateWebUIUserPassword(r.Context(), db, username, req.Password); handleWebUIUserErr(w, log, "updating", err) {
+				return
+			}
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// handleDeleteWebUIUser serves DELETE /api/users/{username}: it removes the
+// named web UI "Users" admin-managed account.
+func handleDeleteWebUIUser(db *sql.DB, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			http.Error(w, "user management requires the job state db", http.StatusServiceUnavailable)
+			return
+		}
+
+		if err := backup.DeleteWebUIUser(r.Context(), db, r.PathValue("username")); handleWebUIUserErr(w, log, "deleting", err) {
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// handleWebUIUserErr writes the right response for err, as returned by one
+// of the backup.*WebUIUser* functions handleUpdateWebUIUser/
+// handleDeleteWebUIUser call — backup.ErrWebUIUserNotFound as 404, any
+// other error as a logged 500 — and reports whether it wrote one at all
+// (err == nil), so those handlers can `if handleWebUIUserErr(...) { return }`
+// rather than repeating this switch themselves.
+func handleWebUIUserErr(w http.ResponseWriter, log *slog.Logger, verb string, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, backup.ErrWebUIUserNotFound):
+		http.Error(w, "user not found", http.StatusNotFound)
+	default:
+		log.Warn("web UI: "+verb+" user failed", "err", err)
+		http.Error(w, verb+" user failed", http.StatusInternalServerError)
+	}
+
+	return true
+}
+
+// minAPITokenDays/maxAPITokenDays bound how many days an admin can request
+// handleIssueWebUIUserToken mint a long-lived API token for: at least a
+// day, so it's meaningfully longer-lived than an interactive session
+// (sessionTTL, 12 hours), and at most ten years, since a token revoked
+// before its expiry still occupies sessionStore's in-memory revocation list
+// for the rest of its claimed lifetime.
+const (
+	minAPITokenDays = 1
+	maxAPITokenDays = 3650
+)
+
+// apiTokenRequestJSON is handleIssueWebUIUserToken's request body: how many
+// days the minted token should stay valid for, clamped to
+// [minAPITokenDays, maxAPITokenDays].
+type apiTokenRequestJSON struct {
+	Days int `json:"days"`
+}
+
+// handleIssueWebUIUserToken serves POST /api/users/{username}/tokens: it
+// mints a long-lived bearer token (see sessionStore.createWithTTL) for the
+// named "Users" admin-managed account, carrying that account's currently
+// granted permissions (see backup.GetWebUIUser) — the same kind of token a
+// normal login produces, just valid for Days days instead of sessionTTL, for
+// scripts/automation that can't sit through an interactive login. Returned
+// as loginResponseJSON, the same shape POST /login uses, since it's the same
+// kind of token; unlike an interactive session, the minted token's jti is
+// also recorded (see backup.RecordAPIToken) so an admin can later revoke it
+// (see handleRevokeWebUIUserToken) without needing to hold the raw token
+// itself — the whole point, since it's shown here once and never again.
+func handleIssueWebUIUserToken(sessions *sessionStore, db *sql.DB, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			http.Error(w, "user management requires the job state db", http.StatusServiceUnavailable)
+			return
+		}
+
+		username := r.PathValue("username")
+
+		var req apiTokenRequestJSON
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if req.Days < minAPITokenDays || req.Days > maxAPITokenDays {
+			http.Error(w, fmt.Sprintf("days must be between %d and %d", minAPITokenDays, maxAPITokenDays), http.StatusBadRequest)
+			return
+		}
+
+		user, ok, err := backup.GetWebUIUser(r.Context(), db, username)
+		if err != nil {
+			log.Warn("web UI: looking up user failed", "err", err)
+			http.Error(w, "issuing token failed", http.StatusInternalServerError)
+
+			return
+		}
+
+		if !ok {
+			http.Error(w, "user not found", http.StatusNotFound)
+			return
+		}
+
+		ttl := time.Duration(req.Days) * 24 * time.Hour
+		issuedAt := time.Now()
+		expiresAt := issuedAt.Add(ttl)
+
+		token, jti, err := sessions.createWithTTL(user.Username, user.Permissions, ttl)
+		if err != nil {
+			log.Warn("web UI: issuing token failed", "err", err)
+			http.Error(w, "issuing token failed", http.StatusInternalServerError)
+
+			return
+		}
+
+		if err := backup.RecordAPIToken(r.Context(), db, jti, user.Username, user.Permissions, issuedAt, expiresAt); err != nil {
+			log.Warn("web UI: recording issued token failed", "err", err)
+			http.Error(w, "issuing token failed", http.StatusInternalServerError)
+
+			return
+		}
+
+		writeJSON(w, loginResponseJSON{Token: token, ExpiresAt: expiresAt})
+	}
+}
+
+// apiTokenJSON is one backup.APIToken's wire shape for the "Users" admin
+// section's per-user token listing (handleListWebUIUserTokens) and its
+// revocation (handleRevokeWebUIUserToken), matching the dashboard's own
+// field naming (snake_case, as every other /api/... endpoint here uses). It
+// never carries the token's own signed value — only jti, the identifier
+// needed to revoke it — since the raw token was already shown once, at
+// issuance (see handleIssueWebUIUserToken), and is never stored.
+type apiTokenJSON struct {
+	JTI       string     `json:"jti"`
+	CreatedAt time.Time  `json:"created_at"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	Revoked   bool       `json:"revoked"`
+	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+}
+
+// handleListWebUIUserTokens serves GET /api/users/{username}/tokens: every
+// long-lived API token recorded for the named "Users" admin-managed account
+// (see backup.RecordAPIToken), most recently issued first, for the "Users"
+// admin section's per-user token management dialog to show which of them
+// are still outstanding and offer to revoke one.
+func handleListWebUIUserTokens(db *sql.DB, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			writeJSON(w, []apiTokenJSON{})
+			return
+		}
+
+		tokens, err := backup.ListAPITokensForUser(r.Context(), db, r.PathValue("username"))
+		if err != nil {
+			log.Warn("web UI: listing API tokens failed", "err", err)
+			http.Error(w, "listing tokens failed", http.StatusInternalServerError)
+
+			return
+		}
+
+		out := make([]apiTokenJSON, len(tokens))
+		for i, t := range tokens {
+			out[i] = apiTokenJSON{JTI: t.JTI, CreatedAt: t.CreatedAt, ExpiresAt: t.ExpiresAt, Revoked: t.RevokedAt != nil, RevokedAt: t.RevokedAt}
+		}
+
+		writeJSON(w, out)
+	}
+}
+
+// handleRevokeWebUIUserToken serves DELETE
+// /api/users/{username}/tokens/{jti}: it revokes the named long-lived API
+// token (see backup.RevokeAPIToken) — a no-op, not an error, if it was
+// already revoked — and immediately blocklists it in sessions' in-memory
+// revocation check too (see sessionStore.revokeJTI), so it stops working on
+// this instance right away rather than only after a restart reloads it from
+// db (see newSessionStore). {username} is checked against the token's own
+// recorded owner (backup.ErrAPITokenNotFound if {jti} doesn't belong to
+// {username}, matching a plain unknown jti) purely so a stale or
+// copy-pasted URL can't revoke a different user's token out from under the
+// "Users" admin section's per-user dialog.
+func handleRevokeWebUIUserToken(sessions *sessionStore, db *sql.DB, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			http.Error(w, "user management requires the job state db", http.StatusServiceUnavailable)
+			return
+		}
+
+		username := r.PathValue("username")
+		jti := r.PathValue("jti")
+
+		// Checked before revoking, not after: backup.RevokeAPIToken takes no
+		// username of its own, so revoking first and only then comparing
+		// owners would still permanently revoke a mismatched {username}'s
+		// token while reporting 404, as if the request had no effect.
+		existing, ok, err := backup.GetAPIToken(r.Context(), db, jti)
+		switch {
+		case err != nil:
+			log.Warn("web UI: looking up API token failed", "err", err)
+			http.Error(w, "revoking token failed", http.StatusInternalServerError)
+
+			return
+		case !ok, existing.Username != username:
+			http.Error(w, "token not found", http.StatusNotFound)
+			return
+		}
+
+		t, err := backup.RevokeAPIToken(r.Context(), db, jti, time.Now())
+		if err != nil {
+			log.Warn("web UI: revoking API token failed", "err", err)
+			http.Error(w, "revoking token failed", http.StatusInternalServerError)
+
+			return
+		}
+
+		sessions.revokeJTI(t.JTI, t.ExpiresAt)
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// oidcUserPermissionJSON is one backup.OIDCUserPermission's wire shape for
+// the "Users" admin section's OIDC listing (handleListOIDCUserPermissions/
+// handleSetOIDCUserPermissions), matching the dashboard's own field naming
+// (snake_case, as every other /api/... endpoint here uses).
+type oidcUserPermissionJSON struct {
+	Identity    string    `json:"identity"`
+	Permissions []string  `json:"permissions"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// handleListOIDCUserPermissions serves GET /api/oidc-users: every stored
+// per-identity permission override for an SSO login (see
+// backup.OIDCUserPermission/oidcusers.go), for the dashboard's "Users"
+// admin section's OIDC listing — requireAdmin (see StartWebUI) restricts
+// this to the config-file admin, same as handleListWebUIUsers.
+func handleListOIDCUserPermissions(db *sql.DB, log *slog.Logger) http.HandlerFunc {
+	return handleListJSON(db, log, "listing oidc user permissions failed", backup.ListOIDCUserPermissions, func(u backup.OIDCUserPermission) oidcUserPermissionJSON {
+		return oidcUserPermissionJSON{Identity: u.Identity, Permissions: u.Permissions.Names(), UpdatedAt: u.UpdatedAt}
+	})
+}
+
+// oidcUserPermissionRequestJSON is handleSetOIDCUserPermissions's request
+// body.
+type oidcUserPermissionRequestJSON struct {
+	Permissions []string `json:"permissions"`
+}
+
+// handleSetOIDCUserPermissions serves PUT /api/oidc-users/{identity...}: it
+// stores (or replaces) the named identity's permission override (see
+// backup.SetOIDCUserPermissions/oidcusers.go), taken effect on that
+// identity's next SSO login (see handleOIDCCallback in oidc.go) — same as a
+// web UI "Users" admin-managed account's permissions only taking effect on
+// its own next login (see sessionClaims). Unlike handleCreateWebUIUser,
+// there's no separate create step: an admin grants an identity's first
+// override the same way they change an existing one.
+func handleSetOIDCUserPermissions(db *sql.DB, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			http.Error(w, "user management requires the job state db", http.StatusServiceUnavailable)
+			return
+		}
+
+		identity := r.PathValue("identity")
+		if identity == "" {
+			http.Error(w, "identity is required", http.StatusBadRequest)
+			return
+		}
+
+		var req oidcUserPermissionRequestJSON
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		perm, err := backup.ParsePermissions(req.Permissions)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := backup.SetOIDCUserPermissions(r.Context(), db, identity, perm); err != nil {
+			log.Warn("web UI: setting oidc user permissions failed", "err", err)
+			http.Error(w, "setting oidc user permissions failed", http.StatusInternalServerError)
+
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// handleDeleteOIDCUserPermissions serves DELETE /api/oidc-users/{identity...}:
+// it removes the named identity's stored permission override (see
+// backup.DeleteOIDCUserPermissions/oidcusers.go), reverting its next SSO
+// login to webui.oidc.default-permissions:.
+func handleDeleteOIDCUserPermissions(db *sql.DB, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			http.Error(w, "user management requires the job state db", http.StatusServiceUnavailable)
+			return
+		}
+
+		switch err := backup.DeleteOIDCUserPermissions(r.Context(), db, r.PathValue("identity")); {
+		case errors.Is(err, backup.ErrOIDCUserPermissionsNotFound):
+			http.Error(w, "no permission override for this identity", http.StatusNotFound)
+		case err != nil:
+			log.Warn("web UI: deleting oidc user permissions failed", "err", err)
+			http.Error(w, "deleting oidc user permissions failed", http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
 	}
 }
 
@@ -1184,6 +1880,74 @@ func requireWebUISession(authEnabled bool, sessions *sessionStore, next http.Han
 		}
 
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}
+}
+
+// requirePermission wraps next (itself already wrapped in
+// requireWebUISession, so a request here is already known to carry a
+// currently valid session whenever authEnabled), additionally requiring
+// that session to hold required — reporting 403 rather than
+// requireWebUISession's 401, since the request is authenticated, just not
+// authorized for this endpoint. required must be one of
+// backup.PermissionDownload, backup.PermissionViewLoginLog, or
+// backup.PermissionViewDownloadLog (checked via the matching CanDownload/
+// CanViewLoginLog/CanViewDownloadLog method); anything else, including
+// backup.PermissionView, falls back to CanView. authEnabled false skips the
+// check entirely, matching requireWebUISession's own bypass, since there's
+// no session to hold a permission in that case.
+func requirePermission(authEnabled bool, sessions *sessionStore, required backup.Permission, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if authEnabled {
+			perm := sessions.permissionsFor(r)
+
+			var allowed bool
+
+			switch required {
+			case backup.PermissionDownload:
+				allowed = perm.CanDownload()
+			case backup.PermissionViewLoginLog:
+				allowed = perm.CanViewLoginLog()
+			case backup.PermissionViewDownloadLog:
+				allowed = perm.CanViewDownloadLog()
+			case backup.PermissionView, backup.PermissionAdmin:
+				allowed = perm.CanView()
+			default:
+				allowed = perm.CanView()
+			}
+
+			if !allowed {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+		}
+
+		next(w, r)
+	}
+}
+
+// requireAdmin wraps next (itself already wrapped in requireWebUISession),
+// additionally requiring the session either belong to the config-file admin
+// (webui.username) or hold backup.PermissionAdmin — the two ways to reach
+// the web UI's "Users" admin section (see handleListWebUIUsers and
+// friends): the single config-file admin always could, and a "Users"
+// admin-managed account or an OIDC login can too now, once granted
+// PermissionAdmin (see backup.Permission). adminUsername empty (no
+// config-file admin configured) just falls through to the permission
+// check. authEnabled false skips the check entirely, matching
+// requireWebUISession/requirePermission's own bypass.
+func requireAdmin(authEnabled bool, sessions *sessionStore, adminUsername string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if authEnabled {
+			claims, sc, ok := sessions.current(r)
+			isConfigAdmin := ok && adminUsername != "" && claims.Subject == adminUsername
+
+			if !isConfigAdmin && !sc.Perm.CanAdmin() {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+		}
+
+		next(w, r)
 	}
 }
 

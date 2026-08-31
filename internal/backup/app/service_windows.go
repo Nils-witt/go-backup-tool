@@ -15,6 +15,8 @@ import (
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
+
+	"nilswitt.dev/go-backup-tool/internal/backup/app/config"
 )
 
 // serviceName is the Windows service go-backup-tool installs itself as and
@@ -204,7 +206,7 @@ func resolveConfigArgAbs(args []string) ([]string, error) {
 		return out, nil
 	}
 
-	abs, err := filepath.Abs(defaultConfigPath)
+	abs, err := filepath.Abs(config.DefaultConfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolving default config path: %w", err)
 	}

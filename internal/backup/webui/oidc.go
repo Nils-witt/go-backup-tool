@@ -24,6 +24,7 @@ import (
 type OIDCAuth struct {
 	oauth2Config oauth2.Config
 	verifier     *oidc.IDTokenVerifier
+	defaultPerm  backup.Permission
 }
 
 // newOIDCAuth builds an *OIDCAuth for cfg by fetching its provider's
@@ -49,7 +50,8 @@ func newOIDCAuth(ctx context.Context, cfg backup.OIDCSettings) (*OIDCAuth, error
 			Endpoint:     provider.Endpoint(),
 			Scopes:       append([]string{oidc.ScopeOpenID}, cfg.Scopes...),
 		},
-		verifier: provider.Verifier(&oidc.Config{ClientID: cfg.ClientID}),
+		verifier:    provider.Verifier(&oidc.Config{ClientID: cfg.ClientID}),
+		defaultPerm: cfg.DefaultPermissions,
 	}, nil
 }
 
@@ -207,9 +209,18 @@ func writeOIDCCompletePage(w http.ResponseWriter, token string, expiresAt time.T
 // of that checks out — starts a dashboard session exactly as a successful
 // password login would (see handleWebUILogin), then serves the bridge page
 // (see writeOIDCCompletePage) that hands the browser its token and sends it
-// on to the in-flight login's next. db, when non-nil, gets every attempt
-// appended to the login log (see recordLoginEvent), win or lose, mirroring
-// handleWebUILogin's own recording.
+// on to the in-flight login's next. The session's permissions are
+// auth.defaultPerm, unless db (when non-nil) holds a stored permission
+// record for this login (see backup.OIDCUserPermissions/oidcusers.go) — set
+// through the "Users" admin section's OIDC listing (see
+// handleSetOIDCUserPermissions in webui.go) — in which case that takes
+// precedence. The very first login for an identity has no such record yet,
+// so this also provisions one then, granting auth.defaultPerm — the
+// identity shows up in that admin listing from then on, ready for an admin
+// to adjust, rather than only appearing once they've manually added it. db
+// also, independently of all that, gets every attempt appended to the login
+// log (see recordLoginEvent), win or lose, mirroring handleWebUILogin's own
+// recording.
 func handleOIDCCallback(auth *OIDCAuth, pending *oidcPendingStore, sessions *sessionStore, log *slog.Logger, db *sql.DB, trustProxyHeaders bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		record := func(username, detail string, success bool) {
@@ -265,15 +276,38 @@ func handleOIDCCallback(auth *OIDCAuth, pending *oidcPendingStore, sessions *ses
 			return
 		}
 
-		id, err := sessions.create(oidcIdentity(idToken))
+		identity := oidcIdentity(idToken)
+		perm := auth.defaultPerm
+
+		if db != nil {
+			switch override, ok, err := backup.OIDCUserPermissions(r.Context(), db, identity); {
+			case err != nil:
+				log.Warn("oidc: looking up user permission record failed", "err", err)
+			case ok:
+				perm = override
+			default:
+				// First login for this identity: provision its permission
+				// record now, granting auth.defaultPerm — the same
+				// permissions this session gets either way (see perm above)
+				// — so it shows up in the "Users" admin section's OIDC
+				// listing (see handleListOIDCUserPermissions in webui.go)
+				// ready for an admin to adjust, rather than only appearing
+				// once they've manually set an override for it.
+				if err := backup.SetOIDCUserPermissions(r.Context(), db, identity, perm); err != nil {
+					log.Warn("oidc: provisioning user permission record failed", "err", err)
+				}
+			}
+		}
+
+		id, err := sessions.create(identity, perm)
 		if err != nil {
-			record(oidcIdentity(idToken), "starting session failed", false)
+			record(identity, "starting session failed", false)
 			http.Error(w, "starting session failed", http.StatusInternalServerError)
 
 			return
 		}
 
-		record(oidcIdentity(idToken), "", true)
+		record(identity, "", true)
 		writeOIDCCompletePage(w, id, time.Now().Add(sessionTTL), p.next)
 	}
 }

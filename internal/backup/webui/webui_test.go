@@ -1,6 +1,8 @@
 package webui
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -31,7 +33,7 @@ func writeFile(t *testing.T, path, contents string) {
 func newTestSessionStore(t *testing.T) *sessionStore {
 	t.Helper()
 
-	sessions, err := newSessionStore(nil)
+	sessions, err := newSessionStore(nil, nil)
 	if err != nil {
 		t.Fatalf("newSessionStore(): %v", err)
 	}
@@ -240,7 +242,7 @@ func TestRequireWebUISessionAcceptsValidToken(t *testing.T) {
 	called := false
 	sessions := newTestSessionStore(t)
 
-	id, err := sessions.create("alice")
+	id, err := sessions.create("alice", backup.PermissionView|backup.PermissionDownload)
 	if err != nil {
 		t.Fatalf("sessions.create(): %v", err)
 	}
@@ -334,6 +336,124 @@ func TestStartWebUIWithLoginRequiresSession(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("authenticated GET /api/status status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// webUILogin logs into srv as username/password over the real HTTP mux
+// StartWebUI wires up, returning the resulting session's bearer token and
+// failing the test on any error or non-200 response.
+func webUILogin(t *testing.T, client *http.Client, srv *Server, username, password string) string {
+	t.Helper()
+
+	form := url.Values{"username": {username}, "password": {password}}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+srv.addr+"/login", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatalf("building login request: %v", err)
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST /login: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /login status = %d, want 200", resp.StatusCode)
+	}
+
+	var body loginResponseJSON
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decoding login response: %v", err)
+	}
+
+	return body.Token
+}
+
+// webUIGetStatus issues an authenticated GET to path on srv's real HTTP mux,
+// returning the response status code and failing the test if the request
+// itself couldn't be made.
+func webUIGetStatus(t *testing.T, client *http.Client, srv *Server, token, path string) int {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+srv.addr+path, nil)
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	return resp.StatusCode
+}
+
+// TestStartWebUILoginLogAndDownloadLogRequireDedicatedPermission is an
+// end-to-end check, through the real mux StartWebUI wires up, that
+// /api/login-events and /api/download-events are gated on
+// backup.PermissionViewLoginLog/PermissionViewDownloadLog rather than the
+// general backup.PermissionView every other api(...) route uses — a
+// view-only db-backed account can reach /api/status but not either log,
+// granting just the dedicated permission (without "view") is enough for
+// that one log alone, and the single config-file admin (webui.username/
+// webui.password) can still reach both despite its session never holding
+// PermissionView/PermissionDownload's usual db-backed-account shape (see
+// handleWebUILogin's own perm assignment).
+func TestStartWebUILoginLogAndDownloadLogRequireDedicatedPermission(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore()
+	db := openTestStateDB(t)
+
+	if err := backup.CreateWebUIUser(context.Background(), db, "viewer", "s3cret1", backup.PermissionView); err != nil {
+		t.Fatalf("CreateWebUIUser(viewer) unexpected error: %v", err)
+	}
+
+	if err := backup.CreateWebUIUser(context.Background(), db, "auditor", "s3cret2", backup.PermissionViewLoginLog); err != nil {
+		t.Fatalf("CreateWebUIUser(auditor) unexpected error: %v", err)
+	}
+
+	srv := StartWebUI("127.0.0.1:0", store, nil, nil, discardLogger, db, nil, "admin", "secret", nil, nil, false, nil)
+	if srv == nil {
+		t.Fatal("StartWebUI() = nil, want a running server")
+	}
+
+	t.Cleanup(srv.Shutdown)
+
+	client := &http.Client{}
+	viewerToken := webUILogin(t, client, srv, "viewer", "s3cret1")
+	auditorToken := webUILogin(t, client, srv, "auditor", "s3cret2")
+	adminToken := webUILogin(t, client, srv, "admin", "secret")
+
+	tests := []struct {
+		name  string
+		token string
+		path  string
+		want  int
+	}{
+		{"viewer can see status", viewerToken, "/api/status", http.StatusOK},
+		{"viewer cannot see login log", viewerToken, "/api/login-events", http.StatusForbidden},
+		{"viewer cannot see download log", viewerToken, "/api/download-events", http.StatusForbidden},
+		{"login-log-only account can see login log", auditorToken, "/api/login-events", http.StatusOK},
+		{"login-log-only account cannot see download log", auditorToken, "/api/download-events", http.StatusForbidden},
+		{"config-file admin can see login log", adminToken, "/api/login-events", http.StatusOK},
+		{"config-file admin can see download log", adminToken, "/api/download-events", http.StatusOK},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := webUIGetStatus(t, client, srv, tt.token, tt.path); got != tt.want {
+				t.Errorf("GET %s status = %d, want %d", tt.path, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -568,7 +688,7 @@ func TestHandleAPILogoutRevokesSession(t *testing.T) {
 
 	sessions := newTestSessionStore(t)
 
-	id, err := sessions.create("alice")
+	id, err := sessions.create("alice", backup.PermissionView|backup.PermissionDownload)
 	if err != nil {
 		t.Fatalf("sessions.create(): %v", err)
 	}
@@ -578,7 +698,7 @@ func TestHandleAPILogoutRevokesSession(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleAPILogout(sessions)(rec, req)
+	handleAPILogout(sessions, nil, discardLogger)(rec, req)
 
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
@@ -586,6 +706,294 @@ func TestHandleAPILogoutRevokesSession(t *testing.T) {
 
 	if sessions.valid(id) {
 		t.Error("session is still valid after logout")
+	}
+}
+
+func TestHandleIssueWebUIUserTokenRecordsToken(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	ctx := t.Context()
+
+	if err := backup.CreateWebUIUser(ctx, db, "alice", "hunter2", backup.PermissionView); err != nil {
+		t.Fatalf("CreateWebUIUser(): %v", err)
+	}
+
+	sessions, err := newSessionStore(nil, db)
+	if err != nil {
+		t.Fatalf("newSessionStore(): %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/users/alice/tokens", strings.NewReader(`{"days":30}`))
+	req.SetPathValue("username", "alice")
+
+	rec := httptest.NewRecorder()
+
+	handleIssueWebUIUserToken(sessions, db, discardLogger)(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var body loginResponseJSON
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+
+	if body.Token == "" || !sessions.valid(body.Token) {
+		t.Fatal("issued token is missing or not a valid session")
+	}
+
+	tokens, err := backup.ListAPITokensForUser(ctx, db, "alice")
+	if err != nil {
+		t.Fatalf("ListAPITokensForUser(): %v", err)
+	}
+
+	if len(tokens) != 1 {
+		t.Fatalf("ListAPITokensForUser() returned %d tokens, want 1", len(tokens))
+	}
+
+	if tokens[0].RevokedAt != nil {
+		t.Error("newly issued token is already recorded as revoked")
+	}
+}
+
+func TestHandleListWebUIUserTokens(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	ctx := t.Context()
+
+	if err := backup.CreateWebUIUser(ctx, db, "alice", "hunter2", backup.PermissionView); err != nil {
+		t.Fatalf("CreateWebUIUser(): %v", err)
+	}
+
+	sessions, err := newSessionStore(nil, db)
+	if err != nil {
+		t.Fatalf("newSessionStore(): %v", err)
+	}
+
+	for range 2 {
+		issueReq := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/users/alice/tokens", strings.NewReader(`{"days":30}`))
+		issueReq.SetPathValue("username", "alice")
+
+		issueRec := httptest.NewRecorder()
+
+		handleIssueWebUIUserToken(sessions, db, discardLogger)(issueRec, issueReq)
+
+		if issueRec.Code != http.StatusOK {
+			t.Fatalf("issuing token: status = %d, want 200", issueRec.Code)
+		}
+	}
+
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/users/alice/tokens", nil)
+	req.SetPathValue("username", "alice")
+
+	rec := httptest.NewRecorder()
+
+	handleListWebUIUserTokens(db, discardLogger)(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var tokens []apiTokenJSON
+	if err := json.NewDecoder(rec.Body).Decode(&tokens); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+
+	if len(tokens) != 2 {
+		t.Fatalf("handleListWebUIUserTokens() returned %d tokens, want 2", len(tokens))
+	}
+
+	for _, tok := range tokens {
+		if tok.Revoked || tok.JTI == "" {
+			t.Errorf("token %+v: want a non-empty jti and Revoked = false", tok)
+		}
+	}
+}
+
+// TestHandleRevokeWebUIUserTokenBlocksSessionAndIsIdempotent drives issue/
+// wrong-user-revoke/revoke/re-revoke/unknown-jti in order (each stage
+// depends on state the previous one left behind) against one shared db,
+// session store, and issued token. The stages live in standalone helpers
+// below rather than inline t.Run closures, since gocyclo counts a closure's
+// branches against the enclosing function just as if they were inline.
+func TestHandleRevokeWebUIUserTokenBlocksSessionAndIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+
+	if err := backup.CreateWebUIUser(t.Context(), db, "alice", "hunter2", backup.PermissionView); err != nil {
+		t.Fatalf("CreateWebUIUser(): %v", err)
+	}
+
+	sessions, err := newSessionStore(nil, db)
+	if err != nil {
+		t.Fatalf("newSessionStore(): %v", err)
+	}
+
+	issued := issueWebUIUserTokenForAlice(t, sessions, db)
+	jti := requireOnlyAPITokenJTI(t, db, "alice")
+
+	requireRevokeUnderWrongUsernameHasNoEffect(t, sessions, db, jti, issued.Token)
+
+	revokeWebUIUserToken(t, sessions, db, "alice", jti, http.StatusNoContent)
+
+	if sessions.valid(issued.Token) {
+		t.Error("token is still valid after being revoked")
+	}
+
+	// Revoking the same token again is a no-op, not an error.
+	revokeWebUIUserToken(t, sessions, db, "alice", jti, http.StatusNoContent)
+
+	revokeWebUIUserToken(t, sessions, db, "alice", "no-such-jti", http.StatusNotFound)
+}
+
+// issueWebUIUserTokenForAlice issues alice a 30-day API token through
+// handleIssueWebUIUserToken, requires success and that the token validates,
+// and returns the decoded response.
+func issueWebUIUserTokenForAlice(t *testing.T, sessions *sessionStore, db *sql.DB) loginResponseJSON {
+	t.Helper()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/users/alice/tokens", strings.NewReader(`{"days":30}`))
+	req.SetPathValue("username", "alice")
+
+	rec := httptest.NewRecorder()
+	handleIssueWebUIUserToken(sessions, db, discardLogger)(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("issuing token: status = %d, want 200", rec.Code)
+	}
+
+	var issued loginResponseJSON
+	if err := json.NewDecoder(rec.Body).Decode(&issued); err != nil {
+		t.Fatalf("decoding issue response: %v", err)
+	}
+
+	if !sessions.valid(issued.Token) {
+		t.Fatal("freshly issued token isn't valid")
+	}
+
+	return issued
+}
+
+// requireOnlyAPITokenJTI requires exactly one API token recorded for
+// username and returns its JTI.
+func requireOnlyAPITokenJTI(t *testing.T, db *sql.DB, username string) string {
+	t.Helper()
+
+	tokens, err := backup.ListAPITokensForUser(t.Context(), db, username)
+	if err != nil || len(tokens) != 1 {
+		t.Fatalf("ListAPITokensForUser() = %+v, %v, want exactly one token", tokens, err)
+	}
+
+	return tokens[0].JTI
+}
+
+// requireRevokeUnderWrongUsernameHasNoEffect attempts to revoke jti as bob
+// (not its owner) and requires the request to be rejected without revoking
+// anything.
+func requireRevokeUnderWrongUsernameHasNoEffect(t *testing.T, sessions *sessionStore, db *sql.DB, jti, token string) {
+	t.Helper()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/api/users/bob/tokens/"+jti, nil)
+	req.SetPathValue("username", "bob")
+	req.SetPathValue("jti", jti)
+
+	rec := httptest.NewRecorder()
+	handleRevokeWebUIUserToken(sessions, db, discardLogger)(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("revoking under the wrong username: status = %d, want 404", rec.Code)
+	}
+
+	if !sessions.valid(token) {
+		t.Error("token was revoked despite the username mismatch")
+	}
+
+	// Checking sessions.valid alone isn't enough here: it only reflects
+	// sessions' in-memory blocklist, which a rejected request never touches
+	// either way. What must not have happened is the persistent record
+	// itself being marked revoked, since that's what a later restart would
+	// reload (see TestSessionStoreReloadsRevokedAPITokensAfterRestart).
+	if stored, ok, err := backup.GetAPIToken(t.Context(), db, jti); err != nil || !ok || stored.RevokedAt != nil {
+		t.Errorf("GetAPIToken() after a wrong-username revoke attempt = (%+v, %v, %v), want a still-unrevoked token", stored, ok, err)
+	}
+}
+
+// revokeWebUIUserToken issues a DELETE for username's jti through
+// handleRevokeWebUIUserToken and requires the response status to be
+// wantStatus.
+func revokeWebUIUserToken(t *testing.T, sessions *sessionStore, db *sql.DB, username, jti string, wantStatus int) {
+	t.Helper()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/api/users/"+username+"/tokens/"+jti, nil)
+	req.SetPathValue("username", username)
+	req.SetPathValue("jti", jti)
+
+	rec := httptest.NewRecorder()
+	handleRevokeWebUIUserToken(sessions, db, discardLogger)(rec, req)
+
+	if rec.Code != wantStatus {
+		t.Errorf("revoke status = %d, want %d", rec.Code, wantStatus)
+	}
+}
+
+// TestSessionStoreReloadsRevokedAPITokensAfterRestart is the core guarantee
+// behind making a long-lived API token revocable at all: since the token
+// itself is a self-contained signed JWT (see sessionStore), the only way to
+// end it early is a server-side revocation blocklist — and since such a
+// token can outlive the process by years (see maxAPITokenDays), that
+// blocklist has to survive a restart too, unlike an ordinary interactive
+// session's own revocation. This simulates a restart by discarding the
+// first sessionStore and building a second one against the same db.
+func TestSessionStoreReloadsRevokedAPITokensAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	ctx := t.Context()
+
+	before, err := newSessionStore(nil, db)
+	if err != nil {
+		t.Fatalf("newSessionStore(): %v", err)
+	}
+
+	token, jti, err := before.createWithTTL("alice", backup.PermissionView, time.Hour)
+	if err != nil {
+		t.Fatalf("createWithTTL(): %v", err)
+	}
+
+	now := time.Now()
+
+	if err := backup.RecordAPIToken(ctx, db, jti, "alice", backup.PermissionView, now, now.Add(time.Hour)); err != nil {
+		t.Fatalf("RecordAPIToken(): %v", err)
+	}
+
+	if !before.valid(token) {
+		t.Fatal("token isn't valid before revocation")
+	}
+
+	revoked, err := backup.RevokeAPIToken(ctx, db, jti, now)
+	if err != nil {
+		t.Fatalf("RevokeAPIToken(): %v", err)
+	}
+
+	before.revokeJTI(revoked.JTI, revoked.ExpiresAt)
+
+	if before.valid(token) {
+		t.Fatal("token is still valid immediately after revocation")
+	}
+
+	// Simulate a restart: a fresh sessionStore against the same db, with
+	// nothing carried over in memory.
+	after, err := newSessionStore(nil, db)
+	if err != nil {
+		t.Fatalf("newSessionStore() after restart: %v", err)
+	}
+
+	if after.valid(token) {
+		t.Error("token is valid again after a simulated restart — the revocation wasn't persisted")
 	}
 }
 
