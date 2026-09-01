@@ -348,6 +348,61 @@ function renderDownloadEvents(events) {
   }).join("");
 }
 
+// fmtDuration formats a millisecond duration (end - start, as computed by
+// renderJobRunEvents) the way a human would read it: whole seconds once
+// it's a second or more, milliseconds below that.
+function fmtDuration(ms) {
+  if (ms < 1000) return ms + "ms";
+  return (ms / 1000).toFixed(1) + "s";
+}
+
+// renderJobRunEvents re-renders the job run log table from events (newest
+// first, as served by /api/job-runs). The section stays hidden while
+// there's nothing to show, matching renderLoginEvents above.
+function renderJobRunEvents(events) {
+  const wrap = document.getElementById("job-run-log-wrap");
+  if (!events || !events.length) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+
+  document.getElementById("job-run-log-body").innerHTML = events.map(function (ev) {
+    const result = ev.success ? badge("ok", "success") : badge("failed", "failed");
+    const err = ev.error ? '<p class="err">' + escapeHtml(ev.error) + '</p>' : '';
+    const duration = fmtDuration(new Date(ev.end) - new Date(ev.start));
+    return '<tr>' +
+      '<td class="nowrap">' + fmtTime(ev.end) + '</td>' +
+      '<td>' + escapeHtml(ev.job_name) + '</td>' +
+      '<td class="nowrap">' + duration + '</td>' +
+      '<td class="nowrap">' + fmtSize(ev.size) + '</td>' +
+      '<td class="nowrap">' + result + err + '</td>' +
+      '</tr>';
+  }).join("");
+}
+
+// renderTargetRunEvents re-renders the target run log table from events
+// (newest first, as served by /api/target-runs). The section stays hidden
+// while there's nothing to show, matching renderLoginEvents above.
+function renderTargetRunEvents(events) {
+  const wrap = document.getElementById("target-run-log-wrap");
+  if (!events || !events.length) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+
+  document.getElementById("target-run-log-body").innerHTML = events.map(function (ev) {
+    const err = ev.error ? '<p class="err">' + escapeHtml(ev.error) + '</p>' : '';
+    return '<tr>' +
+      '<td class="nowrap">' + fmtTime(ev.at) + '</td>' +
+      '<td>' + escapeHtml(ev.job_name) + '</td>' +
+      '<td>' + escapeHtml(ev.target) + '</td>' +
+      '<td class="nowrap">' + badge(ev.state) + err + '</td>' +
+      '</tr>';
+  }).join("");
+}
+
 // renderIdentity fills in the "Server identity" section from identity (as
 // served by /api/identity). It stays hidden when there's no identity to
 // show, matching the receivers/logs sections above — either
@@ -885,12 +940,16 @@ function refresh() {
   Promise.all([
     apiFetch("/api/status").then(function (r) { return r.json(); }),
     apiFetch("/api/receivers").then(function (r) { return r.json(); }),
-    apiFetch("/api/logs").then(function (r) { return r.json(); })
+    apiFetch("/api/logs").then(function (r) { return r.json(); }),
+    apiFetch("/api/job-runs").then(function (r) { return r.json(); }),
+    apiFetch("/api/target-runs").then(function (r) { return r.json(); })
   ]).then(function (results) {
     render(results[0]);
     lastReceivers = results[1] || [];
     renderReceivers(lastReceivers);
     renderLogs(results[2]);
+    renderJobRunEvents(results[3]);
+    renderTargetRunEvents(results[4]);
     document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
   }).catch(function (err) {
     document.getElementById("updated").textContent = "error fetching status: " + err;

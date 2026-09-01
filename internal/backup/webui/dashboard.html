@@ -230,19 +230,25 @@
   .logs .log-error { color: var(--failed); }
   .logs .log-warn { color: var(--running); }
   .login-log-card,
-  .download-log-card {
+  .download-log-card,
+  .job-run-log-card,
+  .target-run-log-card {
     max-width: 1200px;
     margin: 0 auto;
     overflow-x: auto;
   }
   table.login-events,
-  table.download-events {
+  table.download-events,
+  table.job-run-events,
+  table.target-run-events {
     width: 100%;
     border-collapse: collapse;
     font-size: .82rem;
   }
   table.login-events th,
-  table.download-events th {
+  table.download-events th,
+  table.job-run-events th,
+  table.target-run-events th {
     text-align: left;
     color: var(--muted);
     font-weight: 600;
@@ -254,13 +260,17 @@
     white-space: nowrap;
   }
   table.login-events td,
-  table.download-events td {
+  table.download-events td,
+  table.job-run-events td,
+  table.target-run-events td {
     padding: .4rem .5rem;
     border-bottom: 1px solid var(--border);
     overflow-wrap: anywhere;
   }
   table.login-events td.nowrap,
-  table.download-events td.nowrap {
+  table.download-events td.nowrap,
+  table.job-run-events td.nowrap,
+  table.target-run-events td.nowrap {
     white-space: nowrap;
   }
   .users-card {
@@ -491,6 +501,30 @@
         <tr><th>Time</th><th>Username</th><th>Method</th><th>Result</th><th>Remote address</th></tr>
       </thead>
       <tbody id="login-log-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="job-run-log-wrap" hidden>
+  <h2 class="section-title">Job run log</h2>
+  <div class="card job-run-log-card">
+    <table class="job-run-events">
+      <thead>
+        <tr><th>Time</th><th>Job</th><th>Duration</th><th>Size</th><th>Result</th></tr>
+      </thead>
+      <tbody id="job-run-log-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="target-run-log-wrap" hidden>
+  <h2 class="section-title">Target run log</h2>
+  <div class="card target-run-log-card">
+    <table class="target-run-events">
+      <thead>
+        <tr><th>Time</th><th>Job</th><th>Target</th><th>Result</th></tr>
+      </thead>
+      <tbody id="target-run-log-body"></tbody>
     </table>
   </div>
 </div>

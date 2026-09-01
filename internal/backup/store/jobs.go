@@ -116,6 +116,49 @@ func (s *Store) GetLastRun(ctx context.Context, name string) (LastRun, bool, err
 	})
 }
 
+// JobRunEvent is one historical job run, as appended by SaveJobRun and
+// returned by ListJobRunEvents — unlike GetLastRun, which only returns a
+// job's most recently completed run, this preserves every run across every
+// job's history, for the dashboard's job run log view.
+type JobRunEvent struct {
+	JobName string
+	Start   time.Time
+	End     time.Time
+	Success bool
+	Size    int64
+	Error   string
+}
+
+// ListJobRunEvents returns up to limit of the most recently recorded job
+// runs across every job, newest first, for the dashboard's job run log
+// view.
+func (s *Store) ListJobRunEvents(ctx context.Context, limit int) ([]JobRunEvent, error) {
+	query := `SELECT name, "startTime", "endTime", success, size, error FROM job_runs ORDER BY id DESC LIMIT ?`
+
+	return queryRows(ctx, s.db, "reading job run events", query, []any{limit}, func(rows *sql.Rows) (JobRunEvent, error) {
+		var (
+			ev      JobRunEvent
+			start   sql.NullTime
+			end     sql.NullTime
+			success sql.NullBool
+			size    sql.NullInt64
+			errText sql.NullString
+		)
+
+		if err := rows.Scan(&ev.JobName, &start, &end, &success, &size, &errText); err != nil {
+			return JobRunEvent{}, err
+		}
+
+		ev.Start = start.Time
+		ev.End = end.Time
+		ev.Success = success.Bool
+		ev.Size = size.Int64
+		ev.Error = errText.String
+
+		return ev, nil
+	})
+}
+
 // SaveTargetRun appends a target_runs row recording job name's target
 // (target names the servers: entry it came from, see config.Target.
 // ServerName) just-finished success/failure. Called for every target of
@@ -159,5 +202,41 @@ func (s *Store) ListTargetRuns(ctx context.Context, name string) ([]TargetRun, e
 		}
 
 		return TargetRun{Target: target, State: state, Error: errText.String}, nil
+	})
+}
+
+// TargetRunEvent is one historical job target run, as appended by
+// SaveTargetRun and returned by ListTargetRunEvents — unlike ListTargetRuns,
+// which only returns each target's most recently completed outcome, this
+// preserves every run across every job's history, for the dashboard's
+// target run log view.
+type TargetRunEvent struct {
+	At      time.Time
+	JobName string
+	Target  string
+	Success bool
+	State   string
+	Error   string
+}
+
+// ListTargetRunEvents returns up to limit of the most recently recorded
+// target runs across every job, newest first, for the dashboard's target
+// run log view.
+func (s *Store) ListTargetRunEvents(ctx context.Context, limit int) ([]TargetRunEvent, error) {
+	query := `SELECT run_at, job_name, target, success, state, error FROM target_runs ORDER BY id DESC LIMIT ?`
+
+	return queryRows(ctx, s.db, "reading target run events", query, []any{limit}, func(rows *sql.Rows) (TargetRunEvent, error) {
+		var (
+			ev      TargetRunEvent
+			errText sql.NullString
+		)
+
+		if err := rows.Scan(&ev.At, &ev.JobName, &ev.Target, &ev.Success, &ev.State, &errText); err != nil {
+			return TargetRunEvent{}, err
+		}
+
+		ev.Error = errText.String
+
+		return ev, nil
 	})
 }

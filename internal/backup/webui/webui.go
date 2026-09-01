@@ -135,6 +135,8 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, receivers map[stri
 	mux.HandleFunc("GET /api/logs", api(handleLogs(logs)))
 	mux.HandleFunc("GET /api/identity", api(handleIdentity(identity)))
 	mux.HandleFunc("GET /api/receivers", api(handleReceiverStatus(receivers, receiverStore, log)))
+	mux.HandleFunc("GET /api/job-runs", api(handleJobRunEvents(db, log)))
+	mux.HandleFunc("GET /api/target-runs", api(handleTargetRunEvents(db, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/files", api(handleReceiverFiles(receivers, log)))
 	mux.HandleFunc("POST /api/receivers/{id}/download/{key...}", apiDownload(handleMintDownloadTicket(receivers, downloadTickets, uiSessions)))
 	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", handleDownloadFile(receivers, log, db, downloadTickets, trustProxyHeaders))
@@ -1020,6 +1022,64 @@ func handleDownloadEvents(db *store.Store, log *slog.Logger) http.HandlerFunc {
 		serveEventLog(w, r, log, db, downloadEventsLimit, db.ListDownloadEvents,
 			func(ev store.DownloadEvent) downloadEventJSON { return downloadEventJSON(ev) },
 			"reading download events failed")
+	}
+}
+
+// jobRunEventJSON is store.JobRunEvent's wire shape for handleJobRunEvents,
+// matching the dashboard's own field naming (snake_case, as every other
+// /api/... endpoint here uses).
+type jobRunEventJSON struct {
+	JobName string    `json:"job_name"`
+	Start   time.Time `json:"start"`
+	End     time.Time `json:"end"`
+	Success bool      `json:"success"`
+	Size    int64     `json:"size"`
+	Error   string    `json:"error"`
+}
+
+// jobRunEventsLimit caps how many of the most recent job runs
+// handleJobRunEvents serves, for the dashboard's job run log view.
+const jobRunEventsLimit = 200
+
+// handleJobRunEvents serves GET /api/job-runs: the most recently recorded
+// job runs (see Runner.recordJobRun), newest first, across every job, as
+// JSON. db nil (state tracking unavailable) serves an empty list rather
+// than failing the request, matching handleLoginEvents's own tolerance for
+// a missing dependency.
+func handleJobRunEvents(db *store.Store, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		serveEventLog(w, r, log, db, jobRunEventsLimit, db.ListJobRunEvents,
+			func(ev store.JobRunEvent) jobRunEventJSON { return jobRunEventJSON(ev) },
+			"reading job run events failed")
+	}
+}
+
+// targetRunEventJSON is store.TargetRunEvent's wire shape for
+// handleTargetRunEvents, matching the dashboard's own field naming
+// (snake_case, as every other /api/... endpoint here uses).
+type targetRunEventJSON struct {
+	At      time.Time `json:"at"`
+	JobName string    `json:"job_name"`
+	Target  string    `json:"target"`
+	Success bool      `json:"success"`
+	State   string    `json:"state"`
+	Error   string    `json:"error"`
+}
+
+// targetRunEventsLimit caps how many of the most recent target runs
+// handleTargetRunEvents serves, for the dashboard's target run log view.
+const targetRunEventsLimit = 200
+
+// handleTargetRunEvents serves GET /api/target-runs: the most recently
+// recorded job target runs (see Runner.persistTargetRun), newest first,
+// across every job, as JSON. db nil (state tracking unavailable) serves an
+// empty list rather than failing the request, matching handleLoginEvents's
+// own tolerance for a missing dependency.
+func handleTargetRunEvents(db *store.Store, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		serveEventLog(w, r, log, db, targetRunEventsLimit, db.ListTargetRunEvents,
+			func(ev store.TargetRunEvent) targetRunEventJSON { return targetRunEventJSON(ev) },
+			"reading target run events failed")
 	}
 }
 
