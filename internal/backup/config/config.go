@@ -1,15 +1,10 @@
-// Package backup implements go-backup-tool's pipeline: run a shell command,
-// encrypt its stdout with gpg, stage the ciphertext to a local temp file,
-// then upload that file to one or more targets: an S3 (or S3-compatible)
-// bucket, a directory on the local filesystem, or another go-backup-tool
-// instance's receiver API. Each target uploads (and retries on failure)
-// independently from the staged file, so one target's trouble never
-// requires re-running the backup command or gpg, and never affects any
-// other target.
-package backup
+// Package config reads go-backup-tool's configuration: CLI flags (-config,
+// -job, -log-level) and the YAML config file they name, resolved into a
+// RunConfig — the jobs to run, the overall run timeout, and the optional web
+// UI/receiver API settings — ready for the rest of the program to consume.
+package config
 
 import (
-	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,8 +17,12 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
-	"nilswitt.dev/go-backup-tool/internal/backup/app/config"
+
+	appconfig "nilswitt.dev/go-backup-tool/internal/backup/app/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
+	"nilswitt.dev/go-backup-tool/internal/backup/permission"
+	"nilswitt.dev/go-backup-tool/internal/backup/report"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 type stringSlice []string
@@ -56,24 +55,13 @@ type Config struct {
 	// temp directory (os.CreateTemp's behavior when given "").
 	StagingDir string
 
-	// Retries is the total number of attempts allowed for each target's
-	// upload (1 means no retry) before that target is permanently abandoned:
-	// its first attempt happens in-run (see uploadStagedToTargets), and any
-	// further attempts happen roughly once a minute afterward, persisted as
-	// an outstanding upload and driven by monitorOutstandingUploads
-	// (uploadretry.go) rather than an immediate in-run retry loop. Retries
-	// are per target: one target exhausting its Retries doesn't affect any
-	// other target's attempts, and none of them re-run the backup command or
-	// gpg, since every attempt re-reads the same already-staged local file.
-	Retries int
-
-	// StateDB is the shared state/retention sqlite database (see
-	// schedule_state.go and retention.go), set on each run's own copy of its
-	// job's config by runner.runOnce so RecordLocalWrite/RemoveRetentionRecord
+	// StateDB is the shared state/retention sqlite database (see the store
+	// package and retention.go), set on each run's own copy of its job's
+	// config by runner.runOnce so RecordLocalWrite/RemoveRetentionRecord
 	// reach it without every function in the upload call chain needing its
 	// own db parameter. Nil disables retention tracking for this run (e.g.
 	// the db couldn't be opened at startup) — see RecordLocalWrite.
-	StateDB *sql.DB
+	StateDB *store.Store
 
 	// Identity is this instance's own persistent Identity (see
 	// loadServerIdentity), set on each run's own copy of its job's config by
@@ -100,48 +88,34 @@ type jobTargetRef struct {
 	retention time.Duration
 }
 
-// ServerKind distinguishes a servers: entry's destination type. The zero
-// value is serverKindS3, so existing config files (and target literals in
-// tests) that never set type: keep working unchanged.
+// ServerKind distinguishes a servers: entry's destination type. There is no
+// default: every servers: entry must set an explicit type:.
 type ServerKind string
 
 // The ServerKind values a servers: entry's type: can resolve to.
 const (
-	ServerKindS3     ServerKind = ""       // default; type: s3 also selects this
 	ServerKindLocal  ServerKind = "local"  // type: local
 	ServerKindRemote ServerKind = "remote" // type: remote
 )
 
-// parseServerKind validates a fileServer's Type field, defaulting an unset
-// or explicit "s3" value to serverKindS3.
+// parseServerKind validates a fileServer's Type field.
 func parseServerKind(t string) (ServerKind, error) {
 	switch strings.TrimSpace(t) {
-	case "", "s3":
-		return ServerKindS3, nil
 	case string(ServerKindLocal):
 		return ServerKindLocal, nil
 	case string(ServerKindRemote):
 		return ServerKindRemote, nil
+	case "":
+		return "", fmt.Errorf("type is required (want %q or %q)", ServerKindLocal, ServerKindRemote)
 	default:
-		return "", fmt.Errorf("unknown type %q (want \"s3\", %q, or %q)", t, ServerKindLocal, ServerKindRemote)
+		return "", fmt.Errorf("unknown type %q (want %q or %q)", t, ServerKindLocal, ServerKindRemote)
 	}
-}
-
-// serverKindLabel names kind for an error message, since serverKindS3's
-// zero value ("") is never what a config file author actually wrote.
-func serverKindLabel(kind ServerKind) string {
-	if kind == ServerKindS3 {
-		return "s3"
-	}
-
-	return string(kind)
 }
 
 // Target is one upload destination for a job, fully resolved from a
 // jobTargetRef against its named server. A job uploads the same encrypted
 // object to every one of its targets. Its kind determines which of the
-// fields below apply: s3 (the default) uses bucket/region/endpoint/
-// pathStyle/credentials; local uses only bucket (as a subdirectory of
+// fields below apply: local uses only bucket (as a subdirectory of
 // localPath) and localPath itself; remote uses bucket (as the id sent to
 // the destination instance) and endpoint. A remote Target authenticates
 // with the run's own cfg.identity (see uploadToRemote/deleteRemoteObject in
@@ -150,23 +124,11 @@ type Target struct {
 	ServerName string // the servers: entry this came from, for diagnostics
 	Kind       ServerKind
 	Bucket     string
-	Region     string
 	Endpoint   string
-	PathStyle  bool
-
-	// accessKeyEnv/secretKeyEnv are the server's configured env var names
-	// (set at config-build time); accessKey/secretKey are their resolved
-	// values, filled in later by resolveTargetCredentials. Both empty means
-	// no static credentials: newS3Client falls back to the AWS SDK's
-	// default credential chain. Unused for a local target.
-	accessKeyEnv string
-	secretKeyEnv string
-	AccessKey    string
-	SecretKey    string
 
 	// LocalPath is the local server's root directory (only set when
 	// kind == serverKindLocal). The object is written to
-	// LocalPath/bucket/key, mirroring the S3 bucket/key layout.
+	// LocalPath/bucket/key.
 	LocalPath string
 
 	// Retention is how long a local target's written objects are kept
@@ -187,7 +149,7 @@ type RunConfig struct {
 	Listen     string // empty disables the web UI; see resolveWebUIListen
 	ConfigPath string // where the config file was loaded from; state db lives alongside it
 	LogLevel   slog.Level
-	Receivers  map[string]ResolvedReceiver // this instance's receiver API entries, keyed by id; see receiver.go
+	Receivers  map[string]ResolvedReceiver // this instance's receiver API entries, keyed by id; see receivers.go
 
 	// KeysDir is where this instance's persistent identity (its RSA key pair
 	// and UUID — see loadServerIdentity) is stored. Defaults to
@@ -233,7 +195,7 @@ type RunConfig struct {
 	// errors, and any receiver currently stale) — see report.go. Independent
 	// of the web UI: a daily report is useful for anyone monitoring
 	// receivers by inbox, not just those watching the dashboard.
-	Report ReportSettings
+	Report report.Settings
 }
 
 // OIDCSettings is runConfig's resolved form of the config file's
@@ -251,11 +213,11 @@ type OIDCSettings struct {
 	// (see handleOIDCCallback in oidc.go) — OIDC has no per-account
 	// permissions of its own the way a web UI "Users" admin-managed account
 	// does (see WebUIUser in webusers.go), so every account the provider
-	// lets in gets the same fixed set. Defaults to PermissionView|
-	// PermissionDownload (see resolveOIDCSettings) when
+	// lets in gets the same fixed set. Defaults to permission.PermissionView|
+	// permission.PermissionDownload (see resolveOIDCSettings) when
 	// webui.oidc.default-permissions: is unset, preserving the full access
 	// every SSO login had before per-user permissions existed.
-	DefaultPermissions Permission
+	DefaultPermissions permission.Permission
 }
 
 // fileJob mirrors config's per-job fields for YAML unmarshaling, used both
@@ -265,10 +227,10 @@ type OIDCSettings struct {
 //
 // A job names its upload destination(s) via targets:, each entry a
 // {server, bucket} pair referencing a servers: entry defined at the top
-// level (see fileServer) — server connection details (region, endpoint,
-// path-style, credentials) live there, not on the job. A targets: entry may
-// also set its own retention: (local servers only), overriding the
-// server's for that job's writes to that target — see fileJobTarget.
+// level (see fileServer) — server connection details (endpoint) live there,
+// not on the job. A targets: entry may also set its own retention: (local
+// servers only), overriding the server's for that job's writes to that
+// target — see fileJobTarget.
 type fileJob struct {
 	Name       string          `yaml:"name"`
 	Cmd        string          `yaml:"cmd"`
@@ -282,7 +244,6 @@ type fileJob struct {
 	Interval   string          `yaml:"interval"`
 	StartTime  string          `yaml:"start-time"`
 	StagingDir string          `yaml:"staging-dir"`
-	Retries    int             `yaml:"retries"`
 }
 
 // fileJobTarget mirrors jobTargetRef for YAML unmarshaling. Retention (local
@@ -299,17 +260,10 @@ type fileJobTarget struct {
 
 // fileServer is one top-level servers: entry, defined once and referenced by
 // name from any job's targets: list. type: selects the destination kind:
-// "s3" (the default) for an S3 (or S3-compatible) endpoint, using
-// region/endpoint/path-style/access-key-env/secret-key-env; "local" for a
-// directory on the local filesystem, using only path; or "remote" for
-// another go-backup-tool instance's receiver API, using only endpoint —
-// auth is this instance's own identity (see loadServerIdentity), not a
-// config field.
-// AccessKeyEnv/SecretKeyEnv name environment variables to read static S3
-// credentials from (both required together, or neither); like
-// GPG_PASSPHRASE, they are never read directly out of the config file
-// itself. When neither is set, an s3 server falls back to the AWS SDK's
-// default credential chain (env vars, shared config, IAM role, ...).
+// "local" for a directory on the local filesystem, using only path; or
+// "remote" for another go-backup-tool instance's receiver API, using only
+// endpoint — auth is this instance's own identity (see loadServerIdentity),
+// not a config field. type: is required; there is no default.
 // Retention (local only) is a duration string (e.g. "7d" or "168h" for 7
 // days, "30m" for 30 minutes) — like time.ParseDuration but with "d" also
 // accepted for days (parsed by parseDayDuration, since the standard library
@@ -324,15 +278,11 @@ type fileJobTarget struct {
 // the destination instance verifies against the public key configured on
 // its matching receivers: entry's public-key: (see fileReceiver).
 type fileServer struct {
-	Name         string `yaml:"name"`
-	Type         string `yaml:"type"`
-	Region       string `yaml:"region"`
-	Endpoint     string `yaml:"endpoint"`
-	PathStyle    bool   `yaml:"path-style"`
-	AccessKeyEnv string `yaml:"access-key-env"`
-	SecretKeyEnv string `yaml:"secret-key-env"`
-	Path         string `yaml:"path"`      // local only: root directory backups are written under
-	Retention    string `yaml:"retention"` // local only: e.g. "7d" or "168h"; unset/"0" keeps objects forever
+	Name      string `yaml:"name"`
+	Type      string `yaml:"type"`
+	Endpoint  string `yaml:"endpoint"`
+	Path      string `yaml:"path"`      // local only: root directory backups are written under
+	Retention string `yaml:"retention"` // local only: e.g. "7d" or "168h"; unset/"0" keeps objects forever
 }
 
 // fileConfig is the top-level shape of the YAML config file. Its embedded
@@ -341,14 +291,14 @@ type fileServer struct {
 type fileConfig struct {
 	fileJob `yaml:",inline"`
 
-	Timeout   string         `yaml:"timeout"`
-	LogLevel  string         `yaml:"log-level"` // debug, info, warn, or error; overridden by -log-level when that flag is explicitly given
-	KeysDir   string         `yaml:"keys-dir"`  // where this instance's persistent identity (RSA key pair + UUID) is stored; defaults to defaultServerKeyDir
-	Servers   []fileServer   `yaml:"servers"`
-	Jobs      []fileJob      `yaml:"jobs"`
-	Receivers []FileReceiver `yaml:"receivers"`
-	WebUI     fileWebUI      `yaml:"webui"`
-	Report    fileReport     `yaml:"report"`
+	Timeout   string            `yaml:"timeout"`
+	LogLevel  string            `yaml:"log-level"` // debug, info, warn, or error; overridden by -log-level when that flag is explicitly given
+	KeysDir   string            `yaml:"keys-dir"`  // where this instance's persistent identity (RSA key pair + UUID) is stored; defaults to defaultServerKeyDir
+	Servers   []fileServer      `yaml:"servers"`
+	Jobs      []fileJob         `yaml:"jobs"`
+	Receivers []FileReceiver    `yaml:"receivers"`
+	WebUI     fileWebUI         `yaml:"webui"`
+	Report    report.FileReport `yaml:"report"`
 }
 
 // fileWebUI is the top-level webui: entry, grouping every setting that
@@ -416,9 +366,9 @@ type fileWebUIOIDC struct {
 	Issuer string `yaml:"issuer"`
 
 	// ClientID/ClientSecret identify this application to the provider, as
-	// issued when registering it there. Unlike servers.access-key-env,
-	// ClientSecret is written directly in this file rather than read from
-	// the environment, so protect this file's permissions accordingly.
+	// issued when registering it there. ClientSecret is written directly in
+	// this file rather than read from the environment, so protect this
+	// file's permissions accordingly.
 	ClientID     string `yaml:"client-id"`
 	ClientSecret string `yaml:"client-secret"`
 
@@ -470,7 +420,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		logLevel   string
 	)
 
-	fs.StringVar(&configPath, "config", config.DefaultConfigPath, "path to the YAML config file")
+	fs.StringVar(&configPath, "config", appconfig.DefaultConfigPath, "path to the YAML config file")
 	fs.StringVar(&jobFilter, "job", "", "run only the named job from the config file's jobs: list")
 	fs.StringVar(&logLevel, "log-level", "info", "log verbosity: debug, info, warn, or error (overrides the config file's log-level:)")
 
@@ -524,7 +474,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		keysDir = identity.DefaultServerKeyDir
 	}
 
-	report, err := resolveReportSettings(fileCfg.Report)
+	report, err := report.ResolveSettings(fileCfg.Report)
 	if err != nil {
 		return nil, err
 	}
@@ -603,10 +553,10 @@ func resolveOIDCSettings(cfg fileWebUIOIDC, listen string) (OIDCSettings, error)
 		scopes = []string{"profile", "email"}
 	}
 
-	defaultPerm := PermissionView | PermissionDownload
+	defaultPerm := permission.PermissionView | permission.PermissionDownload
 
 	if len(cfg.DefaultPermissions) > 0 {
-		parsed, err := ParsePermissions(cfg.DefaultPermissions)
+		parsed, err := permission.ParsePermissions(cfg.DefaultPermissions)
 		if err != nil {
 			return OIDCSettings{}, fmt.Errorf("webui.oidc.default-permissions: %w", err)
 		}
@@ -761,12 +711,8 @@ func buildJobsFromFile(fileCfg *fileConfig) ([]*Config, error) {
 }
 
 // buildServers resolves fileServers into a name -> resolvedServer map,
-// validating that every entry has a non-empty, unique name and that
-// access-key-env/secret-key-env are set together or not at all. It does
-// not read the named environment variables yet: that's deferred to
-// resolveTargetCredentials, called only for jobs that survive -job
-// filtering, so an unrelated/unused server's credentials don't need to be
-// present in the environment for a run that never touches it.
+// validating that every entry has a non-empty, unique name and an explicit,
+// valid type:.
 func buildServers(fileServers []fileServer) (map[string]resolvedServer, error) {
 	servers := make(map[string]resolvedServer, len(fileServers))
 
@@ -785,63 +731,34 @@ func buildServers(fileServers []fileServer) (map[string]resolvedServer, error) {
 			return nil, fmt.Errorf("server %q: %w", name, err)
 		}
 
-		if kind == ServerKindLocal {
-			server, err := buildLocalServer(name, &fs)
-			if err != nil {
-				return nil, err
-			}
+		var server resolvedServer
 
-			servers[name] = server
-
-			continue
+		switch kind {
+		case ServerKindLocal:
+			server, err = buildLocalServer(name, &fs)
+		case ServerKindRemote:
+			server, err = buildRemoteServer(name, &fs)
 		}
 
-		if kind == ServerKindRemote {
-			server, err := buildRemoteServer(name, &fs)
-			if err != nil {
-				return nil, err
-			}
-
-			servers[name] = server
-
-			continue
+		if err != nil {
+			return nil, err
 		}
 
-		if fs.Retention != "" {
-			return nil, fmt.Errorf("server %q: retention is not valid for type: s3 (local only)", name)
-		}
-
-		if err := pairedFieldsErr("access-key-env", fs.AccessKeyEnv, "secret-key-env", fs.SecretKeyEnv); err != nil {
-			return nil, fmt.Errorf("server %q: %w", name, err)
-		}
-
-		region := fs.Region
-		if region == "" {
-			region = config.DefaultRegion
-		}
-
-		servers[name] = resolvedServer{
-			name:         name,
-			region:       region,
-			endpoint:     fs.Endpoint,
-			pathStyle:    fs.PathStyle,
-			accessKeyEnv: fs.AccessKeyEnv,
-			secretKeyEnv: fs.SecretKeyEnv,
-		}
+		servers[name] = server
 	}
 
 	return servers, nil
 }
 
 // buildLocalServer validates and builds a resolvedServer for a type: local
-// servers: entry, which uses only path and none of the S3-specific fields.
+// servers: entry, which uses only path and retention.
 func buildLocalServer(name string, fs *fileServer) (resolvedServer, error) {
 	if strings.TrimSpace(fs.Path) == "" {
 		return resolvedServer{}, fmt.Errorf("server %q: path is required for type: local", name)
 	}
 
-	if fs.Endpoint != "" || fs.PathStyle || fs.AccessKeyEnv != "" || fs.SecretKeyEnv != "" {
-		return resolvedServer{}, fmt.Errorf("server %q: endpoint/path-style/access-key-env/secret-key-env are not valid for type: local", name)
+	if fs.Endpoint != "" {
+		return resolvedServer{}, fmt.Errorf("server %q: endpoint is not valid for type: local", name)
 	}
 
 	retention, err := parseRetention(fs.Retention)
@@ -853,16 +770,15 @@ func buildLocalServer(name string, fs *fileServer) (resolvedServer, error) {
 }
 
 // buildRemoteServer validates and builds a resolvedServer for a type: remote
-// servers: entry, which uses only endpoint and none of the S3/local-specific
-// fields — auth is this instance's own identity (see loadServerIdentity),
-// not a config field.
+// servers: entry, which uses only endpoint — auth is this instance's own
+// identity (see loadServerIdentity), not a config field.
 func buildRemoteServer(name string, fs *fileServer) (resolvedServer, error) {
 	if strings.TrimSpace(fs.Endpoint) == "" {
 		return resolvedServer{}, fmt.Errorf("server %q: endpoint is required for type: remote", name)
 	}
 
-	if fs.Region != "" || fs.PathStyle || fs.AccessKeyEnv != "" || fs.SecretKeyEnv != "" || fs.Path != "" || fs.Retention != "" {
-		return resolvedServer{}, fmt.Errorf("server %q: region/path-style/access-key-env/secret-key-env/path/retention are not valid for type: remote", name)
+	if fs.Path != "" || fs.Retention != "" {
+		return resolvedServer{}, fmt.Errorf("server %q: path/retention are not valid for type: remote", name)
 	}
 
 	return resolvedServer{name: name, kind: ServerKindRemote, endpoint: fs.Endpoint}, nil
@@ -905,19 +821,6 @@ func parseOptionalDayDuration(field, s string, allowZero bool) (time.Duration, e
 	}
 
 	return d, nil
-}
-
-// pairedFieldsErr returns an error if exactly one of a/b is set — the "must
-// be configured together" validation used for access-key-env/secret-key-env
-// (buildRemoteServer). Returns nil if the pair is consistent (both set or
-// both empty), leaving any outer wrapping (e.g. a server-name prefix) to the
-// caller.
-func pairedFieldsErr(aName, a, bName, b string) error {
-	if (a == "") != (b == "") {
-		return fmt.Errorf("%s and %s must be set together", aName, bName)
-	}
-
-	return nil
 }
 
 // dayUnitRE matches a leading "<number>d" component (e.g. "7d" or "1.5d") of
@@ -979,20 +882,14 @@ func parseDayDuration(s string) (time.Duration, error) {
 	return total, nil
 }
 
-// resolvedServer is one servers: entry after defaulting its region, ready
-// to be combined with a job's targetRef bucket into a target. Its
-// credentials, if any, are still just environment variable names at this
-// point; resolveTargetCredentials reads their values later.
+// resolvedServer is one servers: entry, ready to be combined with a job's
+// targetRef bucket into a target.
 type resolvedServer struct {
-	name         string
-	kind         ServerKind
-	region       string
-	endpoint     string
-	pathStyle    bool
-	accessKeyEnv string
-	secretKeyEnv string
-	path         string        // local only: root directory backups are written under
-	retention    time.Duration // local only: 0 means no automatic expiry
+	name      string
+	kind      ServerKind
+	endpoint  string
+	path      string        // local only: root directory backups are written under
+	retention time.Duration // local only: 0 means no automatic expiry
 }
 
 // resolveJobTargets resolves cfg's raw target references (targetRefs, from
@@ -1024,54 +921,19 @@ func resolveJobTargets(cfg *Config, servers map[string]resolvedServer) error {
 
 		if ref.retention > 0 {
 			if server.kind != ServerKindLocal {
-				return fmt.Errorf("targets[%d]: retention is not valid for server %q (type %s; local only)", i, ref.server, serverKindLabel(server.kind))
+				return fmt.Errorf("targets[%d]: retention is not valid for server %q (type %s; local only)", i, ref.server, server.kind)
 			}
 
 			retention = ref.retention
 		}
 
 		cfg.Targets[i] = Target{
-			ServerName:   server.name,
-			Kind:         server.kind,
-			Bucket:       ref.bucket,
-			Region:       server.region,
-			Endpoint:     server.endpoint,
-			PathStyle:    server.pathStyle,
-			accessKeyEnv: server.accessKeyEnv,
-			secretKeyEnv: server.secretKeyEnv,
-			LocalPath:    server.path,
-			Retention:    retention,
-		}
-	}
-
-	return nil
-}
-
-// resolveTargetCredentials reads each job's targets' static credentials
-// from the environment (the access-key-env/secret-key-env named by the
-// target's server), for every job in jobs — call this only after -job
-// filtering has narrowed jobs down to what will actually run. A target
-// whose server configured no credentials is left with none, and
-// newS3Client falls back to the AWS SDK's default credential chain for it.
-func resolveTargetCredentials(jobs []*Config) error {
-	for _, j := range jobs {
-		for i := range j.Targets {
-			t := &j.Targets[i]
-			if t.accessKeyEnv == "" {
-				continue
-			}
-
-			accessKey := os.Getenv(t.accessKeyEnv)
-			if accessKey == "" {
-				return fmt.Errorf("server %q: environment variable %q (access-key-env) is not set", t.ServerName, t.accessKeyEnv)
-			}
-
-			secretKey := os.Getenv(t.secretKeyEnv)
-			if secretKey == "" {
-				return fmt.Errorf("server %q: environment variable %q (secret-key-env) is not set", t.ServerName, t.secretKeyEnv)
-			}
-
-			t.AccessKey, t.SecretKey = accessKey, secretKey
+			ServerName: server.name,
+			Kind:       server.kind,
+			Bucket:     ref.bucket,
+			Endpoint:   server.endpoint,
+			LocalPath:  server.path,
+			Retention:  retention,
 		}
 	}
 
@@ -1082,14 +944,13 @@ func resolveTargetCredentials(jobs []*Config) error {
 // every job before its config file fields are layered on top.
 func newConfigDefaults() *Config {
 	return &Config{
-		Key:     config.DefaultKeyPattern,
-		GPGBin:  config.DefaultGPGBin,
-		Retries: config.DefaultRetries,
+		Key:    appconfig.DefaultKeyPattern,
+		GPGBin: appconfig.DefaultGPGBin,
 	}
 }
 
 // prepareJobs narrows jobs to the one named by jobFilter (if any), validates
-// them, and resolves their passphrases and target credentials.
+// them, and resolves their passphrases.
 func prepareJobs(jobs []*Config, jobFilter string) ([]*Config, error) {
 	jobs, err := applyJobFilter(jobs, jobFilter)
 	if err != nil {
@@ -1101,10 +962,6 @@ func prepareJobs(jobs []*Config, jobFilter string) ([]*Config, error) {
 	}
 
 	if err := resolvePassphrases(jobs); err != nil {
-		return nil, err
-	}
-
-	if err := resolveTargetCredentials(jobs); err != nil {
 		return nil, err
 	}
 
@@ -1251,14 +1108,6 @@ func applyFileJob(cfg *Config, fj *fileJob) error {
 
 	applyBool(&cfg.Symmetric, fj.Symmetric)
 	applyBool(&cfg.Armor, fj.Armor)
-
-	// fj.Retries == 0 is indistinguishable from "not set in this fj" (YAML's
-	// zero value for an omitted int), same ambiguity applyBool documents for
-	// bool fields; retries: 0 wouldn't be a meaningful setting anyway (there
-	// would be no attempts at all), so treating it as unset costs nothing.
-	if fj.Retries > 0 {
-		cfg.Retries = fj.Retries
-	}
 
 	if len(fj.Targets) > 0 {
 		cfg.targetRefs = make([]jobTargetRef, len(fj.Targets))

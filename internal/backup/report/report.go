@@ -1,4 +1,7 @@
-package backup
+// Package report resolves and validates the config file's report: entry,
+// the optional daily/periodic email summary of backup activity sent via
+// SMTP.
+package report
 
 import (
 	"errors"
@@ -9,7 +12,7 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
-// fileReport is the top-level report: entry, configuring an optional
+// FileReport is the top-level report: entry, configuring an optional
 // email: an overview of how many files each configured receiver received,
 // any receiver API errors, and any receiver currently stale, sent to an
 // operator's inbox via SMTP on a cron schedule. It's independent of the web UI
@@ -17,7 +20,7 @@ import (
 // not just those watching the dashboard — but reads the same
 // receiver_events history (schedule_state.go) and on-disk receiver state
 // (receiver.go) the dashboard itself uses. Unset (the default) disables it.
-type fileReport struct {
+type FileReport struct {
 	Enabled bool     `yaml:"enabled"`
 	To      []string `yaml:"to"`
 	// From is the envelope/header sender address. Unset falls back to
@@ -78,10 +81,10 @@ type SMTPSettings struct {
 	Security SMTPSecurity
 }
 
-// ReportSettings is fileReport after validation, ready for
+// Settings is fileReport after validation, ready for
 // pipeline.RunReportLoop to act on. Its zero value (Enabled false) means the
 // report is disabled.
-type ReportSettings struct {
+type Settings struct {
 	Enabled bool
 	To      []string
 	From    string
@@ -97,17 +100,17 @@ type ReportSettings struct {
 // once a day at 07:00.
 const defaultReportSchedule = "0 7 * * *"
 
-// resolveReportSettings validates cfg (the config file's report: entry) and
-// resolves it into a ReportSettings, reading report.smtp.password-env from
+// ResolveSettings validates cfg (the config file's report: entry) and
+// resolves it into a Settings, reading report.smtp.password-env from
 // the environment if authentication is configured. An unset/false
 // cfg.Enabled returns the zero value, leaving the daily report disabled.
-func resolveReportSettings(cfg fileReport) (ReportSettings, error) {
+func ResolveSettings(cfg FileReport) (Settings, error) {
 	if !cfg.Enabled {
-		return ReportSettings{}, nil
+		return Settings{}, nil
 	}
 
 	if len(cfg.To) == 0 {
-		return ReportSettings{}, errors.New("report.enabled is true but report.to is not set")
+		return Settings{}, errors.New("report.enabled is true but report.to is not set")
 	}
 
 	to := make([]string, len(cfg.To))
@@ -115,7 +118,7 @@ func resolveReportSettings(cfg fileReport) (ReportSettings, error) {
 	for i, addr := range cfg.To {
 		addr = strings.TrimSpace(addr)
 		if addr == "" {
-			return ReportSettings{}, fmt.Errorf("report.to[%d] is empty", i)
+			return Settings{}, fmt.Errorf("report.to[%d] is empty", i)
 		}
 
 		to[i] = addr
@@ -128,12 +131,12 @@ func resolveReportSettings(cfg fileReport) (ReportSettings, error) {
 
 	sched, err := cron.ParseStandard(schedule)
 	if err != nil {
-		return ReportSettings{}, fmt.Errorf("parsing report.schedule %q: %w (want a standard 5-field cron expression, e.g. \"0 7 * * *\")", schedule, err)
+		return Settings{}, fmt.Errorf("parsing report.schedule %q: %w (want a standard 5-field cron expression, e.g. \"0 7 * * *\")", schedule, err)
 	}
 
 	smtpCfg, err := resolveSMTPSettings(&cfg.SMTP)
 	if err != nil {
-		return ReportSettings{}, err
+		return Settings{}, err
 	}
 
 	from := strings.TrimSpace(cfg.From)
@@ -142,10 +145,10 @@ func resolveReportSettings(cfg fileReport) (ReportSettings, error) {
 	}
 
 	if from == "" {
-		return ReportSettings{}, errors.New("report.enabled is true but neither report.from nor report.smtp.username is set")
+		return Settings{}, errors.New("report.enabled is true but neither report.from nor report.smtp.username is set")
 	}
 
-	return ReportSettings{
+	return Settings{
 		Enabled:  true,
 		To:       to,
 		From:     from,

@@ -4,7 +4,7 @@ import (
 	"io"
 	"testing"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
 )
 
 // TestNewRunLoggerLogViewerGate covers newRunLogger's *backup.LogRingBuffer
@@ -31,7 +31,7 @@ func TestNewRunLoggerLogViewerGate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			rc := &backup.RunConfig{Listen: tt.listen, LogViewer: tt.logViewer}
+			rc := &config.RunConfig{Listen: tt.listen, LogViewer: tt.logViewer}
 
 			_, logs := newRunLogger(io.Discard, rc)
 			if got := logs != nil; got != tt.wantLogs {

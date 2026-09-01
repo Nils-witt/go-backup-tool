@@ -3,7 +3,7 @@
 package identity
 
 // Server identity file names and key parameters, all rooted under a
-// configurable keys directory (see backup.RunConfig.KeysDir, defaulting to
+// configurable keys directory (see config.RunConfig.KeysDir, defaulting to
 // DefaultServerKeyDir).
 const (
 	DefaultServerKeyDir = "data/keys"

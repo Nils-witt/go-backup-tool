@@ -1,14 +1,15 @@
 package receiver
 
 import (
-	"database/sql"
 	"log/slog"
 	"net/http"
 	"os"
 	"strings"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/remoteAuth"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 // RegisterRoutes mounts the receiver API's PUT/DELETE object endpoints on
@@ -17,7 +18,7 @@ import (
 // parameter). status is the live receiver status store, shared with
 // whatever also displays it (e.g. the dashboard's /api/receivers), so a
 // write here is reflected there immediately.
-func RegisterRoutes(mux *http.ServeMux, receivers map[string]backup.ResolvedReceiver, status *backup.ReceiverStatusStore, log *slog.Logger, db *sql.DB) {
+func RegisterRoutes(mux *http.ServeMux, receivers map[string]config.ResolvedReceiver, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) {
 	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(receivers, status, log, db))
 	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", HandleDeleteObject(receivers, status, log, db))
 }
@@ -29,7 +30,7 @@ func RegisterRoutes(mux *http.ServeMux, receivers map[string]backup.ResolvedRece
 // own local-target writes share the same on-disk behavior (atomic
 // temp-file-then-rename) and retention tracking. Every attempt is recorded
 // to status, win or lose, so /api/receivers reflects it.
-func HandleReceiveObject(receivers map[string]backup.ResolvedReceiver, status *backup.ReceiverStatusStore, log *slog.Logger, db *sql.DB) http.HandlerFunc {
+func HandleReceiveObject(receivers map[string]config.ResolvedReceiver, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, cfg, t, key, ok := resolveReceiverRequest(w, r, receivers, db)
 		if !ok {
@@ -39,7 +40,7 @@ func HandleReceiveObject(receivers map[string]backup.ResolvedReceiver, status *b
 		if err := backup.WriteLocalObject(cfg, t, r.Body); err != nil {
 			log.Warn("receiver: writing object failed", "id", recv.ID, "key", key, "err", err)
 			status.Record(recv.ID, key, err)
-			recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, backup.ReceiverEventReceive, key, 0, err)
+			recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, store.ReceiverEventReceive, key, 0, err)
 			http.Error(w, "writing object failed", http.StatusInternalServerError)
 
 			return
@@ -56,7 +57,7 @@ func HandleReceiveObject(receivers map[string]backup.ResolvedReceiver, status *b
 			size = info.Size()
 		}
 
-		recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, backup.ReceiverEventReceive, key, size, nil)
+		recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, store.ReceiverEventReceive, key, size, nil)
 
 		log.Info("receiver: object written", "id", recv.ID, "key", key, "path", backup.LocalObjectPath(cfg, t))
 		w.WriteHeader(http.StatusCreated)
@@ -67,7 +68,7 @@ func HandleReceiveObject(receivers map[string]backup.ResolvedReceiver, status *b
 // receiver API's client-facing counterpart to pipeline's deleteRemoteObject.
 // Every attempt is recorded to status, win or lose, so /api/receivers
 // reflects it.
-func HandleDeleteObject(receivers map[string]backup.ResolvedReceiver, status *backup.ReceiverStatusStore, log *slog.Logger, db *sql.DB) http.HandlerFunc {
+func HandleDeleteObject(receivers map[string]config.ResolvedReceiver, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, cfg, t, key, ok := resolveReceiverRequest(w, r, receivers, db)
 		if !ok {
@@ -77,7 +78,7 @@ func HandleDeleteObject(receivers map[string]backup.ResolvedReceiver, status *ba
 		if err := backup.DeleteLocalObject(cfg, t); err != nil {
 			log.Warn("receiver: deleting object failed", "id", recv.ID, "key", key, "err", err)
 			status.Record(recv.ID, key, err)
-			recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, backup.ReceiverEventDelete, key, 0, err)
+			recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, store.ReceiverEventDelete, key, 0, err)
 			http.Error(w, "deleting object failed", http.StatusInternalServerError)
 
 			return
@@ -88,7 +89,7 @@ func HandleDeleteObject(receivers map[string]backup.ResolvedReceiver, status *ba
 		}
 
 		status.Record(recv.ID, key, nil)
-		recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, backup.ReceiverEventDelete, key, 0, nil)
+		recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, store.ReceiverEventDelete, key, 0, nil)
 		log.Info("receiver: object deleted", "id", recv.ID, "key", key, "path", backup.LocalObjectPath(cfg, t))
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -100,17 +101,17 @@ func HandleDeleteObject(receivers map[string]backup.ResolvedReceiver, status *ba
 // backup.VerifyRemoteAuthToken/backup.SignRemoteAuthToken), writing an
 // error response and returning ok=false if either the id is unknown or the
 // token doesn't verify.
-func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers map[string]backup.ResolvedReceiver) (recv backup.ResolvedReceiver, ok bool) {
+func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers map[string]config.ResolvedReceiver) (recv config.ResolvedReceiver, ok bool) {
 	recv, exists := receivers[r.PathValue("id")]
 	if !exists {
 		http.Error(w, "unknown receiver id", http.StatusNotFound)
-		return backup.ResolvedReceiver{}, false
+		return config.ResolvedReceiver{}, false
 	}
 
 	token, hasToken := bearerToken(r)
 	if !hasToken || remoteAuth.VerifyRemoteAuthToken(token, recv.PublicKey, recv.ID) != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return backup.ResolvedReceiver{}, false
+		return config.ResolvedReceiver{}, false
 	}
 
 	return recv, true
@@ -124,19 +125,19 @@ func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers map[str
 // WriteLocalObject/DeleteLocalObject as a type: local target would (see
 // backup.ReceiverTarget). Shared by both handlers, which otherwise duplicate
 // this exact preamble.
-func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers map[string]backup.ResolvedReceiver, db *sql.DB) (recv backup.ResolvedReceiver, cfg *backup.Config, t *backup.Target, key string, ok bool) {
+func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers map[string]config.ResolvedReceiver, db *store.Store) (recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, key string, ok bool) {
 	recv, ok = authorizeReceiver(w, r, receivers)
 	if !ok {
-		return backup.ResolvedReceiver{}, nil, nil, "", false
+		return config.ResolvedReceiver{}, nil, nil, "", false
 	}
 
 	key, err := backup.SanitizeObjectKey(r.PathValue("key"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
-		return backup.ResolvedReceiver{}, nil, nil, "", false
+		return config.ResolvedReceiver{}, nil, nil, "", false
 	}
 
-	return recv, &backup.Config{Key: key, StateDB: db}, backup.ReceiverTarget(recv), key, true
+	return recv, &config.Config{Key: key, StateDB: db}, backup.ReceiverTarget(recv), key, true
 }
 
 // bearerToken extracts the token from an "Authorization: Bearer <token>"

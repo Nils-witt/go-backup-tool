@@ -6,13 +6,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
 )
 
 // LocalObjectPath returns the filesystem path a local target (t.Kind ==
 // ServerKindLocal) writes cfg.Key to: t.LocalPath, with t.Bucket as a
-// subdirectory, mirroring the bucket/key layout used for S3 targets so both
-// kinds share the same targets: schema.
-func LocalObjectPath(cfg *Config, t *Target) string {
+// subdirectory, so a local target shares the same targets: schema
+// (server/bucket) as a remote one.
+func LocalObjectPath(cfg *config.Config, t *config.Target) string {
 	return filepath.Join(t.LocalPath, t.Bucket, cfg.Key)
 }
 
@@ -23,7 +25,7 @@ func LocalObjectPath(cfg *Config, t *Target) string {
 // renames it into place once fully written, so a reader never observes a
 // partially written object and a mid-stream failure leaves nothing at the
 // final path.
-func WriteLocalObject(cfg *Config, t *Target, r io.Reader) error {
+func WriteLocalObject(cfg *config.Config, t *config.Target, r io.Reader) error {
 	dst := LocalObjectPath(cfg, t)
 	dir := filepath.Dir(dst)
 
@@ -65,7 +67,7 @@ func WriteLocalObject(cfg *Config, t *Target, r io.Reader) error {
 // DeleteLocalObject removes the file at LocalObjectPath(cfg, t), used by the
 // receiver API's DELETE endpoint (see handleDeleteObject in webui.go). A
 // file that's already gone is not an error.
-func DeleteLocalObject(cfg *Config, t *Target) error {
+func DeleteLocalObject(cfg *config.Config, t *config.Target) error {
 	err := os.Remove(LocalObjectPath(cfg, t))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err

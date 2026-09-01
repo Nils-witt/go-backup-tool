@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -19,7 +18,9 @@ import (
 
 	josejwk "github.com/go-jose/go-jose/v4"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/permission"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 // fakeOIDCProvider is a minimal OpenID Connect provider backed by an
@@ -166,7 +167,7 @@ func TestOIDCLoginAndCallback(t *testing.T) {
 	provider := newFakeOIDCProvider(t, clientID)
 	provider.email.Store("person@example.com")
 
-	auth, err := newOIDCAuth(t.Context(), backup.OIDCSettings{
+	auth, err := newOIDCAuth(t.Context(), config.OIDCSettings{
 		Enabled:      true,
 		Issuer:       provider.issuer(),
 		ClientID:     clientID,
@@ -231,7 +232,7 @@ func TestOIDCLoginAndCallback(t *testing.T) {
 		t.Errorf("callback body doesn't send the browser on to /dashboard: %s", body)
 	}
 
-	assertSoleLoginEvent(t, db, backup.LoginEvent{Username: "person@example.com", Method: "oidc", Success: true})
+	assertSoleLoginEvent(t, db, store.LoginEvent{Username: "person@example.com", Method: "oidc", Success: true})
 
 	token := extractOIDCCompleteToken(t, body)
 	if !sessions.valid(token) {
@@ -240,7 +241,7 @@ func TestOIDCLoginAndCallback(t *testing.T) {
 }
 
 // TestOIDCCallbackUsesStoredPermissionOverride checks that a permission
-// override stored for an identity (see backup.SetOIDCUserPermissions/
+// override stored for an identity (see store.SaveOIDCUserPermissions/
 // oidcusers.go — set through the "Users" admin section's OIDC listing, see
 // handleSetOIDCUserPermissions in webui.go) takes precedence over
 // auth.defaultPerm at that identity's next SSO login (see
@@ -254,21 +255,21 @@ func TestOIDCCallbackUsesStoredPermissionOverride(t *testing.T) {
 	provider := newFakeOIDCProvider(t, clientID)
 	provider.email.Store("override@example.com")
 
-	auth, err := newOIDCAuth(t.Context(), backup.OIDCSettings{
+	auth, err := newOIDCAuth(t.Context(), config.OIDCSettings{
 		Enabled:            true,
 		Issuer:             provider.issuer(),
 		ClientID:           clientID,
 		ClientSecret:       "test-secret",
 		RedirectURL:        "https://backups.example.com/login/oidc/callback",
 		Scopes:             []string{"profile", "email"},
-		DefaultPermissions: backup.PermissionView | backup.PermissionDownload,
+		DefaultPermissions: permission.PermissionView | permission.PermissionDownload,
 	})
 	if err != nil {
 		t.Fatalf("newOIDCAuth() unexpected error: %v", err)
 	}
 
 	db := openTestStateDB(t)
-	if err := backup.SetOIDCUserPermissions(t.Context(), db, "override@example.com", backup.PermissionView); err != nil {
+	if err := db.SaveOIDCUserPermissions(t.Context(), "override@example.com", permission.PermissionView); err != nil {
 		t.Fatalf("SetOIDCUserPermissions() unexpected error: %v", err)
 	}
 
@@ -300,8 +301,8 @@ func TestOIDCCallbackUsesStoredPermissionOverride(t *testing.T) {
 	token := extractOIDCCompleteToken(t, callbackRec.Body.String())
 
 	perm := sessions.permissionsFor(&http.Request{Header: http.Header{"Authorization": {"Bearer " + token}}})
-	if perm != backup.PermissionView {
-		t.Errorf("session permissions = %v, want %v (the stored override, not auth.defaultPerm)", perm, backup.PermissionView)
+	if perm != permission.PermissionView {
+		t.Errorf("session permissions = %v, want %v (the stored override, not auth.defaultPerm)", perm, permission.PermissionView)
 	}
 }
 
@@ -310,7 +311,7 @@ func TestOIDCCallbackUsesStoredPermissionOverride(t *testing.T) {
 // browser would, returning the callback's response recorder. Shared by the
 // permission-provisioning tests below, which each need to drive more than
 // one login in sequence against the same identity.
-func doOIDCLogin(t *testing.T, provider *fakeOIDCProvider, auth *OIDCAuth, pending *oidcPendingStore, sessions *sessionStore, db *sql.DB) *httptest.ResponseRecorder {
+func doOIDCLogin(t *testing.T, provider *fakeOIDCProvider, auth *OIDCAuth, pending *oidcPendingStore, sessions *sessionStore, db *store.Store) *httptest.ResponseRecorder {
 	t.Helper()
 
 	loginReq := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/login/oidc?next=/dashboard", nil)
@@ -340,7 +341,7 @@ func doOIDCLogin(t *testing.T, provider *fakeOIDCProvider, auth *OIDCAuth, pendi
 
 // TestOIDCCallbackProvisionsPermissionsOnFirstLogin checks that an
 // identity's very first SSO login provisions its permission record (see
-// backup.OIDCUserPermissions/oidcusers.go), granting auth.defaultPerm, so it
+// store.GetOIDCUserPermissions), granting auth.defaultPerm, so it
 // shows up in the "Users" admin section's OIDC listing (see
 // handleListOIDCUserPermissions in webui.go) ready for an admin to adjust,
 // rather than only appearing once they've manually added it.
@@ -352,14 +353,14 @@ func TestOIDCCallbackProvisionsPermissionsOnFirstLogin(t *testing.T) {
 	provider := newFakeOIDCProvider(t, clientID)
 	provider.email.Store("newperson@example.com")
 
-	auth, err := newOIDCAuth(t.Context(), backup.OIDCSettings{
+	auth, err := newOIDCAuth(t.Context(), config.OIDCSettings{
 		Enabled:            true,
 		Issuer:             provider.issuer(),
 		ClientID:           clientID,
 		ClientSecret:       "test-secret",
 		RedirectURL:        "https://backups.example.com/login/oidc/callback",
 		Scopes:             []string{"profile", "email"},
-		DefaultPermissions: backup.PermissionView,
+		DefaultPermissions: permission.PermissionView,
 	})
 	if err != nil {
 		t.Fatalf("newOIDCAuth() unexpected error: %v", err)
@@ -369,13 +370,13 @@ func TestOIDCCallbackProvisionsPermissionsOnFirstLogin(t *testing.T) {
 	pending := newOIDCPendingStore()
 	sessions := newTestSessionStore(t)
 
-	if _, ok, err := backup.OIDCUserPermissions(t.Context(), db, "newperson@example.com"); err != nil || ok {
+	if _, ok, err := db.GetOIDCUserPermissions(t.Context(), "newperson@example.com"); err != nil || ok {
 		t.Fatalf("OIDCUserPermissions() before first login = (ok=%v, err=%v), want (false, nil)", ok, err)
 	}
 
 	doOIDCLogin(t, provider, auth, pending, sessions, db)
 
-	perm, ok, err := backup.OIDCUserPermissions(t.Context(), db, "newperson@example.com")
+	perm, ok, err := db.GetOIDCUserPermissions(t.Context(), "newperson@example.com")
 	if err != nil {
 		t.Fatalf("OIDCUserPermissions() unexpected error: %v", err)
 	}
@@ -384,8 +385,8 @@ func TestOIDCCallbackProvisionsPermissionsOnFirstLogin(t *testing.T) {
 		t.Fatal("OIDCUserPermissions() ok = false after first login, want true (a record should have been provisioned)")
 	}
 
-	if perm != backup.PermissionView {
-		t.Errorf("provisioned permissions = %v, want %v (auth.defaultPerm)", perm, backup.PermissionView)
+	if perm != permission.PermissionView {
+		t.Errorf("provisioned permissions = %v, want %v (auth.defaultPerm)", perm, permission.PermissionView)
 	}
 }
 
@@ -402,14 +403,14 @@ func TestOIDCCallbackDoesNotOverwriteAdminEditOnLaterLogin(t *testing.T) {
 	provider := newFakeOIDCProvider(t, clientID)
 	provider.email.Store("regular@example.com")
 
-	auth, err := newOIDCAuth(t.Context(), backup.OIDCSettings{
+	auth, err := newOIDCAuth(t.Context(), config.OIDCSettings{
 		Enabled:            true,
 		Issuer:             provider.issuer(),
 		ClientID:           clientID,
 		ClientSecret:       "test-secret",
 		RedirectURL:        "https://backups.example.com/login/oidc/callback",
 		Scopes:             []string{"profile", "email"},
-		DefaultPermissions: backup.PermissionView | backup.PermissionDownload,
+		DefaultPermissions: permission.PermissionView | permission.PermissionDownload,
 	})
 	if err != nil {
 		t.Fatalf("newOIDCAuth() unexpected error: %v", err)
@@ -423,7 +424,7 @@ func TestOIDCCallbackDoesNotOverwriteAdminEditOnLaterLogin(t *testing.T) {
 	doOIDCLogin(t, provider, auth, pending, sessions, db)
 
 	// An admin then restricts it to view-only.
-	if err := backup.SetOIDCUserPermissions(t.Context(), db, "regular@example.com", backup.PermissionView); err != nil {
+	if err := db.SaveOIDCUserPermissions(t.Context(), "regular@example.com", permission.PermissionView); err != nil {
 		t.Fatalf("SetOIDCUserPermissions() unexpected error: %v", err)
 	}
 
@@ -434,8 +435,8 @@ func TestOIDCCallbackDoesNotOverwriteAdminEditOnLaterLogin(t *testing.T) {
 	token := extractOIDCCompleteToken(t, rec.Body.String())
 
 	perm := sessions.permissionsFor(&http.Request{Header: http.Header{"Authorization": {"Bearer " + token}}})
-	if perm != backup.PermissionView {
-		t.Errorf("session permissions after second login = %v, want %v (the admin's edit, not auth.defaultPerm)", perm, backup.PermissionView)
+	if perm != permission.PermissionView {
+		t.Errorf("session permissions after second login = %v, want %v (the admin's edit, not auth.defaultPerm)", perm, permission.PermissionView)
 	}
 }
 
@@ -463,10 +464,10 @@ func extractOIDCCompleteToken(t *testing.T, body string) string {
 // assertSoleLoginEvent fails t unless db's login log holds exactly one
 // event matching want's Username/Method/Success (its At/RemoteAddr/Detail
 // are ignored, since callers only care about identity/kind/outcome here).
-func assertSoleLoginEvent(t *testing.T, db *sql.DB, want backup.LoginEvent) {
+func assertSoleLoginEvent(t *testing.T, db *store.Store, want store.LoginEvent) {
 	t.Helper()
 
-	events, err := backup.ReadLoginEvents(t.Context(), db, 10)
+	events, err := db.ListLoginEvents(t.Context(), 10)
 	if err != nil {
 		t.Fatalf("readLoginEvents() error: %v", err)
 	}
@@ -481,7 +482,7 @@ func TestOIDCCallbackUnknownStateRejected(t *testing.T) {
 
 	provider := newFakeOIDCProvider(t, "test-client")
 
-	auth, err := newOIDCAuth(t.Context(), backup.OIDCSettings{
+	auth, err := newOIDCAuth(t.Context(), config.OIDCSettings{
 		Enabled:      true,
 		Issuer:       provider.issuer(),
 		ClientID:     "test-client",
@@ -510,7 +511,7 @@ func TestOIDCCallbackProviderErrorRejected(t *testing.T) {
 
 	provider := newFakeOIDCProvider(t, "test-client")
 
-	auth, err := newOIDCAuth(t.Context(), backup.OIDCSettings{
+	auth, err := newOIDCAuth(t.Context(), config.OIDCSettings{
 		Enabled:      true,
 		Issuer:       provider.issuer(),
 		ClientID:     "test-client",
@@ -584,7 +585,7 @@ func TestOIDCPendingStoreConsumeExpired(t *testing.T) {
 func TestNewOIDCAuthBadIssuerFails(t *testing.T) {
 	t.Parallel()
 
-	_, err := newOIDCAuth(t.Context(), backup.OIDCSettings{
+	_, err := newOIDCAuth(t.Context(), config.OIDCSettings{
 		Enabled:      true,
 		Issuer:       "http://127.0.0.1:1", // nothing listening there
 		ClientID:     "test-client",

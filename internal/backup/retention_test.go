@@ -1,24 +1,26 @@
 package backup
 
 import (
-	"database/sql"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
-// openTestRetentionDB opens a fresh shared state db (see schedule_state.go)
-// for a retention test, in its own temp directory rather than sharing
-// openTestStateDB's, since some assertions below want to point it at a
-// distinct temp file.
-func openTestRetentionDB(t *testing.T) *sql.DB {
+// openTestRetentionDB opens a fresh shared state db for a retention test, in
+// its own temp directory rather than sharing openTestStateDB's, since some
+// assertions below want to point it at a distinct temp file.
+func openTestRetentionDB(t *testing.T) *store.Store {
 	t.Helper()
 
-	db, err := OpenScheduleStateDB(t.Context(), filepath.Join(t.TempDir(), "state.db"))
+	db, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
-		t.Fatalf("openScheduleStateDB() unexpected error: %v", err)
+		t.Fatalf("store.Open() unexpected error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = db.Close() })
@@ -26,27 +28,23 @@ func openTestRetentionDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// countRetentionRows returns how many rows db has for path, for assertions
-// below.
-func countRetentionRows(t *testing.T, db *sql.DB, path string) int {
+// hasRetentionRow reports whether db still has a tracked row for path on
+// server, regardless of whether it's currently within retention: it checks
+// by asking for every path expired as of a point far enough in the future
+// that any row on server — no matter its own retention_seconds — is bound
+// to show up, which is as close to "SELECT COUNT(*)" as this test can get
+// through store's own exported API.
+func hasRetentionRow(t *testing.T, db *store.Store, server, path string) bool {
 	t.Helper()
 
-	var n int
-	if err := db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM objects WHERE path = ?`, path).Scan(&n); err != nil {
-		t.Fatalf("counting retention rows: %v", err)
+	farFuture := time.Now().Add(100 * 365 * 24 * time.Hour)
+
+	paths, err := db.ExpiredObjectPaths(t.Context(), server, farFuture, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("ExpiredObjectPaths(): %v", err)
 	}
 
-	return n
-}
-
-// setRetentionWrittenAt backdates path's written_at in db, so a sweep can be
-// tested without waiting out a real retention window.
-func setRetentionWrittenAt(t *testing.T, db *sql.DB, path string, when time.Time) {
-	t.Helper()
-
-	if _, err := db.ExecContext(t.Context(), `UPDATE objects SET written_at = ? WHERE path = ?`, when.UTC(), path); err != nil {
-		t.Fatalf("backdating written_at: %v", err)
-	}
+	return slices.Contains(paths, path)
 }
 
 func TestRecordLocalWriteNoRetentionIsNoop(t *testing.T) {
@@ -54,15 +52,15 @@ func TestRecordLocalWriteNoRetentionIsNoop(t *testing.T) {
 
 	dir := t.TempDir()
 	db := openTestRetentionDB(t)
-	cfg := &Config{Key: "backup.gpg", StateDB: db}
-	tgt := &Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "sub", LocalPath: dir}
+	cfg := &config.Config{Key: "backup.gpg", StateDB: db}
+	tgt := &config.Target{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir}
 
 	if err := RecordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
 		t.Fatalf("RecordLocalWrite() unexpected error: %v", err)
 	}
 
-	if got := countRetentionRows(t, db, LocalObjectPath(cfg, tgt)); got != 0 {
-		t.Errorf("retention rows = %d, want 0 when retention is unset", got)
+	if hasRetentionRow(t, db, "nas", LocalObjectPath(cfg, tgt)) {
+		t.Error("retention row exists, want none when retention is unset")
 	}
 }
 
@@ -70,8 +68,8 @@ func TestRecordLocalWriteNilStateDBIsNoop(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	cfg := &Config{Key: "backup.gpg"} // stateDB left nil
-	tgt := &Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
+	cfg := &config.Config{Key: "backup.gpg"} // stateDB left nil
+	tgt := &config.Target{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
 
 	if err := WriteLocalObject(cfg, tgt, strings.NewReader("data")); err != nil {
 		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
@@ -87,8 +85,8 @@ func TestRecordLocalWriteTracksObject(t *testing.T) {
 
 	dir := t.TempDir()
 	db := openTestRetentionDB(t)
-	cfg := &Config{Key: "backup.gpg", StateDB: db}
-	tgt := &Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
+	cfg := &config.Config{Key: "backup.gpg", StateDB: db}
+	tgt := &config.Target{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
 
 	if err := WriteLocalObject(cfg, tgt, strings.NewReader("data")); err != nil {
 		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
@@ -99,8 +97,8 @@ func TestRecordLocalWriteTracksObject(t *testing.T) {
 	}
 
 	path := LocalObjectPath(cfg, tgt)
-	if got := countRetentionRows(t, db, path); got != 1 {
-		t.Errorf("retention rows for %q = %d, want 1", path, got)
+	if !hasRetentionRow(t, db, "nas", path) {
+		t.Errorf("no retention row for %q, want one", path)
 	}
 
 	// A well within-retention object survives the sweep RecordLocalWrite
@@ -115,23 +113,26 @@ func TestRecordLocalWriteSweepsExpiredObjects(t *testing.T) {
 
 	dir := t.TempDir()
 	db := openTestRetentionDB(t)
-	tgt := &Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
+	tgt := &config.Target{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
 
-	oldCfg := &Config{Key: "old.gpg", StateDB: db}
+	oldCfg := &config.Config{Key: "old.gpg", StateDB: db}
 	if err := WriteLocalObject(oldCfg, tgt, strings.NewReader("stale")); err != nil {
 		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
 	}
 
-	if err := RecordLocalWrite(t.Context(), oldCfg, tgt, discardLogger); err != nil {
-		t.Fatalf("RecordLocalWrite() unexpected error: %v", err)
-	}
-
 	oldPath := LocalObjectPath(oldCfg, tgt)
-	setRetentionWrittenAt(t, db, oldPath, time.Now().Add(-2*time.Hour))
+
+	// Record the write backdated by two hours (past the target's one-hour
+	// retention) directly through the store, rather than via
+	// RecordLocalWrite (which always stamps "now"), so the sweep below has
+	// something to actually catch.
+	if err := db.SaveObjectWrite(t.Context(), tgt.ServerName, tgt.Bucket, oldPath, time.Now().Add(-2*time.Hour), int64(tgt.Retention/time.Second)); err != nil {
+		t.Fatalf("SaveObjectWrite() unexpected error: %v", err)
+	}
 
 	// A fresh write triggers RecordLocalWrite's sweep, which should now
 	// catch the backdated object above.
-	newCfg := &Config{Key: "new.gpg", StateDB: db}
+	newCfg := &config.Config{Key: "new.gpg", StateDB: db}
 	if err := WriteLocalObject(newCfg, tgt, strings.NewReader("fresh")); err != nil {
 		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
 	}
@@ -144,8 +145,8 @@ func TestRecordLocalWriteSweepsExpiredObjects(t *testing.T) {
 		t.Errorf("expired object still present after sweep: err = %v", err)
 	}
 
-	if got := countRetentionRows(t, db, oldPath); got != 0 {
-		t.Errorf("retention rows for expired %q = %d, want 0", oldPath, got)
+	if hasRetentionRow(t, db, "nas", oldPath) {
+		t.Errorf("retention row for expired %q still present, want none", oldPath)
 	}
 
 	newPath := LocalObjectPath(newCfg, tgt)
@@ -159,19 +160,18 @@ func TestSweepRetentionForTargetIgnoresMissingFile(t *testing.T) {
 
 	dir := t.TempDir()
 	db := openTestRetentionDB(t)
-	cfg := &Config{Key: "gone.gpg", StateDB: db}
-	tgt := &Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
+	cfg := &config.Config{Key: "gone.gpg", StateDB: db}
+	tgt := &config.Target{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
 
 	if err := WriteLocalObject(cfg, tgt, strings.NewReader("data")); err != nil {
 		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
 	}
 
-	if err := RecordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
-		t.Fatalf("RecordLocalWrite() unexpected error: %v", err)
-	}
-
 	path := LocalObjectPath(cfg, tgt)
-	setRetentionWrittenAt(t, db, path, time.Now().Add(-2*time.Hour))
+
+	if err := db.SaveObjectWrite(t.Context(), tgt.ServerName, tgt.Bucket, path, time.Now().Add(-2*time.Hour), int64(tgt.Retention/time.Second)); err != nil {
+		t.Fatalf("SaveObjectWrite() unexpected error: %v", err)
+	}
 
 	// The file is gone from disk (e.g. removed by hand) but its db record
 	// isn't; the sweep should still clean up the record without erroring.
@@ -183,15 +183,15 @@ func TestSweepRetentionForTargetIgnoresMissingFile(t *testing.T) {
 		t.Fatalf("SweepRetentionForTarget() unexpected error: %v", err)
 	}
 
-	if got := countRetentionRows(t, db, path); got != 0 {
-		t.Errorf("retention rows for %q = %d, want 0", path, got)
+	if hasRetentionRow(t, db, "nas", path) {
+		t.Errorf("retention row for %q still present after sweep, want none", path)
 	}
 }
 
 func TestSweepRetentionForTargetNilDBIsNoop(t *testing.T) {
 	t.Parallel()
 
-	tgt := &Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "sub", LocalPath: t.TempDir(), Retention: time.Hour}
+	tgt := &config.Target{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: t.TempDir(), Retention: time.Hour}
 
 	if err := SweepRetentionForTarget(t.Context(), nil, tgt, discardLogger); err != nil {
 		t.Fatalf("SweepRetentionForTarget() unexpected error: %v", err)
@@ -203,8 +203,8 @@ func TestRemoveRetentionRecord(t *testing.T) {
 
 	dir := t.TempDir()
 	db := openTestRetentionDB(t)
-	cfg := &Config{Key: "backup.gpg", StateDB: db}
-	tgt := &Target{ServerName: "nas", Kind: ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
+	cfg := &config.Config{Key: "backup.gpg", StateDB: db}
+	tgt := &config.Target{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
 
 	if err := WriteLocalObject(cfg, tgt, strings.NewReader("data")); err != nil {
 		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
@@ -215,57 +215,15 @@ func TestRemoveRetentionRecord(t *testing.T) {
 	}
 
 	path := LocalObjectPath(cfg, tgt)
-	if got := countRetentionRows(t, db, path); got != 1 {
-		t.Fatalf("retention rows for %q = %d, want 1 before removal", path, got)
+	if !hasRetentionRow(t, db, "nas", path) {
+		t.Fatalf("no retention row for %q before removal, want one", path)
 	}
 
 	if err := RemoveRetentionRecord(t.Context(), cfg, tgt); err != nil {
 		t.Fatalf("RemoveRetentionRecord() unexpected error: %v", err)
 	}
 
-	if got := countRetentionRows(t, db, path); got != 0 {
-		t.Errorf("retention rows for %q = %d, want 0 after removal", path, got)
-	}
-}
-
-func TestParseRetention(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		in      string
-		want    time.Duration
-		wantErr bool
-	}{
-		{name: "empty means no expiry", in: "", want: 0},
-		{name: "hours", in: "168h", want: 168 * time.Hour},
-		{name: "days", in: "7d", want: 7 * 24 * time.Hour},
-		{name: "days plus hours", in: "1d12h", want: 36 * time.Hour},
-		{name: "fractional days", in: "1.5d", want: 36 * time.Hour},
-		{name: "minutes", in: "90m", want: 90 * time.Minute},
-		{name: "negative hours rejected", in: "-1h", wantErr: true},
-		{name: "negative days rejected", in: "-1d", wantErr: true},
-		{name: "bare sign rejected", in: "-", wantErr: true},
-		{name: "unit with no number rejected", in: "d", wantErr: true},
-		{name: "garbage rejected", in: "not-a-duration", wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			got, err := parseRetention(tt.in)
-			if tt.wantErr {
-				if err == nil {
-					t.Errorf("parseRetention(%q) error = nil, want error", tt.in)
-				}
-
-				return
-			}
-
-			if err != nil || got != tt.want {
-				t.Errorf("parseRetention(%q) = (%v, %v), want (%v, nil)", tt.in, got, err, tt.want)
-			}
-		})
+	if hasRetentionRow(t, db, "nas", path) {
+		t.Errorf("retention row for %q still present after removal, want none", path)
 	}
 }

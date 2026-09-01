@@ -1,34 +1,13 @@
 package pipeline
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/rsa"
-	"database/sql"
 	"log/slog"
-	"path/filepath"
 	"testing"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 )
-
-// openTestStateDB opens a fresh state db under t.TempDir(), closed
-// automatically when the test ends.
-func openTestStateDB(t *testing.T) *sql.DB {
-	t.Helper()
-
-	path := filepath.Join(t.TempDir(), "state.db")
-
-	db, err := backup.OpenScheduleStateDB(context.Background(), path)
-	if err != nil {
-		t.Fatalf("OpenScheduleStateDB() error: %v", err)
-	}
-
-	t.Cleanup(func() { _ = db.Close() })
-
-	return db
-}
 
 // discardLogger is a *slog.Logger that writes nowhere, for tests that need
 // to pass one but don't assert on its output.

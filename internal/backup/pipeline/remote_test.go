@@ -7,14 +7,14 @@ import (
 	"strings"
 	"testing"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/remoteAuth"
 )
 
 func TestRemoteObjectURL(t *testing.T) {
 	t.Parallel()
 
-	tgt := &backup.Target{Endpoint: "https://backup2.example.com:8443/", Bucket: "from primary"}
+	tgt := &config.Target{Endpoint: "https://backup2.example.com:8443/", Bucket: "from primary"}
 
 	got := RemoteObjectURL(tgt, "backup 20260101.gpg")
 	want := "https://backup2.example.com:8443/api/v1/objects/from%20primary/backup%2020260101.gpg"
@@ -47,8 +47,8 @@ func TestUploadToRemote(t *testing.T) {
 	defer srv.Close()
 
 	id, key := testServerIdentityAndKey(t)
-	cfg := &backup.Config{Key: "backup.gpg", Identity: id}
-	tgt := &backup.Target{Kind: backup.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
+	cfg := &config.Config{Key: "backup.gpg", Identity: id}
+	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
 	if err := UploadToRemote(t.Context(), cfg, tgt, strings.NewReader("ciphertext")); err != nil {
 		t.Fatalf("UploadToRemote() unexpected error: %v", err)
@@ -84,8 +84,8 @@ func TestUploadToRemoteNoIdentity(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &backup.Config{Key: "backup.gpg"} // identity left nil: loadServerIdentity failed at startup
-	tgt := &backup.Target{Kind: backup.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
+	cfg := &config.Config{Key: "backup.gpg"} // identity left nil: loadServerIdentity failed at startup
+	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
 	err := UploadToRemote(t.Context(), cfg, tgt, strings.NewReader("x"))
 	if err == nil || !strings.Contains(err.Error(), "identity") {
@@ -101,8 +101,8 @@ func TestUploadToRemoteUnauthorized(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &backup.Config{Key: "backup.gpg", Identity: testServerIdentity(t)}
-	tgt := &backup.Target{Kind: backup.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
+	cfg := &config.Config{Key: "backup.gpg", Identity: testServerIdentity(t)}
+	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
 	err := UploadToRemote(t.Context(), cfg, tgt, strings.NewReader("x"))
 	if err == nil || !strings.Contains(err.Error(), "401") {
@@ -123,8 +123,8 @@ func TestDeleteRemoteObject(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &backup.Config{Key: "backup.gpg", Identity: testServerIdentity(t)}
-	tgt := &backup.Target{Kind: backup.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
+	cfg := &config.Config{Key: "backup.gpg", Identity: testServerIdentity(t)}
+	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
 	if err := DeleteRemoteObject(t.Context(), cfg, tgt); err != nil {
 		t.Fatalf("DeleteRemoteObject() unexpected error: %v", err)
@@ -147,8 +147,8 @@ func TestDeleteRemoteObjectNotFound(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &backup.Config{Key: "backup.gpg", Identity: testServerIdentity(t)}
-	tgt := &backup.Target{Kind: backup.ServerKindRemote, Endpoint: srv.URL, Bucket: "no-such-id"}
+	cfg := &config.Config{Key: "backup.gpg", Identity: testServerIdentity(t)}
+	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "no-such-id"}
 
 	err := DeleteRemoteObject(t.Context(), cfg, tgt)
 	if err == nil || !strings.Contains(err.Error(), "404") {

@@ -2,7 +2,6 @@ package webui
 
 import (
 	"context"
-	"database/sql"
 	_ "embed"
 	"html/template"
 	"log/slog"
@@ -13,7 +12,9 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/permission"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 // OIDCAuth wraps everything the dashboard's SSO login (see
@@ -24,7 +25,7 @@ import (
 type OIDCAuth struct {
 	oauth2Config oauth2.Config
 	verifier     *oidc.IDTokenVerifier
-	defaultPerm  backup.Permission
+	defaultPerm  permission.Permission
 }
 
 // newOIDCAuth builds an *OIDCAuth for cfg by fetching its provider's
@@ -36,7 +37,7 @@ type OIDCAuth struct {
 // doesn't speak OIDC discovery, which the caller treats as a soft failure —
 // logging a warning and running the web UI without SSO rather than failing
 // the whole process over an IdP that's down.
-func newOIDCAuth(ctx context.Context, cfg backup.OIDCSettings) (*OIDCAuth, error) {
+func newOIDCAuth(ctx context.Context, cfg config.OIDCSettings) (*OIDCAuth, error) {
 	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
 	if err != nil {
 		return nil, err
@@ -60,7 +61,7 @@ func newOIDCAuth(ctx context.Context, cfg backup.OIDCSettings) (*OIDCAuth, error
 // warning and returns nil, running the web UI without SSO rather than
 // failing the whole process over an IdP that's unreachable at startup. A
 // disabled cfg (the common case) is a silent no-op.
-func SetupOIDCAuth(ctx context.Context, cfg backup.OIDCSettings, log *slog.Logger) *OIDCAuth {
+func SetupOIDCAuth(ctx context.Context, cfg config.OIDCSettings, log *slog.Logger) *OIDCAuth {
 	if !cfg.Enabled {
 		return nil
 	}
@@ -211,7 +212,7 @@ func writeOIDCCompletePage(w http.ResponseWriter, token string, expiresAt time.T
 // (see writeOIDCCompletePage) that hands the browser its token and sends it
 // on to the in-flight login's next. The session's permissions are
 // auth.defaultPerm, unless db (when non-nil) holds a stored permission
-// record for this login (see backup.OIDCUserPermissions/oidcusers.go) — set
+// record for this login (see store.OIDCUserPermission) — set
 // through the "Users" admin section's OIDC listing (see
 // handleSetOIDCUserPermissions in webui.go) — in which case that takes
 // precedence. The very first login for an identity has no such record yet,
@@ -221,7 +222,7 @@ func writeOIDCCompletePage(w http.ResponseWriter, token string, expiresAt time.T
 // also, independently of all that, gets every attempt appended to the login
 // log (see recordLoginEvent), win or lose, mirroring handleWebUILogin's own
 // recording.
-func handleOIDCCallback(auth *OIDCAuth, pending *oidcPendingStore, sessions *sessionStore, log *slog.Logger, db *sql.DB, trustProxyHeaders bool) http.HandlerFunc {
+func handleOIDCCallback(auth *OIDCAuth, pending *oidcPendingStore, sessions *sessionStore, log *slog.Logger, db *store.Store, trustProxyHeaders bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		record := func(username, detail string, success bool) {
 			recordLogin(r.Context(), db, log, r, trustProxyHeaders, "oidc", "oidc", username, detail, success)
@@ -280,7 +281,7 @@ func handleOIDCCallback(auth *OIDCAuth, pending *oidcPendingStore, sessions *ses
 		perm := auth.defaultPerm
 
 		if db != nil {
-			switch override, ok, err := backup.OIDCUserPermissions(r.Context(), db, identity); {
+			switch override, ok, err := db.GetOIDCUserPermissions(r.Context(), identity); {
 			case err != nil:
 				log.Warn("oidc: looking up user permission record failed", "err", err)
 			case ok:
@@ -293,7 +294,7 @@ func handleOIDCCallback(auth *OIDCAuth, pending *oidcPendingStore, sessions *ses
 				// listing (see handleListOIDCUserPermissions in webui.go)
 				// ready for an admin to adjust, rather than only appearing
 				// once they've manually set an override for it.
-				if err := backup.SetOIDCUserPermissions(r.Context(), db, identity, perm); err != nil {
+				if err := db.SaveOIDCUserPermissions(r.Context(), identity, perm); err != nil {
 					log.Warn("oidc: provisioning user permission record failed", "err", err)
 				}
 			}

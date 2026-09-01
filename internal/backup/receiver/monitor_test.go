@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
-	"database/sql"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -18,6 +17,8 @@ import (
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 // testServerIdentity builds a *backup.ServerIdentity backed by a freshly
@@ -51,14 +52,14 @@ var discardLogger = slog.New(slog.DiscardHandler)
 
 // openTestStateDB opens a fresh state db under t.TempDir(), closed
 // automatically when the test ends.
-func openTestStateDB(t *testing.T) *sql.DB {
+func openTestStateDB(t *testing.T) *store.Store {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "state.db")
 
-	db, err := backup.OpenScheduleStateDB(context.Background(), path)
+	db, err := store.Open(context.Background(), path)
 	if err != nil {
-		t.Fatalf("OpenScheduleStateDB() error: %v", err)
+		t.Fatalf("store.Open() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = db.Close() })
@@ -82,7 +83,7 @@ func writeFile(t *testing.T, path, contents string) {
 func TestRenderStaleWebhookPayload(t *testing.T) {
 	t.Parallel()
 
-	recv := backup.ResolvedReceiver{ID: "a", Path: "/mnt/a", StaleAfter: 6 * time.Hour}
+	recv := config.ResolvedReceiver{ID: "a", Path: "/mnt/a", StaleAfter: 6 * time.Hour}
 	tmpl := "{receiver_id} at {path} stale after {stale_after}, last received {last_received}"
 	lastSeen := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
@@ -138,7 +139,7 @@ func TestStaleReceiverMonitorCheckFreshFileDoesNotFire(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "recent.gpg"), "a")
 
-	recv := backup.ResolvedReceiver{ID: "a", Path: root, StaleAfter: time.Hour, Webhook: backup.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}}
+	recv := config.ResolvedReceiver{ID: "a", Path: root, StaleAfter: time.Hour, Webhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}}
 
 	newStaleReceiverMonitor().check(recv, discardLogger)
 
@@ -169,7 +170,7 @@ func TestStaleReceiverMonitorCheckStaleFileFires(t *testing.T) {
 		t.Fatalf("Chtimes(%q): %v", stale, err)
 	}
 
-	recv := backup.ResolvedReceiver{ID: "recv-a", Path: root, StaleAfter: time.Hour, Webhook: backup.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}}
+	recv := config.ResolvedReceiver{ID: "recv-a", Path: root, StaleAfter: time.Hour, Webhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}}
 
 	monitor := newStaleReceiverMonitor()
 	monitor.check(recv, discardLogger)
@@ -208,7 +209,7 @@ func TestStaleReceiverMonitorCheckNeverReceivedDoesNotFire(t *testing.T) {
 
 	srv := newTestWebhookServer(t, &mu, &calls)
 
-	recv := backup.ResolvedReceiver{ID: "a", Path: t.TempDir(), StaleAfter: time.Hour, Webhook: backup.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}}
+	recv := config.ResolvedReceiver{ID: "a", Path: t.TempDir(), StaleAfter: time.Hour, Webhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}}
 
 	newStaleReceiverMonitor().check(recv, discardLogger)
 
@@ -239,7 +240,7 @@ func TestStaleReceiverMonitorCheckRefiresAfterGapReopens(t *testing.T) {
 		t.Fatalf("Chtimes(%q): %v", f, err)
 	}
 
-	recv := backup.ResolvedReceiver{ID: "a", Path: root, StaleAfter: time.Hour, Webhook: backup.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}}
+	recv := config.ResolvedReceiver{ID: "a", Path: root, StaleAfter: time.Hour, Webhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}}
 
 	monitor := newStaleReceiverMonitor()
 	monitor.check(recv, discardLogger)
@@ -273,7 +274,7 @@ func TestStaleReceiverMonitorCheckDisabledIsNoop(t *testing.T) {
 
 	srv := newTestWebhookServer(t, &mu, &calls)
 
-	recv := backup.ResolvedReceiver{ID: "a", Path: t.TempDir(), Webhook: backup.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}} // staleAfter left at zero
+	recv := config.ResolvedReceiver{ID: "a", Path: t.TempDir(), Webhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}} // staleAfter left at zero
 
 	newStaleReceiverMonitor().check(recv, discardLogger)
 
@@ -325,9 +326,9 @@ func TestStaleReceiverMonitorCheckUsesCustomMethodHeadersAndBody(t *testing.T) {
 		t.Fatalf("Chtimes(%q): %v", stale, err)
 	}
 
-	recv := backup.ResolvedReceiver{
+	recv := config.ResolvedReceiver{
 		ID: "recv-a", Path: root, StaleAfter: time.Hour,
-		Webhook: backup.ResolvedWebhook{
+		Webhook: config.ResolvedWebhook{
 			URL:     srv.URL,
 			Method:  http.MethodPut,
 			Headers: map[string]string{"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer tok"},
@@ -388,9 +389,9 @@ func TestStaleReceiverMonitorCheckDefaultContentTypeWhenNoHeadersSet(t *testing.
 		t.Fatalf("Chtimes(%q): %v", stale, err)
 	}
 
-	recv := backup.ResolvedReceiver{
+	recv := config.ResolvedReceiver{
 		ID: "a", Path: root, StaleAfter: time.Hour,
-		Webhook: backup.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost},
+		Webhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost},
 	}
 
 	newStaleReceiverMonitor().check(recv, discardLogger)
@@ -410,19 +411,19 @@ func TestSeedReceiverStatusFromState(t *testing.T) {
 	ctx := context.Background()
 
 	at := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
-	if err := backup.RecordReceiverEvent(ctx, db, backup.ReceiverEvent{At: at, ReceiverID: "a", Kind: backup.ReceiverEventReceive, Key: "obj.gpg", Success: true}); err != nil {
-		t.Fatalf("RecordReceiverEvent() error: %v", err)
+	if err := db.SaveReceiverEvent(ctx, store.ReceiverEvent{At: at, ReceiverID: "a", Kind: store.ReceiverEventReceive, Key: "obj.gpg", Success: true}); err != nil {
+		t.Fatalf("SaveReceiverEvent() error: %v", err)
 	}
 
-	receivers := map[string]backup.ResolvedReceiver{
+	receivers := map[string]config.ResolvedReceiver{
 		"a": {ID: "a", Path: t.TempDir()},
 		"b": {ID: "b", Path: t.TempDir()}, // no events recorded: stays idle
 	}
-	store := backup.NewReceiverStatusStore(receivers)
+	statusStore := backup.NewReceiverStatusStore(receivers)
 
-	SeedReceiverStatusFromState(ctx, db, receivers, store, discardLogger)
+	SeedReceiverStatusFromState(ctx, db, receivers, statusStore, discardLogger)
 
-	snap := store.Snapshot()
+	snap := statusStore.Snapshot()
 
 	byID := make(map[string]backup.ReceiverSnapshot, len(snap))
 	for _, s := range snap {

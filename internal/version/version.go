@@ -5,7 +5,7 @@ package version
 var (
 	// Version is the git tag the binary was built from. It is left empty
 	// for untagged builds.
-	Version = ""
+	Version = "none"
 	// Commit is the short git commit hash the binary was built from.
 	Commit = "unknown"
 )

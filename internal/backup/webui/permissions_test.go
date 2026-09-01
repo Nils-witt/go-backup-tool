@@ -2,7 +2,6 @@ package webui
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,12 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/permission"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 // mustCreateSession mints a session token for username granting perm,
 // failing the test on error.
-func mustCreateSession(t *testing.T, sessions *sessionStore, username string, perm backup.Permission) string {
+func mustCreateSession(t *testing.T, sessions *sessionStore, username string, perm permission.Permission) string {
 	t.Helper()
 
 	token, err := sessions.create(username, perm)
@@ -31,10 +31,10 @@ func TestRequirePermissionAllowsSufficientPermission(t *testing.T) {
 	t.Parallel()
 
 	sessions := newTestSessionStore(t)
-	token := mustCreateSession(t, sessions, "alice", backup.PermissionDownload)
+	token := mustCreateSession(t, sessions, "alice", permission.PermissionDownload)
 
 	called := false
-	h := requirePermission(true, sessions, backup.PermissionView, func(http.ResponseWriter, *http.Request) { called = true })
+	h := requirePermission(true, sessions, permission.PermissionView, func(http.ResponseWriter, *http.Request) { called = true })
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -56,10 +56,10 @@ func TestRequirePermissionRejectsInsufficientPermission(t *testing.T) {
 	t.Parallel()
 
 	sessions := newTestSessionStore(t)
-	token := mustCreateSession(t, sessions, "alice", backup.PermissionView)
+	token := mustCreateSession(t, sessions, "alice", permission.PermissionView)
 
 	called := false
-	h := requirePermission(true, sessions, backup.PermissionDownload, func(http.ResponseWriter, *http.Request) { called = true })
+	h := requirePermission(true, sessions, permission.PermissionDownload, func(http.ResponseWriter, *http.Request) { called = true })
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -81,10 +81,10 @@ func TestRequirePermissionLoginLogAndDownloadLogAreIndependentOfView(t *testing.
 	t.Parallel()
 
 	sessions := newTestSessionStore(t)
-	token := mustCreateSession(t, sessions, "alice", backup.PermissionView|backup.PermissionDownload)
+	token := mustCreateSession(t, sessions, "alice", permission.PermissionView|permission.PermissionDownload)
 
 	loginLogCalled := false
-	loginLog := requirePermission(true, sessions, backup.PermissionViewLoginLog, func(http.ResponseWriter, *http.Request) { loginLogCalled = true })
+	loginLog := requirePermission(true, sessions, permission.PermissionViewLoginLog, func(http.ResponseWriter, *http.Request) { loginLogCalled = true })
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -101,7 +101,7 @@ func TestRequirePermissionLoginLogAndDownloadLogAreIndependentOfView(t *testing.
 	}
 
 	downloadLogCalled := false
-	downloadLog := requirePermission(true, sessions, backup.PermissionViewDownloadLog, func(http.ResponseWriter, *http.Request) { downloadLogCalled = true })
+	downloadLog := requirePermission(true, sessions, permission.PermissionViewDownloadLog, func(http.ResponseWriter, *http.Request) { downloadLogCalled = true })
 
 	req = httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -118,7 +118,7 @@ func TestRequirePermissionLoginLogAndDownloadLogAreIndependentOfView(t *testing.
 	}
 
 	// PermissionAdmin implies both, unlike view+download above.
-	adminToken := mustCreateSession(t, sessions, "erin", backup.PermissionAdmin)
+	adminToken := mustCreateSession(t, sessions, "erin", permission.PermissionAdmin)
 
 	loginLogCalled = false
 	req = httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
@@ -149,7 +149,7 @@ func TestRequirePermissionBypassedWhenAuthDisabled(t *testing.T) {
 	sessions := newTestSessionStore(t)
 
 	called := false
-	h := requirePermission(false, sessions, backup.PermissionDownload, func(http.ResponseWriter, *http.Request) { called = true })
+	h := requirePermission(false, sessions, permission.PermissionDownload, func(http.ResponseWriter, *http.Request) { called = true })
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
@@ -167,11 +167,11 @@ func TestRequireAdminAllowsAdminSessions(t *testing.T) {
 	tests := []struct {
 		name        string
 		username    string
-		perm        backup.Permission
+		perm        permission.Permission
 		configAdmin string
 	}{
-		{"configured admin's own session", "admin", backup.PermissionView, "admin"},
-		{"PermissionAdmin holder with no config admin", "erin", backup.PermissionAdmin, ""},
+		{"configured admin's own session", "admin", permission.PermissionView, "admin"},
+		{"PermissionAdmin holder with no config admin", "erin", permission.PermissionAdmin, ""},
 	}
 
 	for _, tt := range tests {
@@ -202,7 +202,7 @@ func TestRequireAdminRejectsNonAdmin(t *testing.T) {
 	t.Parallel()
 
 	sessions := newTestSessionStore(t)
-	token := mustCreateSession(t, sessions, "alice", backup.PermissionView|backup.PermissionDownload)
+	token := mustCreateSession(t, sessions, "alice", permission.PermissionView|permission.PermissionDownload)
 
 	called := false
 	h := requireAdmin(true, sessions, "admin", func(http.ResponseWriter, *http.Request) { called = true })
@@ -227,7 +227,7 @@ func TestRequireAdminAllowsPermissionAdminHolder(t *testing.T) {
 	t.Parallel()
 
 	sessions := newTestSessionStore(t)
-	token := mustCreateSession(t, sessions, "erin", backup.PermissionAdmin)
+	token := mustCreateSession(t, sessions, "erin", permission.PermissionAdmin)
 
 	called := false
 	h := requireAdmin(true, sessions, "admin", func(http.ResponseWriter, *http.Request) { called = true })
@@ -252,7 +252,7 @@ func TestRequireAdminRejectsEveryoneWhenNoAdminConfigured(t *testing.T) {
 	t.Parallel()
 
 	sessions := newTestSessionStore(t)
-	token := mustCreateSession(t, sessions, "alice", backup.PermissionView|backup.PermissionDownload)
+	token := mustCreateSession(t, sessions, "alice", permission.PermissionView|permission.PermissionDownload)
 
 	h := requireAdmin(true, sessions, "", func(http.ResponseWriter, *http.Request) {
 		t.Error("handler was called despite no config-file admin being configured")
@@ -274,7 +274,7 @@ func TestHandleSessionInfoReportsPermissionsAndAdmin(t *testing.T) {
 	t.Parallel()
 
 	sessions := newTestSessionStore(t)
-	token := mustCreateSession(t, sessions, "alice", backup.PermissionView)
+	token := mustCreateSession(t, sessions, "alice", permission.PermissionView)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/session", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -305,7 +305,7 @@ func TestHandleSessionInfoReportsAdminForPermissionAdminHolder(t *testing.T) {
 	t.Parallel()
 
 	sessions := newTestSessionStore(t)
-	token := mustCreateSession(t, sessions, "erin", backup.PermissionAdmin)
+	token := mustCreateSession(t, sessions, "erin", permission.PermissionAdmin)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/session", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -384,7 +384,7 @@ func TestHandleWebUILoginConfigAdminGrantsEveryPermissionBit(t *testing.T) {
 
 	perm := sessions.permissionsFor(&http.Request{Header: http.Header{"Authorization": {"Bearer " + body.Token}}})
 
-	want := backup.PermissionView | backup.PermissionDownload | backup.PermissionAdmin | backup.PermissionViewLoginLog | backup.PermissionViewDownloadLog
+	want := permission.PermissionView | permission.PermissionDownload | permission.PermissionAdmin | permission.PermissionViewLoginLog | permission.PermissionViewDownloadLog
 	if perm != want {
 		t.Errorf("session permissions = %v, want %v", perm, want)
 	}
@@ -400,7 +400,7 @@ func TestHandleWebUILoginDBUserGrantsStoredPermissions(t *testing.T) {
 	db := openTestStateDB(t)
 	sessions := newTestSessionStore(t)
 
-	if err := backup.CreateWebUIUser(context.Background(), db, "bob", "s3cret", backup.PermissionView); err != nil {
+	if err := db.SaveWebUIUser(context.Background(), "bob", "s3cret", permission.PermissionView); err != nil {
 		t.Fatalf("CreateWebUIUser() unexpected error: %v", err)
 	}
 
@@ -424,8 +424,8 @@ func TestHandleWebUILoginDBUserGrantsStoredPermissions(t *testing.T) {
 	}
 
 	perm := sessions.permissionsFor(&http.Request{Header: http.Header{"Authorization": {"Bearer " + body.Token}}})
-	if perm != backup.PermissionView {
-		t.Errorf("session permissions = %v, want %v", perm, backup.PermissionView)
+	if perm != permission.PermissionView {
+		t.Errorf("session permissions = %v, want %v", perm, permission.PermissionView)
 	}
 }
 
@@ -484,12 +484,12 @@ func TestHandleWebUIUserAdminAPILifecycle(t *testing.T) {
 		t.Fatalf("update status = %d, want %d, body: %s", rec.Code, http.StatusNoContent, rec.Body.String())
 	}
 
-	perm, ok, err := backup.VerifyWebUIUser(context.Background(), db, "carol", "pw123456")
+	perm, ok, err := db.VerifyWebUIUser(context.Background(), "carol", "pw123456")
 	if err != nil || !ok {
 		t.Fatalf("VerifyWebUIUser() after update = (ok=%v, err=%v), want (true, nil)", ok, err)
 	}
 
-	if want := backup.PermissionView | backup.PermissionDownload; perm != want {
+	if want := permission.PermissionView | permission.PermissionDownload; perm != want {
 		t.Errorf("permissions after update = %v, want %v", perm, want)
 	}
 
@@ -504,7 +504,7 @@ func TestHandleWebUIUserAdminAPILifecycle(t *testing.T) {
 		t.Fatalf("delete status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
 
-	if _, ok, _ := backup.VerifyWebUIUser(context.Background(), db, "carol", "pw123456"); ok {
+	if _, ok, _ := db.VerifyWebUIUser(context.Background(), "carol", "pw123456"); ok {
 		t.Error("carol still verifies after being deleted")
 	}
 
@@ -526,7 +526,7 @@ func TestHandleIssueWebUIUserToken(t *testing.T) {
 	db := openTestStateDB(t)
 	sessions := newTestSessionStore(t)
 
-	if err := backup.CreateWebUIUser(context.Background(), db, "erin", "s3cret1", backup.PermissionView|backup.PermissionDownload); err != nil {
+	if err := db.SaveWebUIUser(context.Background(), "erin", "s3cret1", permission.PermissionView|permission.PermissionDownload); err != nil {
 		t.Fatalf("CreateWebUIUser() unexpected error: %v", err)
 	}
 
@@ -557,8 +557,8 @@ func TestHandleIssueWebUIUserToken(t *testing.T) {
 		t.Errorf("token username = %q, want %q", username, "erin")
 	}
 
-	if perm := sessions.permissionsFor(authedReq); perm != backup.PermissionView|backup.PermissionDownload {
-		t.Errorf("token permissions = %v, want %v", perm, backup.PermissionView|backup.PermissionDownload)
+	if perm := sessions.permissionsFor(authedReq); perm != permission.PermissionView|permission.PermissionDownload {
+		t.Errorf("token permissions = %v, want %v", perm, permission.PermissionView|permission.PermissionDownload)
 	}
 
 	if want := time.Now().Add(90 * 24 * time.Hour); body.ExpiresAt.Before(want.Add(-time.Minute)) || body.ExpiresAt.After(want.Add(time.Minute)) {
@@ -591,7 +591,7 @@ func TestHandleIssueWebUIUserTokenRejectsOutOfRangeDays(t *testing.T) {
 	db := openTestStateDB(t)
 	sessions := newTestSessionStore(t)
 
-	if err := backup.CreateWebUIUser(context.Background(), db, "erin", "s3cret1", backup.PermissionView); err != nil {
+	if err := db.SaveWebUIUser(context.Background(), "erin", "s3cret1", permission.PermissionView); err != nil {
 		t.Fatalf("CreateWebUIUser() unexpected error: %v", err)
 	}
 
@@ -647,7 +647,7 @@ func TestHandleOIDCUserPermissionsAdminAPILifecycle(t *testing.T) {
 	requireOIDCPermissionListed(t, list, "view")
 
 	setOIDCPermissions(t, set, `{"permissions":["view","download"]}`, http.StatusNoContent)
-	requireOIDCPermissionsStored(t, db, backup.PermissionView|backup.PermissionDownload)
+	requireOIDCPermissionsStored(t, db, permission.PermissionView|permission.PermissionDownload)
 
 	deleteOIDCPermissions(t, del, http.StatusNoContent)
 	requireNoOIDCPermissionsStored(t, db)
@@ -708,10 +708,10 @@ func requireOIDCPermissionListed(t *testing.T, list http.HandlerFunc, wantPerm s
 
 // requireOIDCPermissionsStored requires dave@example.com's stored permission
 // override to be exactly want.
-func requireOIDCPermissionsStored(t *testing.T, db *sql.DB, want backup.Permission) {
+func requireOIDCPermissionsStored(t *testing.T, db *store.Store, want permission.Permission) {
 	t.Helper()
 
-	perm, ok, err := backup.OIDCUserPermissions(context.Background(), db, "dave@example.com")
+	perm, ok, err := db.GetOIDCUserPermissions(context.Background(), "dave@example.com")
 	if err != nil || !ok {
 		t.Fatalf("OIDCUserPermissions() = (ok=%v, err=%v), want (true, nil)", ok, err)
 	}
@@ -723,10 +723,10 @@ func requireOIDCPermissionsStored(t *testing.T, db *sql.DB, want backup.Permissi
 
 // requireNoOIDCPermissionsStored requires dave@example.com to have no stored
 // permission override.
-func requireNoOIDCPermissionsStored(t *testing.T, db *sql.DB) {
+func requireNoOIDCPermissionsStored(t *testing.T, db *store.Store) {
 	t.Helper()
 
-	if _, ok, _ := backup.OIDCUserPermissions(context.Background(), db, "dave@example.com"); ok {
+	if _, ok, _ := db.GetOIDCUserPermissions(context.Background(), "dave@example.com"); ok {
 		t.Error("dave@example.com still has a permission override after being deleted")
 	}
 }

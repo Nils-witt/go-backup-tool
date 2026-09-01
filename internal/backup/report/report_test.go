@@ -1,4 +1,4 @@
-package backup
+package report
 
 import (
 	"reflect"
@@ -9,8 +9,8 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
-// wantSchedule parses spec the same way resolveReportSettings does, for a
-// test to compare a resolved ReportSettings.Schedule against.
+// wantSchedule parses spec the same way ResolveSettings does, for a
+// test to compare a resolved Settings.Schedule against.
 func wantSchedule(t *testing.T, spec string) cron.Schedule {
 	t.Helper()
 
@@ -22,23 +22,23 @@ func wantSchedule(t *testing.T, spec string) cron.Schedule {
 	return sched
 }
 
-func TestResolveReportSettingsDisabledByDefault(t *testing.T) {
+func TestResolveSettingsDisabledByDefault(t *testing.T) {
 	t.Parallel()
 
-	got, err := resolveReportSettings(fileReport{})
+	got, err := ResolveSettings(FileReport{})
 	if err != nil {
-		t.Fatalf("resolveReportSettings() error: %v", err)
+		t.Fatalf("ResolveSettings() error: %v", err)
 	}
 
 	if got.Enabled {
-		t.Errorf("resolveReportSettings() enabled = true, want false for an unset report:")
+		t.Errorf("ResolveSettings() enabled = true, want false for an unset report:")
 	}
 }
 
-func TestResolveReportSettingsDefaults(t *testing.T) {
+func TestResolveSettingsDefaults(t *testing.T) {
 	t.Setenv("REPORT_TEST_PW", "s3cr3t")
 
-	cfg := fileReport{
+	cfg := FileReport{
 		Enabled: true,
 		To:      []string{"ops@example.com"},
 		SMTP: fileSMTP{
@@ -48,12 +48,12 @@ func TestResolveReportSettingsDefaults(t *testing.T) {
 		},
 	}
 
-	got, err := resolveReportSettings(cfg)
+	got, err := ResolveSettings(cfg)
 	if err != nil {
-		t.Fatalf("resolveReportSettings() error: %v", err)
+		t.Fatalf("ResolveSettings() error: %v", err)
 	}
 
-	want := ReportSettings{
+	want := Settings{
 		Enabled:  true,
 		To:       []string{"ops@example.com"},
 		From:     "backups@example.com", // defaults to smtp.username
@@ -68,14 +68,14 @@ func TestResolveReportSettingsDefaults(t *testing.T) {
 	}
 
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("resolveReportSettings() = %+v, want %+v", got, want)
+		t.Errorf("ResolveSettings() = %+v, want %+v", got, want)
 	}
 }
 
-func TestResolveReportSettingsExplicitFields(t *testing.T) {
+func TestResolveSettingsExplicitFields(t *testing.T) {
 	t.Parallel()
 
-	cfg := fileReport{
+	cfg := FileReport{
 		Enabled:  true,
 		To:       []string{"a@example.com", "b@example.com"},
 		From:     "reports@example.com",
@@ -87,9 +87,9 @@ func TestResolveReportSettingsExplicitFields(t *testing.T) {
 		},
 	}
 
-	got, err := resolveReportSettings(cfg)
+	got, err := ResolveSettings(cfg)
 	if err != nil {
-		t.Fatalf("resolveReportSettings() error: %v", err)
+		t.Fatalf("ResolveSettings() error: %v", err)
 	}
 
 	if got.From != "reports@example.com" {
@@ -110,10 +110,10 @@ func TestResolveReportSettingsExplicitFields(t *testing.T) {
 	}
 }
 
-func TestResolveReportSettingsDirectPassword(t *testing.T) {
+func TestResolveSettingsDirectPassword(t *testing.T) {
 	t.Parallel()
 
-	cfg := fileReport{
+	cfg := FileReport{
 		Enabled: true,
 		To:      []string{"a@example.com"},
 		From:    "reports@example.com",
@@ -124,9 +124,9 @@ func TestResolveReportSettingsDirectPassword(t *testing.T) {
 		},
 	}
 
-	got, err := resolveReportSettings(cfg)
+	got, err := ResolveSettings(cfg)
 	if err != nil {
-		t.Fatalf("resolveReportSettings() error: %v", err)
+		t.Fatalf("ResolveSettings() error: %v", err)
 	}
 
 	if got.SMTP.Password != "hunter2" {
@@ -134,19 +134,19 @@ func TestResolveReportSettingsDirectPassword(t *testing.T) {
 	}
 }
 
-func TestResolveReportSettingsTLSDefaultPort(t *testing.T) {
+func TestResolveSettingsTLSDefaultPort(t *testing.T) {
 	t.Parallel()
 
-	cfg := fileReport{
+	cfg := FileReport{
 		Enabled: true,
 		To:      []string{"a@example.com"},
 		From:    "reports@example.com",
 		SMTP:    fileSMTP{Host: "smtp.example.com", Security: "tls"},
 	}
 
-	got, err := resolveReportSettings(cfg)
+	got, err := ResolveSettings(cfg)
 	if err != nil {
-		t.Fatalf("resolveReportSettings() error: %v", err)
+		t.Fatalf("ResolveSettings() error: %v", err)
 	}
 
 	if got.SMTP.Port != 465 {
@@ -154,32 +154,32 @@ func TestResolveReportSettingsTLSDefaultPort(t *testing.T) {
 	}
 }
 
-func TestResolveReportSettingsErrors(t *testing.T) {
+func TestResolveSettingsErrors(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
 		name       string
-		cfg        fileReport
+		cfg        FileReport
 		wantErrHas string
 	}{
 		{
 			name:       "missing to",
-			cfg:        fileReport{Enabled: true, SMTP: fileSMTP{Host: "smtp.example.com"}},
+			cfg:        FileReport{Enabled: true, SMTP: fileSMTP{Host: "smtp.example.com"}},
 			wantErrHas: "report.to",
 		},
 		{
 			name:       "empty to entry",
-			cfg:        fileReport{Enabled: true, To: []string{" "}, SMTP: fileSMTP{Host: "smtp.example.com"}},
+			cfg:        FileReport{Enabled: true, To: []string{" "}, SMTP: fileSMTP{Host: "smtp.example.com"}},
 			wantErrHas: "report.to[0]",
 		},
 		{
 			name:       "missing smtp host",
-			cfg:        fileReport{Enabled: true, To: []string{"a@example.com"}},
+			cfg:        FileReport{Enabled: true, To: []string{"a@example.com"}},
 			wantErrHas: "report.smtp.host",
 		},
 		{
 			name: "bad schedule",
-			cfg: fileReport{
+			cfg: FileReport{
 				Enabled: true, To: []string{"a@example.com"}, Schedule: "not-a-cron-expr",
 				SMTP: fileSMTP{Host: "smtp.example.com"},
 			},
@@ -187,7 +187,7 @@ func TestResolveReportSettingsErrors(t *testing.T) {
 		},
 		{
 			name: "bad security",
-			cfg: fileReport{
+			cfg: FileReport{
 				Enabled: true, To: []string{"a@example.com"},
 				SMTP: fileSMTP{Host: "smtp.example.com", Security: "ssl"},
 			},
@@ -195,7 +195,7 @@ func TestResolveReportSettingsErrors(t *testing.T) {
 		},
 		{
 			name: "username without password-env",
-			cfg: fileReport{
+			cfg: FileReport{
 				Enabled: true, To: []string{"a@example.com"},
 				SMTP: fileSMTP{Host: "smtp.example.com", Username: "u"},
 			},
@@ -203,7 +203,7 @@ func TestResolveReportSettingsErrors(t *testing.T) {
 		},
 		{
 			name: "password-env without username",
-			cfg: fileReport{
+			cfg: FileReport{
 				Enabled: true, To: []string{"a@example.com"},
 				SMTP: fileSMTP{Host: "smtp.example.com", PasswordEnv: "SOME_ENV"},
 			},
@@ -211,7 +211,7 @@ func TestResolveReportSettingsErrors(t *testing.T) {
 		},
 		{
 			name: "password and password-env both set",
-			cfg: fileReport{
+			cfg: FileReport{
 				Enabled: true, To: []string{"a@example.com"},
 				SMTP: fileSMTP{Host: "smtp.example.com", Username: "u", Password: "p", PasswordEnv: "SOME_ENV"},
 			},
@@ -219,7 +219,7 @@ func TestResolveReportSettingsErrors(t *testing.T) {
 		},
 		{
 			name: "password-env not set in environment",
-			cfg: fileReport{
+			cfg: FileReport{
 				Enabled: true, To: []string{"a@example.com"},
 				SMTP: fileSMTP{Host: "smtp.example.com", Username: "u", PasswordEnv: "REPORT_TEST_UNSET_VAR"}, //nolint:gosec // PasswordEnv names an env var, not a credential itself
 			},
@@ -227,7 +227,7 @@ func TestResolveReportSettingsErrors(t *testing.T) {
 		},
 		{
 			name: "no from and no username",
-			cfg: fileReport{
+			cfg: FileReport{
 				Enabled: true, To: []string{"a@example.com"},
 				SMTP: fileSMTP{Host: "smtp.example.com"},
 			},
@@ -239,9 +239,9 @@ func TestResolveReportSettingsErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := resolveReportSettings(tc.cfg)
+			_, err := ResolveSettings(tc.cfg)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErrHas) {
-				t.Fatalf("resolveReportSettings() error = %v, want it to mention %q", err, tc.wantErrHas)
+				t.Fatalf("ResolveSettings() error = %v, want it to mention %q", err, tc.wantErrHas)
 			}
 		})
 	}

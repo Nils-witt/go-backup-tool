@@ -1,7 +1,6 @@
 package receiver
 
 import (
-	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,14 +10,16 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 // newReceiverMux builds the same mux backup.StartWebUI registers the
 // receiver routes on, without a real listener, so an interop test can
 // exercise the client (UploadToRemote/DeleteRemoteObject) against the real
 // server-side handlers rather than a hand-rolled stand-in.
-func newReceiverMux(receivers map[string]backup.ResolvedReceiver) *http.ServeMux {
+func newReceiverMux(receivers map[string]config.ResolvedReceiver) *http.ServeMux {
 	status := backup.NewReceiverStatusStore(receivers)
 
 	mux := http.NewServeMux()
@@ -33,15 +34,15 @@ func TestRemoteTargetInteropWithReceiver(t *testing.T) {
 
 	dir := t.TempDir()
 	id, key := testServerIdentityAndKey(t)
-	receivers := map[string]backup.ResolvedReceiver{
+	receivers := map[string]config.ResolvedReceiver{
 		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: dir},
 	}
 
 	srv := httptest.NewServer(newReceiverMux(receivers))
 	defer srv.Close()
 
-	cfg := &backup.Config{Key: "backup-20260101.gpg", Identity: id}
-	tgt := &backup.Target{Kind: backup.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
+	cfg := &config.Config{Key: "backup-20260101.gpg", Identity: id}
+	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
 	const content = "encrypted backup bytes"
 
@@ -72,7 +73,7 @@ func TestRemoteTargetInteropWrongIdentity(t *testing.T) {
 
 	dir := t.TempDir()
 	_, key := testServerIdentityAndKey(t)
-	receivers := map[string]backup.ResolvedReceiver{
+	receivers := map[string]config.ResolvedReceiver{
 		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: dir},
 	}
 
@@ -82,8 +83,8 @@ func TestRemoteTargetInteropWrongIdentity(t *testing.T) {
 	// cfg signs with a different identity than the one the receiver trusts,
 	// so its signature won't verify against the receiver's configured
 	// public-key:.
-	cfg := &backup.Config{Key: "backup.gpg", Identity: testServerIdentity(t)}
-	tgt := &backup.Target{Kind: backup.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
+	cfg := &config.Config{Key: "backup.gpg", Identity: testServerIdentity(t)}
+	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
 	err := pipeline.UploadToRemote(t.Context(), cfg, tgt, strings.NewReader("x"))
 	if err == nil || !strings.Contains(err.Error(), "401") {
@@ -95,7 +96,7 @@ func TestRemoteTargetInteropNoAuthorizationHeader(t *testing.T) {
 	t.Parallel()
 
 	_, key := testServerIdentityAndKey(t)
-	receivers := map[string]backup.ResolvedReceiver{
+	receivers := map[string]config.ResolvedReceiver{
 		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: t.TempDir()},
 	}
 
@@ -122,15 +123,15 @@ func TestRemoteTargetInteropUnknownID(t *testing.T) {
 	t.Parallel()
 
 	id, key := testServerIdentityAndKey(t)
-	receivers := map[string]backup.ResolvedReceiver{
+	receivers := map[string]config.ResolvedReceiver{
 		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: t.TempDir()},
 	}
 
 	srv := httptest.NewServer(newReceiverMux(receivers))
 	defer srv.Close()
 
-	cfg := &backup.Config{Key: "backup.gpg", Identity: id}
-	tgt := &backup.Target{Kind: backup.ServerKindRemote, Endpoint: srv.URL, Bucket: "no-such-id"}
+	cfg := &config.Config{Key: "backup.gpg", Identity: id}
+	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "no-such-id"}
 
 	err := pipeline.UploadToRemote(t.Context(), cfg, tgt, strings.NewReader("x"))
 	if err == nil || !strings.Contains(err.Error(), "404") {
@@ -142,7 +143,7 @@ func TestRemoteTargetInteropUnknownID(t *testing.T) {
 // HandleReceiveObject/HandleDeleteObject instead of nil, so a
 // test can inspect what they recorded to it (retention tracking,
 // receiver_events).
-func newReceiverMuxWithDB(receivers map[string]backup.ResolvedReceiver, db *sql.DB) *http.ServeMux {
+func newReceiverMuxWithDB(receivers map[string]config.ResolvedReceiver, db *store.Store) *http.ServeMux {
 	status := backup.NewReceiverStatusStore(receivers)
 
 	mux := http.NewServeMux()
@@ -157,23 +158,23 @@ func TestHandleReceiveAndDeleteObjectRecordReceiverEvents(t *testing.T) {
 
 	dir := t.TempDir()
 
-	db, err := backup.OpenScheduleStateDB(t.Context(), filepath.Join(dir, "state.db"))
+	db, err := store.Open(t.Context(), filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("OpenScheduleStateDB() error: %v", err)
+		t.Fatalf("store.Open() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = db.Close() })
 
 	id, key := testServerIdentityAndKey(t)
-	receivers := map[string]backup.ResolvedReceiver{
+	receivers := map[string]config.ResolvedReceiver{
 		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: filepath.Join(dir, "objects")},
 	}
 
 	srv := httptest.NewServer(newReceiverMuxWithDB(receivers, db))
 	defer srv.Close()
 
-	cfg := &backup.Config{Key: "backup.gpg", Identity: id}
-	tgt := &backup.Target{Kind: backup.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
+	cfg := &config.Config{Key: "backup.gpg", Identity: id}
+	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
 	const content = "ciphertext bytes"
 
@@ -185,7 +186,7 @@ func TestHandleReceiveAndDeleteObjectRecordReceiverEvents(t *testing.T) {
 		t.Fatalf("pipeline.DeleteRemoteObject() error: %v", err)
 	}
 
-	summaries, err := backup.SummarizeReceiverEvents(t.Context(), db, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	summaries, err := db.SummarizeReceiverEvents(t.Context(), time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("SummarizeReceiverEvents() error: %v", err)
 	}
@@ -204,9 +205,9 @@ func TestHandleReceiveObjectRecordsFailedReceiverEvent(t *testing.T) {
 
 	dir := t.TempDir()
 
-	db, err := backup.OpenScheduleStateDB(t.Context(), filepath.Join(dir, "state.db"))
+	db, err := store.Open(t.Context(), filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("OpenScheduleStateDB() error: %v", err)
+		t.Fatalf("store.Open() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = db.Close() })
@@ -218,26 +219,26 @@ func TestHandleReceiveObjectRecordsFailedReceiverEvent(t *testing.T) {
 	writeFile(t, root, "occupied")
 
 	id, key := testServerIdentityAndKey(t)
-	receivers := map[string]backup.ResolvedReceiver{
+	receivers := map[string]config.ResolvedReceiver{
 		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: root},
 	}
 
 	srv := httptest.NewServer(newReceiverMuxWithDB(receivers, db))
 	defer srv.Close()
 
-	cfg := &backup.Config{Key: "backup.gpg", Identity: id}
-	tgt := &backup.Target{Kind: backup.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
+	cfg := &config.Config{Key: "backup.gpg", Identity: id}
+	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
 	if err := pipeline.UploadToRemote(t.Context(), cfg, tgt, strings.NewReader("x")); err == nil {
 		t.Fatal("pipeline.UploadToRemote() error = nil, want a failure since the receiver's root isn't a directory")
 	}
 
-	errs, err := backup.ReadReceiverErrorEvents(t.Context(), db, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	errs, err := db.ListReceiverErrorEvents(t.Context(), time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("ReadReceiverErrorEvents() error: %v", err)
 	}
 
-	if len(errs) != 1 || errs[0].ReceiverID != "instance-a" || errs[0].Kind != backup.ReceiverEventReceive {
+	if len(errs) != 1 || errs[0].ReceiverID != "instance-a" || errs[0].Kind != store.ReceiverEventReceive {
 		t.Fatalf("ReadReceiverErrorEvents() = %+v, want one failed receive for instance-a", errs)
 	}
 }

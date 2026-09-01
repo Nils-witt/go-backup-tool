@@ -2,8 +2,6 @@ package pipeline
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
 	"log/slog"
 	"strings"
 	"sync/atomic"
@@ -11,6 +9,8 @@ import (
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 // Runner tracks whether any job run has failed across the concurrently
@@ -18,15 +18,15 @@ import (
 type Runner struct {
 	log      *slog.Logger
 	store    *backup.StatusStore
-	stateDB  *sql.DB                  // nil only if the db couldn't be opened
+	stateDB  *store.Store             // nil only if the db couldn't be opened
 	identity *identity.ServerIdentity // nil if loadServerIdentity failed at startup; see Config.Identity
 	failed   atomic.Bool
 }
 
 // NewRunner builds a Runner sharing store/stateDB/identity across every job
 // scheduled through it in this run.
-func NewRunner(log *slog.Logger, store *backup.StatusStore, stateDB *sql.DB, identity *identity.ServerIdentity) *Runner {
-	return &Runner{log: log, store: store, stateDB: stateDB, identity: identity}
+func NewRunner(log *slog.Logger, statusStore *backup.StatusStore, stateDB *store.Store, identity *identity.ServerIdentity) *Runner {
+	return &Runner{log: log, store: statusStore, stateDB: stateDB, identity: identity}
 }
 
 // Failed reports whether any job run has failed so far.
@@ -39,9 +39,9 @@ func (r *Runner) Failed() bool {
 // show when each job last ran instead of every job reverting to "never"
 // until it next runs. Called once at startup, before the jobs' own
 // goroutines start.
-func SeedStatusFromState(ctx context.Context, db *sql.DB, jobs []*backup.Config, store *backup.StatusStore, log *slog.Logger) {
+func SeedStatusFromState(ctx context.Context, db *store.Store, jobs []*config.Config, statusStore *backup.StatusStore, log *slog.Logger) {
 	for _, j := range jobs {
-		run, ok, err := backup.ReadLastRun(ctx, db, j.Name)
+		run, ok, err := db.GetLastRun(ctx, j.Name)
 		if err != nil {
 			log.Warn("reading last run from state db", "job", j.Name, "err", err)
 			continue
@@ -53,18 +53,18 @@ func SeedStatusFromState(ctx context.Context, db *sql.DB, jobs []*backup.Config,
 
 		log.Debug("seeded job status from state db", "job", j.Name, "state", run.State, "last_end", run.End)
 
-		store.SeedLastRun(j.Name, run)
+		statusStore.SeedLastRun(j.Name, run.Start, run.End, backup.RunState(run.State), run.Error, run.Size)
 	}
 
 	for _, j := range jobs {
-		targetRuns, err := backup.ReadTargetRuns(ctx, db, j.Name)
+		targetRuns, err := db.ListTargetRuns(ctx, j.Name)
 		if err != nil {
 			log.Warn("reading target runs from state db", "job", j.Name, "err", err)
 			continue
 		}
 
 		for _, tr := range targetRuns {
-			store.SeedTargetRun(j.Name, tr.Index, tr.State, tr.Error)
+			statusStore.SeedTargetRun(j.Name, tr.Index, backup.RunState(tr.State), tr.Error)
 		}
 	}
 }
@@ -77,7 +77,7 @@ func (r *Runner) lastJobSuccess(ctx context.Context, name string) time.Time {
 		return time.Time{}
 	}
 
-	t, ok, err := backup.ReadLastSuccess(ctx, r.stateDB, name)
+	t, ok, err := r.stateDB.GetLastSuccess(ctx, name)
 	if err != nil {
 		r.log.Warn("reading last success from state db", "job", name, "err", err)
 		return time.Time{}
@@ -97,7 +97,7 @@ func (r *Runner) recordJobSuccess(ctx context.Context, name string) {
 		return
 	}
 
-	if err := backup.WriteLastSuccess(ctx, r.stateDB, name, time.Now()); err != nil {
+	if err := r.stateDB.SaveLastSuccess(ctx, name, time.Now()); err != nil {
 		r.log.Warn("recording job success to state db", "job", name, "err", err)
 	}
 }
@@ -115,7 +115,7 @@ func (r *Runner) recordLastRun(ctx context.Context, name string, start time.Time
 		return
 	}
 
-	run := backup.LastRun{Start: start, End: time.Now(), State: state, Size: size}
+	run := store.LastRun{Start: start, End: time.Now(), State: string(state), Size: size}
 
 	if err != nil {
 		run.Error = err.Error()
@@ -127,7 +127,7 @@ func (r *Runner) recordLastRun(ctx context.Context, name string, start time.Time
 		run.Size = 0
 	}
 
-	if err := backup.WriteLastRun(ctx, r.stateDB, name, run); err != nil {
+	if err := r.stateDB.SaveLastRun(ctx, name, run); err != nil {
 		r.log.Warn("recording last run to state db", "job", name, "err", err)
 	}
 }
@@ -145,7 +145,7 @@ func (r *Runner) recordLastRun(ctx context.Context, name string, start time.Time
 // Every subsequent run recomputes its next slot from start-time rather than
 // accumulating +interval, so the schedule stays exactly grid-aligned
 // regardless of how long a run takes.
-func (r *Runner) Schedule(ctx context.Context, job *backup.Config) {
+func (r *Runner) Schedule(ctx context.Context, job *config.Config) {
 	log := r.log.With("job", job.Name)
 
 	if job.StartTime.IsZero() {
@@ -247,7 +247,7 @@ func nextGridTime(start time.Time, interval time.Duration, now time.Time) time.T
 // runOnce runs job a single time, resolving a fresh {time} timestamp in its
 // key first so a repeating job doesn't overwrite the same object on every
 // run, and reports the outcome to r.log.
-func (r *Runner) runOnce(ctx context.Context, job *backup.Config) {
+func (r *Runner) runOnce(ctx context.Context, job *config.Config) {
 	run := *job
 	run.Key = substituteKeyTime(job.Key)
 	run.StateDB = r.stateDB
@@ -267,6 +267,10 @@ func (r *Runner) runOnce(ctx context.Context, job *backup.Config) {
 	onTargetDone := func(index int, terr error) {
 		r.store.TargetDone(job.Name, index, terr)
 		r.persistTargetRun(ctx, job.Name, index, terr)
+
+		if terr != nil && index >= 0 && index < len(run.Targets) {
+			r.recordTargetError(ctx, job.Name, index, &run.Targets[index], terr)
+		}
 	}
 
 	bytesWritten, err := runPipeline(ctx, &run, log, onTargetDone)
@@ -281,9 +285,9 @@ func (r *Runner) runOnce(ctx context.Context, job *backup.Config) {
 		if state == backup.StateIncomplete {
 			// Some targets got the backup and some didn't — worth flagging,
 			// but distinct from (and less severe than) every target failing.
-			log.Warn("job incomplete: some targets failed", "duration", duration, "err", backup.JobError(job, err))
+			log.Warn("job incomplete: some targets failed", "duration", duration, "err", config.JobError(job, err))
 		} else {
-			log.Error("job failed", "duration", duration, "err", backup.JobError(job, err))
+			log.Error("job failed", "duration", duration, "err", config.JobError(job, err))
 		}
 
 		return
@@ -299,12 +303,10 @@ func (r *Runner) runOnce(ctx context.Context, job *backup.Config) {
 		t := &run.Targets[i]
 
 		switch t.Kind {
-		case backup.ServerKindLocal:
+		case config.ServerKindLocal:
 			log.Info("wrote target", "target", targetLabel(t), "path", backup.LocalObjectPath(&run, t))
-		case backup.ServerKindRemote:
+		case config.ServerKindRemote:
 			log.Info("uploaded target", "target", targetLabel(t), "url", RemoteObjectURL(t, run.Key))
-		case backup.ServerKindS3:
-			log.Info("uploaded target", "target", targetLabel(t), "url", fmt.Sprintf("s3://%s/%s", t.Bucket, run.Key))
 		}
 	}
 }
@@ -318,16 +320,6 @@ func (r *Runner) persistTargetRun(ctx context.Context, jobName string, index int
 		return
 	}
 
-	writeTargetRunLogged(ctx, r.stateDB, r.log, jobName, index, terr, "recording target run to state db")
-}
-
-// writeTargetRunLogged persists jobName/index's outcome (state/errText
-// derived from terr; nil means success) to db, logging any write failure
-// with msg via log rather than returning it — every target-run write is
-// best-effort, matching recordLastRun's own reasoning that a db hiccup here
-// shouldn't fail the run. Shared by Runner.persistTargetRun and
-// OutstandingUploadMonitor.processOne's retry-success path.
-func writeTargetRunLogged(ctx context.Context, db *sql.DB, log *slog.Logger, jobName string, index int, terr error, msg string) {
 	var (
 		state   backup.RunState
 		errText string
@@ -335,8 +327,23 @@ func writeTargetRunLogged(ctx context.Context, db *sql.DB, log *slog.Logger, job
 
 	backup.SetOutcome(&state, &errText, terr)
 
-	if err := backup.WriteTargetRun(ctx, db, jobName, index, state, errText, time.Now()); err != nil {
-		log.Warn(msg, "job", jobName, "target", index, "err", err)
+	if err := r.stateDB.SaveTargetRun(ctx, jobName, index, string(state), errText, time.Now()); err != nil {
+		r.log.Warn("recording target run to state db", "job", jobName, "target", index, "err", err)
+	}
+}
+
+// recordTargetError appends a target_errors row for job jobName's target at
+// index (t), best-effort: a db hiccup here shouldn't fail the run, matching
+// persistTargetRun's own reasoning. Unlike persistTargetRun's target_runs
+// write, which overwrites the target's previous outcome, this appends one
+// row per failure so a history of every occurrence is kept.
+func (r *Runner) recordTargetError(ctx context.Context, jobName string, index int, t *config.Target, targetErr error) {
+	if r.stateDB == nil {
+		return
+	}
+
+	if err := r.stateDB.SaveTargetError(ctx, jobName, index, t.ServerName, t.Bucket, time.Now(), targetErr); err != nil {
+		r.log.Warn("recording target error to state db", "job", jobName, "target", index, "err", err)
 	}
 }
 
@@ -349,9 +356,9 @@ func substituteKeyTime(key string) string {
 }
 
 // WarnIfKeyWontChange warns when a repeating job's key has no {time}
-// placeholder: every run would then overwrite the same S3 object, silently
+// placeholder: every run would then overwrite the same object, silently
 // leaving only the most recent backup instead of a history of them.
-func WarnIfKeyWontChange(log *slog.Logger, job *backup.Config) {
+func WarnIfKeyWontChange(log *slog.Logger, job *config.Config) {
 	if job.Interval <= 0 || strings.Contains(job.Key, "{time}") {
 		return
 	}
@@ -366,7 +373,7 @@ func WarnIfKeyWontChange(log *slog.Logger, job *backup.Config) {
 // to it — potentially long after files there actually expired, e.g. right
 // after go-backup-tool restarts following a period of downtime. A nil db
 // (retention tracking unavailable this run) is a no-op.
-func SweepStartupRetention(ctx context.Context, db *sql.DB, jobs []*backup.Config, log *slog.Logger) {
+func SweepStartupRetention(ctx context.Context, db *store.Store, jobs []*config.Config, log *slog.Logger) {
 	if db == nil {
 		return
 	}
@@ -376,7 +383,7 @@ func SweepStartupRetention(ctx context.Context, db *sql.DB, jobs []*backup.Confi
 	for _, j := range jobs {
 		for i := range j.Targets {
 			t := &j.Targets[i]
-			if t.Kind != backup.ServerKindLocal || t.Retention <= 0 || seen[t.LocalPath] {
+			if t.Kind != config.ServerKindLocal || t.Retention <= 0 || seen[t.LocalPath] {
 				continue
 			}
 

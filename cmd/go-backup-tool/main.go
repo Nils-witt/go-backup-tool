@@ -1,6 +1,6 @@
 // Command go-backup-tool runs a shell command, encrypts its output with gpg,
-// and streams the ciphertext to one or more targets: an S3 (or
-// S3-compatible) bucket, or a directory on the local filesystem.
+// and streams the ciphertext to one or more targets: a directory on the
+// local filesystem, or another go-backup-tool instance's receiver API.
 package main
 
 import (

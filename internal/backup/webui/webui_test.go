@@ -2,7 +2,6 @@ package webui
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +14,9 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/permission"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 // writeFile writes contents to path, failing the test on any error.
@@ -95,8 +97,8 @@ func TestHandleReceiverStatusIncludesStaleness(t *testing.T) {
 		t.Fatalf("Chtimes(%q): %v", stale, err)
 	}
 
-	receivers := map[string]backup.ResolvedReceiver{
-		"a": {ID: "a", Path: root, StaleAfter: time.Hour, Webhook: backup.ResolvedWebhook{URL: "https://example.com/hook", Method: http.MethodPost}},
+	receivers := map[string]config.ResolvedReceiver{
+		"a": {ID: "a", Path: root, StaleAfter: time.Hour, Webhook: config.ResolvedWebhook{URL: "https://example.com/hook", Method: http.MethodPost}},
 	}
 	store := backup.NewReceiverStatusStore(receivers)
 
@@ -125,8 +127,8 @@ func TestHandleReceiverStatusFreshFileIsNotStale(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "recent.gpg"), "a")
 
-	receivers := map[string]backup.ResolvedReceiver{
-		"a": {ID: "a", Path: root, StaleAfter: time.Hour, Webhook: backup.ResolvedWebhook{URL: "https://example.com/hook", Method: http.MethodPost}},
+	receivers := map[string]config.ResolvedReceiver{
+		"a": {ID: "a", Path: root, StaleAfter: time.Hour, Webhook: config.ResolvedWebhook{URL: "https://example.com/hook", Method: http.MethodPost}},
 	}
 	store := backup.NewReceiverStatusStore(receivers)
 
@@ -148,7 +150,7 @@ func TestHandleReceiverStatusFreshFileIsNotStale(t *testing.T) {
 func TestHandleReceiverStatusWithoutStaleAfterOmitsStaleness(t *testing.T) {
 	t.Parallel()
 
-	receivers := map[string]backup.ResolvedReceiver{"a": {ID: "a", Path: t.TempDir()}}
+	receivers := map[string]config.ResolvedReceiver{"a": {ID: "a", Path: t.TempDir()}}
 	store := backup.NewReceiverStatusStore(receivers)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers", nil)
@@ -242,7 +244,7 @@ func TestRequireWebUISessionAcceptsValidToken(t *testing.T) {
 	called := false
 	sessions := newTestSessionStore(t)
 
-	id, err := sessions.create("alice", backup.PermissionView|backup.PermissionDownload)
+	id, err := sessions.create("alice", permission.PermissionView|permission.PermissionDownload)
 	if err != nil {
 		t.Fatalf("sessions.create(): %v", err)
 	}
@@ -397,8 +399,8 @@ func webUIGetStatus(t *testing.T, client *http.Client, srv *Server, token, path 
 // TestStartWebUILoginLogAndDownloadLogRequireDedicatedPermission is an
 // end-to-end check, through the real mux StartWebUI wires up, that
 // /api/login-events and /api/download-events are gated on
-// backup.PermissionViewLoginLog/PermissionViewDownloadLog rather than the
-// general backup.PermissionView every other api(...) route uses — a
+// permission.PermissionViewLoginLog/PermissionViewDownloadLog rather than the
+// general permission.PermissionView every other api(...) route uses — a
 // view-only db-backed account can reach /api/status but not either log,
 // granting just the dedicated permission (without "view") is enough for
 // that one log alone, and the single config-file admin (webui.username/
@@ -411,11 +413,11 @@ func TestStartWebUILoginLogAndDownloadLogRequireDedicatedPermission(t *testing.T
 	store, _ := newTestStore()
 	db := openTestStateDB(t)
 
-	if err := backup.CreateWebUIUser(context.Background(), db, "viewer", "s3cret1", backup.PermissionView); err != nil {
+	if err := db.SaveWebUIUser(context.Background(), "viewer", "s3cret1", permission.PermissionView); err != nil {
 		t.Fatalf("CreateWebUIUser(viewer) unexpected error: %v", err)
 	}
 
-	if err := backup.CreateWebUIUser(context.Background(), db, "auditor", "s3cret2", backup.PermissionViewLoginLog); err != nil {
+	if err := db.SaveWebUIUser(context.Background(), "auditor", "s3cret2", permission.PermissionViewLoginLog); err != nil {
 		t.Fatalf("CreateWebUIUser(auditor) unexpected error: %v", err)
 	}
 
@@ -463,7 +465,7 @@ func TestHandleReceiverFilesServesJSON(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "backup.gpg"), "data")
 
-	receivers := map[string]backup.ResolvedReceiver{"a": {ID: "a", Path: root}}
+	receivers := map[string]config.ResolvedReceiver{"a": {ID: "a", Path: root}}
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/files", nil)
 	req.SetPathValue("id", "a")
@@ -494,7 +496,7 @@ func TestHandleReceiverFilesUnknownID(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleReceiverFiles(map[string]backup.ResolvedReceiver{}, discardLogger)(rec, req)
+	handleReceiverFiles(map[string]config.ResolvedReceiver{}, discardLogger)(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
@@ -520,7 +522,7 @@ func TestHandleDownloadFileServesContent(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "backup.gpg"), "secret data")
 
-	receivers := map[string]backup.ResolvedReceiver{"a": {ID: "a", Path: root}}
+	receivers := map[string]config.ResolvedReceiver{"a": {ID: "a", Path: root}}
 
 	tickets := newDownloadTicketStore()
 
@@ -556,7 +558,7 @@ func TestHandleDownloadFileRejectsMissingTicket(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "backup.gpg"), "secret data")
 
-	receivers := map[string]backup.ResolvedReceiver{"a": {ID: "a", Path: root}}
+	receivers := map[string]config.ResolvedReceiver{"a": {ID: "a", Path: root}}
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/backup.gpg", nil)
 	req.SetPathValue("id", "a")
@@ -688,7 +690,7 @@ func TestHandleAPILogoutRevokesSession(t *testing.T) {
 
 	sessions := newTestSessionStore(t)
 
-	id, err := sessions.create("alice", backup.PermissionView|backup.PermissionDownload)
+	id, err := sessions.create("alice", permission.PermissionView|permission.PermissionDownload)
 	if err != nil {
 		t.Fatalf("sessions.create(): %v", err)
 	}
@@ -715,7 +717,7 @@ func TestHandleIssueWebUIUserTokenRecordsToken(t *testing.T) {
 	db := openTestStateDB(t)
 	ctx := t.Context()
 
-	if err := backup.CreateWebUIUser(ctx, db, "alice", "hunter2", backup.PermissionView); err != nil {
+	if err := db.SaveWebUIUser(ctx, "alice", "hunter2", permission.PermissionView); err != nil {
 		t.Fatalf("CreateWebUIUser(): %v", err)
 	}
 
@@ -744,7 +746,7 @@ func TestHandleIssueWebUIUserTokenRecordsToken(t *testing.T) {
 		t.Fatal("issued token is missing or not a valid session")
 	}
 
-	tokens, err := backup.ListAPITokensForUser(ctx, db, "alice")
+	tokens, err := db.ListAPITokensForUser(ctx, "alice")
 	if err != nil {
 		t.Fatalf("ListAPITokensForUser(): %v", err)
 	}
@@ -764,7 +766,7 @@ func TestHandleListWebUIUserTokens(t *testing.T) {
 	db := openTestStateDB(t)
 	ctx := t.Context()
 
-	if err := backup.CreateWebUIUser(ctx, db, "alice", "hunter2", backup.PermissionView); err != nil {
+	if err := db.SaveWebUIUser(ctx, "alice", "hunter2", permission.PermissionView); err != nil {
 		t.Fatalf("CreateWebUIUser(): %v", err)
 	}
 
@@ -824,7 +826,7 @@ func TestHandleRevokeWebUIUserTokenBlocksSessionAndIsIdempotent(t *testing.T) {
 
 	db := openTestStateDB(t)
 
-	if err := backup.CreateWebUIUser(t.Context(), db, "alice", "hunter2", backup.PermissionView); err != nil {
+	if err := db.SaveWebUIUser(t.Context(), "alice", "hunter2", permission.PermissionView); err != nil {
 		t.Fatalf("CreateWebUIUser(): %v", err)
 	}
 
@@ -853,7 +855,7 @@ func TestHandleRevokeWebUIUserTokenBlocksSessionAndIsIdempotent(t *testing.T) {
 // issueWebUIUserTokenForAlice issues alice a 30-day API token through
 // handleIssueWebUIUserToken, requires success and that the token validates,
 // and returns the decoded response.
-func issueWebUIUserTokenForAlice(t *testing.T, sessions *sessionStore, db *sql.DB) loginResponseJSON {
+func issueWebUIUserTokenForAlice(t *testing.T, sessions *sessionStore, db *store.Store) loginResponseJSON {
 	t.Helper()
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/users/alice/tokens", strings.NewReader(`{"days":30}`))
@@ -880,10 +882,10 @@ func issueWebUIUserTokenForAlice(t *testing.T, sessions *sessionStore, db *sql.D
 
 // requireOnlyAPITokenJTI requires exactly one API token recorded for
 // username and returns its JTI.
-func requireOnlyAPITokenJTI(t *testing.T, db *sql.DB, username string) string {
+func requireOnlyAPITokenJTI(t *testing.T, db *store.Store, username string) string {
 	t.Helper()
 
-	tokens, err := backup.ListAPITokensForUser(t.Context(), db, username)
+	tokens, err := db.ListAPITokensForUser(t.Context(), username)
 	if err != nil || len(tokens) != 1 {
 		t.Fatalf("ListAPITokensForUser() = %+v, %v, want exactly one token", tokens, err)
 	}
@@ -894,7 +896,7 @@ func requireOnlyAPITokenJTI(t *testing.T, db *sql.DB, username string) string {
 // requireRevokeUnderWrongUsernameHasNoEffect attempts to revoke jti as bob
 // (not its owner) and requires the request to be rejected without revoking
 // anything.
-func requireRevokeUnderWrongUsernameHasNoEffect(t *testing.T, sessions *sessionStore, db *sql.DB, jti, token string) {
+func requireRevokeUnderWrongUsernameHasNoEffect(t *testing.T, sessions *sessionStore, db *store.Store, jti, token string) {
 	t.Helper()
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/api/users/bob/tokens/"+jti, nil)
@@ -917,7 +919,7 @@ func requireRevokeUnderWrongUsernameHasNoEffect(t *testing.T, sessions *sessionS
 	// either way. What must not have happened is the persistent record
 	// itself being marked revoked, since that's what a later restart would
 	// reload (see TestSessionStoreReloadsRevokedAPITokensAfterRestart).
-	if stored, ok, err := backup.GetAPIToken(t.Context(), db, jti); err != nil || !ok || stored.RevokedAt != nil {
+	if stored, ok, err := db.GetAPIToken(t.Context(), jti); err != nil || !ok || stored.RevokedAt != nil {
 		t.Errorf("GetAPIToken() after a wrong-username revoke attempt = (%+v, %v, %v), want a still-unrevoked token", stored, ok, err)
 	}
 }
@@ -925,7 +927,7 @@ func requireRevokeUnderWrongUsernameHasNoEffect(t *testing.T, sessions *sessionS
 // revokeWebUIUserToken issues a DELETE for username's jti through
 // handleRevokeWebUIUserToken and requires the response status to be
 // wantStatus.
-func revokeWebUIUserToken(t *testing.T, sessions *sessionStore, db *sql.DB, username, jti string, wantStatus int) {
+func revokeWebUIUserToken(t *testing.T, sessions *sessionStore, db *store.Store, username, jti string, wantStatus int) {
 	t.Helper()
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/api/users/"+username+"/tokens/"+jti, nil)
@@ -959,14 +961,14 @@ func TestSessionStoreReloadsRevokedAPITokensAfterRestart(t *testing.T) {
 		t.Fatalf("newSessionStore(): %v", err)
 	}
 
-	token, jti, err := before.createWithTTL("alice", backup.PermissionView, time.Hour)
+	token, jti, err := before.createWithTTL("alice", permission.PermissionView, time.Hour)
 	if err != nil {
 		t.Fatalf("createWithTTL(): %v", err)
 	}
 
 	now := time.Now()
 
-	if err := backup.RecordAPIToken(ctx, db, jti, "alice", backup.PermissionView, now, now.Add(time.Hour)); err != nil {
+	if err := db.SaveAPIToken(ctx, jti, "alice", permission.PermissionView, now, now.Add(time.Hour)); err != nil {
 		t.Fatalf("RecordAPIToken(): %v", err)
 	}
 
@@ -974,7 +976,7 @@ func TestSessionStoreReloadsRevokedAPITokensAfterRestart(t *testing.T) {
 		t.Fatal("token isn't valid before revocation")
 	}
 
-	revoked, err := backup.RevokeAPIToken(ctx, db, jti, now)
+	revoked, err := db.RevokeAPIToken(ctx, jti, now)
 	if err != nil {
 		t.Fatalf("RevokeAPIToken(): %v", err)
 	}
@@ -1166,7 +1168,7 @@ func TestHandleWebUILoginRecordsLoginEvents(t *testing.T) {
 
 	handleWebUILogin("admin", "secret", false, sessions, db, discardLogger, false)(rec, req)
 
-	events, err := backup.ReadLoginEvents(t.Context(), db, 10)
+	events, err := db.ListLoginEvents(t.Context(), 10)
 	if err != nil {
 		t.Fatalf("readLoginEvents() error: %v", err)
 	}
@@ -1200,7 +1202,7 @@ func TestHandleWebUILoginWithTrustProxyHeadersRecordsForwardedAddr(t *testing.T)
 
 	handleWebUILogin("admin", "secret", false, sessions, db, discardLogger, true)(rec, req)
 
-	events, err := backup.ReadLoginEvents(t.Context(), db, 10)
+	events, err := db.ListLoginEvents(t.Context(), 10)
 	if err != nil {
 		t.Fatalf("readLoginEvents() error: %v", err)
 	}
@@ -1215,7 +1217,7 @@ func TestHandleLoginEventsServesJSON(t *testing.T) {
 
 	db := openTestStateDB(t)
 
-	if err := backup.RecordLoginEvent(t.Context(), db, backup.LoginEvent{At: time.Now(), Username: "admin", Method: "password", Success: true, RemoteAddr: "127.0.0.1:1"}); err != nil {
+	if err := db.SaveLoginEvent(t.Context(), store.LoginEvent{At: time.Now(), Username: "admin", Method: "password", Success: true, RemoteAddr: "127.0.0.1:1"}); err != nil {
 		t.Fatalf("recordLoginEvent() error: %v", err)
 	}
 
@@ -1270,7 +1272,7 @@ func TestHandleDownloadFileRecordsDownloadEvents(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "backup.gpg"), "secret data")
 
-	receivers := map[string]backup.ResolvedReceiver{"a": {ID: "a", Path: root}}
+	receivers := map[string]config.ResolvedReceiver{"a": {ID: "a", Path: root}}
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/backup.gpg?ticket="+ticket, nil)
 	req.SetPathValue("id", "a")
@@ -1297,7 +1299,7 @@ func TestHandleDownloadFileRecordsDownloadEvents(t *testing.T) {
 
 	handleDownloadFile(receivers, discardLogger, db, tickets, false)(httptest.NewRecorder(), req)
 
-	events, err := backup.ReadDownloadEvents(t.Context(), db, 10)
+	events, err := db.ListDownloadEvents(t.Context(), 10)
 	if err != nil {
 		t.Fatalf("readDownloadEvents() error: %v", err)
 	}
@@ -1320,7 +1322,7 @@ func TestHandleDownloadEventsServesJSON(t *testing.T) {
 
 	db := openTestStateDB(t)
 
-	if err := backup.RecordDownloadEvent(t.Context(), db, backup.DownloadEvent{At: time.Now(), Username: "admin", ReceiverID: "a", Key: "backup.gpg", Success: true, RemoteAddr: "127.0.0.1:1"}); err != nil {
+	if err := db.SaveDownloadEvent(t.Context(), store.DownloadEvent{At: time.Now(), Username: "admin", ReceiverID: "a", Key: "backup.gpg", Success: true, RemoteAddr: "127.0.0.1:1"}); err != nil {
 		t.Fatalf("recordDownloadEvent() error: %v", err)
 	}
 

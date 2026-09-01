@@ -7,7 +7,5 @@ package config
 const (
 	DefaultConfigPath = "config.yaml"
 	DefaultKeyPattern = "backup-{time}.gpg"
-	DefaultRegion     = "us-east-1"
 	DefaultGPGBin     = "gpg"
-	DefaultRetries    = 3
 )

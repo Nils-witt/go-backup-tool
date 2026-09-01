@@ -9,7 +9,6 @@ package receiver
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -18,17 +17,19 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
-// SeedReceiverStatusFromState initializes store's receivers from each one's
-// most recently persisted receiver_events row (see
-// backup.ReadLastReceiverEvent), so a restart's web UI can still show a
+// SeedReceiverStatusFromState initializes statusStore's receivers from each
+// one's most recently persisted receiver_events row (see the store
+// package's GetLastReceiverEvent), so a restart's web UI can still show a
 // receiver's last activity instead of every receiver reverting to idle
 // until it next serves a request. Called once at startup, before the
 // receiver API's handlers can serve any request.
-func SeedReceiverStatusFromState(ctx context.Context, db *sql.DB, receivers map[string]backup.ResolvedReceiver, store *backup.ReceiverStatusStore, log *slog.Logger) {
+func SeedReceiverStatusFromState(ctx context.Context, db *store.Store, receivers map[string]config.ResolvedReceiver, statusStore *backup.ReceiverStatusStore, log *slog.Logger) {
 	for id := range receivers {
-		ev, ok, err := backup.ReadLastReceiverEvent(ctx, db, id)
+		ev, ok, err := db.GetLastReceiverEvent(ctx, id)
 		if err != nil {
 			log.Warn("reading last receiver event from state db", "id", id, "err", err)
 			continue
@@ -38,7 +39,7 @@ func SeedReceiverStatusFromState(ctx context.Context, db *sql.DB, receivers map[
 			continue
 		}
 
-		store.SeedLastEvent(id, ev)
+		statusStore.SeedLastEvent(id, ev.Key, ev.At, ev.Success, ev.Error)
 	}
 }
 
@@ -49,17 +50,17 @@ func SeedReceiverStatusFromState(ctx context.Context, db *sql.DB, receivers map[
 // matching every other state-db write; a write failure is logged rather
 // than returned, since it shouldn't affect the response the request already
 // committed to.
-func recordReceiverEventBestEffort(ctx context.Context, db *sql.DB, log *slog.Logger, receiverID, kind, key string, size int64, recvErr error) {
+func recordReceiverEventBestEffort(ctx context.Context, db *store.Store, log *slog.Logger, receiverID, kind, key string, size int64, recvErr error) {
 	if db == nil {
 		return
 	}
 
-	ev := backup.ReceiverEvent{At: time.Now(), ReceiverID: receiverID, Kind: kind, Key: key, Size: size, Success: recvErr == nil}
+	ev := store.ReceiverEvent{At: time.Now(), ReceiverID: receiverID, Kind: kind, Key: key, Size: size, Success: recvErr == nil}
 	if recvErr != nil {
 		ev.Error = recvErr.Error()
 	}
 
-	if err := backup.RecordReceiverEvent(ctx, db, ev); err != nil {
+	if err := db.SaveReceiverEvent(ctx, ev); err != nil {
 		log.Warn("receiver: recording event failed", "id", receiverID, "err", err)
 	}
 }
@@ -70,7 +71,7 @@ func recordReceiverEventBestEffort(ctx context.Context, db *sql.DB, log *slog.Lo
 // without this, a receiver would only get swept whenever it next happens to
 // receive a write, potentially long after files there actually expired. A
 // nil db (retention tracking unavailable this run) is a no-op.
-func SweepStartupReceiverRetention(ctx context.Context, db *sql.DB, receivers map[string]backup.ResolvedReceiver, log *slog.Logger) {
+func SweepStartupReceiverRetention(ctx context.Context, db *store.Store, receivers map[string]config.ResolvedReceiver, log *slog.Logger) {
 	if db == nil {
 		return
 	}
@@ -122,7 +123,7 @@ func newStaleReceiverMonitor() *staleReceiverMonitor {
 // alerting already watches for a receiver that should have received its
 // first file by now. A recv.StaleAfter <= 0 (the monitor disabled for this
 // receiver) is also a no-op.
-func (m *staleReceiverMonitor) check(recv backup.ResolvedReceiver, log *slog.Logger) {
+func (m *staleReceiverMonitor) check(recv config.ResolvedReceiver, log *slog.Logger) {
 	if recv.StaleAfter <= 0 {
 		return
 	}
@@ -165,7 +166,7 @@ const defaultStaleWebhookContentType = "application/json"
 // staleWebhookBody builds the request body sent to recv.Webhook: recv's
 // webhook.body: template (see renderStaleWebhookPayload), if set, otherwise
 // the default JSON staleReceiverPayload.
-func staleWebhookBody(recv backup.ResolvedReceiver, lastSeen time.Time) ([]byte, error) {
+func staleWebhookBody(recv config.ResolvedReceiver, lastSeen time.Time) ([]byte, error) {
 	if recv.Webhook.Body != "" {
 		return []byte(renderStaleWebhookPayload(recv.Webhook.Body, recv, lastSeen)), nil
 	}
@@ -184,7 +185,7 @@ func staleWebhookBody(recv backup.ResolvedReceiver, lastSeen time.Time) ([]byte,
 // an operator's webhook receiver (Slack, PagerDuty, a custom endpoint
 // expecting its own JSON/form shape, ...) get a body it already understands
 // instead of go-backup-tool's own default shape.
-func renderStaleWebhookPayload(tmpl string, recv backup.ResolvedReceiver, lastSeen time.Time) string {
+func renderStaleWebhookPayload(tmpl string, recv config.ResolvedReceiver, lastSeen time.Time) string {
 	replacer := strings.NewReplacer(
 		"{receiver_id}", recv.ID,
 		"{path}", recv.Path,
@@ -201,7 +202,7 @@ func renderStaleWebhookPayload(tmpl string, recv backup.ResolvedReceiver, lastSe
 // caller to report it to — MonitorStaleReceivers already marked this gap as
 // notified before calling this, so a failed delivery isn't retried until the
 // gap clears and reopens.
-func notifyStaleReceiverWebhook(recv backup.ResolvedReceiver, lastSeen time.Time, log *slog.Logger) {
+func notifyStaleReceiverWebhook(recv config.ResolvedReceiver, lastSeen time.Time, log *slog.Logger) {
 	body, err := staleWebhookBody(recv, lastSeen)
 	if err != nil {
 		log.Warn("stale receiver webhook: encoding payload failed", "id", recv.ID, "err", err)
@@ -255,7 +256,7 @@ var staleWebhookHTTPClient = &http.Client{Timeout: staleWebhookTimeout}
 // once per gap (see staleReceiverMonitor), not on every check, so a sender
 // that stays down doesn't spam the webhook indefinitely. A no-op if no
 // receiver has stale-after: set.
-func MonitorStaleReceivers(ctx context.Context, receivers map[string]backup.ResolvedReceiver, log *slog.Logger) {
+func MonitorStaleReceivers(ctx context.Context, receivers map[string]config.ResolvedReceiver, log *slog.Logger) {
 	if !anyReceiverHasStaleAfter(receivers) {
 		return
 	}
@@ -273,7 +274,7 @@ func MonitorStaleReceivers(ctx context.Context, receivers map[string]backup.Reso
 
 // anyReceiverHasStaleAfter reports whether any entry in receivers has
 // stale-after: set, i.e. whether MonitorStaleReceivers has anything to do.
-func anyReceiverHasStaleAfter(receivers map[string]backup.ResolvedReceiver) bool {
+func anyReceiverHasStaleAfter(receivers map[string]config.ResolvedReceiver) bool {
 	for _, recv := range receivers {
 		if recv.StaleAfter > 0 {
 			return true

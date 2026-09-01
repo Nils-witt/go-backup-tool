@@ -5,7 +5,6 @@ package app
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"flag"
 	"io"
@@ -18,8 +17,10 @@ import (
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 	"nilswitt.dev/go-backup-tool/internal/backup/webui"
 	"nilswitt.dev/go-backup-tool/internal/version"
 )
@@ -28,7 +29,7 @@ func newLogger(w io.Writer, level slog.Level) *slog.Logger {
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
 }
 
-func newRunLogger(stderr io.Writer, rc *backup.RunConfig) (*slog.Logger, *webui.LogRingBuffer) {
+func newRunLogger(stderr io.Writer, rc *config.RunConfig) (*slog.Logger, *webui.LogRingBuffer) {
 	if rc.Listen == "" || !rc.LogViewer {
 		return newLogger(stderr, rc.LogLevel), nil
 	}
@@ -70,7 +71,7 @@ func Run(args []string, stderr io.Writer) int {
 // with the stale-receiver webhook monitor (see
 // receiver.MonitorStaleReceivers). It returns nil, doing nothing else, when
 // rc.Listen is unset.
-func startWebUIIfConfigured(ctx context.Context, rc *backup.RunConfig, store *backup.StatusStore, stateDB *sql.DB, logs *webui.LogRingBuffer, serverIdentity *identity.ServerIdentity, log *slog.Logger) *webui.Server {
+func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, statusStore *backup.StatusStore, stateDB *store.Store, logs *webui.LogRingBuffer, serverIdentity *identity.ServerIdentity, log *slog.Logger) *webui.Server {
 	if rc.Listen == "" {
 		return nil
 	}
@@ -87,7 +88,7 @@ func startWebUIIfConfigured(ctx context.Context, rc *backup.RunConfig, store *ba
 	receiver.SweepStartupReceiverRetention(ctx, stateDB, rc.Receivers, log)
 
 	oAuth := webui.SetupOIDCAuth(ctx, rc.OIDC, log)
-	srv := webui.StartWebUI(rc.Listen, store, rc.Receivers, receiverStore, log, stateDB, logs, rc.WebUIUsername, rc.WebUIPassword, oAuth, serverIdentity, rc.TrustProxyHeaders, func(mux *http.ServeMux) {
+	srv := webui.StartWebUI(rc.Listen, statusStore, rc.Receivers, receiverStore, log, stateDB, logs, rc.WebUIUsername, rc.WebUIPassword, oAuth, serverIdentity, rc.TrustProxyHeaders, func(mux *http.ServeMux) {
 		receiver.RegisterRoutes(mux, rc.Receivers, receiverStore, log, stateDB)
 	})
 
@@ -102,7 +103,7 @@ func startWebUIIfConfigured(ctx context.Context, rc *backup.RunConfig, store *ba
 // Manager stop/shutdown requests, which — unlike Ctrl-C/SIGTERM — aren't
 // delivered to a service process the normal OS-signal way.
 func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
-	rc, err := backup.ParseFlags(args, stderr)
+	rc, err := config.ParseFlags(args, stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -135,16 +136,14 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		log.Debug("run timeout set", "timeout", rc.Timeout)
 	}
 
-	var stateDB *sql.DB
+	var stateDB *store.Store
 
-	// Always opened: besides catch-up scheduling, the web UI, and retention
-	// tracking, it now also backs the outstanding-uploads retry queue (see
-	// uploadretry.go), which every run needs regardless of those other
-	// features — a target upload failure with no state db to queue it in
-	// would otherwise be retried immediately or not at all.
-	path := backup.ScheduleStateDBPath(rc.ConfigPath)
+	// Always opened: backs catch-up scheduling, the web UI, retention
+	// tracking, and the target-error log, which every run needs regardless
+	// of those other features.
+	path := store.StateDBPath(rc.ConfigPath)
 
-	db, err := backup.OpenScheduleStateDB(ctx, path)
+	db, err := store.Open(ctx, path)
 	if err != nil {
 		log.Warn("opening job state db", "path", path, "err", err)
 	} else {
@@ -156,31 +155,20 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 
 	pipeline.SweepStartupRetention(ctx, stateDB, rc.Jobs, log)
 
-	store := backup.NewStatusStore(rc.Jobs)
+	statusStore := backup.NewStatusStore(rc.Jobs)
 
 	if stateDB != nil {
-		pipeline.SeedStatusFromState(ctx, stateDB, rc.Jobs, store, log)
+		pipeline.SeedStatusFromState(ctx, stateDB, rc.Jobs, statusStore, log)
 	}
 
-	r := pipeline.NewRunner(log, store, stateDB, serverIdentity)
-
-	if stateDB != nil {
-		jobsByName := make(map[string]*backup.Config, len(rc.Jobs))
-		for _, j := range rc.Jobs {
-			jobsByName[j.Name] = j
-		}
-
-		monitor := pipeline.NewOutstandingUploadMonitor(stateDB, jobsByName, store, serverIdentity, log)
-
-		go monitor.Run(ctx)
-	}
+	r := pipeline.NewRunner(log, statusStore, stateDB, serverIdentity)
 
 	// Independent of the web UI: a daily report is useful for anyone
 	// monitoring receivers by inbox, not just those watching the dashboard.
 	// RunReportLoop itself no-ops when report.enabled isn't set.
 	go pipeline.RunReportLoop(ctx, rc, stateDB, log)
 
-	srv := startWebUIIfConfigured(ctx, rc, store, stateDB, logs, serverIdentity, log)
+	srv := startWebUIIfConfigured(ctx, rc, statusStore, stateDB, logs, serverIdentity, log)
 
 	var wg sync.WaitGroup
 

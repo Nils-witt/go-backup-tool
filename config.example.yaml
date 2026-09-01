@@ -20,26 +20,23 @@
 # This is Windows-only; on other platforms -service isn't a recognized flag.
 #
 # Every server go-backup-tool can upload to is defined once, by name, under
-# servers:. Jobs never set region/endpoint/path-style/path themselves — a
-# job's targets: list just names which server(s) to upload to and which
-# bucket to use on each, so the same server definition can be reused across
-# many jobs.
+# servers:. Jobs never set endpoint/path themselves — a job's targets: list
+# just names which server(s) to upload to and which bucket to use on each,
+# so the same server definition can be reused across many jobs.
 #
-# type: selects the destination kind: "s3" (the default, so it can be
-# omitted) for an S3 (or S3-compatible) bucket, "local" for a directory
-# on the local filesystem (e.g. a mounted NFS share, external disk, or
-# another backup tool's watched directory), or "remote" for another
+# type: selects the destination kind (required; there is no default): "local"
+# for a directory on the local filesystem (e.g. a mounted NFS share, external
+# disk, or another backup tool's watched directory), or "remote" for another
 # go-backup-tool instance's receiver API (see receivers: below). A local
 # server only needs path; a target's bucket is still required and is used
 # as a subdirectory under it, so the object ends up at path/bucket/key. A
 # remote server only needs endpoint; a target's bucket is still required
 # and is sent as the id identifying which of the destination instance's
-# receivers: entries to write to. Unlike a local or S3 server, a remote
-# server needs no auth field of its own: every go-backup-tool instance
-# generates its own persistent RSA key pair and UUID on first run (under
-# ./data/keys, next to this file) and signs each request to a remote
-# server with it; see receivers: below for how the destination instance
-# is told to trust it.
+# receivers: entries to write to. Unlike a local server, a remote server
+# needs no auth field of its own: every go-backup-tool instance generates
+# its own persistent RSA key pair and UUID on first run (under ./data/keys,
+# next to this file) and signs each request to a remote server with it; see
+# receivers: below for how the destination instance is told to trust it.
 #
 # A local server may also set retention: (e.g. "7d" for 7 days, "168h",
 # "90m" for 90 minutes — "d" for days works alongside every unit Go's
@@ -59,25 +56,8 @@
 # different retention windows (see the "uploads" job's nas target below).
 # Leave it unset to keep the server's retention: unchanged.
 servers:
-  - name: primary
-    region: us-east-1
-    # endpoint: "" # e.g. https://minio.example.com for a self-hosted S3 server
-    # path-style: false
-    # Static credentials for this server, read from the named environment
-    # variables at startup (never written in this file, same as
-    # GPG_PASSPHRASE below). Omit both to fall back to the AWS SDK's default
-    # credential chain (env vars, shared config file, IAM role, ...).
-    # access-key-env: PRIMARY_S3_ACCESS_KEY
-    # secret-key-env: PRIMARY_S3_SECRET_KEY
-  - name: offsite
-    region: us-east-1
-    endpoint: "https://minio.example.com"
-    path-style: true
-    access-key-env: OFFSITE_S3_ACCESS_KEY
-    secret-key-env: OFFSITE_S3_SECRET_KEY
   - name: nas
     type: local
-
     path: /mnt/backups
     retention: 7d # delete objects here once they're older than 7 days
   - name: sibling-instance
@@ -100,21 +80,15 @@ servers:
 # A job's backup is encrypted and written to a local staging file (see
 # staging-dir below) before any target upload starts, so a failed source
 # command or gpg never reaches a target, and each target then uploads from
-# that same stable file independently. If a target's upload fails, only that
-# target is retried: its first attempt happens immediately as part of the
-# run, and (retries: how many attempts total, default 3) further attempts
-# happen roughly once a minute afterward, persisted so they survive a
-# restart — a target retrying never re-runs the backup command or gpg, and
-# never affects any other target's own attempts or retries. The staged file
-# itself is kept on disk until every target has either succeeded or
-# permanently given up on it.
+# that same stable file independently. Each target gets exactly one upload
+# attempt; a target whose upload fails is not retried, and that failure is
+# permanent for the run — it never affects any other target's own attempt.
 #
 # staging-dir: "" # directory the encrypted backup is staged to before
 # uploading; empty (the default) uses the OS temp directory. Set this if
 # the default temp filesystem is too small or too slow for your backups'
 # size (e.g. point it at the same volume a large local target already
 # lives on).
-# retries: 3
 
 # gpg-bin and gpg-homedir are almost always set here, at the top level,
 # rather than per job: they describe where gpg lives on this machine, not
@@ -228,7 +202,7 @@ jobs:
     cmd: "mysqldump --single-transaction mydb | gzip"
     key: "db-{time}.gpg"
     targets:
-      - server: primary
+      - server: nas
         bucket: my-backup-bucket
     recipients:
       - me@example.com
@@ -260,10 +234,6 @@ jobs:
     # naming which of the destination instance's receivers: entries to
     # write to.
     targets:
-      - server: primary
-        bucket: my-backup-bucket
-      - server: offsite
-        bucket: my-backup-bucket-offsite
       - server: nas
         bucket: my-backup-bucket-local
         retention: 30d # overrides nas's own 7d retention: for this job only
@@ -349,8 +319,7 @@ jobs:
 #     # together with username; omit all three to send unauthenticated (e.g.
 #     # a trusted local relay). password writes the credential directly in
 #     # this file; password-env instead names an environment variable to
-#     # read it from, same as a server's access-key-env/secret-key-env
-#     # above.
+#     # read it from, same as GPG_PASSPHRASE above.
 #     password: "app-password-here"
 #     # password-env: SMTP_PASSWORD
 #     # security selects the connection's encryption: "starttls" (the

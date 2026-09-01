@@ -3,7 +3,6 @@ package pipeline
 import (
 	"context"
 	"crypto/tls"
-	"database/sql"
 	"fmt"
 	"log/slog"
 	"net"
@@ -13,6 +12,9 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/report"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 // RunReportLoop sends rc's receiver report on rc.Report's configured cron
@@ -20,7 +22,7 @@ import (
 // the report isn't enabled. db may be nil (the state db couldn't be opened
 // at startup); the report is still sent, just without any receiver_events
 // history (see buildReport).
-func RunReportLoop(ctx context.Context, rc *backup.RunConfig, db *sql.DB, log *slog.Logger) {
+func RunReportLoop(ctx context.Context, rc *config.RunConfig, db *store.Store, log *slog.Logger) {
 	if !rc.Report.Enabled {
 		return
 	}
@@ -70,7 +72,7 @@ type staleReceiverLine struct {
 type reportContent struct {
 	start, end time.Time
 	receivers  []receiverReportLine
-	errors     []backup.ReceiverErrorEvent
+	errors     []store.ReceiverErrorEvent
 	stale      []staleReceiverLine
 }
 
@@ -82,7 +84,7 @@ type reportContent struct {
 // logged and leaves that section empty rather than failing the whole
 // report — a partial report is better than none, matching this codebase's
 // usual failure handling.
-func buildReport(ctx context.Context, rc *backup.RunConfig, db *sql.DB, start, end time.Time, log *slog.Logger) reportContent {
+func buildReport(ctx context.Context, rc *config.RunConfig, db *store.Store, start, end time.Time, log *slog.Logger) reportContent {
 	report := reportContent{start: start, end: end}
 
 	ids := make([]string, 0, len(rc.Receivers))
@@ -92,10 +94,10 @@ func buildReport(ctx context.Context, rc *backup.RunConfig, db *sql.DB, start, e
 
 	sort.Strings(ids)
 
-	byID := make(map[string]backup.ReceiverDaySummary, len(ids))
+	byID := make(map[string]store.ReceiverDaySummary, len(ids))
 
 	if db != nil {
-		summaries, err := backup.SummarizeReceiverEvents(ctx, db, start, end)
+		summaries, err := db.SummarizeReceiverEvents(ctx, start, end)
 		if err != nil {
 			log.Warn("daily report: summarizing receiver events failed", "err", err)
 		}
@@ -104,7 +106,7 @@ func buildReport(ctx context.Context, rc *backup.RunConfig, db *sql.DB, start, e
 			byID[s.ReceiverID] = s
 		}
 
-		errs, err := backup.ReadReceiverErrorEvents(ctx, db, start, end)
+		errs, err := db.ListReceiverErrorEvents(ctx, start, end)
 		if err != nil {
 			log.Warn("daily report: reading receiver error events failed", "err", err)
 		} else {
@@ -203,7 +205,7 @@ const reportSMTPTimeout = 30 * time.Second
 // stale-receiver webhook, a delivery problem here shouldn't affect anything
 // else this process is doing, and there's no caller to report it to — the
 // next scheduled report gets another chance.
-func sendReport(ctx context.Context, rc *backup.RunConfig, db *sql.DB, start, end time.Time, log *slog.Logger) {
+func sendReport(ctx context.Context, rc *config.RunConfig, db *store.Store, start, end time.Time, log *slog.Logger) {
 	report := buildReport(ctx, rc, db, start, end, log)
 
 	subject := "go-backup-tool report - " + end.Format("2006-01-02 15:04")
@@ -226,7 +228,7 @@ func sendReport(ctx context.Context, rc *backup.RunConfig, db *sql.DB, start, en
 // deadline (see reportSMTPTimeout) is applied directly to the underlying
 // connection, since net/smtp's own operations aren't otherwise
 // context-aware.
-func dialSMTP(ctx context.Context, cfg backup.SMTPSettings) (*smtp.Client, error) {
+func dialSMTP(ctx context.Context, cfg report.SMTPSettings) (*smtp.Client, error) {
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 
 	rawConn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
@@ -240,7 +242,7 @@ func dialSMTP(ctx context.Context, cfg backup.SMTPSettings) (*smtp.Client, error
 
 	var conn net.Conn
 
-	if cfg.Security == backup.SMTPSecurityTLS {
+	if cfg.Security == report.SMTPSecurityTLS {
 		conn = tls.Client(rawConn, &tls.Config{ServerName: cfg.Host})
 	} else {
 		conn = rawConn
@@ -252,7 +254,7 @@ func dialSMTP(ctx context.Context, cfg backup.SMTPSettings) (*smtp.Client, error
 		return nil, fmt.Errorf("initializing smtp client: %w", err)
 	}
 
-	if cfg.Security != backup.SMTPSecurityStartTLS {
+	if cfg.Security != report.SMTPSecurityStartTLS {
 		return client, nil
 	}
 
@@ -268,7 +270,7 @@ func dialSMTP(ctx context.Context, cfg backup.SMTPSettings) (*smtp.Client, error
 
 // sendMail sends a plain-text email from sender to every address in
 // recipients, via cfg.
-func sendMail(ctx context.Context, cfg backup.SMTPSettings, sender string, recipients []string, subject, body string) error {
+func sendMail(ctx context.Context, cfg report.SMTPSettings, sender string, recipients []string, subject, body string) error {
 	client, err := dialSMTP(ctx, cfg)
 	if err != nil {
 		return err

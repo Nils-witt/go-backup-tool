@@ -1,4 +1,7 @@
-package backup
+// Package permission defines the web UI dashboard's session permission
+// bitmask (view/download/admin/login-log/download-log) and its config-file
+// and admin-API name parsing.
+package permission
 
 import (
 	"fmt"

@@ -16,7 +16,9 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
-	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/report"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 // writeFile writes contents to path, failing the test on any error.
@@ -69,9 +71,9 @@ func TestBuildReportSummarizesReceiverEvents(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	db, err := backup.OpenScheduleStateDB(ctx, filepath.Join(dir, "state.db"))
+	db, err := store.Open(ctx, filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("OpenScheduleStateDB() error: %v", err)
+		t.Fatalf("store.Open() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = db.Close() })
@@ -81,21 +83,21 @@ func TestBuildReportSummarizesReceiverEvents(t *testing.T) {
 	inWindow := end.Add(-time.Hour)
 	outOfWindow := end.Add(-25 * time.Hour) // just outside the window
 
-	events := []backup.ReceiverEvent{
-		{At: inWindow, ReceiverID: "recv-a", Kind: backup.ReceiverEventReceive, Key: "a1.gpg", Size: 100, Success: true},
-		{At: inWindow, ReceiverID: "recv-a", Kind: backup.ReceiverEventReceive, Key: "a2.gpg", Size: 200, Success: true},
-		{At: inWindow, ReceiverID: "recv-a", Kind: backup.ReceiverEventReceive, Key: "a3.gpg", Success: false, Error: "disk full"},
-		{At: inWindow, ReceiverID: "recv-b", Kind: backup.ReceiverEventDelete, Key: "b1.gpg", Success: true},
-		{At: outOfWindow, ReceiverID: "recv-a", Kind: backup.ReceiverEventReceive, Key: "old.gpg", Size: 999, Success: true},
+	events := []store.ReceiverEvent{
+		{At: inWindow, ReceiverID: "recv-a", Kind: store.ReceiverEventReceive, Key: "a1.gpg", Size: 100, Success: true},
+		{At: inWindow, ReceiverID: "recv-a", Kind: store.ReceiverEventReceive, Key: "a2.gpg", Size: 200, Success: true},
+		{At: inWindow, ReceiverID: "recv-a", Kind: store.ReceiverEventReceive, Key: "a3.gpg", Success: false, Error: "disk full"},
+		{At: inWindow, ReceiverID: "recv-b", Kind: store.ReceiverEventDelete, Key: "b1.gpg", Success: true},
+		{At: outOfWindow, ReceiverID: "recv-a", Kind: store.ReceiverEventReceive, Key: "old.gpg", Size: 999, Success: true},
 	}
 
 	for _, ev := range events {
-		if err := backup.RecordReceiverEvent(ctx, db, ev); err != nil {
-			t.Fatalf("RecordReceiverEvent() error: %v", err)
+		if err := db.SaveReceiverEvent(ctx, ev); err != nil {
+			t.Fatalf("SaveReceiverEvent() error: %v", err)
 		}
 	}
 
-	rc := &backup.RunConfig{Receivers: map[string]backup.ResolvedReceiver{
+	rc := &config.RunConfig{Receivers: map[string]config.ResolvedReceiver{
 		"recv-a": {ID: "recv-a"},
 		"recv-b": {ID: "recv-b"},
 		"recv-c": {ID: "recv-c"}, // no events at all in the window
@@ -124,7 +126,7 @@ func TestBuildReportSummarizesReceiverEvents(t *testing.T) {
 		}
 	}
 
-	wantErrors := []backup.ReceiverErrorEvent{{At: inWindow, ReceiverID: "recv-a", Kind: backup.ReceiverEventReceive, Key: "a3.gpg", Error: "disk full"}}
+	wantErrors := []store.ReceiverErrorEvent{{At: inWindow, ReceiverID: "recv-a", Kind: store.ReceiverEventReceive, Key: "a3.gpg", Error: "disk full"}}
 	if !reflect.DeepEqual(report.errors, wantErrors) {
 		t.Errorf("report.errors = %+v, want %+v", report.errors, wantErrors)
 	}
@@ -149,7 +151,7 @@ func TestBuildReportDetectsStaleReceiver(t *testing.T) {
 
 	neverDir := t.TempDir()
 
-	rc := &backup.RunConfig{Receivers: map[string]backup.ResolvedReceiver{
+	rc := &config.RunConfig{Receivers: map[string]config.ResolvedReceiver{
 		"fresh": {ID: "fresh", Path: freshDir, StaleAfter: time.Hour},
 		"stale": {ID: "stale", Path: staleDir, StaleAfter: time.Hour},
 		"never": {ID: "never", Path: neverDir, StaleAfter: time.Hour},
@@ -172,8 +174,8 @@ func TestRenderReportBody(t *testing.T) {
 		receivers: []receiverReportLine{
 			{id: "recv-a", filesReceived: 3, bytesReceived: 1500, errors: 0},
 		},
-		errors: []backup.ReceiverErrorEvent{
-			{At: time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC), ReceiverID: "recv-a", Kind: backup.ReceiverEventReceive, Key: "x.gpg", Error: "boom"},
+		errors: []store.ReceiverErrorEvent{
+			{At: time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC), ReceiverID: "recv-a", Kind: store.ReceiverEventReceive, Key: "x.gpg", Error: "boom"},
 		},
 		stale: []staleReceiverLine{
 			{id: "recv-b", staleAfter: 6 * time.Hour, lastSeen: time.Date(2026, 8, 26, 0, 0, 0, 0, time.UTC)},
@@ -379,7 +381,7 @@ func TestSendMailPlainNoAuth(t *testing.T) {
 	srv := startFakeSMTPServer(t)
 	host, port := srv.hostPort(t)
 
-	cfg := backup.SMTPSettings{Host: host, Port: port, Security: backup.SMTPSecurityNone}
+	cfg := report.SMTPSettings{Host: host, Port: port, Security: report.SMTPSecurityNone}
 
 	err := sendMail(context.Background(), cfg, "from@example.com", []string{"to@example.com"}, "Test subject", "line one\nline two")
 	if err != nil {
@@ -418,7 +420,7 @@ func TestSendMailWithAuth(t *testing.T) {
 	srv := startFakeSMTPServer(t)
 	host, port := srv.hostPort(t)
 
-	cfg := backup.SMTPSettings{Host: host, Port: port, Security: backup.SMTPSecurityNone, Username: "user@example.com", Password: "hunter2"}
+	cfg := report.SMTPSettings{Host: host, Port: port, Security: report.SMTPSecurityNone, Username: "user@example.com", Password: "hunter2"}
 
 	if err := sendMail(context.Background(), cfg, "from@example.com", []string{"a@example.com", "b@example.com"}, "Subj", "body"); err != nil {
 		t.Fatalf("sendMail() error: %v", err)
@@ -466,7 +468,7 @@ func TestSendMailConnectionRefused(t *testing.T) {
 		t.Fatalf("Atoi() error: %v", err)
 	}
 
-	cfg := backup.SMTPSettings{Host: host, Port: port, Security: backup.SMTPSecurityNone}
+	cfg := report.SMTPSettings{Host: host, Port: port, Security: report.SMTPSecurityNone}
 
 	if err := sendMail(context.Background(), cfg, "from@example.com", []string{"to@example.com"}, "s", "b"); err == nil {
 		t.Fatal("sendMail() error = nil, want a connection error")

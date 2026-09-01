@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
 )
 
 // RunState is the lifecycle state of a job or target as shown in the web UI
@@ -57,7 +59,7 @@ type StatusStore struct {
 
 // NewStatusStore builds a StatusStore with one idle entry per job in jobs,
 // preserving their config-file order.
-func NewStatusStore(jobs []*Config) *StatusStore {
+func NewStatusStore(jobs []*config.Config) *StatusStore {
 	s := &StatusStore{jobs: make(map[string]*JobSnapshot, len(jobs))}
 
 	for _, j := range jobs {
@@ -258,11 +260,11 @@ func overallState(targets []TargetSnapshot) RunState {
 }
 
 // SeedLastRun initializes job name's snapshot from a previously persisted
-// run (see readLastRun in schedule_state.go), so a restart's web UI can
-// still show when the job last ran instead of reverting to "never" until it
-// next runs. Called once at startup, before any job's own goroutine can
-// call starting/finished, so it never races an actual run.
-func (s *StatusStore) SeedLastRun(name string, run LastRun) {
+// run (see the store package's GetLastRun), so a restart's web UI can still
+// show when the job last ran instead of reverting to "never" until it next
+// runs. Called once at startup, before any job's own goroutine can call
+// starting/finished, so it never races an actual run.
+func (s *StatusStore) SeedLastRun(name string, start, end time.Time, state RunState, errText string, size int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -271,13 +273,13 @@ func (s *StatusStore) SeedLastRun(name string, run LastRun) {
 		return
 	}
 
-	j.State = run.State
-	j.LastStart = run.Start
-	j.LastEnd = run.End
-	j.Duration = run.End.Sub(run.Start).Round(time.Millisecond).String()
-	j.Error = run.Error
+	j.State = state
+	j.LastStart = start
+	j.LastEnd = end
+	j.Duration = end.Sub(start).Round(time.Millisecond).String()
+	j.Error = errText
 
-	setSizeIfSucceeded(&j.Size, run.State, run.Size)
+	setSizeIfSucceeded(&j.Size, state, size)
 }
 
 // SeedTargetRun initializes job name's target at index from a previously

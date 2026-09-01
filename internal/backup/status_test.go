@@ -4,19 +4,21 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
 )
 
-func newTestStore() (*StatusStore, *Config) {
-	cfg := &Config{
+func newTestStore() (*StatusStore, *config.Config) {
+	cfg := &config.Config{
 		Name:     "test",
 		Interval: time.Minute,
-		Targets: []Target{
-			{ServerName: "primary", Bucket: "b1", Kind: ServerKindS3},
-			{ServerName: "nas", Bucket: "b2", Kind: ServerKindLocal},
+		Targets: []config.Target{
+			{ServerName: "sibling", Bucket: "b1", Kind: config.ServerKindRemote},
+			{ServerName: "nas", Bucket: "b2", Kind: config.ServerKindLocal},
 		},
 	}
 
-	return NewStatusStore([]*Config{cfg}), cfg
+	return NewStatusStore([]*config.Config{cfg}), cfg
 }
 
 func TestFormatBytes(t *testing.T) {
@@ -252,9 +254,9 @@ func TestNewStatusStoreInitializesNextRunFromStartTime(t *testing.T) {
 	t.Parallel()
 
 	start := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
-	cfg := &Config{Name: "test", Interval: time.Hour, StartTime: start}
+	cfg := &config.Config{Name: "test", Interval: time.Hour, StartTime: start}
 
-	store := NewStatusStore([]*Config{cfg})
+	store := NewStatusStore([]*config.Config{cfg})
 
 	if got := store.Snapshot()[0].NextRun; !got.Equal(start) {
 		t.Errorf("snapshot()[0].NextRun = %v, want %v", got, start)
@@ -295,7 +297,7 @@ func TestStatusStoreSeedLastRunSuccess(t *testing.T) {
 	start := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
 	end := start.Add(5 * time.Second)
 
-	store.SeedLastRun("test", LastRun{Start: start, End: end, State: StateOK, Size: 2048})
+	store.SeedLastRun("test", start, end, StateOK, "", 2048)
 
 	snap := store.Snapshot()[0]
 
@@ -324,7 +326,7 @@ func TestStatusStoreSeedLastRunFailure(t *testing.T) {
 	start := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
 	end := start.Add(time.Second)
 
-	store.SeedLastRun("test", LastRun{Start: start, End: end, State: StateFailed, Error: "boom"})
+	store.SeedLastRun("test", start, end, StateFailed, "boom", 0)
 
 	snap := store.Snapshot()[0]
 
@@ -345,7 +347,7 @@ func TestStatusStoreSeedLastRunIncomplete(t *testing.T) {
 	start := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
 	end := start.Add(time.Second)
 
-	store.SeedLastRun("test", LastRun{Start: start, End: end, State: StateIncomplete, Error: "boom", Size: 2048})
+	store.SeedLastRun("test", start, end, StateIncomplete, "boom", 2048)
 
 	snap := store.Snapshot()[0]
 
@@ -363,7 +365,7 @@ func TestStatusStoreSeedLastRunUnknownJobIsNoOp(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	store.SeedLastRun("nope", LastRun{State: StateOK})
+	store.SeedLastRun("nope", time.Time{}, time.Time{}, StateOK, "", 0)
 
 	snap := store.Snapshot()[0]
 	if snap.State != StateIdle {

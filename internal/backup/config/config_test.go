@@ -1,4 +1,4 @@
-package backup
+package config
 
 import (
 	"bytes"
@@ -14,7 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup/app/config"
+	"github.com/robfig/cron/v3"
+
+	"nilswitt.dev/go-backup-tool/internal/backup/permission"
+	"nilswitt.dev/go-backup-tool/internal/backup/report"
 )
 
 // testConfigRSAPublicKeyPEM is a fixed RSA public key, PEM-encoded the same
@@ -91,16 +94,16 @@ func TestParseFlags(t *testing.T) {
 	}{
 		{
 			name:    "missing jobs list",
-			yaml:    "servers:\n  - name: s\n    region: us-east-1\nrecipients: [me@example.com]\n",
+			yaml:    "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\nrecipients: [me@example.com]\n",
 			wantErr: "must define at least one job",
 		},
 		{
 			name: "missing jobs list allowed with listen set",
-			yaml: "webui:\n  enabled: true\n  listen: :8080\nservers:\n  - name: s\n    region: us-east-1\nrecipients: [me@example.com]\n",
+			yaml: "webui:\n  enabled: true\n  listen: :8080\nservers:\n  - name: s\n    type: local\n    path: /mnt/backups\nrecipients: [me@example.com]\n",
 		},
 		{
 			name:    "missing cmd",
-			yaml:    "servers:\n  - name: s\n    region: us-east-1\njobs:\n  - name: test\n    targets: [{server: s, bucket: b}]\n    recipients: [me@example.com]\n",
+			yaml:    "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\njobs:\n  - name: test\n    targets: [{server: s, bucket: b}]\n    recipients: [me@example.com]\n",
 			wantErr: "cmd is required",
 		},
 		{
@@ -115,26 +118,26 @@ func TestParseFlags(t *testing.T) {
 		},
 		{
 			name:    "symmetric and recipient conflict",
-			yaml:    "servers:\n  - name: s\n    region: us-east-1\njobs:\n  - name: test\n    cmd: echo hi\n    targets: [{server: s, bucket: b}]\n    symmetric: true\n    recipients: [me@example.com]\n",
+			yaml:    "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\njobs:\n  - name: test\n    cmd: echo hi\n    targets: [{server: s, bucket: b}]\n    symmetric: true\n    recipients: [me@example.com]\n",
 			wantErr: "cannot be combined",
 		},
 		{
 			name:    "neither recipient nor symmetric",
-			yaml:    "servers:\n  - name: s\n    region: us-east-1\njobs:\n  - name: test\n    cmd: echo hi\n    targets: [{server: s, bucket: b}]\n",
+			yaml:    "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\njobs:\n  - name: test\n    cmd: echo hi\n    targets: [{server: s, bucket: b}]\n",
 			wantErr: "specify at least one recipient",
 		},
 		{
 			name:    "symmetric without passphrase env",
-			yaml:    "servers:\n  - name: s\n    region: us-east-1\njobs:\n  - name: test\n    cmd: echo hi\n    targets: [{server: s, bucket: b}]\n    symmetric: true\n",
+			yaml:    "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\njobs:\n  - name: test\n    cmd: echo hi\n    targets: [{server: s, bucket: b}]\n    symmetric: true\n",
 			wantErr: "GPG_PASSPHRASE",
 		},
 		{
 			name: "valid recipient config",
-			yaml: "servers:\n  - name: s\n    region: us-east-1\njobs:\n  - name: test\n    cmd: echo hi\n    targets: [{server: s, bucket: b}]\n    recipients: [me@example.com]\n",
+			yaml: "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\njobs:\n  - name: test\n    cmd: echo hi\n    targets: [{server: s, bucket: b}]\n    recipients: [me@example.com]\n",
 		},
 		{
 			name: "valid symmetric config",
-			yaml: "servers:\n  - name: s\n    region: us-east-1\njobs:\n  - name: test\n    cmd: echo hi\n    targets: [{server: s, bucket: b}]\n    symmetric: true\n",
+			yaml: "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\njobs:\n  - name: test\n    cmd: echo hi\n    targets: [{server: s, bucket: b}]\n    symmetric: true\n",
 			env:  map[string]string{"GPG_PASSPHRASE": "secret"},
 		},
 	}
@@ -207,7 +210,8 @@ func TestParseFlagsKeyTimeNotYetSubstituted(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -235,7 +239,8 @@ func TestParseFlagsMultipleRecipients(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -276,7 +281,8 @@ webui:
 
 servers:
   - name: primary
-    region: eu-central-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -297,7 +303,7 @@ jobs:
 		t.Errorf("cfg.cmd = %q, want %q", cfg.Cmd, "echo from-file")
 	}
 
-	want := Target{ServerName: "primary", Bucket: "file-bucket", Region: "eu-central-1"}
+	want := Target{ServerName: "primary", Kind: ServerKindLocal, Bucket: "file-bucket", LocalPath: "/mnt/backups"}
 	if len(cfg.Targets) != 1 || cfg.Targets[0] != want {
 		t.Errorf("cfg.targets = %+v, want [%+v]", cfg.Targets, want)
 	}
@@ -321,7 +327,8 @@ func TestParseFlagsConfigFileListenUnset(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -349,7 +356,8 @@ webui:
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -373,7 +381,8 @@ webui:
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -404,7 +413,8 @@ webui:
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -437,7 +447,8 @@ webui:
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -467,7 +478,8 @@ webui:
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -494,7 +506,8 @@ log-level: debug
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -521,7 +534,8 @@ log-level: debug
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -548,7 +562,8 @@ log-level: "not-a-level"
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -607,7 +622,8 @@ timeout: "not-a-duration"
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -631,9 +647,11 @@ recipients:
 
 servers:
   - name: primary
-    region: eu-central-1
+    type: local
+    path: /mnt/primary
   - name: secondary
-    region: us-west-2
+    type: local
+    path: /mnt/secondary
 
 jobs:
   - name: database
@@ -661,7 +679,7 @@ jobs:
 		t.Errorf("db job = %+v", db)
 	}
 
-	wantDBTarget := Target{ServerName: "primary", Bucket: "db-bucket", Region: "eu-central-1"}
+	wantDBTarget := Target{ServerName: "primary", Kind: ServerKindLocal, Bucket: "db-bucket", LocalPath: "/mnt/primary"}
 	if len(db.Targets) != 1 || db.Targets[0] != wantDBTarget {
 		t.Errorf("db.targets = %+v, want [%+v]", db.Targets, wantDBTarget)
 	}
@@ -672,7 +690,7 @@ jobs:
 	}
 
 	// files job targets a different server and overrides recipients.
-	wantFilesTarget := Target{ServerName: "secondary", Bucket: "files-bucket", Region: "us-west-2"}
+	wantFilesTarget := Target{ServerName: "secondary", Kind: ServerKindLocal, Bucket: "files-bucket", LocalPath: "/mnt/secondary"}
 	if len(files.Targets) != 1 || files.Targets[0] != wantFilesTarget {
 		t.Errorf("files.targets = %+v, want [%+v]", files.Targets, wantFilesTarget)
 	}
@@ -688,12 +706,11 @@ func TestParseFlagsMultipleTargets(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: primary
-    region: eu-central-1
-    endpoint: "https://s3.example.com"
+    type: local
+    path: /mnt/primary
   - name: offsite
-    region: us-west-2
+    type: remote
     endpoint: "https://minio.example.com"
-    path-style: true
 
 jobs:
   - name: test
@@ -714,8 +731,8 @@ jobs:
 	cfg := singleJob(t, rc)
 
 	want := []Target{
-		{ServerName: "primary", Bucket: "primary-bucket", Region: "eu-central-1", Endpoint: "https://s3.example.com"},
-		{ServerName: "offsite", Bucket: "secondary-bucket", Region: "us-west-2", Endpoint: "https://minio.example.com", PathStyle: true},
+		{ServerName: "primary", Kind: ServerKindLocal, Bucket: "primary-bucket", LocalPath: "/mnt/primary"},
+		{ServerName: "offsite", Kind: ServerKindRemote, Bucket: "secondary-bucket", Endpoint: "https://minio.example.com"},
 	}
 
 	if len(cfg.Targets) != len(want) {
@@ -753,7 +770,8 @@ func TestParseFlagsTargetMissingBucket(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-west-2
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -774,7 +792,8 @@ func TestParseFlagsServerRequiresName(t *testing.T) {
 
 	path := writeConfigFile(t, `
 servers:
-  - region: us-east-1
+  - type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -795,9 +814,11 @@ func TestParseFlagsServerDuplicateName(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: dup
-    region: us-east-1
+    type: local
+    path: /mnt/a
   - name: dup
-    region: us-west-2
+    type: local
+    path: /mnt/b
 
 jobs:
   - name: test
@@ -812,7 +833,7 @@ jobs:
 	}
 }
 
-func TestParseFlagsServerDefaultRegion(t *testing.T) {
+func TestParseFlagsServerTypeRequired(t *testing.T) {
 	t.Parallel()
 
 	path := writeConfigFile(t, `
@@ -826,14 +847,9 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("ParseFlags() unexpected error: %v", err)
-	}
-
-	cfg := singleJob(t, rc)
-	if len(cfg.Targets) != 1 || cfg.Targets[0].Region != config.DefaultRegion {
-		t.Errorf("cfg.targets = %+v, want region %q", cfg.Targets, config.DefaultRegion)
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "type is required") {
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "type is required")
 	}
 }
 
@@ -976,27 +992,6 @@ jobs:
 	}
 }
 
-func TestParseFlagsS3ServerRejectsRetention(t *testing.T) {
-	t.Parallel()
-
-	path := writeConfigFile(t, `
-servers:
-  - name: s
-    retention: 168h
-
-jobs:
-  - name: test
-    cmd: echo hi
-    targets: [{server: s, bucket: b}]
-    recipients: [me@example.com]
-`)
-
-	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "retention is not valid for type: s3") {
-		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "retention is not valid for type: s3")
-	}
-}
-
 func TestParseFlagsJobTargetRetention(t *testing.T) {
 	t.Parallel()
 
@@ -1076,20 +1071,6 @@ jobs:
 			wantErr: "retention must not be negative",
 		},
 		{
-			name: "s3 server",
-			yaml: `
-servers:
-  - name: s
-
-jobs:
-  - name: test
-    cmd: echo hi
-    targets: [{server: s, bucket: b, retention: 168h}]
-    recipients: [me@example.com]
-`,
-			wantErr: `retention is not valid for server "s" (type s3; local only)`,
-		},
-		{
 			name: "remote server",
 			yaml: `
 servers:
@@ -1121,7 +1102,7 @@ jobs:
 	}
 }
 
-func TestParseFlagsLocalServerRejectsS3Fields(t *testing.T) {
+func TestParseFlagsLocalServerRejectsRemoteFields(t *testing.T) {
 	t.Parallel()
 
 	path := writeConfigFile(t, `
@@ -1139,8 +1120,8 @@ jobs:
 `)
 
 	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "are not valid for type: local") {
-		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "are not valid for type: local")
+	if err == nil || !strings.Contains(err.Error(), "is not valid for type: local") {
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "is not valid for type: local")
 	}
 }
 
@@ -1165,128 +1146,14 @@ jobs:
 	}
 }
 
-func TestParseFlagsServerCredentialsFromEnv(t *testing.T) {
-	t.Setenv("TEST_ACCESS_KEY", "AKIATEST")
-	t.Setenv("TEST_SECRET_KEY", "shh-secret")
-
-	path := writeConfigFile(t, `
-servers:
-  - name: s
-    region: us-east-1
-    access-key-env: TEST_ACCESS_KEY
-    secret-key-env: TEST_SECRET_KEY
-
-jobs:
-  - name: test
-    cmd: echo hi
-    targets: [{server: s, bucket: b}]
-    recipients: [me@example.com]
-`)
-
-	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("ParseFlags() unexpected error: %v", err)
-	}
-
-	cfg := singleJob(t, rc)
-	if len(cfg.Targets) != 1 {
-		t.Fatalf("cfg.targets = %+v, want 1 entry", cfg.Targets)
-	}
-
-	got := cfg.Targets[0]
-	if got.AccessKey != "AKIATEST" || got.SecretKey != "shh-secret" {
-		t.Errorf("cfg.targets[0] = %+v, want accessKey %q secretKey %q", got, "AKIATEST", "shh-secret")
-	}
-}
-
-func TestParseFlagsServerCredentialsRequireBothEnvVars(t *testing.T) {
-	t.Parallel()
-
-	path := writeConfigFile(t, `
-servers:
-  - name: s
-    region: us-east-1
-    access-key-env: TEST_ACCESS_KEY_ONLY
-
-jobs:
-  - name: test
-    cmd: echo hi
-    targets: [{server: s, bucket: b}]
-    recipients: [me@example.com]
-`)
-
-	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "must be set together") {
-		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "must be set together")
-	}
-}
-
-func TestParseFlagsJobFilterSkipsUnusedServerCredentials(t *testing.T) {
-	t.Parallel()
-
-	// A server's access-key-env/secret-key-env should only be required
-	// when a job that actually targets it survives -job filtering.
-	path := writeConfigFile(t, `
-servers:
-  - name: primary
-    region: us-east-1
-  - name: offsite
-    region: us-east-1
-    access-key-env: UNSET_OFFSITE_ACCESS_KEY
-    secret-key-env: UNSET_OFFSITE_SECRET_KEY
-
-jobs:
-  - name: database
-    cmd: echo hi
-    targets: [{server: primary, bucket: b}]
-    recipients: [me@example.com]
-  - name: uploads
-    cmd: echo hi
-    targets: [{server: offsite, bucket: b}]
-    recipients: [me@example.com]
-`)
-
-	rc, err := ParseFlags([]string{"-config", path, "-job", "database"}, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("ParseFlags() unexpected error: %v", err)
-	}
-
-	cfg := singleJob(t, rc)
-	if cfg.Name != "database" {
-		t.Errorf("cfg.name = %q, want %q", cfg.Name, "database")
-	}
-}
-
-func TestParseFlagsServerCredentialsEnvVarUnset(t *testing.T) {
-	t.Parallel()
-
-	path := writeConfigFile(t, `
-servers:
-  - name: s
-    region: us-east-1
-    access-key-env: DOES_NOT_EXIST_ACCESS
-    secret-key-env: DOES_NOT_EXIST_SECRET
-
-jobs:
-  - name: test
-    cmd: echo hi
-    targets: [{server: s, bucket: b}]
-    recipients: [me@example.com]
-`)
-
-	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), `"DOES_NOT_EXIST_ACCESS"`) {
-		t.Fatalf("ParseFlags() error = %v, want substring %q", err, `"DOES_NOT_EXIST_ACCESS"`)
-	}
-}
-
 func TestParseFlagsMultiJobRequiresName(t *testing.T) {
 	t.Parallel()
 
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - cmd: "echo hi"
@@ -1306,7 +1173,8 @@ func TestParseFlagsMultiJobDuplicateName(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: dup
@@ -1331,7 +1199,8 @@ func TestParseFlagsJobFilter(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: database
@@ -1361,7 +1230,8 @@ func TestParseFlagsJobFilterUnknownJob(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: database
@@ -1384,7 +1254,8 @@ symmetric: true
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: a
@@ -1417,7 +1288,8 @@ func TestParseFlagsMultiJobValidationErrorNamesJob(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: broken
@@ -1437,7 +1309,8 @@ func TestParseFlagsInterval(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -1464,7 +1337,8 @@ func TestParseFlagsIntervalDefaultsToZero(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -1489,7 +1363,8 @@ func TestParseFlagsIntervalNegativeRejected(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -1513,7 +1388,8 @@ interval: 1h
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: hourly
@@ -1551,7 +1427,8 @@ func TestParseFlagsIntervalBadFileValue(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -1573,7 +1450,8 @@ func TestParseFlagsStartTime(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -1603,7 +1481,8 @@ func TestParseFlagsStartTimeDefaultsToZero(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -1628,7 +1507,8 @@ func TestParseFlagsStartTimeBadFileValue(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -1651,7 +1531,8 @@ func TestParseFlagsStartTimeRequiresInterval(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -1753,7 +1634,8 @@ func TestParseFlagsReceivers(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 receivers:
   - id: from-primary
@@ -1791,7 +1673,8 @@ func TestParseFlagsReceiverRequiresPublicKey(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 receivers:
   - id: from-primary
@@ -1816,7 +1699,8 @@ func TestParseFlagsReceiverDuplicateID(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 receivers:
   - id: dup
@@ -1849,7 +1733,8 @@ func TestParseFlagsReceiverStaleAfterAndWebhook(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 receivers:
   - id: from-primary
@@ -1902,7 +1787,8 @@ func TestParseFlagsReceiverStaleAfterRequiresWebhook(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 receivers:
   - id: from-primary
@@ -1924,13 +1810,14 @@ jobs:
 	}
 }
 
-func TestParseFlagsRetriesDefaults(t *testing.T) {
+func TestParseFlagsStagingDirDefaultsEmpty(t *testing.T) {
 	t.Parallel()
 
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -1945,29 +1832,25 @@ jobs:
 	}
 
 	cfg := singleJob(t, rc)
-	if cfg.Retries != config.DefaultRetries {
-		t.Errorf("cfg.retries = %v, want %v", cfg.Retries, config.DefaultRetries)
-	}
-
 	if cfg.StagingDir != "" {
 		t.Errorf("cfg.stagingDir = %q, want empty (OS default temp dir)", cfg.StagingDir)
 	}
 }
 
-func TestParseFlagsRetriesAndStagingDir(t *testing.T) {
+func TestParseFlagsStagingDir(t *testing.T) {
 	t.Parallel()
 
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
     cmd: echo hi
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
-    retries: 5
     staging-dir: /var/lib/go-backup-tool/staging
 `)
 
@@ -1977,10 +1860,6 @@ jobs:
 	}
 
 	cfg := singleJob(t, rc)
-	if cfg.Retries != 5 {
-		t.Errorf("cfg.retries = %v, want 5", cfg.Retries)
-	}
-
 	if cfg.StagingDir != "/var/lib/go-backup-tool/staging" {
 		t.Errorf("cfg.stagingDir = %q, want %q", cfg.StagingDir, "/var/lib/go-backup-tool/staging")
 	}
@@ -1995,7 +1874,8 @@ gpg-homedir: /etc/go-backup-tool/gnupg
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: default-gpg
@@ -2029,42 +1909,6 @@ jobs:
 	}
 }
 
-func TestParseFlagsMultiJobPerJobRetries(t *testing.T) {
-	t.Parallel()
-
-	path := writeConfigFile(t, `
-retries: 2
-
-servers:
-  - name: s
-    region: us-east-1
-
-jobs:
-  - name: default-retries
-    cmd: echo hi
-    targets: [{server: s, bucket: b}]
-    recipients: [me@example.com]
-  - name: custom-retries
-    cmd: echo hi
-    targets: [{server: s, bucket: b}]
-    recipients: [me@example.com]
-    retries: 7
-`)
-
-	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("ParseFlags() unexpected error: %v", err)
-	}
-
-	want := map[string]int{"default-retries": 2, "custom-retries": 7}
-
-	for _, j := range rc.Jobs {
-		if j.Retries != want[j.Name] {
-			t.Errorf("job %q retries = %v, want %v", j.Name, j.Retries, want[j.Name])
-		}
-	}
-}
-
 func TestParseFlagsOIDCSettings(t *testing.T) {
 	t.Parallel()
 
@@ -2081,7 +1925,8 @@ webui:
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -2102,7 +1947,7 @@ jobs:
 		ClientSecret:       "s3cr3t",
 		RedirectURL:        "https://backups.example.com/login/oidc/callback",
 		Scopes:             []string{"profile", "email"},
-		DefaultPermissions: PermissionView | PermissionDownload,
+		DefaultPermissions: permission.PermissionView | permission.PermissionDownload,
 	}
 
 	if !reflect.DeepEqual(rc.OIDC, want) {
@@ -2127,7 +1972,8 @@ webui:
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -2141,8 +1987,8 @@ jobs:
 		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	if rc.OIDC.DefaultPermissions != PermissionView {
-		t.Errorf("rc.OIDC.DefaultPermissions = %v, want %v", rc.OIDC.DefaultPermissions, PermissionView)
+	if rc.OIDC.DefaultPermissions != permission.PermissionView {
+		t.Errorf("rc.OIDC.DefaultPermissions = %v, want %v", rc.OIDC.DefaultPermissions, permission.PermissionView)
 	}
 }
 
@@ -2163,7 +2009,8 @@ webui:
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -2194,7 +2041,8 @@ webui:
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -2227,7 +2075,8 @@ webui:
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -2300,7 +2149,8 @@ webui:
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -2327,7 +2177,8 @@ webui:
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -2363,7 +2214,8 @@ report:
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -2377,17 +2229,22 @@ jobs:
 		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	want := ReportSettings{
+	schedule, err := cron.ParseStandard("30 6 * * *")
+	if err != nil {
+		t.Fatalf("cron.ParseStandard() unexpected error: %v", err)
+	}
+
+	want := report.Settings{
 		Enabled:  true,
 		To:       []string{"ops@example.com"},
 		From:     "backups@example.com",
-		Schedule: wantSchedule(t, "30 6 * * *"),
-		SMTP: SMTPSettings{
+		Schedule: schedule,
+		SMTP: report.SMTPSettings{
 			Host:     "smtp.example.com",
 			Port:     2525,
 			Username: "backups@example.com",
 			Password: "s3cr3t",
-			Security: SMTPSecurityNone,
+			Security: report.SMTPSecurityNone,
 		},
 	}
 
@@ -2402,7 +2259,8 @@ func TestParseFlagsReportDisabledByDefault(t *testing.T) {
 	path := writeConfigFile(t, `
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
@@ -2432,7 +2290,8 @@ report:
 
 servers:
   - name: s
-    region: us-east-1
+    type: local
+    path: /mnt/backups
 
 jobs:
   - name: test
