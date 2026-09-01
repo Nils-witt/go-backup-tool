@@ -626,7 +626,7 @@ func TestScheduleStartTimeSkipsCatchUpWhenAlreadyRecorded(t *testing.T) { //noli
 		t.Fatal("lastDueSlot() ok = false, want true (start-time is in the past)")
 	}
 
-	if err := stateDB.SaveJobRun(context.Background(), job.Name, true, due, due, 0, ""); err != nil {
+	if err := stateDB.SaveJobRun(context.Background(), job.Name, string(backup.StateOK), true, due, due, 0, ""); err != nil {
 		t.Fatalf("SaveJobRun() error: %v", err)
 	}
 

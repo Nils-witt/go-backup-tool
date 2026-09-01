@@ -247,25 +247,25 @@ func (r *Runner) runOnce(ctx context.Context, job *config.Config) {
 			log.Error("job failed", "duration", duration, "err", config.JobError(job, err))
 		}
 
-		r.recordJobRun(ctx, job.Name, false, start, bytesWritten, config.JobError(job, err).Error())
+		r.recordJobRun(ctx, job.Name, state, false, start, bytesWritten, config.JobError(job, err).Error())
 
 		return
 	}
 
 	log.Info("job finished", "duration", duration, "bytes", bytesWritten)
-	r.recordJobRun(ctx, job.Name, true, start, bytesWritten, "")
+	r.recordJobRun(ctx, job.Name, state, true, start, bytesWritten, "")
 }
 
 // recordJobRun persists job name's just-finished run (whether it fully
 // succeeded, partly succeeded, or failed outright), so a future restart's
 // web UI can still show it via SeedStatusFromState. Best-effort: a db
 // hiccup here shouldn't fail the run.
-func (r *Runner) recordJobRun(ctx context.Context, name string, success bool, start time.Time, bytesWritten int64, errText string) {
+func (r *Runner) recordJobRun(ctx context.Context, name string, state backup.RunState, success bool, start time.Time, bytesWritten int64, errText string) {
 	if r.stateDB == nil {
 		return
 	}
 
-	if err := r.stateDB.SaveJobRun(ctx, name, success, start, time.Now(), bytesWritten, errText); err != nil {
+	if err := r.stateDB.SaveJobRun(ctx, name, string(state), success, start, time.Now(), bytesWritten, errText); err != nil {
 		r.log.Warn("recording job run to state db", "job", name, "err", err)
 	}
 }

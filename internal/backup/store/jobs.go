@@ -20,7 +20,8 @@ const jobRunsSchema = `CREATE TABLE IF NOT EXISTS job_runs (
 	startTime TIMESTAMP,
 	endTime   TIMESTAMP,
 	error     TEXT,
-	size      INTEGER
+	size      INTEGER,
+	state     TEXT NOT NULL
 )`
 
 // targetRunsSchema is target_runs: an append-only history of every
@@ -43,10 +44,10 @@ const targetRunsSchema = `CREATE TABLE IF NOT EXISTS target_runs (
 // SaveJobRun appends a job_runs row recording that job name's run starting
 // at startTime and ending at endTime just completed, succeeding or failing
 // with errText (empty on success) and having written bytesWritten bytes.
-func (s *Store) SaveJobRun(ctx context.Context, name string, success bool, startTime, endTime time.Time, bytesWritten int64, errText string) error {
-	const insert = `INSERT INTO job_runs (name, success, startTime, endTime, error, size) VALUES (?, ?, ?, ?, ?, ?)`
+func (s *Store) SaveJobRun(ctx context.Context, name, state string, success bool, startTime, endTime time.Time, bytesWritten int64, errText string) error {
+	const insert = `INSERT INTO job_runs (name, state, success, startTime, endTime, error, size) VALUES (?, ?, ?, ?, ?, ?, ?)`
 
-	if _, err := s.db.ExecContext(ctx, insert, name, success, startTime.UTC(), endTime.UTC(), errText, bytesWritten); err != nil {
+	if _, err := s.db.ExecContext(ctx, insert, name, state, success, startTime.UTC(), endTime.UTC(), errText, bytesWritten); err != nil {
 		return fmt.Errorf("recording job %q run: %w", name, err)
 	}
 

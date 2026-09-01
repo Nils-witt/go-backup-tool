@@ -15,7 +15,7 @@ func TestSaveGetLastJobSuccessRoundTrip(t *testing.T) {
 	start := time.Date(2026, 1, 1, 2, 59, 0, 0, time.UTC)
 	want := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
 
-	if err := db.SaveJobRun(ctx, "job-a", true, start, want, 0, ""); err != nil {
+	if err := db.SaveJobRun(ctx, "job-a", "ok", true, start, want, 0, ""); err != nil {
 		t.Fatalf("SaveJobRun() error: %v", err)
 	}
 
@@ -55,12 +55,12 @@ func TestGetLastJobSuccessIgnoresFailedRuns(t *testing.T) {
 	ctx := context.Background()
 
 	success := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
-	if err := db.SaveJobRun(ctx, "job-a", true, success, success, 1024, ""); err != nil {
+	if err := db.SaveJobRun(ctx, "job-a", "ok", true, success, success, 1024, ""); err != nil {
 		t.Fatalf("SaveJobRun() success error: %v", err)
 	}
 
 	failed := time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)
-	if err := db.SaveJobRun(ctx, "job-a", false, failed, failed, 0, "boom"); err != nil {
+	if err := db.SaveJobRun(ctx, "job-a", "failed", false, failed, failed, 0, "boom"); err != nil {
 		t.Fatalf("SaveJobRun() failure error: %v", err)
 	}
 
@@ -83,7 +83,7 @@ func TestSaveGetLastRunRoundTrip(t *testing.T) {
 	start := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 1, 1, 3, 0, 5, 0, time.UTC)
 
-	if err := db.SaveJobRun(ctx, "job-a", true, start, end, 2048, ""); err != nil {
+	if err := db.SaveJobRun(ctx, "job-a", "ok", true, start, end, 2048, ""); err != nil {
 		t.Fatalf("SaveJobRun() error: %v", err)
 	}
 
@@ -111,11 +111,11 @@ func TestGetLastRunReturnsMostRecentRun(t *testing.T) {
 	first := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
 	second := time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)
 
-	if err := db.SaveJobRun(ctx, "job-a", true, first, first, 0, ""); err != nil {
+	if err := db.SaveJobRun(ctx, "job-a", "ok", true, first, first, 0, ""); err != nil {
 		t.Fatalf("SaveJobRun() first error: %v", err)
 	}
 
-	if err := db.SaveJobRun(ctx, "job-a", false, second, second, 0, "boom"); err != nil {
+	if err := db.SaveJobRun(ctx, "job-a", "failed", false, second, second, 0, "boom"); err != nil {
 		t.Fatalf("SaveJobRun() second error: %v", err)
 	}
 
