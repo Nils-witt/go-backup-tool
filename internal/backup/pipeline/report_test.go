@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/robfig/cron/v3"
 	"nilswitt.dev/go-backup-tool/internal/backup"
 )
 
@@ -27,49 +28,42 @@ func writeFile(t *testing.T, path, contents string) {
 	}
 }
 
-func TestNextDailyReportTimeLaterToday(t *testing.T) {
+// TestReportScheduleNext exercises the report package's actual use of
+// cron.Schedule (RunReportLoop calls Next(time.Now()) each iteration), as a
+// sanity check that a daily "0 7 * * *" schedule behaves the way the report
+// loop's log/tests assume: today's occurrence if it hasn't passed yet,
+// tomorrow's otherwise — including the exact-match instant, so a report sent
+// right at its scheduled time doesn't loop and fire again immediately.
+func TestReportScheduleNext(t *testing.T) {
 	t.Parallel()
 
-	now := time.Date(2026, 8, 28, 6, 0, 0, 0, time.UTC)
+	sched, err := cron.ParseStandard("0 7 * * *")
+	if err != nil {
+		t.Fatalf("cron.ParseStandard() error: %v", err)
+	}
 
-	got := nextDailyReportTime(7, 0, now)
-	want := time.Date(2026, 8, 28, 7, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		now  time.Time
+		want time.Time
+	}{
+		{"later today", time.Date(2026, 8, 28, 6, 0, 0, 0, time.UTC), time.Date(2026, 8, 28, 7, 0, 0, 0, time.UTC)},
+		{"already passed rolls to tomorrow", time.Date(2026, 8, 28, 8, 0, 0, 0, time.UTC), time.Date(2026, 8, 29, 7, 0, 0, 0, time.UTC)},
+		{"exact match rolls to tomorrow", time.Date(2026, 8, 28, 7, 0, 0, 0, time.UTC), time.Date(2026, 8, 29, 7, 0, 0, 0, time.UTC)},
+	}
 
-	if !got.Equal(want) {
-		t.Errorf("nextDailyReportTime() = %v, want %v", got, want)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := sched.Next(tc.now); !got.Equal(tc.want) {
+				t.Errorf("Schedule.Next(%v) = %v, want %v", tc.now, got, tc.want)
+			}
+		})
 	}
 }
 
-func TestNextDailyReportTimeAlreadyPassedRollsOverToTomorrow(t *testing.T) {
-	t.Parallel()
-
-	now := time.Date(2026, 8, 28, 8, 0, 0, 0, time.UTC)
-
-	got := nextDailyReportTime(7, 0, now)
-	want := time.Date(2026, 8, 29, 7, 0, 0, 0, time.UTC)
-
-	if !got.Equal(want) {
-		t.Errorf("nextDailyReportTime() = %v, want %v", got, want)
-	}
-}
-
-func TestNextDailyReportTimeExactMatchRollsOverToTomorrow(t *testing.T) {
-	t.Parallel()
-
-	// now landing exactly on the target time isn't "still due today" —
-	// otherwise a report sent right at its scheduled time would loop and
-	// fire again immediately.
-	now := time.Date(2026, 8, 28, 7, 0, 0, 0, time.UTC)
-
-	got := nextDailyReportTime(7, 0, now)
-	want := time.Date(2026, 8, 29, 7, 0, 0, 0, time.UTC)
-
-	if !got.Equal(want) {
-		t.Errorf("nextDailyReportTime() = %v, want %v", got, want)
-	}
-}
-
-func TestBuildDailyReportSummarizesReceiverEvents(t *testing.T) {
+func TestBuildReportSummarizesReceiverEvents(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -83,8 +77,9 @@ func TestBuildDailyReportSummarizesReceiverEvents(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	end := time.Date(2026, 8, 28, 7, 0, 0, 0, time.UTC)
+	start := end.Add(-24 * time.Hour)
 	inWindow := end.Add(-time.Hour)
-	outOfWindow := end.Add(-25 * time.Hour) // just outside the 24h window
+	outOfWindow := end.Add(-25 * time.Hour) // just outside the window
 
 	events := []backup.ReceiverEvent{
 		{At: inWindow, ReceiverID: "recv-a", Kind: backup.ReceiverEventReceive, Key: "a1.gpg", Size: 100, Success: true},
@@ -106,7 +101,7 @@ func TestBuildDailyReportSummarizesReceiverEvents(t *testing.T) {
 		"recv-c": {ID: "recv-c"}, // no events at all in the window
 	}}
 
-	report := buildDailyReport(ctx, rc, db, end, discardLogger)
+	report := buildReport(ctx, rc, db, start, end, discardLogger)
 
 	if len(report.receivers) != 3 {
 		t.Fatalf("report.receivers = %+v, want 3 entries (one per configured receiver)", report.receivers)
@@ -135,7 +130,7 @@ func TestBuildDailyReportSummarizesReceiverEvents(t *testing.T) {
 	}
 }
 
-func TestBuildDailyReportDetectsStaleReceiver(t *testing.T) {
+func TestBuildReportDetectsStaleReceiver(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -160,17 +155,18 @@ func TestBuildDailyReportDetectsStaleReceiver(t *testing.T) {
 		"never": {ID: "never", Path: neverDir, StaleAfter: time.Hour},
 	}}
 
-	report := buildDailyReport(ctx, rc, nil, time.Now(), discardLogger)
+	now := time.Now()
+	report := buildReport(ctx, rc, nil, now.Add(-24*time.Hour), now, discardLogger)
 
 	if len(report.stale) != 1 || report.stale[0].id != "stale" {
 		t.Errorf("report.stale = %+v, want only \"stale\" (fresh isn't stale, never has nothing to be stale)", report.stale)
 	}
 }
 
-func TestRenderDailyReportBody(t *testing.T) {
+func TestRenderReportBody(t *testing.T) {
 	t.Parallel()
 
-	report := dailyReport{
+	report := reportContent{
 		start: time.Date(2026, 8, 27, 7, 0, 0, 0, time.UTC),
 		end:   time.Date(2026, 8, 28, 7, 0, 0, 0, time.UTC),
 		receivers: []receiverReportLine{
@@ -184,23 +180,23 @@ func TestRenderDailyReportBody(t *testing.T) {
 		},
 	}
 
-	body := renderDailyReportBody(report)
+	body := renderReportBody(report)
 
 	for _, want := range []string{"recv-a", "3 file(s)", "recv-b", "boom", "stale-after: 6h0m0s"} {
 		if !strings.Contains(body, want) {
-			t.Errorf("renderDailyReportBody() = %q, want it to contain %q", body, want)
+			t.Errorf("renderReportBody() = %q, want it to contain %q", body, want)
 		}
 	}
 }
 
-func TestRenderDailyReportBodyEmpty(t *testing.T) {
+func TestRenderReportBodyEmpty(t *testing.T) {
 	t.Parallel()
 
-	body := renderDailyReportBody(dailyReport{})
+	body := renderReportBody(reportContent{})
 
 	for _, want := range []string{"No receivers configured", "No receivers currently stale", "No errors recorded"} {
 		if !strings.Contains(body, want) {
-			t.Errorf("renderDailyReportBody() = %q, want it to contain %q", body, want)
+			t.Errorf("renderReportBody() = %q, want it to contain %q", body, want)
 		}
 	}
 }

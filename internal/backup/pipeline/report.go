@@ -15,44 +15,40 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 )
 
-// RunDailyReportLoop sends rc's daily receiver report once a day at
-// rc.Report's configured time, in this process's local time zone, until ctx
-// is done. A no-op if the daily report isn't enabled. db may be nil (the
-// state db couldn't be opened at startup); the report is still sent, just
-// without any receiver_events history (see buildDailyReport).
-func RunDailyReportLoop(ctx context.Context, rc *backup.RunConfig, db *sql.DB, log *slog.Logger) {
+// RunReportLoop sends rc's receiver report on rc.Report's configured cron
+// schedule, in this process's local time zone, until ctx is done. A no-op if
+// the report isn't enabled. db may be nil (the state db couldn't be opened
+// at startup); the report is still sent, just without any receiver_events
+// history (see buildReport).
+func RunReportLoop(ctx context.Context, rc *backup.RunConfig, db *sql.DB, log *slog.Logger) {
 	if !rc.Report.Enabled {
 		return
 	}
 
-	log = log.With("component", "daily-report")
+	log = log.With("component", "report")
+
+	var prev time.Time // zero until the first report in this process has been sent
 
 	for {
-		next := nextDailyReportTime(rc.Report.SendHour, rc.Report.SendMinute, time.Now())
-		log.Debug("scheduled next daily report", "at", next)
+		next := rc.Report.Schedule.Next(time.Now())
+		log.Debug("scheduled next report", "at", next)
 
 		if !waitUntil(ctx, next) {
 			return
 		}
 
-		sendDailyReport(ctx, rc, db, next, log)
-	}
-}
+		start := prev
+		if start.IsZero() {
+			start = next.Add(-24 * time.Hour)
+		}
 
-// nextDailyReportTime returns the next time hour:minute occurs at or after
-// now, in now's own location: today if that time hasn't passed yet,
-// tomorrow otherwise.
-func nextDailyReportTime(hour, minute int, now time.Time) time.Time {
-	next := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
-	if !next.After(now) {
-		next = next.AddDate(0, 0, 1)
+		sendReport(ctx, rc, db, start, next, log)
+		prev = next
 	}
-
-	return next
 }
 
 // receiverReportLine is one configured receiver's activity over a
-// dailyReport's window, in the order its config file entry was listed.
+// reportContent's window, in the order its config file entry was listed.
 type receiverReportLine struct {
 	id            string
 	filesReceived int
@@ -61,7 +57,7 @@ type receiverReportLine struct {
 }
 
 // staleReceiverLine is one receiver found currently stale (see
-// annotateReceiverStaleness's identical condition) when a dailyReport was
+// annotateReceiverStaleness's identical condition) when a reportContent was
 // built.
 type staleReceiverLine struct {
 	id         string
@@ -69,26 +65,25 @@ type staleReceiverLine struct {
 	lastSeen   time.Time // zero if it has never received anything at all
 }
 
-// dailyReport is the computed content of one daily report email, built by
-// buildDailyReport and rendered to a message body by renderDailyReportBody.
-type dailyReport struct {
+// reportContent is the computed content of one report email, built by
+// buildReport and rendered to a message body by renderReportBody.
+type reportContent struct {
 	start, end time.Time
 	receivers  []receiverReportLine
 	errors     []backup.ReceiverErrorEvent
 	stale      []staleReceiverLine
 }
 
-// buildDailyReport summarizes rc's configured receivers' activity in the
-// 24h window ending at end: files received and errors from receiver_events
-// (db, skipped if nil), and current staleness read live from disk (see
+// buildReport summarizes rc's configured receivers' activity in the window
+// from start to end: files received and errors from receiver_events (db,
+// skipped if nil), and current staleness read live from disk (see
 // backup.LastReceivedAt), mirroring the dashboard's own
 // annotateReceiverStaleness so the two never disagree. A query failure is
 // logged and leaves that section empty rather than failing the whole
 // report — a partial report is better than none, matching this codebase's
 // usual failure handling.
-func buildDailyReport(ctx context.Context, rc *backup.RunConfig, db *sql.DB, end time.Time, log *slog.Logger) dailyReport {
-	start := end.Add(-24 * time.Hour)
-	report := dailyReport{start: start, end: end}
+func buildReport(ctx context.Context, rc *backup.RunConfig, db *sql.DB, start, end time.Time, log *slog.Logger) reportContent {
+	report := reportContent{start: start, end: end}
 
 	ids := make([]string, 0, len(rc.Receivers))
 	for id := range rc.Receivers {
@@ -142,11 +137,11 @@ func buildDailyReport(ctx context.Context, rc *backup.RunConfig, db *sql.DB, end
 	return report
 }
 
-// renderDailyReportBody renders report as a plain-text email body.
-func renderDailyReportBody(report dailyReport) string {
+// renderReportBody renders report as a plain-text email body.
+func renderReportBody(report reportContent) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "go-backup-tool daily receiver report\n")
+	fmt.Fprintf(&b, "go-backup-tool receiver report\n")
 	fmt.Fprintf(&b, "Period: %s to %s (UTC)\n\n", report.start.UTC().Format(time.RFC3339), report.end.UTC().Format(time.RFC3339))
 
 	if len(report.receivers) == 0 {
@@ -192,37 +187,37 @@ func renderDailyReportBody(report dailyReport) string {
 }
 
 // formatReportBytes formats n bytes as a short human-readable size (e.g.
-// "1.2 GB") for the daily report body. Unlike a general-purpose humanize
-// package, this only needs to read reasonably in an email, not be exact.
+// "1.2 GB") for the report body. Unlike a general-purpose humanize package,
+// this only needs to read reasonably in an email, not be exact.
 func formatReportBytes(n int64) string {
 	return backup.FormatSize(n, 1000, "kMGTPE", false)
 }
 
-// reportSMTPTimeout bounds the whole daily report email send (connect,
-// authenticate, and deliver), since sendDailyReport runs on its own
-// background schedule rather than under a run's -timeout.
+// reportSMTPTimeout bounds the whole report email send (connect,
+// authenticate, and deliver), since sendReport runs on its own background
+// schedule rather than under a run's -timeout.
 const reportSMTPTimeout = 30 * time.Second
 
-// sendDailyReport builds and emails rc's daily receiver report for the
-// window ending at, logging (rather than returning) any failure: like the
+// sendReport builds and emails rc's receiver report for the window from
+// start to end, logging (rather than returning) any failure: like the
 // stale-receiver webhook, a delivery problem here shouldn't affect anything
 // else this process is doing, and there's no caller to report it to — the
 // next scheduled report gets another chance.
-func sendDailyReport(ctx context.Context, rc *backup.RunConfig, db *sql.DB, at time.Time, log *slog.Logger) {
-	report := buildDailyReport(ctx, rc, db, at, log)
+func sendReport(ctx context.Context, rc *backup.RunConfig, db *sql.DB, start, end time.Time, log *slog.Logger) {
+	report := buildReport(ctx, rc, db, start, end, log)
 
-	subject := "go-backup-tool daily report - " + at.Format("2006-01-02")
-	body := renderDailyReportBody(report)
+	subject := "go-backup-tool report - " + end.Format("2006-01-02 15:04")
+	body := renderReportBody(report)
 
 	sendCtx, cancel := context.WithTimeout(ctx, reportSMTPTimeout)
 	defer cancel()
 
 	if err := sendMail(sendCtx, rc.Report.SMTP, rc.Report.From, rc.Report.To, subject, body); err != nil {
-		log.Warn("daily report: sending email failed", "err", err)
+		log.Warn("report: sending email failed", "err", err)
 		return
 	}
 
-	log.Info("daily report sent", "to", rc.Report.To, "receivers", len(report.receivers), "errors", len(report.errors), "stale", len(report.stale))
+	log.Info("report sent", "to", rc.Report.To, "receivers", len(report.receivers), "errors", len(report.errors), "stale", len(report.stale))
 }
 
 // dialSMTP connects to cfg's mail server and returns a ready-to-use

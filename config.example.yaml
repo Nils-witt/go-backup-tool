@@ -324,29 +324,35 @@ jobs:
 # last one; go-backup-tool warns at startup if a repeating job's key has no
 # {time} placeholder at all.
 
-# report: configures an optional daily email summarizing this instance's
-# receiver activity: how many files each configured receivers: entry
-# received in the last 24h, any receiver API errors, and any receiver
-# currently stale (see receivers: above). Independent of webui: — it's sent
-# regardless of whether the dashboard is enabled, as long as at least one
-# receivers: entry exists to report on. Omit this section entirely (the
-# default) to disable it.
+# report: configures an optional email summarizing this instance's receiver
+# activity: how many files each configured receivers: entry received since
+# the previous report, any receiver API errors, and any receiver currently
+# stale (see receivers: above). Independent of webui: — it's sent regardless
+# of whether the dashboard is enabled, as long as at least one receivers:
+# entry exists to report on. Omit this section entirely (the default) to
+# disable it.
 # report:
 #   enabled: true
 #   to: ["ops@example.com"]
 #   # from: "backups@example.com" # defaults to smtp.username if unset;
 #   # it's an error to leave both unset.
-#   time: "07:00" # "HH:MM", 24h, in this process's local time zone; default 07:00
+#   # schedule: a standard 5-field cron expression (minute hour
+#   # day-of-month month day-of-week), evaluated in this process's local
+#   # time zone; also accepts cron's descriptor shorthands (e.g. "@daily",
+#   # "@every 6h"). Default "0 7 * * *" (once a day at 07:00).
+#   schedule: "0 7 * * *"
 #   smtp:
 #     host: "smtp.example.com"
 #     # port: 587 # default 587, or 465 if security: tls
 #     username: "backups@example.com"
-#     # password is never written directly in this file: password-env names
-#     # an environment variable to read it from instead, same as a server's
-#     # access-key-env/secret-key-env above. Required together with
-#     # username; omit both to send unauthenticated (e.g. a trusted local
-#     # relay).
-#     password-env: SMTP_PASSWORD
+#     # password/password-env are mutually exclusive — set at most one,
+#     # together with username; omit all three to send unauthenticated (e.g.
+#     # a trusted local relay). password writes the credential directly in
+#     # this file; password-env instead names an environment variable to
+#     # read it from, same as a server's access-key-env/secret-key-env
+#     # above.
+#     password: "app-password-here"
+#     # password-env: SMTP_PASSWORD
 #     # security selects the connection's encryption: "starttls" (the
 #     # default) connects in plaintext and upgrades before authenticating;
 #     # "tls" connects already encrypted (the traditional port 465); "none"

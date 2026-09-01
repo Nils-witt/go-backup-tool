@@ -2353,7 +2353,7 @@ func TestParseFlagsReportSettings(t *testing.T) {
 report:
   enabled: true
   to: ["ops@example.com"]
-  time: "06:30"
+  schedule: "30 6 * * *"
   smtp:
     host: smtp.example.com
     port: 2525
@@ -2378,11 +2378,10 @@ jobs:
 	}
 
 	want := ReportSettings{
-		Enabled:    true,
-		To:         []string{"ops@example.com"},
-		From:       "backups@example.com",
-		SendHour:   6,
-		SendMinute: 30,
+		Enabled:  true,
+		To:       []string{"ops@example.com"},
+		From:     "backups@example.com",
+		Schedule: wantSchedule(t, "30 6 * * *"),
 		SMTP: SMTPSettings{
 			Host:     "smtp.example.com",
 			Port:     2525,

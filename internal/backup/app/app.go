@@ -177,8 +177,8 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 
 	// Independent of the web UI: a daily report is useful for anyone
 	// monitoring receivers by inbox, not just those watching the dashboard.
-	// RunDailyReportLoop itself no-ops when report.enabled isn't set.
-	go pipeline.RunDailyReportLoop(ctx, rc, stateDB, log)
+	// RunReportLoop itself no-ops when report.enabled isn't set.
+	go pipeline.RunReportLoop(ctx, rc, stateDB, log)
 
 	srv := startWebUIIfConfigured(ctx, rc, store, stateDB, logs, serverIdentity, log)
 

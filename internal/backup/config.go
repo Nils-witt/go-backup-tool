@@ -908,9 +908,8 @@ func parseOptionalDayDuration(field, s string, allowZero bool) (time.Duration, e
 }
 
 // pairedFieldsErr returns an error if exactly one of a/b is set — the "must
-// be configured together" validation shared by access-key-env/secret-key-env
-// (buildRemoteServer) and smtp.username/smtp.password-env (report.go's
-// resolveSMTPSettings). Returns nil if the pair is consistent (both set or
+// be configured together" validation used for access-key-env/secret-key-env
+// (buildRemoteServer). Returns nil if the pair is consistent (both set or
 // both empty), leaving any outer wrapping (e.g. a server-name prefix) to the
 // caller.
 func pairedFieldsErr(aName, a, bName, b string) error {

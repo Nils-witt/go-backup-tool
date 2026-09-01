@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
+
+	"github.com/robfig/cron/v3"
 )
 
-// fileReport is the top-level report: entry, configuring the optional daily
+// fileReport is the top-level report: entry, configuring an optional
 // email: an overview of how many files each configured receiver received,
-// any receiver API errors, and any receiver currently stale, sent once a
-// day to an operator's inbox via SMTP. It's independent of the web UI
+// any receiver API errors, and any receiver currently stale, sent to an
+// operator's inbox via SMTP on a cron schedule. It's independent of the web UI
 // dashboard (webui.go) — useful for anyone monitoring receivers by inbox,
 // not just those watching the dashboard — but reads the same
 // receiver_events history (schedule_state.go) and on-disk receiver state
@@ -21,23 +22,32 @@ type fileReport struct {
 	To      []string `yaml:"to"`
 	// From is the envelope/header sender address. Unset falls back to
 	// smtp.username; it's an error to leave both unset.
-	From string   `yaml:"from"`
-	Time string   `yaml:"time"` // "HH:MM", 24h, in this process's local time zone; default "07:00"
-	SMTP fileSMTP `yaml:"smtp"`
+	From string `yaml:"from"`
+
+	// Schedule is a standard 5-field cron expression (minute hour
+	// day-of-month month day-of-week), evaluated in this process's local
+	// time zone, e.g. "0 7 * * *" for once a day at 07:00, or "0 */6 * * *"
+	// for every 6h. Also accepts cron's descriptor shorthands (e.g.
+	// "@daily", "@every 6h"). Default "0 7 * * *" (once a day at 07:00).
+	Schedule string   `yaml:"schedule"`
+	SMTP     fileSMTP `yaml:"smtp"`
 }
 
 // fileSMTP is the report.smtp: block, describing how to reach the outgoing
-// mail server. Like a server's access-key-env/secret-key-env, Password is
-// never written directly in this file: PasswordEnv names an environment
-// variable to read it from instead.
+// mail server. Password/PasswordEnv are mutually exclusive: Password writes
+// the credential directly in this file, PasswordEnv instead names an
+// environment variable to read it from (like a server's
+// access-key-env/secret-key-env).
 type fileSMTP struct {
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"` // default depends on security: 465 for "tls", 587 otherwise
 
-	// Username/PasswordEnv authenticate to the mail server with SMTP PLAIN
-	// auth, required together; leave both unset to send unauthenticated
-	// (e.g. a local relay that only accepts connections from this host).
+	// Username authenticates to the mail server with SMTP PLAIN auth,
+	// together with exactly one of Password/PasswordEnv; leave all three
+	// unset to send unauthenticated (e.g. a local relay that only accepts
+	// connections from this host).
 	Username    string `yaml:"username"`
+	Password    string `yaml:"password"`
 	PasswordEnv string `yaml:"password-env"`
 
 	// Security selects the connection's encryption: "starttls" (the
@@ -69,24 +79,23 @@ type SMTPSettings struct {
 }
 
 // ReportSettings is fileReport after validation, ready for
-// pipeline.RunDailyReportLoop to act on. Its zero value (Enabled false)
-// means the daily report is disabled.
+// pipeline.RunReportLoop to act on. Its zero value (Enabled false) means the
+// report is disabled.
 type ReportSettings struct {
 	Enabled bool
 	To      []string
 	From    string
 
-	// SendHour/SendMinute are fileReport.Time, parsed once here rather than
-	// re-parsed on every scheduling loop iteration (see
-	// pipeline.nextDailyReportTime).
-	SendHour   int
-	SendMinute int
+	// Schedule is fileReport.Schedule, parsed once here rather than
+	// re-parsed on every scheduling loop iteration.
+	Schedule cron.Schedule
 
 	SMTP SMTPSettings
 }
 
-// defaultReportTime is fileReport.Time's default when left unset.
-const defaultReportTime = "07:00"
+// defaultReportSchedule is fileReport.Schedule's default when left unset:
+// once a day at 07:00.
+const defaultReportSchedule = "0 7 * * *"
 
 // resolveReportSettings validates cfg (the config file's report: entry) and
 // resolves it into a ReportSettings, reading report.smtp.password-env from
@@ -112,14 +121,14 @@ func resolveReportSettings(cfg fileReport) (ReportSettings, error) {
 		to[i] = addr
 	}
 
-	sendTime := strings.TrimSpace(cfg.Time)
-	if sendTime == "" {
-		sendTime = defaultReportTime
+	schedule := strings.TrimSpace(cfg.Schedule)
+	if schedule == "" {
+		schedule = defaultReportSchedule
 	}
 
-	hm, err := time.Parse("15:04", sendTime)
+	sched, err := cron.ParseStandard(schedule)
 	if err != nil {
-		return ReportSettings{}, fmt.Errorf("parsing report.time %q: %w (want 24h \"HH:MM\")", sendTime, err)
+		return ReportSettings{}, fmt.Errorf("parsing report.schedule %q: %w (want a standard 5-field cron expression, e.g. \"0 7 * * *\")", schedule, err)
 	}
 
 	smtpCfg, err := resolveSMTPSettings(&cfg.SMTP)
@@ -137,18 +146,17 @@ func resolveReportSettings(cfg fileReport) (ReportSettings, error) {
 	}
 
 	return ReportSettings{
-		Enabled:    true,
-		To:         to,
-		From:       from,
-		SendHour:   hm.Hour(),
-		SendMinute: hm.Minute(),
-		SMTP:       smtpCfg,
+		Enabled:  true,
+		To:       to,
+		From:     from,
+		Schedule: sched,
+		SMTP:     smtpCfg,
 	}, nil
 }
 
 // resolveSMTPSettings validates cfg (the config file's report.smtp: entry)
 // and resolves it into an SMTPSettings, reading password-env from the
-// environment when username is set.
+// environment when it's set instead of password directly.
 func resolveSMTPSettings(cfg *fileSMTP) (SMTPSettings, error) {
 	host := strings.TrimSpace(cfg.Host)
 	if host == "" {
@@ -167,21 +175,39 @@ func resolveSMTPSettings(cfg *fileSMTP) (SMTPSettings, error) {
 
 	username := strings.TrimSpace(cfg.Username)
 	passwordEnv := strings.TrimSpace(cfg.PasswordEnv)
+	password := cfg.Password
 
-	if err := pairedFieldsErr("report.smtp.username", username, "report.smtp.password-env", passwordEnv); err != nil {
+	password, err = resolveSMTPPassword(username, password, passwordEnv)
+	if err != nil {
 		return SMTPSettings{}, err
 	}
 
-	var password string
+	return SMTPSettings{Host: host, Port: port, Username: username, Password: password, Security: security}, nil
+}
 
-	if username != "" {
+// resolveSMTPPassword validates the username/password/password-env
+// combination from report.smtp: and resolves the effective password,
+// reading password-env from the environment when it's set.
+func resolveSMTPPassword(username, password, passwordEnv string) (string, error) {
+	if password != "" && passwordEnv != "" {
+		return "", errors.New("report.smtp.password and report.smtp.password-env are mutually exclusive; set at most one")
+	}
+
+	switch {
+	case username == "" && (password != "" || passwordEnv != ""):
+		return "", errors.New("report.smtp.password/password-env is set but report.smtp.username is not")
+	case username != "" && password == "" && passwordEnv == "":
+		return "", errors.New("report.smtp.username is set but neither report.smtp.password nor report.smtp.password-env is set")
+	}
+
+	if passwordEnv != "" {
 		password = os.Getenv(passwordEnv)
 		if password == "" {
-			return SMTPSettings{}, fmt.Errorf("report.smtp.password-env: environment variable %q is not set", passwordEnv)
+			return "", fmt.Errorf("report.smtp.password-env: environment variable %q is not set", passwordEnv)
 		}
 	}
 
-	return SMTPSettings{Host: host, Port: port, Username: username, Password: password, Security: security}, nil
+	return password, nil
 }
 
 // parseSMTPSecurity validates a report.smtp.security: value, defaulting an

@@ -4,7 +4,23 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/robfig/cron/v3"
 )
+
+// wantSchedule parses spec the same way resolveReportSettings does, for a
+// test to compare a resolved ReportSettings.Schedule against.
+func wantSchedule(t *testing.T, spec string) cron.Schedule {
+	t.Helper()
+
+	sched, err := cron.ParseStandard(spec)
+	if err != nil {
+		t.Fatalf("cron.ParseStandard(%q) error: %v", spec, err)
+	}
+
+	return sched
+}
 
 func TestResolveReportSettingsDisabledByDefault(t *testing.T) {
 	t.Parallel()
@@ -38,11 +54,10 @@ func TestResolveReportSettingsDefaults(t *testing.T) {
 	}
 
 	want := ReportSettings{
-		Enabled:    true,
-		To:         []string{"ops@example.com"},
-		From:       "backups@example.com", // defaults to smtp.username
-		SendHour:   7,
-		SendMinute: 0,
+		Enabled:  true,
+		To:       []string{"ops@example.com"},
+		From:     "backups@example.com", // defaults to smtp.username
+		Schedule: wantSchedule(t, defaultReportSchedule),
 		SMTP: SMTPSettings{
 			Host:     "smtp.example.com",
 			Port:     587, // default for starttls
@@ -61,10 +76,10 @@ func TestResolveReportSettingsExplicitFields(t *testing.T) {
 	t.Parallel()
 
 	cfg := fileReport{
-		Enabled: true,
-		To:      []string{"a@example.com", "b@example.com"},
-		From:    "reports@example.com",
-		Time:    "23:45",
+		Enabled:  true,
+		To:       []string{"a@example.com", "b@example.com"},
+		From:     "reports@example.com",
+		Schedule: "45 23 * * *",
 		SMTP: fileSMTP{
 			Host:     "smtp.example.com",
 			Port:     2525,
@@ -81,8 +96,9 @@ func TestResolveReportSettingsExplicitFields(t *testing.T) {
 		t.Errorf("from = %q, want explicit report.from", got.From)
 	}
 
-	if got.SendHour != 23 || got.SendMinute != 45 {
-		t.Errorf("sendHour/sendMinute = %d:%d, want 23:45", got.SendHour, got.SendMinute)
+	wantNext := time.Date(2026, 8, 28, 23, 45, 0, 0, time.Local)
+	if next := got.Schedule.Next(time.Date(2026, 8, 28, 0, 0, 0, 0, time.Local)); !next.Equal(wantNext) {
+		t.Errorf("schedule.Next() = %v, want %v (report.schedule 23:45 parsed as 45 23 * * *)", next, wantNext)
 	}
 
 	if got.SMTP.Port != 2525 {
@@ -91,6 +107,30 @@ func TestResolveReportSettingsExplicitFields(t *testing.T) {
 
 	if got.SMTP.Security != SMTPSecurityNone {
 		t.Errorf("security = %q, want none", got.SMTP.Security)
+	}
+}
+
+func TestResolveReportSettingsDirectPassword(t *testing.T) {
+	t.Parallel()
+
+	cfg := fileReport{
+		Enabled: true,
+		To:      []string{"a@example.com"},
+		From:    "reports@example.com",
+		SMTP: fileSMTP{
+			Host:     "smtp.example.com",
+			Username: "backups@example.com",
+			Password: "hunter2",
+		},
+	}
+
+	got, err := resolveReportSettings(cfg)
+	if err != nil {
+		t.Fatalf("resolveReportSettings() error: %v", err)
+	}
+
+	if got.SMTP.Password != "hunter2" {
+		t.Errorf("password = %q, want the literal report.smtp.password", got.SMTP.Password)
 	}
 }
 
@@ -138,12 +178,12 @@ func TestResolveReportSettingsErrors(t *testing.T) {
 			wantErrHas: "report.smtp.host",
 		},
 		{
-			name: "bad time",
+			name: "bad schedule",
 			cfg: fileReport{
-				Enabled: true, To: []string{"a@example.com"}, Time: "not-a-time",
+				Enabled: true, To: []string{"a@example.com"}, Schedule: "not-a-cron-expr",
 				SMTP: fileSMTP{Host: "smtp.example.com"},
 			},
-			wantErrHas: "report.time",
+			wantErrHas: "report.schedule",
 		},
 		{
 			name: "bad security",
@@ -168,6 +208,14 @@ func TestResolveReportSettingsErrors(t *testing.T) {
 				SMTP: fileSMTP{Host: "smtp.example.com", PasswordEnv: "SOME_ENV"},
 			},
 			wantErrHas: "password-env",
+		},
+		{
+			name: "password and password-env both set",
+			cfg: fileReport{
+				Enabled: true, To: []string{"a@example.com"},
+				SMTP: fileSMTP{Host: "smtp.example.com", Username: "u", Password: "p", PasswordEnv: "SOME_ENV"},
+			},
+			wantErrHas: "mutually exclusive",
 		},
 		{
 			name: "password-env not set in environment",
