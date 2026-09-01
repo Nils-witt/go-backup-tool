@@ -282,23 +282,29 @@ func (s *StatusStore) SeedLastRun(name string, start, end time.Time, state RunSt
 	setSizeIfSucceeded(&j.Size, state, size)
 }
 
-// SeedTargetRun initializes job name's target at index from a previously
-// persisted result (see readTargetRuns in schedule_state.go), mirroring
+// SeedTargetRun initializes job name's target whose server matches target
+// from a previously persisted result (see store.ListTargetRuns), mirroring
 // seedLastRun's reasoning one level down: a restart's web UI can still show
 // each target's last outcome instead of every target reverting to "idle"
 // until it next runs. Called once at startup, before any job's own goroutine
 // can call starting/targetDone, so it never races an actual run.
-func (s *StatusStore) SeedTargetRun(name string, index int, state RunState, errText string) {
+func (s *StatusStore) SeedTargetRun(name, target string, state RunState, errText string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	j, ok := s.jobs[name]
-	if !ok || index < 0 || index >= len(j.Targets) {
+	if !ok {
 		return
 	}
 
-	j.Targets[index].State = state
-	j.Targets[index].Error = errText
+	for i := range j.Targets {
+		if j.Targets[i].Server == target {
+			j.Targets[i].State = state
+			j.Targets[i].Error = errText
+
+			return
+		}
+	}
 }
 
 // Snapshot returns every job's current status, in config-file order, each a

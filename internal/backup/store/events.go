@@ -76,8 +76,6 @@ func (s *Store) SaveLoginEvent(ctx context.Context, ev LoginEvent) error {
 
 // ListLoginEvents returns up to limit of the most recently recorded login
 // events, newest first, for the dashboard's login log view.
-//
-//nolint:dupl // same query/scan shape as ListTargetErrors by coincidence of field count; not worth a shared abstraction over queryRows for one more caller
 func (s *Store) ListLoginEvents(ctx context.Context, limit int) ([]LoginEvent, error) {
 	query := `SELECT at, username, method, success, remote_addr, detail FROM login_events ORDER BY id DESC LIMIT ?`
 

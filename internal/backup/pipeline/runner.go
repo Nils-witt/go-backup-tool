@@ -51,9 +51,14 @@ func SeedStatusFromState(ctx context.Context, db *store.Store, jobs []*config.Co
 			continue
 		}
 
-		log.Debug("seeded job status from state db", "job", j.Name, "state", run.State, "last_end", run.End)
+		log.Debug("seeded job status from state db", "job", j.Name, "success", run.Success, "last_end", run.End)
 
-		statusStore.SeedLastRun(j.Name, run.Start, run.End, backup.RunState(run.State), run.Error, run.Size)
+		state := backup.StateFailed
+		if run.Success {
+			state = backup.StateOK
+		}
+
+		statusStore.SeedLastRun(j.Name, run.Start, run.End, state, run.Error, run.Size)
 	}
 
 	for _, j := range jobs {
@@ -64,7 +69,7 @@ func SeedStatusFromState(ctx context.Context, db *store.Store, jobs []*config.Co
 		}
 
 		for _, tr := range targetRuns {
-			statusStore.SeedTargetRun(j.Name, tr.Index, backup.RunState(tr.State), tr.Error)
+			statusStore.SeedTargetRun(j.Name, tr.Target, backup.RunState(tr.State), tr.Error)
 		}
 	}
 }
@@ -77,7 +82,7 @@ func (r *Runner) lastJobSuccess(ctx context.Context, name string) time.Time {
 		return time.Time{}
 	}
 
-	t, ok, err := r.stateDB.GetLastSuccess(ctx, name)
+	t, ok, err := r.stateDB.GetLastJobSuccess(ctx, name)
 	if err != nil {
 		r.log.Warn("reading last success from state db", "job", name, "err", err)
 		return time.Time{}
@@ -88,48 +93,6 @@ func (r *Runner) lastJobSuccess(ctx context.Context, name string) time.Time {
 	}
 
 	return t
-}
-
-// recordJobSuccess persists that job name just completed successfully, so a
-// future restart can tell this run's grid slot isn't missed.
-func (r *Runner) recordJobSuccess(ctx context.Context, name string) {
-	if r.stateDB == nil {
-		return
-	}
-
-	if err := r.stateDB.SaveLastSuccess(ctx, name, time.Now()); err != nil {
-		r.log.Warn("recording job success to state db", "job", name, "err", err)
-	}
-}
-
-// recordLastRun persists job name's just-finished run (whether it fully
-// succeeded, partly succeeded, or failed outright, and regardless of
-// whether it uses start-time), so a future restart's web UI can still show
-// it via SeedStatusFromState — unlike recordJobSuccess, which only tracks
-// full successes and only matters for start-time-anchored jobs' catch-up
-// scheduling. state is whatever StatusStore.Finished just computed and
-// recorded live, so the persisted summary matches it rather than
-// re-deriving its own (possibly inconsistent) view from err alone.
-func (r *Runner) recordLastRun(ctx context.Context, name string, start time.Time, state backup.RunState, err error, size int64) {
-	if r.stateDB == nil {
-		return
-	}
-
-	run := store.LastRun{Start: start, End: time.Now(), State: string(state), Size: size}
-
-	if err != nil {
-		run.Error = err.Error()
-	}
-
-	if state == backup.StateFailed {
-		// No target got a copy of the backup, so there's no size worth
-		// reporting (unlike stateIncomplete, where at least one did).
-		run.Size = 0
-	}
-
-	if err := r.stateDB.SaveLastRun(ctx, name, run); err != nil {
-		r.log.Warn("recording last run to state db", "job", name, "err", err)
-	}
 }
 
 // Schedule runs job on its configured cadence until ctx is done.
@@ -260,62 +223,58 @@ func (r *Runner) runOnce(ctx context.Context, job *config.Config) {
 	r.store.Starting(job.Name)
 	log.Info("job starting", "targets", len(run.Targets))
 
-	// Refreshes this target's state (in both the live status store and the
-	// state db) the moment its own outcome is known, independently of every
-	// other target and without waiting for the whole job to finish — see
-	// runPipeline's onTargetDone doc.
 	onTargetDone := func(index int, terr error) {
 		r.store.TargetDone(job.Name, index, terr)
-		r.persistTargetRun(ctx, job.Name, index, terr)
 
-		if terr != nil && index >= 0 && index < len(run.Targets) {
-			r.recordTargetError(ctx, job.Name, index, &run.Targets[index], terr)
+		if index < 0 || index >= len(run.Targets) {
+			return
 		}
+
+		r.persistTargetRun(ctx, job.Name, terr == nil, job.Targets[index].ServerName, terr)
 	}
 
 	bytesWritten, err := runPipeline(ctx, &run, log, onTargetDone)
 	duration := time.Since(start)
 
 	state := r.store.Finished(job.Name, err, bytesWritten)
-	r.recordLastRun(ctx, job.Name, start, state, err, bytesWritten)
 
 	if err != nil {
 		r.failed.Store(true)
 
 		if state == backup.StateIncomplete {
-			// Some targets got the backup and some didn't — worth flagging,
-			// but distinct from (and less severe than) every target failing.
 			log.Warn("job incomplete: some targets failed", "duration", duration, "err", config.JobError(job, err))
 		} else {
 			log.Error("job failed", "duration", duration, "err", config.JobError(job, err))
 		}
 
+		r.recordJobRun(ctx, job.Name, false, start, bytesWritten, config.JobError(job, err).Error())
+
 		return
 	}
 
-	if !job.StartTime.IsZero() {
-		r.recordJobSuccess(ctx, job.Name)
+	log.Info("job finished", "duration", duration, "bytes", bytesWritten)
+	r.recordJobRun(ctx, job.Name, true, start, bytesWritten, "")
+}
+
+// recordJobRun persists job name's just-finished run (whether it fully
+// succeeded, partly succeeded, or failed outright), so a future restart's
+// web UI can still show it via SeedStatusFromState. Best-effort: a db
+// hiccup here shouldn't fail the run.
+func (r *Runner) recordJobRun(ctx context.Context, name string, success bool, start time.Time, bytesWritten int64, errText string) {
+	if r.stateDB == nil {
+		return
 	}
 
-	log.Info("job finished", "duration", duration, "bytes", bytesWritten)
-
-	for i := range run.Targets {
-		t := &run.Targets[i]
-
-		switch t.Kind {
-		case config.ServerKindLocal:
-			log.Info("wrote target", "target", targetLabel(t), "path", backup.LocalObjectPath(&run, t))
-		case config.ServerKindRemote:
-			log.Info("uploaded target", "target", targetLabel(t), "url", RemoteObjectURL(t, run.Key))
-		}
+	if err := r.stateDB.SaveJobRun(ctx, name, success, start, time.Now(), bytesWritten, errText); err != nil {
+		r.log.Warn("recording job run to state db", "job", name, "err", err)
 	}
 }
 
-// persistTargetRun records target index's just-finished success/failure to
-// the state db, mirroring recordLastRun's per-job persistence one level
-// down. Best-effort: a db hiccup here shouldn't fail the run, matching
-// recordLastRun's own reasoning.
-func (r *Runner) persistTargetRun(ctx context.Context, jobName string, index int, terr error) {
+// persistTargetRun records target's just-finished success/failure to the
+// state db, mirroring recordJobRun's per-job persistence one level down.
+// Best-effort: a db hiccup here shouldn't fail the run, matching
+// recordJobRun's own reasoning.
+func (r *Runner) persistTargetRun(ctx context.Context, jobName string, success bool, target string, terr error) {
 	if r.stateDB == nil {
 		return
 	}
@@ -327,23 +286,8 @@ func (r *Runner) persistTargetRun(ctx context.Context, jobName string, index int
 
 	backup.SetOutcome(&state, &errText, terr)
 
-	if err := r.stateDB.SaveTargetRun(ctx, jobName, index, string(state), errText, time.Now()); err != nil {
-		r.log.Warn("recording target run to state db", "job", jobName, "target", index, "err", err)
-	}
-}
-
-// recordTargetError appends a target_errors row for job jobName's target at
-// index (t), best-effort: a db hiccup here shouldn't fail the run, matching
-// persistTargetRun's own reasoning. Unlike persistTargetRun's target_runs
-// write, which overwrites the target's previous outcome, this appends one
-// row per failure so a history of every occurrence is kept.
-func (r *Runner) recordTargetError(ctx context.Context, jobName string, index int, t *config.Target, targetErr error) {
-	if r.stateDB == nil {
-		return
-	}
-
-	if err := r.stateDB.SaveTargetError(ctx, jobName, index, t.ServerName, t.Bucket, time.Now(), targetErr); err != nil {
-		r.log.Warn("recording target error to state db", "job", jobName, "target", index, "err", err)
+	if err := r.stateDB.SaveTargetRun(ctx, jobName, success, target, string(state), errText, time.Now()); err != nil {
+		r.log.Warn("recording target run to state db", "job", jobName, "target", target, "err", err)
 	}
 }
 

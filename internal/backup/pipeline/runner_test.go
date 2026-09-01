@@ -73,8 +73,8 @@ func TestRunOnceRecordsLastRunToStateDB(t *testing.T) { //nolint:paralleltest //
 		t.Fatal("ReadLastRun() ok = false after runOnce, want true")
 	}
 
-	if run.State != string(backup.StateOK) {
-		t.Errorf("run.State = %q, want ok", run.State)
+	if !run.Success {
+		t.Errorf("run.Success = %v, want true", run.Success)
 	}
 
 	if run.End.Before(run.Start) {
@@ -252,8 +252,8 @@ func TestRunOnceReportsIncompleteWhenSomeTargetsFail(t *testing.T) {
 		t.Fatal("ReadLastRun() ok = false, want true")
 	}
 
-	if run.State != string(backup.StateIncomplete) {
-		t.Errorf("persisted run.State = %q, want incomplete", run.State)
+	if run.Success {
+		t.Error("persisted run.Success = true, want false (an incomplete run still counts as not fully successful)")
 	}
 
 	if run.Size == 0 {
@@ -626,8 +626,8 @@ func TestScheduleStartTimeSkipsCatchUpWhenAlreadyRecorded(t *testing.T) { //noli
 		t.Fatal("lastDueSlot() ok = false, want true (start-time is in the past)")
 	}
 
-	if err := stateDB.SaveLastSuccess(context.Background(), job.Name, due); err != nil {
-		t.Fatalf("SaveLastSuccess() error: %v", err)
+	if err := stateDB.SaveJobRun(context.Background(), job.Name, true, due, due, 0, ""); err != nil {
+		t.Fatalf("SaveJobRun() error: %v", err)
 	}
 
 	statusStore := backup.NewStatusStore([]*config.Config{job})
