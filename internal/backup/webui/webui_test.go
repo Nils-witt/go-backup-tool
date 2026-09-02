@@ -274,7 +274,7 @@ func TestStartWebUIServesRequests(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, discardLogger, nil, nil, "", "", nil, nil, false, nil)
+	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, discardLogger, nil, nil, "", "", nil, nil, false, false, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}
@@ -373,7 +373,7 @@ func TestStartWebUIWithLoginRequiresSession(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, discardLogger, nil, nil, "admin", "secret", nil, nil, false, nil)
+	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, discardLogger, nil, nil, "admin", "secret", nil, nil, false, false, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}
@@ -522,7 +522,7 @@ func TestStartWebUILoginLogAndDownloadLogRequireDedicatedPermission(t *testing.T
 		t.Fatalf("CreateWebUIUser(auditor) unexpected error: %v", err)
 	}
 
-	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, discardLogger, db, nil, "admin", "secret", nil, nil, false, nil)
+	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, discardLogger, db, nil, "admin", "secret", nil, nil, false, false, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}
@@ -610,7 +610,7 @@ func TestStartWebUIBadAddrReturnsNil(t *testing.T) {
 	store, _ := newTestStore()
 
 	// Port 0 is valid (means "pick one"); an unparseable address is not.
-	srv := StartWebUI("not-a-valid-address", store, nil, nil, nil, nil, discardLogger, nil, nil, "", "", nil, nil, false, nil)
+	srv := StartWebUI("not-a-valid-address", store, nil, nil, nil, nil, discardLogger, nil, nil, "", "", nil, nil, false, false, nil)
 	if srv != nil {
 		t.Cleanup(srv.Shutdown)
 		t.Fatal("StartWebUI() with an invalid address = non-nil, want nil")

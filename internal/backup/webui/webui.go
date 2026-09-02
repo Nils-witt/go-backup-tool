@@ -52,7 +52,7 @@ type Server struct {
 // StartWebUI starts the -listen web UI dashboard and returns a Server the
 // caller can shut down with Server.Shutdown. Returns nil if the server
 // fails to start.
-func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Config, runner *pipeline.Runner, receivers map[string]config.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store, logs *LogRingBuffer, webUIUsername, webUIPassword string, oidcAuth *OIDCAuth, identity *identity.ServerIdentity, trustProxyHeaders bool, registerExtraRoutes func(*http.ServeMux)) *Server {
+func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Config, runner *pipeline.Runner, receivers map[string]config.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store, logs *LogRingBuffer, webUIUsername, webUIPassword string, oidcAuth *OIDCAuth, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, registerExtraRoutes func(*http.ServeMux)) *Server {
 	jobsByName := make(map[string]*config.Config, len(jobs))
 	for _, j := range jobs {
 		jobsByName[j.Name] = j
@@ -173,8 +173,13 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 		mux.HandleFunc("GET /login/oidc/callback", handleOIDCCallback(oidcAuth, pending, uiSessions, log, db, trustProxyHeaders))
 	}
 
+	var handler http.Handler = mux
+	if devMode {
+		handler = corsMiddleware(handler)
+	}
+
 	srv := &Server{
-		http: &http.Server{Handler: logRequests(log, mux, trustProxyHeaders), ReadHeaderTimeout: 10 * time.Second},
+		http: &http.Server{Handler: logRequests(log, handler, trustProxyHeaders), ReadHeaderTimeout: 10 * time.Second},
 		done: make(chan struct{}),
 		addr: ln.Addr().String(),
 	}
@@ -211,6 +216,31 @@ func logRequests(log *slog.Logger, next http.Handler, trustProxyHeaders bool) ht
 			"status", sw.status,
 			"duration", time.Since(start),
 		)
+	})
+}
+
+// corsMiddleware adds permissive CORS response headers to every request
+// next handles, and answers a CORS preflight (an OPTIONS request) itself
+// rather than passing it on — mux has no route registered for OPTIONS on
+// any path, so without this a preflight would otherwise 404/405 before next
+// ever saw it. Only wired in when webui.dev-mode: is set (see StartWebUI):
+// it lets a frontend dev server running on its own origin (e.g. `npm run
+// dev`) call this instance's API directly, at the cost of letting any
+// website's JavaScript read API responses from a browser that also holds a
+// valid bearer token for this instance — never enable it against a
+// production instance.
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
 	})
 }
 

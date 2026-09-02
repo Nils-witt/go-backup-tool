@@ -180,6 +180,11 @@ type RunConfig struct {
 	// fileWebUI.TrustProxyHeaders and clientAddr in webui.go.
 	TrustProxyHeaders bool
 
+	// DevMode mirrors fileWebUI.DevMode: when set, the web UI adds
+	// permissive CORS response headers so a frontend dev server on its own
+	// origin can call this instance's API directly — see fileWebUI.DevMode.
+	DevMode bool
+
 	// OIDC, when its Enabled field is set, lets a browser log into the web
 	// UI via an OpenID Connect provider instead of (or alongside, if
 	// WebUIUsername/WebUIPassword are also set) the dashboard's own
@@ -345,6 +350,18 @@ type fileWebUI struct {
 	// alongside (or instead of) Username/Password above — see
 	// fileWebUIOIDC.
 	OIDC fileWebUIOIDC `yaml:"oidc"`
+
+	// DevMode adds permissive CORS response headers (Access-Control-Allow-
+	// Origin: *, plus the methods/headers the dashboard's own fetch() calls
+	// use) to every response, so a frontend dev server running on its own
+	// origin (e.g. `npm run dev`, http://localhost:5173) can call this
+	// instance's /api/... endpoints directly without Vite's dev-only proxy
+	// (see frontend/vite.config.ts) in the way. Unset/false (the default)
+	// adds no CORS headers at all, matching the dashboard's normal
+	// same-origin deployment. Never enable this against a production
+	// instance: it lets any website's JavaScript read API responses from a
+	// browser that also holds a valid bearer token for this instance.
+	DevMode bool `yaml:"dev-mode"`
 }
 
 // fileWebUIOIDC is the webui.oidc: entry, configuring Single Sign-On for the
@@ -491,6 +508,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		WebUIPassword:     fileCfg.WebUI.Password,
 		LogViewer:         fileCfg.WebUI.LogViewer,
 		TrustProxyHeaders: fileCfg.WebUI.TrustProxyHeaders,
+		DevMode:           fileCfg.WebUI.DevMode,
 		OIDC:              oidc,
 		Report:            report,
 	}, nil

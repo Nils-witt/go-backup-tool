@@ -165,6 +165,15 @@ servers:
 #   # own address.
 #   trust-proxy-headers: true
 #
+#   # dev-mode adds permissive CORS response headers (Access-Control-Allow-
+#   # Origin: *) to every response, so a frontend dev server on its own
+#   # origin (e.g. `npm run dev`, http://localhost:5173) can call this
+#   # instance's /api/... endpoints directly. Unset (the default) adds no
+#   # CORS headers. Never enable this against a production instance: it lets
+#   # any website's JavaScript read API responses from a browser that also
+#   # holds a valid bearer token for this instance.
+#   dev-mode: true
+#
 #   # oidc adds a "Log in with SSO" link to the login page, alongside
 #   # username/password above if that's also configured — either one starts
 #   # the same kind of dashboard session. Any account the provider itself
