@@ -49,14 +49,27 @@ const outstandingTargetUploads = `CREATE TABLE IF NOT EXISTS outstanding_target_
 	fileName  TEXT NOT NULL
 )`
 
+// maxJobRunsPerJob caps how many job_runs rows SaveJobRun retains per job
+// name, so the table doesn't grow unbounded over a job's lifetime.
+const maxJobRunsPerJob = 100
+
 // SaveJobRun appends a job_runs row recording that job name's run starting
 // at startTime and ending at endTime just completed, succeeding or failing
-// with errText (empty on success) and having written bytesWritten bytes.
+// with errText (empty on success) and having written bytesWritten bytes. It
+// then prunes name's older runs beyond maxJobRunsPerJob.
 func (s *Store) SaveJobRun(ctx context.Context, name, state string, success bool, startTime, endTime time.Time, bytesWritten int64, errText string) error {
 	const insert = `INSERT INTO job_runs (name, state, success, startTime, endTime, error, size) VALUES (?, ?, ?, ?, ?, ?, ?)`
 
 	if _, err := s.db.ExecContext(ctx, insert, name, state, success, startTime.UTC(), endTime.UTC(), errText, bytesWritten); err != nil {
 		return fmt.Errorf("recording job %q run: %w", name, err)
+	}
+
+	const prune = `DELETE FROM job_runs WHERE name = ? AND id NOT IN (
+		SELECT id FROM job_runs WHERE name = ? ORDER BY id DESC LIMIT ?
+	)`
+
+	if _, err := s.db.ExecContext(ctx, prune, name, name, maxJobRunsPerJob); err != nil {
+		return fmt.Errorf("pruning job %q run history: %w", name, err)
 	}
 
 	return nil
@@ -168,15 +181,30 @@ func (s *Store) ListJobRunEvents(ctx context.Context, limit int) ([]JobRunEvent,
 	})
 }
 
+// maxTargetRunsPerTarget caps how many target_runs rows SaveTargetRun
+// retains per job name/target pair, so the table doesn't grow unbounded
+// over a target's lifetime.
+const maxTargetRunsPerTarget = 100
+
 // SaveTargetRun appends a target_runs row recording job name's target
 // (target names the servers: entry it came from, see config.Target.
 // ServerName) just-finished success/failure. Called for every target of
-// every run, mirroring SaveJobRun's per-job persistence one level down.
+// every run, mirroring SaveJobRun's per-job persistence one level down. It
+// then prunes that job/target pair's older runs beyond
+// maxTargetRunsPerTarget.
 func (s *Store) SaveTargetRun(ctx context.Context, name string, success bool, target, state, errText string, at time.Time) error {
 	const insert = `INSERT INTO target_runs (job_name, success, target, run_at, state, error) VALUES (?, ?, ?, ?, ?, ?)`
 
 	if _, err := s.db.ExecContext(ctx, insert, name, success, target, at.UTC(), state, errText); err != nil {
 		return fmt.Errorf("recording job %q target %q run: %w", name, target, err)
+	}
+
+	const prune = `DELETE FROM target_runs WHERE job_name = ? AND target = ? AND id NOT IN (
+		SELECT id FROM target_runs WHERE job_name = ? AND target = ? ORDER BY id DESC LIMIT ?
+	)`
+
+	if _, err := s.db.ExecContext(ctx, prune, name, target, name, target, maxTargetRunsPerTarget); err != nil {
+		return fmt.Errorf("pruning job %q target %q run history: %w", name, target, err)
 	}
 
 	return nil

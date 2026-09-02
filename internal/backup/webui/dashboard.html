@@ -274,6 +274,29 @@
   table.target-run-events td.nowrap {
     white-space: nowrap;
   }
+  .log-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem;
+    margin-bottom: .7rem;
+  }
+  .log-filters input[type="text"],
+  .log-filters select {
+    padding: .35rem .5rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    font-size: .82rem;
+  }
+  .log-filters input[type="text"] {
+    flex: 1 1 180px;
+    min-width: 140px;
+  }
+  td.empty-filter {
+    text-align: center;
+    color: var(--muted);
+  }
   .users-card {
     max-width: 1200px;
     margin: 0 auto;
@@ -509,6 +532,14 @@
 <div id="job-run-log-wrap" hidden>
   <h2 class="section-title">Job run log</h2>
   <div class="card job-run-log-card">
+    <div class="log-filters">
+      <input type="text" id="job-run-log-filter-job" placeholder="Filter by job&hellip;">
+      <select id="job-run-log-filter-result">
+        <option value="">All results</option>
+        <option value="success">Success</option>
+        <option value="failed">Failed</option>
+      </select>
+    </div>
     <table class="job-run-events">
       <thead>
         <tr><th>Time</th><th>Job</th><th>Duration</th><th>Size</th><th>Result</th></tr>
@@ -521,6 +552,15 @@
 <div id="target-run-log-wrap" hidden>
   <h2 class="section-title">Target run log</h2>
   <div class="card target-run-log-card">
+    <div class="log-filters">
+      <input type="text" id="target-run-log-filter-job" placeholder="Filter by job&hellip;">
+      <input type="text" id="target-run-log-filter-target" placeholder="Filter by target&hellip;">
+      <select id="target-run-log-filter-result">
+        <option value="">All results</option>
+        <option value="success">Success</option>
+        <option value="failed">Failed</option>
+      </select>
+    </div>
     <table class="target-run-events">
       <thead>
         <tr><th>Time</th><th>Job</th><th>Target</th><th>Result</th></tr>

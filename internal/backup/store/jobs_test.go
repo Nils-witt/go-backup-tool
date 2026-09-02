@@ -74,6 +74,65 @@ func TestGetLastJobSuccessIgnoresFailedRuns(t *testing.T) {
 	}
 }
 
+func TestSaveJobRunPrunesOldRunsPastLimit(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := context.Background()
+
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	for i := range maxJobRunsPerJob + 10 {
+		at := base.Add(time.Duration(i) * time.Minute)
+		if err := db.SaveJobRun(ctx, "job-a", "ok", true, at, at, 0, ""); err != nil {
+			t.Fatalf("SaveJobRun() run %d error: %v", i, err)
+		}
+	}
+
+	events, err := db.ListJobRunEvents(ctx, maxJobRunsPerJob*2)
+	if err != nil {
+		t.Fatalf("ListJobRunEvents() error: %v", err)
+	}
+
+	if len(events) != maxJobRunsPerJob {
+		t.Fatalf("ListJobRunEvents() returned %d runs, want %d after pruning", len(events), maxJobRunsPerJob)
+	}
+
+	want := base.Add(time.Duration(maxJobRunsPerJob+9) * time.Minute)
+	if !events[0].Start.Equal(want) {
+		t.Errorf("newest surviving run Start = %v, want %v (the most recent run)", events[0].Start, want)
+	}
+}
+
+func TestSaveJobRunPruningIsPerJob(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := context.Background()
+
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	for i := range maxJobRunsPerJob + 5 {
+		at := base.Add(time.Duration(i) * time.Minute)
+		if err := db.SaveJobRun(ctx, "job-a", "ok", true, at, at, 0, ""); err != nil {
+			t.Fatalf("SaveJobRun() job-a run %d error: %v", i, err)
+		}
+	}
+
+	if err := db.SaveJobRun(ctx, "job-b", "ok", true, base, base, 0, ""); err != nil {
+		t.Fatalf("SaveJobRun() job-b error: %v", err)
+	}
+
+	events, err := db.ListJobRunEvents(ctx, maxJobRunsPerJob*2)
+	if err != nil {
+		t.Fatalf("ListJobRunEvents() error: %v", err)
+	}
+
+	if len(events) != maxJobRunsPerJob+1 {
+		t.Fatalf("ListJobRunEvents() returned %d runs, want %d (job-a pruned to %d, job-b untouched)", len(events), maxJobRunsPerJob+1, maxJobRunsPerJob)
+	}
+}
+
 func TestSaveGetLastRunRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -178,6 +237,70 @@ func TestSaveGetTargetRunRoundTrip(t *testing.T) {
 		if w, ok := want[tr.Target]; !ok || tr != w {
 			t.Errorf("ListTargetRuns() entry %+v, want %+v", tr, want[tr.Target])
 		}
+	}
+}
+
+func TestSaveTargetRunPrunesOldRunsPastLimit(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := context.Background()
+
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	for i := range maxTargetRunsPerTarget + 10 {
+		at := base.Add(time.Duration(i) * time.Minute)
+		if err := db.SaveTargetRun(ctx, "job-a", true, "server-a", "ok", "", at); err != nil {
+			t.Fatalf("SaveTargetRun() run %d error: %v", i, err)
+		}
+	}
+
+	events, err := db.ListTargetRunEvents(ctx, maxTargetRunsPerTarget*2)
+	if err != nil {
+		t.Fatalf("ListTargetRunEvents() error: %v", err)
+	}
+
+	if len(events) != maxTargetRunsPerTarget {
+		t.Fatalf("ListTargetRunEvents() returned %d runs, want %d after pruning", len(events), maxTargetRunsPerTarget)
+	}
+
+	want := base.Add(time.Duration(maxTargetRunsPerTarget+9) * time.Minute)
+	if !events[0].At.Equal(want) {
+		t.Errorf("newest surviving run At = %v, want %v (the most recent run)", events[0].At, want)
+	}
+}
+
+func TestSaveTargetRunPruningIsPerJobAndTarget(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := context.Background()
+
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	for i := range maxTargetRunsPerTarget + 5 {
+		at := base.Add(time.Duration(i) * time.Minute)
+		if err := db.SaveTargetRun(ctx, "job-a", true, "server-a", "ok", "", at); err != nil {
+			t.Fatalf("SaveTargetRun() job-a/server-a run %d error: %v", i, err)
+		}
+	}
+
+	if err := db.SaveTargetRun(ctx, "job-a", true, "server-b", "ok", "", base); err != nil {
+		t.Fatalf("SaveTargetRun() job-a/server-b error: %v", err)
+	}
+
+	if err := db.SaveTargetRun(ctx, "job-b", true, "server-a", "ok", "", base); err != nil {
+		t.Fatalf("SaveTargetRun() job-b/server-a error: %v", err)
+	}
+
+	events, err := db.ListTargetRunEvents(ctx, maxTargetRunsPerTarget*2)
+	if err != nil {
+		t.Fatalf("ListTargetRunEvents() error: %v", err)
+	}
+
+	want := maxTargetRunsPerTarget + 2
+	if len(events) != want {
+		t.Fatalf("ListTargetRunEvents() returned %d runs, want %d (job-a/server-a pruned to %d, other pairs untouched)", len(events), want, maxTargetRunsPerTarget)
 	}
 }
 

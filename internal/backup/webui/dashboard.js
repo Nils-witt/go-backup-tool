@@ -395,18 +395,38 @@ function fmtDuration(ms) {
   return (ms / 1000).toFixed(1) + "s";
 }
 
+// lastJobRunEvents/lastTargetRunEvents cache the most recently fetched raw
+// events (before filtering), so the job/target run log filter controls can
+// re-render the table immediately on input without waiting for the next
+// refresh() poll or re-fetching from the server.
+let lastJobRunEvents = [];
+let lastTargetRunEvents = [];
+
 // renderJobRunEvents re-renders the job run log table from events (newest
-// first, as served by /api/job-runs). The section stays hidden while
-// there's nothing to show, matching renderLoginEvents above.
+// first, as served by /api/job-runs), applying the job/result filter
+// controls (see jobRunLogFilters). The section stays hidden while there's
+// no data at all, matching renderLoginEvents above; a filter that matches
+// nothing shows an in-table empty-state row instead, so the filter controls
+// themselves stay visible and usable.
 function renderJobRunEvents(events) {
+  if (events) lastJobRunEvents = events;
+
   const wrap = document.getElementById("job-run-log-wrap");
-  if (!events || !events.length) {
+  if (!lastJobRunEvents.length) {
     wrap.hidden = true;
     return;
   }
   wrap.hidden = false;
 
-  document.getElementById("job-run-log-body").innerHTML = events.map(function (ev) {
+  const filtered = lastJobRunEvents.filter(jobRunLogFilters());
+  const body = document.getElementById("job-run-log-body");
+
+  if (!filtered.length) {
+    body.innerHTML = '<tr><td class="empty-filter" colspan="5">No matching runs</td></tr>';
+    return;
+  }
+
+  body.innerHTML = filtered.map(function (ev) {
     const result = ev.success ? badge("ok", "success") : badge("failed", "failed");
     const err = ev.error ? '<p class="err">' + escapeHtml(ev.error) + '</p>' : '';
     const duration = fmtDuration(new Date(ev.end) - new Date(ev.start));
@@ -420,18 +440,49 @@ function renderJobRunEvents(events) {
   }).join("");
 }
 
+// jobRunLogFilters reads the job run log's filter controls and returns a
+// predicate over jobRunEventJSON for Array.filter: job name substring
+// (case-insensitive) and/or success/failed result.
+function jobRunLogFilters() {
+  const job = document.getElementById("job-run-log-filter-job").value.trim().toLowerCase();
+  const result = document.getElementById("job-run-log-filter-result").value;
+
+  return function (ev) {
+    if (job && ev.job_name.toLowerCase().indexOf(job) === -1) return false;
+    if (result === "success" && !ev.success) return false;
+    if (result === "failed" && ev.success) return false;
+    return true;
+  };
+}
+
+document.getElementById("job-run-log-filter-job").addEventListener("input", function () { renderJobRunEvents(); });
+document.getElementById("job-run-log-filter-result").addEventListener("change", function () { renderJobRunEvents(); });
+
 // renderTargetRunEvents re-renders the target run log table from events
-// (newest first, as served by /api/target-runs). The section stays hidden
-// while there's nothing to show, matching renderLoginEvents above.
+// (newest first, as served by /api/target-runs), applying the
+// job/target/result filter controls (see targetRunLogFilters). The section
+// stays hidden while there's no data at all, matching renderLoginEvents
+// above; a filter that matches nothing shows an in-table empty-state row
+// instead, so the filter controls themselves stay visible and usable.
 function renderTargetRunEvents(events) {
+  if (events) lastTargetRunEvents = events;
+
   const wrap = document.getElementById("target-run-log-wrap");
-  if (!events || !events.length) {
+  if (!lastTargetRunEvents.length) {
     wrap.hidden = true;
     return;
   }
   wrap.hidden = false;
 
-  document.getElementById("target-run-log-body").innerHTML = events.map(function (ev) {
+  const filtered = lastTargetRunEvents.filter(targetRunLogFilters());
+  const body = document.getElementById("target-run-log-body");
+
+  if (!filtered.length) {
+    body.innerHTML = '<tr><td class="empty-filter" colspan="4">No matching runs</td></tr>';
+    return;
+  }
+
+  body.innerHTML = filtered.map(function (ev) {
     const err = ev.error ? '<p class="err">' + escapeHtml(ev.error) + '</p>' : '';
     return '<tr>' +
       '<td class="nowrap">' + fmtTime(ev.at) + '</td>' +
@@ -441,6 +492,28 @@ function renderTargetRunEvents(events) {
       '</tr>';
   }).join("");
 }
+
+// targetRunLogFilters reads the target run log's filter controls and
+// returns a predicate over targetRunEventJSON for Array.filter: job name
+// substring, target substring (both case-insensitive), and/or
+// success/failed result.
+function targetRunLogFilters() {
+  const job = document.getElementById("target-run-log-filter-job").value.trim().toLowerCase();
+  const target = document.getElementById("target-run-log-filter-target").value.trim().toLowerCase();
+  const result = document.getElementById("target-run-log-filter-result").value;
+
+  return function (ev) {
+    if (job && ev.job_name.toLowerCase().indexOf(job) === -1) return false;
+    if (target && ev.target.toLowerCase().indexOf(target) === -1) return false;
+    if (result === "success" && !ev.success) return false;
+    if (result === "failed" && ev.success) return false;
+    return true;
+  };
+}
+
+document.getElementById("target-run-log-filter-job").addEventListener("input", function () { renderTargetRunEvents(); });
+document.getElementById("target-run-log-filter-target").addEventListener("input", function () { renderTargetRunEvents(); });
+document.getElementById("target-run-log-filter-result").addEventListener("change", function () { renderTargetRunEvents(); });
 
 // renderIdentity fills in the "Server identity" section from identity (as
 // served by /api/identity). It stays hidden when there's no identity to
