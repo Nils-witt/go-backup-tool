@@ -7,47 +7,56 @@ import (
 	"time"
 )
 
-// jobRunsSchema is job_runs: an append-only history of every completed job
+// jobRunModel is job_runs: an append-only history of every completed job
 // run, one row per run, so both GetLastJobSuccess (start-time-anchored jobs'
 // catch-up logic, filtering on success) and GetLastRun (the web UI's
 // restart-survives-last-run display, regardless of outcome) can be answered
 // by querying this single history rather than maintaining two overlapping
 // "current state" columns.
-const jobRunsSchema = `CREATE TABLE IF NOT EXISTS job_runs (
-	id        INTEGER PRIMARY KEY AUTOINCREMENT,
-	name      TEXT NOT NULL,
-	success   BOOLEAN,
-	startTime TIMESTAMP,
-	endTime   TIMESTAMP,
-	error     TEXT,
-	size      INTEGER,
-	state     TEXT NOT NULL
-)`
+type jobRunModel struct {
+	ID        uint           `gorm:"column:id;primaryKey;autoIncrement"`
+	Name      string         `gorm:"column:name;not null"`
+	Success   sql.NullBool   `gorm:"column:success"`
+	StartTime sql.NullTime   `gorm:"column:startTime"`
+	EndTime   sql.NullTime   `gorm:"column:endTime"`
+	Error     sql.NullString `gorm:"column:error"`
+	Size      sql.NullInt64  `gorm:"column:size"`
+	State     string         `gorm:"column:state;not null"`
+}
 
-// targetRunsSchema is target_runs: an append-only history of every
-// completed job target run, one level below job_runs, so a restart's
-// caller can also show a target's last outcome instead of every target
-// reverting to "idle" until it next runs. target names the servers: entry
-// the target came from (see config.Target.ServerName) rather than its
-// index, so a historical run stays meaningful even after the config's
-// targets: are edited or reordered later.
-const targetRunsSchema = `CREATE TABLE IF NOT EXISTS target_runs (
-	id       INTEGER PRIMARY KEY AUTOINCREMENT,
-	job_name TEXT NOT NULL,
-	success  BOOLEAN NOT NULL,
-	target   TEXT NOT NULL,
-	run_at   TIMESTAMP NOT NULL,
-	state    TEXT NOT NULL,
-	error    TEXT
-)`
+func (jobRunModel) TableName() string { return "job_runs" }
 
-const outstandingTargetUploads = `CREATE TABLE IF NOT EXISTS outstanding_target_uploads (
-	id       INTEGER PRIMARY KEY AUTOINCREMENT,
-	job_name TEXT NOT NULL,
-	target   TEXT NOT NULL,
-	run_at   TIMESTAMP NOT NULL,
-	fileName  TEXT NOT NULL
-)`
+// targetRunModel is target_runs: an append-only history of every completed
+// job target run, one level below job_runs, so a restart's caller can also
+// show a target's last outcome instead of every target reverting to "idle"
+// until it next runs. Target names the servers: entry the target came from
+// (see config.Target.ServerName) rather than its index, so a historical run
+// stays meaningful even after the config's targets: are edited or reordered
+// later.
+type targetRunModel struct {
+	ID      uint           `gorm:"column:id;primaryKey;autoIncrement"`
+	JobName string         `gorm:"column:job_name;not null"`
+	Success bool           `gorm:"column:success;not null"`
+	Target  string         `gorm:"column:target;not null"`
+	RunAt   time.Time      `gorm:"column:run_at;not null"`
+	State   string         `gorm:"column:state;not null"`
+	Error   sql.NullString `gorm:"column:error"`
+}
+
+func (targetRunModel) TableName() string { return "target_runs" }
+
+// outstandingTargetUploadModel is outstanding_target_uploads: an
+// append-only record of a target upload that needs to be retried at a
+// later time.
+type outstandingTargetUploadModel struct {
+	ID       uint      `gorm:"column:id;primaryKey;autoIncrement"`
+	JobName  string    `gorm:"column:job_name;not null"`
+	Target   string    `gorm:"column:target;not null"`
+	RunAt    time.Time `gorm:"column:run_at;not null"`
+	FileName string    `gorm:"column:fileName;not null"`
+}
+
+func (outstandingTargetUploadModel) TableName() string { return "outstanding_target_uploads" }
 
 // maxJobRunsPerJob caps how many job_runs rows SaveJobRun retains per job
 // name, so the table doesn't grow unbounded over a job's lifetime.
@@ -56,19 +65,21 @@ const maxJobRunsPerJob = 100
 // SaveJobRun appends a job_runs row recording that job name's run starting
 // at startTime and ending at endTime just completed, succeeding or failing
 // with errText (empty on success) and having written bytesWritten bytes. It
-// then prunes name's older runs beyond maxJobRunsPerJob.
+// then prunes name's older runs beyond maxJobRunsPerJob. Insert and prune
+// stay raw SQL — GORM has no "keep newest N per group, delete the rest"
+// chain equivalent for the prune half.
 func (s *Store) SaveJobRun(ctx context.Context, name, state string, success bool, startTime, endTime time.Time, bytesWritten int64, errText string) error {
-	const insert = `INSERT INTO job_runs (name, state, success, startTime, endTime, error, size) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	db := s.db.WithContext(ctx)
 
-	if _, err := s.db.ExecContext(ctx, insert, name, state, success, startTime.UTC(), endTime.UTC(), errText, bytesWritten); err != nil {
+	const insert = `INSERT INTO job_runs (name, state, success, startTime, endTime, error, size) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	if err := db.Exec(insert, name, state, success, startTime.UTC(), endTime.UTC(), errText, bytesWritten).Error; err != nil {
 		return fmt.Errorf("recording job %q run: %w", name, err)
 	}
 
 	const prune = `DELETE FROM job_runs WHERE name = ? AND id NOT IN (
 		SELECT id FROM job_runs WHERE name = ? ORDER BY id DESC LIMIT ?
 	)`
-
-	if _, err := s.db.ExecContext(ctx, prune, name, name, maxJobRunsPerJob); err != nil {
+	if err := db.Exec(prune, name, name, maxJobRunsPerJob).Error; err != nil {
 		return fmt.Errorf("pruning job %q run history: %w", name, err)
 	}
 
@@ -78,20 +89,26 @@ func (s *Store) SaveJobRun(ctx context.Context, name, state string, success bool
 // GetLastJobSuccess returns job name's last recorded successful run, and false
 // if none is recorded yet.
 func (s *Store) GetLastJobSuccess(ctx context.Context, name string) (time.Time, bool, error) {
-	errMsg := fmt.Sprintf("reading job %q state", name)
+	var m jobRunModel
 
-	return queryRowOptional(ctx, s.db, errMsg, `SELECT endTime FROM job_runs WHERE name = ? AND success = 1 ORDER BY endTime DESC LIMIT 1`, []any{name}, func(row *sql.Row) (time.Time, error) {
-		var t sql.NullTime
-		if err := row.Scan(&t); err != nil {
-			return time.Time{}, err
-		}
+	err := s.db.WithContext(ctx).
+		Where("name = ? AND success = 1", name).
+		Order("endTime DESC").
+		Take(&m).Error
 
-		if !t.Valid {
-			return time.Time{}, sql.ErrNoRows
-		}
+	if isRecordNotFound(err) {
+		return time.Time{}, false, nil
+	}
 
-		return t.Time, nil
-	})
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("reading job %q state: %w", name, err)
+	}
+
+	if !m.EndTime.Valid {
+		return time.Time{}, false, nil
+	}
+
+	return m.EndTime.Time, true, nil
 }
 
 // LastRun is a job's most recently completed run (success or failure), as
@@ -109,33 +126,32 @@ type LastRun struct {
 // GetLastRun returns job name's most recently persisted run, and false if
 // none is recorded yet.
 func (s *Store) GetLastRun(ctx context.Context, name string) (LastRun, bool, error) {
-	errMsg := fmt.Sprintf("reading job %q last run", name)
-	query := `SELECT success, "startTime", "endTime", error, size FROM job_runs WHERE name = ? ORDER BY endTime DESC LIMIT 1`
+	var m jobRunModel
 
-	return queryRowOptional(ctx, s.db, errMsg, query, []any{name}, func(row *sql.Row) (LastRun, error) {
-		var (
-			start, end sql.NullTime
-			errText    sql.NullString
-			size       sql.NullInt64
-			success    sql.NullBool
-		)
+	err := s.db.WithContext(ctx).
+		Where("name = ?", name).
+		Order("endTime DESC").
+		Take(&m).Error
 
-		if err := row.Scan(&success, &start, &end, &errText, &size); err != nil {
-			return LastRun{}, err
-		}
+	if isRecordNotFound(err) {
+		return LastRun{}, false, nil
+	}
 
-		if !success.Valid {
-			return LastRun{}, sql.ErrNoRows
-		}
+	if err != nil {
+		return LastRun{}, false, fmt.Errorf("reading job %q last run: %w", name, err)
+	}
 
-		return LastRun{
-			Start:   start.Time,
-			End:     end.Time,
-			Success: success.Bool,
-			Error:   errText.String,
-			Size:    size.Int64,
-		}, nil
-	})
+	if !m.Success.Valid {
+		return LastRun{}, false, nil
+	}
+
+	return LastRun{
+		Start:   m.StartTime.Time,
+		End:     m.EndTime.Time,
+		Success: m.Success.Bool,
+		Error:   m.Error.String,
+		Size:    m.Size.Int64,
+	}, true, nil
 }
 
 // JobRunEvent is one historical job run, as appended by SaveJobRun and
@@ -155,30 +171,25 @@ type JobRunEvent struct {
 // runs across every job, newest first, for the dashboard's job run log
 // view.
 func (s *Store) ListJobRunEvents(ctx context.Context, limit int) ([]JobRunEvent, error) {
-	query := `SELECT name, "startTime", "endTime", success, size, error FROM job_runs ORDER BY id DESC LIMIT ?`
+	var rows []jobRunModel
 
-	return queryRows(ctx, s.db, "reading job run events", query, []any{limit}, func(rows *sql.Rows) (JobRunEvent, error) {
-		var (
-			ev      JobRunEvent
-			start   sql.NullTime
-			end     sql.NullTime
-			success sql.NullBool
-			size    sql.NullInt64
-			errText sql.NullString
-		)
+	if err := s.db.WithContext(ctx).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("reading job run events: %w", err)
+	}
 
-		if err := rows.Scan(&ev.JobName, &start, &end, &success, &size, &errText); err != nil {
-			return JobRunEvent{}, err
+	events := make([]JobRunEvent, len(rows))
+	for i, m := range rows {
+		events[i] = JobRunEvent{
+			JobName: m.Name,
+			Start:   m.StartTime.Time,
+			End:     m.EndTime.Time,
+			Success: m.Success.Bool,
+			Size:    m.Size.Int64,
+			Error:   m.Error.String,
 		}
+	}
 
-		ev.Start = start.Time
-		ev.End = end.Time
-		ev.Success = success.Bool
-		ev.Size = size.Int64
-		ev.Error = errText.String
-
-		return ev, nil
-	})
+	return events, nil
 }
 
 // maxTargetRunsPerTarget caps how many target_runs rows SaveTargetRun
@@ -193,17 +204,17 @@ const maxTargetRunsPerTarget = 100
 // then prunes that job/target pair's older runs beyond
 // maxTargetRunsPerTarget.
 func (s *Store) SaveTargetRun(ctx context.Context, name string, success bool, target, state, errText string, at time.Time) error {
-	const insert = `INSERT INTO target_runs (job_name, success, target, run_at, state, error) VALUES (?, ?, ?, ?, ?, ?)`
+	db := s.db.WithContext(ctx)
 
-	if _, err := s.db.ExecContext(ctx, insert, name, success, target, at.UTC(), state, errText); err != nil {
+	const insert = `INSERT INTO target_runs (job_name, success, target, run_at, state, error) VALUES (?, ?, ?, ?, ?, ?)`
+	if err := db.Exec(insert, name, success, target, at.UTC(), state, errText).Error; err != nil {
 		return fmt.Errorf("recording job %q target %q run: %w", name, target, err)
 	}
 
 	const prune = `DELETE FROM target_runs WHERE job_name = ? AND target = ? AND id NOT IN (
 		SELECT id FROM target_runs WHERE job_name = ? AND target = ? ORDER BY id DESC LIMIT ?
 	)`
-
-	if _, err := s.db.ExecContext(ctx, prune, name, target, name, target, maxTargetRunsPerTarget); err != nil {
+	if err := db.Exec(prune, name, target, name, target, maxTargetRunsPerTarget).Error; err != nil {
 		return fmt.Errorf("pruning job %q target %q run history: %w", name, target, err)
 	}
 
@@ -220,26 +231,21 @@ type TargetRun struct {
 
 // ListTargetRuns returns each of job name's targets' most recently
 // persisted run, one entry per target that has completed at least once.
+// Stays raw SQL: the correlated "latest row per target" subquery has no
+// GORM greatest-n-per-group builder equivalent.
 func (s *Store) ListTargetRuns(ctx context.Context, name string) ([]TargetRun, error) {
-	errMsg := fmt.Sprintf("reading job %q target runs", name)
-	query := `SELECT target, state, error FROM target_runs
+	query := `SELECT target AS target, state AS state, COALESCE(error, '') AS error FROM target_runs
 		WHERE job_name = ? AND id IN (
 			SELECT MAX(id) FROM target_runs WHERE job_name = ? GROUP BY target
 		)`
 
-	return queryRows(ctx, s.db, errMsg, query, []any{name, name}, func(rows *sql.Rows) (TargetRun, error) {
-		var (
-			target  string
-			state   string
-			errText sql.NullString
-		)
+	var out []TargetRun
 
-		if err := rows.Scan(&target, &state, &errText); err != nil {
-			return TargetRun{}, err
-		}
+	if err := s.db.WithContext(ctx).Raw(query, name, name).Scan(&out).Error; err != nil {
+		return nil, fmt.Errorf("reading job %q target runs: %w", name, err)
+	}
 
-		return TargetRun{Target: target, State: state, Error: errText.String}, nil
-	})
+	return out, nil
 }
 
 // TargetRunEvent is one historical job target run, as appended by
@@ -260,29 +266,25 @@ type TargetRunEvent struct {
 // target runs across every job, newest first, for the dashboard's target
 // run log view.
 func (s *Store) ListTargetRunEvents(ctx context.Context, limit int) ([]TargetRunEvent, error) {
-	query := `SELECT run_at, job_name, target, success, state, error FROM target_runs ORDER BY id DESC LIMIT ?`
+	var rows []targetRunModel
 
-	return queryRows(ctx, s.db, "reading target run events", query, []any{limit}, func(rows *sql.Rows) (TargetRunEvent, error) {
-		var (
-			ev      TargetRunEvent
-			errText sql.NullString
-		)
+	if err := s.db.WithContext(ctx).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("reading target run events: %w", err)
+	}
 
-		if err := rows.Scan(&ev.At, &ev.JobName, &ev.Target, &ev.Success, &ev.State, &errText); err != nil {
-			return TargetRunEvent{}, err
-		}
+	events := make([]TargetRunEvent, len(rows))
+	for i, m := range rows {
+		events[i] = TargetRunEvent{At: m.RunAt, JobName: m.JobName, Target: m.Target, Success: m.Success, State: m.State, Error: m.Error.String}
+	}
 
-		ev.Error = errText.String
-
-		return ev, nil
-	})
+	return events, nil
 }
 
 // AddOutstandingTargetUpload records a target upload that needs to be retried at a later time.
 func (s *Store) AddOutstandingTargetUpload(ctx context.Context, jobName, targetName, fileName string, retryAt time.Time) error {
-	const insert = `INSERT INTO outstanding_target_uploads (job_name, target, run_at, fileName) VALUES (?, ?, ?, ?)`
+	m := outstandingTargetUploadModel{JobName: jobName, Target: targetName, RunAt: retryAt, FileName: fileName}
 
-	if _, err := s.db.ExecContext(ctx, insert, jobName, targetName, retryAt, fileName); err != nil {
+	if err := s.db.WithContext(ctx).Create(&m).Error; err != nil {
 		return fmt.Errorf("recording outstanding target upload for job %q target %q: %w", jobName, targetName, err)
 	}
 

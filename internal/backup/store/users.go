@@ -8,31 +8,34 @@ import (
 	"strings"
 	"time"
 
+	"gorm.io/gorm"
+
 	"golang.org/x/crypto/bcrypt"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 )
 
-// usersSchema is users: every dashboard account, whether managed through
-// the web UI's "Users" admin section with a password, auto-provisioned by
-// an SSO login (see GetOrProvisionOIDCUser), or both at once — a password
-// account an admin has linked to an OIDC identity via
-// SetUserOIDCUsername. Distinct from the single config-file admin
-// (webui.username/password, resolved by the config package) that alone can
-// manage rows here. password_hash is NULL for an OIDC-only row (nothing to
-// verify a password login against). oidc_username is NULL/absent for a
-// password-only row, and UNIQUE so at most one row can claim a given SSO
-// identity (SQLite treats multiple NULLs in a UNIQUE column as
-// non-conflicting, so any number of unlinked rows may coexist).
-// permissions is a permission.Permission bitmask (see the permission
-// package).
-const usersSchema = `CREATE TABLE IF NOT EXISTS users (
-	username      TEXT NOT NULL PRIMARY KEY,
-	password_hash TEXT,
-	oidc_username TEXT UNIQUE,
-	permissions   INTEGER NOT NULL DEFAULT 0,
-	created_at    TIMESTAMP NOT NULL
-)`
+// userModel is users: every dashboard account, whether managed through the
+// web UI's "Users" admin section with a password, auto-provisioned by an
+// SSO login (see GetOrProvisionOIDCUser), or both at once — a password
+// account an admin has linked to an OIDC identity via SetUserOIDCUsername.
+// Distinct from the single config-file admin (webui.username/password,
+// resolved by the config package) that alone can manage rows here.
+// PasswordHash is NULL for an OIDC-only row (nothing to verify a password
+// login against). OIDCUsername is NULL/absent for a password-only row, and
+// UNIQUE so at most one row can claim a given SSO identity (SQLite treats
+// multiple NULLs in a UNIQUE column as non-conflicting, so any number of
+// unlinked rows may coexist). Permissions is a permission.Permission
+// bitmask (see the permission package).
+type userModel struct {
+	Username     string         `gorm:"column:username;primaryKey"`
+	PasswordHash sql.NullString `gorm:"column:password_hash"`
+	OIDCUsername sql.NullString `gorm:"column:oidc_username;uniqueIndex"`
+	Permissions  int            `gorm:"column:permissions;not null;default:0"`
+	CreatedAt    time.Time      `gorm:"column:created_at;not null"`
+}
+
+func (userModel) TableName() string { return "users" }
 
 // User is one users row, as returned by ListUsers/GetUser. It never carries
 // the password hash — nothing outside VerifyUser/UpdateUserPassword needs
@@ -74,9 +77,9 @@ func HashPassword(password string) (string, error) {
 
 // isUniqueConstraintErrOn reports whether err is a sqlite UNIQUE constraint
 // violation on column (e.g. "users.username" or "users.oidc_username") —
-// modernc.org/sqlite doesn't export a typed error worth importing just for
-// this, so this matches on the driver's own error text, which names the
-// offending column, instead.
+// the pure-Go sqlite driver GORM sits on doesn't export a typed error worth
+// importing just for this, so this matches on the driver's own error text,
+// which names the offending column, instead.
 func isUniqueConstraintErrOn(err error, column string) bool {
 	return strings.Contains(err.Error(), "UNIQUE constraint failed: "+column)
 }
@@ -98,9 +101,15 @@ func (s *Store) SaveUser(ctx context.Context, username, password, oidcUsername s
 		return err
 	}
 
-	const insert = `INSERT INTO users (username, password_hash, oidc_username, permissions, created_at) VALUES (?, ?, ?, ?, ?)`
+	m := userModel{
+		Username:     username,
+		PasswordHash: nullString(hash),
+		OIDCUsername: nullString(oidcUsername),
+		Permissions:  int(perm),
+		CreatedAt:    time.Now().UTC(),
+	}
 
-	if _, err := s.db.ExecContext(ctx, insert, username, hash, nullString(oidcUsername), int(perm), time.Now().UTC()); err != nil {
+	if err := s.db.WithContext(ctx).Create(&m).Error; err != nil {
 		switch {
 		case isUniqueConstraintErrOn(err, "users.username"):
 			return ErrUserExists
@@ -114,15 +123,14 @@ func (s *Store) SaveUser(ctx context.Context, username, password, oidcUsername s
 	return nil
 }
 
-// checkRowsAffected reports ErrUserNotFound if res (from an UPDATE/DELETE
-// keyed by username) touched no rows, meaning username didn't exist.
-func checkRowsAffected(res sql.Result, verb, username string) error {
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("%s user %q: %w", verb, username, err)
+// checkRowsAffected reports ErrUserNotFound if result (from an UPDATE/
+// DELETE keyed by username) touched no rows, meaning username didn't exist.
+func checkRowsAffected(result *gorm.DB, verb, username string) error {
+	if result.Error != nil {
+		return fmt.Errorf("%s user %q: %w", verb, username, result.Error)
 	}
 
-	if n == 0 {
+	if result.RowsAffected == 0 {
 		return ErrUserNotFound
 	}
 
@@ -138,23 +146,17 @@ func (s *Store) UpdateUserPassword(ctx context.Context, username, password strin
 		return err
 	}
 
-	res, err := s.db.ExecContext(ctx, `UPDATE users SET password_hash = ? WHERE username = ?`, hash, username)
-	if err != nil {
-		return fmt.Errorf("updating user %q password: %w", username, err)
-	}
+	result := s.db.WithContext(ctx).Model(&userModel{}).Where("username = ?", username).Update("password_hash", hash)
 
-	return checkRowsAffected(res, "updating", username)
+	return checkRowsAffected(result, "updating", username)
 }
 
 // UpdateUserPermissions changes username's granted permissions to perm.
 // Returns ErrUserNotFound if username doesn't exist.
 func (s *Store) UpdateUserPermissions(ctx context.Context, username string, perm permission.Permission) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE users SET permissions = ? WHERE username = ?`, int(perm), username)
-	if err != nil {
-		return fmt.Errorf("updating user %q permissions: %w", username, err)
-	}
+	result := s.db.WithContext(ctx).Model(&userModel{}).Where("username = ?", username).Update("permissions", int(perm))
 
-	return checkRowsAffected(res, "updating", username)
+	return checkRowsAffected(result, "updating", username)
 }
 
 // SetUserOIDCUsername links username's row to oidcUsername, or clears any
@@ -166,66 +168,74 @@ func (s *Store) UpdateUserPermissions(ctx context.Context, username string, perm
 // exist, or ErrOIDCUsernameTaken if oidcUsername already links a different
 // row.
 func (s *Store) SetUserOIDCUsername(ctx context.Context, username, oidcUsername string) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE users SET oidc_username = ? WHERE username = ?`, nullString(oidcUsername), username)
-	if err != nil {
-		if isUniqueConstraintErrOn(err, "users.oidc_username") {
+	result := s.db.WithContext(ctx).Model(&userModel{}).Where("username = ?", username).Update("oidc_username", nullString(oidcUsername))
+	if result.Error != nil {
+		if isUniqueConstraintErrOn(result.Error, "users.oidc_username") {
 			return ErrOIDCUsernameTaken
 		}
 
-		return fmt.Errorf("linking user %q to oidc identity %q: %w", username, oidcUsername, err)
+		return fmt.Errorf("linking user %q to oidc identity %q: %w", username, oidcUsername, result.Error)
 	}
 
-	return checkRowsAffected(res, "linking", username)
+	if result.RowsAffected == 0 {
+		return ErrUserNotFound
+	}
+
+	return nil
 }
 
 // DeleteUser removes username. Returns ErrUserNotFound if it doesn't exist.
 func (s *Store) DeleteUser(ctx context.Context, username string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE username = ?`, username)
-	if err != nil {
-		return fmt.Errorf("deleting user %q: %w", username, err)
+	result := s.db.WithContext(ctx).Where("username = ?", username).Delete(&userModel{})
+	if result.Error != nil {
+		return fmt.Errorf("deleting user %q: %w", username, result.Error)
 	}
 
-	return checkRowsAffected(res, "deleting", username)
+	return checkRowsAffected(result, "deleting", username)
 }
 
-// scanUser scans a users row (username, oidc_username, permissions,
-// created_at — in that column order) into a User, shared by ListUsers'
-// and GetUser's scan functions.
-func scanUser(scan func(...any) error) (User, error) {
-	var (
-		u            User
-		oidcUsername sql.NullString
-		perm         int
-	)
-
-	if err := scan(&u.Username, &oidcUsername, &perm, &u.CreatedAt); err != nil {
-		return User{}, err
+// toUser converts a userModel row into the exported User shape.
+func toUser(m userModel) User {
+	return User{
+		Username:     m.Username,
+		OIDCUsername: m.OIDCUsername.String,
+		Permissions:  permission.Permission(m.Permissions),
+		CreatedAt:    m.CreatedAt,
 	}
-
-	u.OIDCUsername = oidcUsername.String
-	u.Permissions = permission.Permission(perm)
-
-	return u, nil
 }
 
 // ListUsers returns every account, in username order, for the "Users"
 // admin section's listing.
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
-	query := `SELECT username, oidc_username, permissions, created_at FROM users ORDER BY username`
+	var rows []userModel
 
-	return queryRows(ctx, s.db, "listing users", query, nil, func(rows *sql.Rows) (User, error) {
-		return scanUser(rows.Scan)
-	})
+	if err := s.db.WithContext(ctx).Order("username").Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("listing users: %w", err)
+	}
+
+	users := make([]User, len(rows))
+	for i, m := range rows {
+		users[i] = toUser(m)
+	}
+
+	return users, nil
 }
 
 // GetUser returns the named account, reporting ok=false if username doesn't
 // exist.
 func (s *Store) GetUser(ctx context.Context, username string) (User, bool, error) {
-	return queryRowOptional(ctx, s.db, fmt.Sprintf("looking up user %q", username),
-		`SELECT username, oidc_username, permissions, created_at FROM users WHERE username = ?`, []any{username},
-		func(sqlRow *sql.Row) (User, error) {
-			return scanUser(sqlRow.Scan)
-		})
+	var m userModel
+
+	err := s.db.WithContext(ctx).Where("username = ?", username).Take(&m).Error
+
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return User{}, false, nil
+	case err != nil:
+		return User{}, false, fmt.Errorf("looking up user %q: %w", username, err)
+	default:
+		return toUser(m), true, nil
+	}
 }
 
 // VerifyUser checks username/password against the stored account (see
@@ -236,33 +246,24 @@ func (s *Store) GetUser(ctx context.Context, username string) (User, bool, error
 // constant-time comparison (of the re-derived hash, not the raw password)
 // is what keeps a real comparison safe from a timing attack.
 func (s *Store) VerifyUser(ctx context.Context, username, password string) (permission.Permission, bool, error) {
-	type row struct {
-		hash sql.NullString
-		perm int
+	var m userModel
+
+	err := s.db.WithContext(ctx).Select("password_hash", "permissions").Where("username = ?", username).Take(&m).Error
+
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return 0, false, nil
+	case err != nil:
+		return 0, false, fmt.Errorf("looking up user %q: %w", username, err)
 	}
 
-	r, ok, err := queryRowOptional(ctx, s.db, fmt.Sprintf("looking up user %q", username),
-		`SELECT password_hash, permissions FROM users WHERE username = ?`, []any{username},
-		func(sqlRow *sql.Row) (row, error) {
-			var r row
-			if err := sqlRow.Scan(&r.hash, &r.perm); err != nil {
-				return row{}, err
-			}
-
-			return r, nil
-		})
-	if err != nil {
-		return 0, false, err
-	}
-
-	if !ok || !r.hash.Valid || bcrypt.CompareHashAndPassword([]byte(r.hash.String), []byte(password)) != nil {
-		// A missing user, a passwordless (OIDC-only) row, or a hash mismatch
-		// is a failed verification, not an error the caller needs to handle
-		// separately.
+	if !m.PasswordHash.Valid || bcrypt.CompareHashAndPassword([]byte(m.PasswordHash.String), []byte(password)) != nil {
+		// A passwordless (OIDC-only) row or a hash mismatch is a failed
+		// verification, not an error the caller needs to handle separately.
 		return 0, false, nil //nolint:nilerr // failed verification, not a caller-facing error
 	}
 
-	return permission.Permission(r.perm), true, nil
+	return permission.Permission(m.Permissions), true, nil
 }
 
 // uniqueUsernameFor returns candidate if no row already has it as its
@@ -273,12 +274,12 @@ func (s *Store) VerifyUser(ctx context.Context, username, password string) (perm
 // must never adopt that row (an SSO login only ever matches by
 // oidc_username), so the new row instead gets a disambiguated username
 // while still recording the original identity as its oidc_username.
-func uniqueUsernameFor(ctx context.Context, q queryRower, candidate string) (string, error) {
+func uniqueUsernameFor(ctx context.Context, db *gorm.DB, candidate string) (string, error) {
 	name := candidate
 
 	for i := 2; ; i++ {
 		var exists bool
-		if err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE username = ?)`, name).Scan(&exists); err != nil {
+		if err := db.WithContext(ctx).Raw(`SELECT EXISTS(SELECT 1 FROM users WHERE username = ?)`, name).Scan(&exists).Error; err != nil {
 			return "", fmt.Errorf("checking username %q availability: %w", name, err)
 		}
 
@@ -308,26 +309,19 @@ func uniqueUsernameFor(ctx context.Context, q queryRower, candidate string) (str
 //
 // The lookup-then-insert here isn't wrapped in its own transaction: it
 // relies on Store's existing single-connection guarantee
-// (db.SetMaxOpenConns(1), see Store) to serialize it against any concurrent
+// (db.SetMaxOpenConns(1), see Open) to serialize it against any concurrent
 // write, the same guarantee SaveOIDCUserPermissions's upsert used to rely
 // on before this method replaced it.
 func (s *Store) GetOrProvisionOIDCUser(ctx context.Context, oidcUsername string, defaultPerm permission.Permission) (permission.Permission, error) {
-	perm, ok, err := queryRowOptional(ctx, s.db, fmt.Sprintf("looking up oidc user %q", oidcUsername),
-		`SELECT permissions FROM users WHERE oidc_username = ?`, []any{oidcUsername},
-		func(row *sql.Row) (int, error) {
-			var perm int
-			if err := row.Scan(&perm); err != nil {
-				return 0, err
-			}
+	var m userModel
 
-			return perm, nil
-		})
-	if err != nil {
-		return 0, err
-	}
+	err := s.db.WithContext(ctx).Select("permissions").Where("oidc_username = ?", oidcUsername).Take(&m).Error
 
-	if ok {
-		return permission.Permission(perm), nil
+	switch {
+	case err == nil:
+		return permission.Permission(m.Permissions), nil
+	case !errors.Is(err, gorm.ErrRecordNotFound):
+		return 0, fmt.Errorf("looking up oidc user %q: %w", oidcUsername, err)
 	}
 
 	username, err := uniqueUsernameFor(ctx, s.db, oidcUsername)
@@ -335,8 +329,14 @@ func (s *Store) GetOrProvisionOIDCUser(ctx context.Context, oidcUsername string,
 		return 0, err
 	}
 
-	const insert = `INSERT INTO users (username, password_hash, oidc_username, permissions, created_at) VALUES (?, NULL, ?, ?, ?)`
-	if _, err := s.db.ExecContext(ctx, insert, username, oidcUsername, int(defaultPerm), time.Now().UTC()); err != nil {
+	provisioned := userModel{
+		Username:     username,
+		OIDCUsername: nullString(oidcUsername),
+		Permissions:  int(defaultPerm),
+		CreatedAt:    time.Now().UTC(),
+	}
+
+	if err := s.db.WithContext(ctx).Create(&provisioned).Error; err != nil {
 		return 0, fmt.Errorf("provisioning oidc user %q: %w", oidcUsername, err)
 	}
 

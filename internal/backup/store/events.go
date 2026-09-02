@@ -2,54 +2,59 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"time"
 )
 
-// loginEventsSchema is login_events: records every dashboard login attempt,
+// loginEventModel is login_events: records every dashboard login attempt,
 // password or SSO, win or lose, so an operator can review who's signed in
 // (and who's tried and failed) from the web UI.
-const loginEventsSchema = `CREATE TABLE IF NOT EXISTS login_events (
-	id          INTEGER PRIMARY KEY AUTOINCREMENT,
-	at          TIMESTAMP NOT NULL,
-	username    TEXT NOT NULL,
-	method      TEXT NOT NULL,
-	success     INTEGER NOT NULL,
-	remote_addr TEXT NOT NULL,
-	detail      TEXT NOT NULL DEFAULT ''
-)`
+type loginEventModel struct {
+	ID         uint      `gorm:"column:id;primaryKey;autoIncrement"`
+	At         time.Time `gorm:"column:at;not null"`
+	Username   string    `gorm:"column:username;not null"`
+	Method     string    `gorm:"column:method;not null"`
+	Success    bool      `gorm:"column:success;not null"`
+	RemoteAddr string    `gorm:"column:remote_addr;not null"`
+	Detail     string    `gorm:"column:detail;not null;default:''"`
+}
 
-// downloadEventsSchema is download_events: records every dashboard file
+func (loginEventModel) TableName() string { return "login_events" }
+
+// downloadEventModel is download_events: records every dashboard file
 // download, win or lose, so an operator can see who pulled which file and
 // when.
-const downloadEventsSchema = `CREATE TABLE IF NOT EXISTS download_events (
-	id          INTEGER PRIMARY KEY AUTOINCREMENT,
-	at          TIMESTAMP NOT NULL,
-	username    TEXT NOT NULL,
-	receiver_id TEXT NOT NULL,
-	key         TEXT NOT NULL,
-	success     INTEGER NOT NULL,
-	remote_addr TEXT NOT NULL,
-	detail      TEXT NOT NULL DEFAULT ''
-)`
+type downloadEventModel struct {
+	ID         uint      `gorm:"column:id;primaryKey;autoIncrement"`
+	At         time.Time `gorm:"column:at;not null"`
+	Username   string    `gorm:"column:username;not null"`
+	ReceiverID string    `gorm:"column:receiver_id;not null"`
+	Key        string    `gorm:"column:key;not null"`
+	Success    bool      `gorm:"column:success;not null"`
+	RemoteAddr string    `gorm:"column:remote_addr;not null"`
+	Detail     string    `gorm:"column:detail;not null;default:''"`
+}
 
-// receiverEventsSchema is receiver_events: records every receiver API
+func (downloadEventModel) TableName() string { return "download_events" }
+
+// receiverEventModel is receiver_events: records every receiver API
 // request (PUT or DELETE) this instance has served, win or lose, regardless
 // of whether that receiver has retention: set (unlike objects, which only
 // tracks writes for a receiver with retention: configured) — so a daily
 // report can summarize how many files each receiver received, and any
 // errors it hit, over a given day.
-const receiverEventsSchema = `CREATE TABLE IF NOT EXISTS receiver_events (
-	id          INTEGER PRIMARY KEY AUTOINCREMENT,
-	at          TIMESTAMP NOT NULL,
-	receiver_id TEXT NOT NULL,
-	kind        TEXT NOT NULL,
-	key         TEXT NOT NULL,
-	size        INTEGER NOT NULL DEFAULT 0,
-	success     INTEGER NOT NULL,
-	error       TEXT NOT NULL DEFAULT ''
-)`
+type receiverEventModel struct {
+	ID         uint      `gorm:"column:id;primaryKey;autoIncrement"`
+	At         time.Time `gorm:"column:at;not null"`
+	ReceiverID string    `gorm:"column:receiver_id;not null"`
+	Kind       string    `gorm:"column:kind;not null"`
+	Key        string    `gorm:"column:key;not null"`
+	Size       int64     `gorm:"column:size;not null;default:0"`
+	Success    bool      `gorm:"column:success;not null"`
+	Error      string    `gorm:"column:error;not null;default:''"`
+}
+
+func (receiverEventModel) TableName() string { return "receiver_events" }
 
 // LoginEvent is one recorded attempt to log into the dashboard, password or
 // SSO, win or lose (see SaveLoginEvent/ListLoginEvents).
@@ -65,9 +70,16 @@ type LoginEvent struct {
 // SaveLoginEvent appends ev to the login log. Called for every login
 // attempt a caller's handlers see, regardless of outcome.
 func (s *Store) SaveLoginEvent(ctx context.Context, ev LoginEvent) error {
-	const insert = `INSERT INTO login_events (at, username, method, success, remote_addr, detail) VALUES (?, ?, ?, ?, ?, ?)`
+	m := loginEventModel{
+		At:         ev.At.UTC(),
+		Username:   ev.Username,
+		Method:     ev.Method,
+		Success:    ev.Success,
+		RemoteAddr: ev.RemoteAddr,
+		Detail:     ev.Detail,
+	}
 
-	if _, err := s.db.ExecContext(ctx, insert, ev.At.UTC(), ev.Username, ev.Method, ev.Success, ev.RemoteAddr, ev.Detail); err != nil {
+	if err := s.db.WithContext(ctx).Create(&m).Error; err != nil {
 		return fmt.Errorf("recording login event: %w", err)
 	}
 
@@ -77,17 +89,18 @@ func (s *Store) SaveLoginEvent(ctx context.Context, ev LoginEvent) error {
 // ListLoginEvents returns up to limit of the most recently recorded login
 // events, newest first, for the dashboard's login log view.
 func (s *Store) ListLoginEvents(ctx context.Context, limit int) ([]LoginEvent, error) {
-	query := `SELECT at, username, method, success, remote_addr, detail FROM login_events ORDER BY id DESC LIMIT ?`
+	var rows []loginEventModel
 
-	return queryRows(ctx, s.db, "reading login events", query, []any{limit}, func(rows *sql.Rows) (LoginEvent, error) {
-		var ev LoginEvent
+	if err := s.db.WithContext(ctx).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("reading login events: %w", err)
+	}
 
-		if err := rows.Scan(&ev.At, &ev.Username, &ev.Method, &ev.Success, &ev.RemoteAddr, &ev.Detail); err != nil {
-			return LoginEvent{}, err
-		}
+	events := make([]LoginEvent, len(rows))
+	for i, m := range rows {
+		events[i] = LoginEvent{At: m.At, Username: m.Username, Method: m.Method, Success: m.Success, RemoteAddr: m.RemoteAddr, Detail: m.Detail}
+	}
 
-		return ev, nil
-	})
+	return events, nil
 }
 
 // DownloadEvent is one recorded attempt to download a file from the
@@ -105,9 +118,17 @@ type DownloadEvent struct {
 // SaveDownloadEvent appends ev to the download log. Called for every
 // download attempt a caller's handlers see, regardless of outcome.
 func (s *Store) SaveDownloadEvent(ctx context.Context, ev DownloadEvent) error {
-	const insert = `INSERT INTO download_events (at, username, receiver_id, key, success, remote_addr, detail) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	m := downloadEventModel{
+		At:         ev.At.UTC(),
+		Username:   ev.Username,
+		ReceiverID: ev.ReceiverID,
+		Key:        ev.Key,
+		Success:    ev.Success,
+		RemoteAddr: ev.RemoteAddr,
+		Detail:     ev.Detail,
+	}
 
-	if _, err := s.db.ExecContext(ctx, insert, ev.At.UTC(), ev.Username, ev.ReceiverID, ev.Key, ev.Success, ev.RemoteAddr, ev.Detail); err != nil {
+	if err := s.db.WithContext(ctx).Create(&m).Error; err != nil {
 		return fmt.Errorf("recording download event: %w", err)
 	}
 
@@ -117,17 +138,18 @@ func (s *Store) SaveDownloadEvent(ctx context.Context, ev DownloadEvent) error {
 // ListDownloadEvents returns up to limit of the most recently recorded
 // download events, newest first, for the dashboard's download log view.
 func (s *Store) ListDownloadEvents(ctx context.Context, limit int) ([]DownloadEvent, error) {
-	query := `SELECT at, username, receiver_id, key, success, remote_addr, detail FROM download_events ORDER BY id DESC LIMIT ?`
+	var rows []downloadEventModel
 
-	return queryRows(ctx, s.db, "reading download events", query, []any{limit}, func(rows *sql.Rows) (DownloadEvent, error) {
-		var ev DownloadEvent
+	if err := s.db.WithContext(ctx).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("reading download events: %w", err)
+	}
 
-		if err := rows.Scan(&ev.At, &ev.Username, &ev.ReceiverID, &ev.Key, &ev.Success, &ev.RemoteAddr, &ev.Detail); err != nil {
-			return DownloadEvent{}, err
-		}
+	events := make([]DownloadEvent, len(rows))
+	for i, m := range rows {
+		events[i] = DownloadEvent{At: m.At, Username: m.Username, ReceiverID: m.ReceiverID, Key: m.Key, Success: m.Success, RemoteAddr: m.RemoteAddr, Detail: m.Detail}
+	}
 
-		return ev, nil
-	})
+	return events, nil
 }
 
 // ReceiverEventReceive and ReceiverEventDelete are the kind values
@@ -154,9 +176,17 @@ type ReceiverEvent struct {
 // SaveReceiverEvent appends ev to the receiver event log. Called for every
 // receiver API request a caller's handlers serve, regardless of outcome.
 func (s *Store) SaveReceiverEvent(ctx context.Context, ev ReceiverEvent) error {
-	const insert = `INSERT INTO receiver_events (at, receiver_id, kind, key, size, success, error) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	m := receiverEventModel{
+		At:         ev.At.UTC(),
+		ReceiverID: ev.ReceiverID,
+		Kind:       ev.Kind,
+		Key:        ev.Key,
+		Size:       ev.Size,
+		Success:    ev.Success,
+		Error:      ev.Error,
+	}
 
-	if _, err := s.db.ExecContext(ctx, insert, ev.At.UTC(), ev.ReceiverID, ev.Kind, ev.Key, ev.Size, ev.Success, ev.Error); err != nil {
+	if err := s.db.WithContext(ctx).Create(&m).Error; err != nil {
 		return fmt.Errorf("recording receiver event: %w", err)
 	}
 
@@ -169,17 +199,18 @@ func (s *Store) SaveReceiverEvent(ctx context.Context, ev ReceiverEvent) error {
 // status with what its last request actually did, mirroring GetLastRun's
 // reasoning for job status.
 func (s *Store) GetLastReceiverEvent(ctx context.Context, id string) (ReceiverEvent, bool, error) {
-	errMsg := fmt.Sprintf("reading receiver %q last event", id)
-	query := `SELECT at, receiver_id, kind, key, size, success, error FROM receiver_events WHERE receiver_id = ? ORDER BY id DESC LIMIT 1`
+	var m receiverEventModel
 
-	return queryRowOptional(ctx, s.db, errMsg, query, []any{id}, func(row *sql.Row) (ReceiverEvent, error) {
-		var ev ReceiverEvent
-		if err := row.Scan(&ev.At, &ev.ReceiverID, &ev.Kind, &ev.Key, &ev.Size, &ev.Success, &ev.Error); err != nil {
-			return ReceiverEvent{}, err
-		}
+	err := s.db.WithContext(ctx).Where("receiver_id = ?", id).Order("id DESC").Take(&m).Error
 
-		return ev, nil
-	})
+	switch {
+	case isRecordNotFound(err):
+		return ReceiverEvent{}, false, nil
+	case err != nil:
+		return ReceiverEvent{}, false, fmt.Errorf("reading receiver %q last event: %w", id, err)
+	default:
+		return ReceiverEvent{At: m.At, ReceiverID: m.ReceiverID, Kind: m.Kind, Key: m.Key, Size: m.Size, Success: m.Success, Error: m.Error}, true, nil
+	}
 }
 
 // ReceiverDaySummary is one receiver's activity over a time window, as
@@ -194,28 +225,27 @@ type ReceiverDaySummary struct {
 }
 
 // SummarizeReceiverEvents returns, in receiver id order, every receiver
-// id's ReceiverDaySummary for the events recorded in [start, end).
+// id's ReceiverDaySummary for the events recorded in [start, end). Stays
+// raw SQL: the conditional-aggregation columns (SUM(CASE WHEN ...)) have no
+// GORM chain equivalent.
 func (s *Store) SummarizeReceiverEvents(ctx context.Context, start, end time.Time) ([]ReceiverDaySummary, error) {
-	const query = `SELECT receiver_id,
-		SUM(CASE WHEN kind = ? AND success = 1 THEN 1 ELSE 0 END),
-		SUM(CASE WHEN kind = ? AND success = 1 THEN size ELSE 0 END),
-		SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END)
+	const query = `SELECT receiver_id AS receiver_id,
+		SUM(CASE WHEN kind = ? AND success = 1 THEN 1 ELSE 0 END) AS files_received,
+		SUM(CASE WHEN kind = ? AND success = 1 THEN size ELSE 0 END) AS bytes_received,
+		SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS errors
 		FROM receiver_events
 		WHERE at >= ? AND at < ?
 		GROUP BY receiver_id
 		ORDER BY receiver_id`
 
-	args := []any{ReceiverEventReceive, ReceiverEventReceive, start.UTC(), end.UTC()}
+	var out []ReceiverDaySummary
 
-	return queryRows(ctx, s.db, "summarizing receiver events", query, args, func(rows *sql.Rows) (ReceiverDaySummary, error) {
-		var sum ReceiverDaySummary
+	err := s.db.WithContext(ctx).Raw(query, ReceiverEventReceive, ReceiverEventReceive, start.UTC(), end.UTC()).Scan(&out).Error
+	if err != nil {
+		return nil, fmt.Errorf("summarizing receiver events: %w", err)
+	}
 
-		if err := rows.Scan(&sum.ReceiverID, &sum.FilesReceived, &sum.BytesReceived, &sum.Errors); err != nil {
-			return ReceiverDaySummary{}, err
-		}
-
-		return sum, nil
-	})
+	return out, nil
 }
 
 // ReceiverErrorEvent is one failed receiver API request in a time window, as
@@ -231,15 +261,20 @@ type ReceiverErrorEvent struct {
 // ListReceiverErrorEvents returns every failed receiver API request
 // recorded in [start, end), oldest first.
 func (s *Store) ListReceiverErrorEvents(ctx context.Context, start, end time.Time) ([]ReceiverErrorEvent, error) {
-	query := `SELECT at, receiver_id, kind, key, error FROM receiver_events WHERE success = 0 AND at >= ? AND at < ? ORDER BY at ASC`
+	var rows []receiverEventModel
 
-	return queryRows(ctx, s.db, "reading receiver error events", query, []any{start.UTC(), end.UTC()}, func(rows *sql.Rows) (ReceiverErrorEvent, error) {
-		var e ReceiverErrorEvent
+	err := s.db.WithContext(ctx).
+		Where("success = 0 AND at >= ? AND at < ?", start.UTC(), end.UTC()).
+		Order("at ASC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("reading receiver error events: %w", err)
+	}
 
-		if err := rows.Scan(&e.At, &e.ReceiverID, &e.Kind, &e.Key, &e.Error); err != nil {
-			return ReceiverErrorEvent{}, err
-		}
+	events := make([]ReceiverErrorEvent, len(rows))
+	for i, m := range rows {
+		events[i] = ReceiverErrorEvent{At: m.At, ReceiverID: m.ReceiverID, Kind: m.Kind, Key: m.Key, Error: m.Error}
+	}
 
-		return e, nil
-	})
+	return events, nil
 }
