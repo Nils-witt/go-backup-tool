@@ -10,12 +10,11 @@ import (
 
 // Permission is a dashboard session's granted capabilities, on top of
 // having merely authenticated: what a logged-in user is allowed to see and
-// do. Stored as a bitmask — on disk in webui_users.permissions (see
-// webusers.go) for a user managed through the web UI's "Users" admin
-// section, and embedded directly in that session's own bearer token at
-// login time (see sessionStore.create in webui.go) so every request can
-// check it without a server-side lookup, the same way the rest of that
-// token's claims work.
+// do. Stored as a bitmask — on disk in users.permissions (see users.go) for
+// an account managed through the web UI's "Users" admin section, and
+// embedded directly in that session's own bearer token at login time (see
+// sessionStore.create in webui.go) so every request can check it without a
+// server-side lookup, the same way the rest of that token's claims work.
 type Permission int
 
 const (

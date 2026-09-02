@@ -2,7 +2,7 @@
 // query and schema statement against the shared state/retention sqlite
 // database lives here, behind a *Store whose exported methods are Get*/List*
 // lookups and Save*/Delete* writes (plus a handful of clearly-named one-off
-// operations — VerifyWebUIUser, RevokeAPIToken, ExpiredObjectPaths — whose
+// operations — VerifyUser, RevokeAPIToken, ExpiredObjectPaths — whose
 // behavior a plain Get/Save name would obscure). Every other package reaches
 // the database only through a *Store, never through a *sql.DB of its own.
 package store
@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 )
@@ -57,8 +58,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		loginEventsSchema,
 		downloadEventsSchema,
 		receiverEventsSchema,
-		webUIUsersSchema,
-		oidcUserPermissionsSchema,
+		usersSchema,
 		apiTokensSchema,
 		outstandingTargetUploads,
 	}
@@ -78,6 +78,11 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		if err := execSchemaOrClose(ctx, db, path, schema); err != nil {
 			return nil, err
 		}
+	}
+
+	if err := ensureUsersMigratedFromLegacyTables(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrating job state db %q: %w", path, err)
 	}
 
 	return &Store{db: db}, nil
@@ -141,6 +146,177 @@ func ensureRetentionSecondsColumn(ctx context.Context, db *sql.DB) error {
 
 	if _, err := db.ExecContext(ctx, `ALTER TABLE objects ADD COLUMN retention_seconds INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return fmt.Errorf("adding retention_seconds column: %w", err)
+	}
+
+	return nil
+}
+
+// queryRower is satisfied by both *sql.DB and *sql.Tx, letting a couple of
+// small lookups (tableExists, uniqueUsernameFor) run against whichever a
+// caller has on hand — a plain connection at runtime, or a migration's own
+// transaction.
+type queryRower interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// tableExists reports whether a table named name exists in the schema, as
+// queried through q.
+func tableExists(ctx context.Context, q queryRower, name string) (bool, error) {
+	var n int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&n); err != nil {
+		return false, fmt.Errorf("checking for table %q: %w", name, err)
+	}
+
+	return n > 0, nil
+}
+
+// ensureUsersMigratedFromLegacyTables copies every row still sitting in the
+// pre-merge webui_users / oidc_user_permissions tables — present only in a
+// state db created before those two were folded into the unified users
+// table (see usersSchema) — into users, then drops both. Safe to call on
+// every startup: once neither legacy table exists (the case on every run
+// after the first upgraded one) it's a no-op. Runs inside a transaction
+// since it copies rows across two tables and then drops them — the db must
+// not end up half-migrated if the process is killed mid-way. Must be
+// called after usersSchema has created users.
+func ensureUsersMigratedFromLegacyTables(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("starting users migration: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	webuiExists, err := tableExists(ctx, tx, "webui_users")
+	if err != nil {
+		return err
+	}
+
+	oidcExists, err := tableExists(ctx, tx, "oidc_user_permissions")
+	if err != nil {
+		return err
+	}
+
+	if !webuiExists && !oidcExists {
+		return nil
+	}
+
+	// webui_users first, and into an otherwise-empty users table: no
+	// collision is possible for it. oidc_user_permissions second, so its
+	// own collision check (see migrateOIDCUserPermissions) sees every
+	// webui_users-derived row already in place.
+	if webuiExists {
+		if err := migrateWebUIUsers(ctx, tx); err != nil {
+			return err
+		}
+	}
+
+	if oidcExists {
+		if err := migrateOIDCUserPermissions(ctx, tx); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// migrateWebUIUsers copies every row of the pre-merge webui_users table
+// into users (oidc_username left NULL), then drops webui_users. Rows are
+// read into memory before any INSERT is issued, rather than inserting
+// while the SELECT's rows are still open, since this shares db's single
+// connection (see Store.SetMaxOpenConns) with the transaction's writes.
+func migrateWebUIUsers(ctx context.Context, tx *sql.Tx) error {
+	type legacyUser struct {
+		username, passwordHash string
+		perm                   int
+		createdAt              time.Time
+	}
+
+	rows, err := tx.QueryContext(ctx, `SELECT username, password_hash, permissions, created_at FROM webui_users`)
+	if err != nil {
+		return fmt.Errorf("reading webui_users for migration: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var legacyUsers []legacyUser
+
+	for rows.Next() {
+		var u legacyUser
+		if err := rows.Scan(&u.username, &u.passwordHash, &u.perm, &u.createdAt); err != nil {
+			return fmt.Errorf("reading webui_users for migration: %w", err)
+		}
+
+		legacyUsers = append(legacyUsers, u)
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("reading webui_users for migration: %w", err)
+	}
+
+	for _, u := range legacyUsers {
+		const insert = `INSERT INTO users (username, password_hash, oidc_username, permissions, created_at) VALUES (?, ?, NULL, ?, ?)`
+		if _, err := tx.ExecContext(ctx, insert, u.username, u.passwordHash, u.perm, u.createdAt); err != nil {
+			return fmt.Errorf("migrating webui_users row %q: %w", u.username, err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `DROP TABLE webui_users`); err != nil {
+		return fmt.Errorf("dropping webui_users: %w", err)
+	}
+
+	return nil
+}
+
+// migrateOIDCUserPermissions copies every row of the pre-merge
+// oidc_user_permissions table into users as a passwordless row linked via
+// oidc_username, then drops oidc_user_permissions. If an identity string
+// happens to equal an existing users.username (from migrateWebUIUsers,
+// which must run first), that unrelated row is never adopted — an OIDC
+// login only ever matches by oidc_username, never by username (see
+// GetOrProvisionOIDCUser) — so the new row's username is disambiguated
+// instead (see uniqueUsernameFor) while oidc_username keeps the original
+// identity string.
+func migrateOIDCUserPermissions(ctx context.Context, tx *sql.Tx) error {
+	type legacyOIDCUser struct {
+		identity  string
+		perm      int
+		updatedAt time.Time
+	}
+
+	rows, err := tx.QueryContext(ctx, `SELECT identity, permissions, updated_at FROM oidc_user_permissions`)
+	if err != nil {
+		return fmt.Errorf("reading oidc_user_permissions for migration: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var legacyUsers []legacyOIDCUser
+
+	for rows.Next() {
+		var u legacyOIDCUser
+		if err := rows.Scan(&u.identity, &u.perm, &u.updatedAt); err != nil {
+			return fmt.Errorf("reading oidc_user_permissions for migration: %w", err)
+		}
+
+		legacyUsers = append(legacyUsers, u)
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("reading oidc_user_permissions for migration: %w", err)
+	}
+
+	for _, u := range legacyUsers {
+		username, err := uniqueUsernameFor(ctx, tx, u.identity)
+		if err != nil {
+			return err
+		}
+
+		const insert = `INSERT INTO users (username, password_hash, oidc_username, permissions, created_at) VALUES (?, NULL, ?, ?, ?)`
+		if _, err := tx.ExecContext(ctx, insert, username, u.identity, u.perm, u.updatedAt); err != nil {
+			return fmt.Errorf("migrating oidc_user_permissions row %q: %w", u.identity, err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `DROP TABLE oidc_user_permissions`); err != nil {
+		return fmt.Errorf("dropping oidc_user_permissions: %w", err)
 	}
 
 	return nil

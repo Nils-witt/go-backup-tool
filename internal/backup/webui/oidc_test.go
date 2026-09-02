@@ -241,12 +241,12 @@ func TestOIDCLoginAndCallback(t *testing.T) {
 }
 
 // TestOIDCCallbackUsesStoredPermissionOverride checks that a permission
-// override stored for an identity (see store.SaveOIDCUserPermissions/
-// oidcusers.go — set through the "Users" admin section's OIDC listing, see
-// handleSetOIDCUserPermissions in webui.go) takes precedence over
-// auth.defaultPerm at that identity's next SSO login (see
-// handleOIDCCallback), the way TestOIDCLoginAndCallback's own session
-// (person@example.com, no override) gets auth.defaultPerm instead.
+// override stored for an identity (see store.GetOrProvisionOIDCUser/
+// users.go — set through the "Users" admin section, see handleUpdateUser
+// in webui.go) takes precedence over auth.defaultPerm at that identity's
+// next SSO login (see handleOIDCCallback), the way TestOIDCLoginAndCallback's
+// own session (person@example.com, no override) gets auth.defaultPerm
+// instead.
 func TestOIDCCallbackUsesStoredPermissionOverride(t *testing.T) {
 	t.Parallel()
 
@@ -269,8 +269,8 @@ func TestOIDCCallbackUsesStoredPermissionOverride(t *testing.T) {
 	}
 
 	db := openTestStateDB(t)
-	if err := db.SaveOIDCUserPermissions(t.Context(), "override@example.com", permission.PermissionView); err != nil {
-		t.Fatalf("SetOIDCUserPermissions() unexpected error: %v", err)
+	if _, err := db.GetOrProvisionOIDCUser(t.Context(), "override@example.com", permission.PermissionView); err != nil {
+		t.Fatalf("GetOrProvisionOIDCUser() unexpected error: %v", err)
 	}
 
 	pending := newOIDCPendingStore()
@@ -340,11 +340,11 @@ func doOIDCLogin(t *testing.T, provider *fakeOIDCProvider, auth *OIDCAuth, pendi
 }
 
 // TestOIDCCallbackProvisionsPermissionsOnFirstLogin checks that an
-// identity's very first SSO login provisions its permission record (see
-// store.GetOIDCUserPermissions), granting auth.defaultPerm, so it
-// shows up in the "Users" admin section's OIDC listing (see
-// handleListOIDCUserPermissions in webui.go) ready for an admin to adjust,
-// rather than only appearing once they've manually added it.
+// identity's very first SSO login provisions a users row for it (see
+// store.GetOrProvisionOIDCUser), granting auth.defaultPerm, so it shows up
+// in the "Users" admin section (see handleListUsers in webui.go) ready for
+// an admin to adjust, rather than only appearing once they've manually
+// added it.
 func TestOIDCCallbackProvisionsPermissionsOnFirstLogin(t *testing.T) {
 	t.Parallel()
 
@@ -370,31 +370,35 @@ func TestOIDCCallbackProvisionsPermissionsOnFirstLogin(t *testing.T) {
 	pending := newOIDCPendingStore()
 	sessions := newTestSessionStore(t)
 
-	if _, ok, err := db.GetOIDCUserPermissions(t.Context(), "newperson@example.com"); err != nil || ok {
-		t.Fatalf("OIDCUserPermissions() before first login = (ok=%v, err=%v), want (false, nil)", ok, err)
+	if _, ok, err := db.GetUser(t.Context(), "newperson@example.com"); err != nil || ok {
+		t.Fatalf("GetUser() before first login = (ok=%v, err=%v), want (false, nil)", ok, err)
 	}
 
 	doOIDCLogin(t, provider, auth, pending, sessions, db)
 
-	perm, ok, err := db.GetOIDCUserPermissions(t.Context(), "newperson@example.com")
+	user, ok, err := db.GetUser(t.Context(), "newperson@example.com")
 	if err != nil {
-		t.Fatalf("OIDCUserPermissions() unexpected error: %v", err)
+		t.Fatalf("GetUser() unexpected error: %v", err)
 	}
 
 	if !ok {
-		t.Fatal("OIDCUserPermissions() ok = false after first login, want true (a record should have been provisioned)")
+		t.Fatal("GetUser() ok = false after first login, want true (a row should have been provisioned)")
 	}
 
-	if perm != permission.PermissionView {
-		t.Errorf("provisioned permissions = %v, want %v (auth.defaultPerm)", perm, permission.PermissionView)
+	if user.OIDCUsername != "newperson@example.com" {
+		t.Errorf("OIDCUsername = %q, want %q", user.OIDCUsername, "newperson@example.com")
+	}
+
+	if user.Permissions != permission.PermissionView {
+		t.Errorf("provisioned permissions = %v, want %v (auth.defaultPerm)", user.Permissions, permission.PermissionView)
 	}
 }
 
 // TestOIDCCallbackDoesNotOverwriteAdminEditOnLaterLogin checks that a later
-// SSO login for an identity that already has a permission record — whether
-// auto-provisioned by an earlier login or set by an admin — doesn't reset it
-// back to auth.defaultPerm; only an admin's own edit (see
-// handleSetOIDCUserPermissions in webui.go) should change it.
+// SSO login for an identity that already has a users row — whether
+// auto-provisioned by an earlier login or edited by an admin — doesn't reset
+// it back to auth.defaultPerm; only an admin's own edit (see
+// handleUpdateUser in webui.go) should change it.
 func TestOIDCCallbackDoesNotOverwriteAdminEditOnLaterLogin(t *testing.T) {
 	t.Parallel()
 
@@ -424,8 +428,8 @@ func TestOIDCCallbackDoesNotOverwriteAdminEditOnLaterLogin(t *testing.T) {
 	doOIDCLogin(t, provider, auth, pending, sessions, db)
 
 	// An admin then restricts it to view-only.
-	if err := db.SaveOIDCUserPermissions(t.Context(), "regular@example.com", permission.PermissionView); err != nil {
-		t.Fatalf("SetOIDCUserPermissions() unexpected error: %v", err)
+	if err := db.UpdateUserPermissions(t.Context(), "regular@example.com", permission.PermissionView); err != nil {
+		t.Fatalf("UpdateUserPermissions() unexpected error: %v", err)
 	}
 
 	// A second login must honor the admin's edit, not reset it back to the
@@ -437,6 +441,94 @@ func TestOIDCCallbackDoesNotOverwriteAdminEditOnLaterLogin(t *testing.T) {
 	perm := sessions.permissionsFor(&http.Request{Header: http.Header{"Authorization": {"Bearer " + token}}})
 	if perm != permission.PermissionView {
 		t.Errorf("session permissions after second login = %v, want %v (the admin's edit, not auth.defaultPerm)", perm, permission.PermissionView)
+	}
+}
+
+// TestOIDCCallbackNeverAdoptsUsernameMatchedRow checks that an SSO login
+// never touches a pre-existing password-based user's row just because the
+// identity string equals that row's username — an SSO login only ever
+// matches by oidc_username (see store.GetOrProvisionOIDCUser), never by
+// comparing the identity to an unrelated row's username. Linking the two
+// is a deliberate admin action (see handleUpdateUser/store.SetUserOIDCUsername
+// in webui.go), never inferred from a login.
+func TestOIDCCallbackNeverAdoptsUsernameMatchedRow(t *testing.T) {
+	t.Parallel()
+
+	const (
+		clientID = "test-client"
+		identity = "shared@example.com"
+	)
+
+	provider := newFakeOIDCProvider(t, clientID)
+	provider.email.Store(identity)
+
+	auth, err := newOIDCAuth(t.Context(), config.OIDCSettings{
+		Enabled:            true,
+		Issuer:             provider.issuer(),
+		ClientID:           clientID,
+		ClientSecret:       "test-secret",
+		RedirectURL:        "https://backups.example.com/login/oidc/callback",
+		Scopes:             []string{"profile", "email"},
+		DefaultPermissions: permission.PermissionView,
+	})
+	if err != nil {
+		t.Fatalf("newOIDCAuth() unexpected error: %v", err)
+	}
+
+	db := openTestStateDB(t)
+
+	// A password-based account already exists, named exactly like the SSO
+	// identity that's about to log in.
+	if err := db.SaveUser(t.Context(), identity, "hunter2", "", permission.PermissionAdmin); err != nil {
+		t.Fatalf("SaveUser() unexpected error: %v", err)
+	}
+
+	pending := newOIDCPendingStore()
+	sessions := newTestSessionStore(t)
+
+	doOIDCLogin(t, provider, auth, pending, sessions, db)
+
+	// The pre-existing password account must be untouched: still unlinked,
+	// still holding its own permissions.
+	existing, ok, err := db.GetUser(t.Context(), identity)
+	if err != nil || !ok {
+		t.Fatalf("GetUser(%q) after SSO login = (ok=%v, err=%v), want (true, nil)", identity, ok, err)
+	}
+
+	if existing.OIDCUsername != "" {
+		t.Errorf("pre-existing user's OIDCUsername = %q, want \"\" (untouched by the SSO login)", existing.OIDCUsername)
+	}
+
+	if existing.Permissions != permission.PermissionAdmin {
+		t.Errorf("pre-existing user's Permissions = %v, want %v (untouched by the SSO login)", existing.Permissions, permission.PermissionAdmin)
+	}
+
+	// The SSO login must instead have provisioned its own, distinctly named
+	// row, linked via oidc_username to the identity.
+	users, err := db.ListUsers(t.Context())
+	if err != nil {
+		t.Fatalf("ListUsers() unexpected error: %v", err)
+	}
+
+	var linked *store.User
+
+	for i := range users {
+		if users[i].OIDCUsername == identity {
+			linked = &users[i]
+			break
+		}
+	}
+
+	if linked == nil {
+		t.Fatalf("ListUsers() = %+v, want a row linked to %q", users, identity)
+	}
+
+	if linked.Username == identity {
+		t.Errorf("provisioned row's Username = %q, want a disambiguated name distinct from the pre-existing user", linked.Username)
+	}
+
+	if linked.Permissions != permission.PermissionView {
+		t.Errorf("provisioned row's Permissions = %v, want %v (auth.defaultPerm)", linked.Permissions, permission.PermissionView)
 	}
 }
 

@@ -8,7 +8,6 @@ import HistoryIcon from "@mui/icons-material/History";
 import PlaylistAddCheckIcon from "@mui/icons-material/PlaylistAddCheck";
 import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import GroupIcon from "@mui/icons-material/Group";
-import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
 import type { SessionInfoState } from "./hooks/useSessionInfo";
 
 export interface NavItem {
@@ -58,12 +57,6 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "Administration",
     items: [
       { to: "/admin/users", label: "Users", icon: <GroupIcon />, visible: (s) => !!s.info?.admin },
-      {
-        to: "/admin/oidc-users",
-        label: "OIDC users",
-        icon: <AdminPanelSettingsIcon />,
-        visible: (s) => !!s.info?.admin && !!s.info?.oidc_enabled,
-      },
     ],
   },
 ];

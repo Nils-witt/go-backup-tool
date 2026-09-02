@@ -43,6 +43,7 @@ export interface ReceiverFile {
   key: string;
   size: number;
   mod_time: string;
+  expires_at: string;
 }
 
 export interface IdentityJSON {
@@ -103,6 +104,7 @@ export interface MetaJSON {
 
 export interface WebUIUserJSON {
   username: string;
+  oidc_username: string;
   permissions: string[];
   created_at: string;
 }
@@ -110,10 +112,12 @@ export interface WebUIUserJSON {
 export interface WebUIUserRequestJSON {
   username: string;
   password: string;
+  oidc_username: string;
   permissions: string[];
 }
 
 export interface WebUIUserUpdateRequestJSON {
+  oidc_username: string;
   permissions: string[];
 }
 
@@ -132,16 +136,6 @@ export interface ApiTokenRequestJSON {
 export interface LoginResponseJSON {
   token: string;
   expires_at: string;
-}
-
-export interface OidcUserPermissionJSON {
-  identity: string;
-  permissions: string[];
-  updated_at: string;
-}
-
-export interface OidcUserPermissionRequestJSON {
-  permissions: string[];
 }
 
 export interface DownloadTicketJSON {

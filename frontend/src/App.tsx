@@ -10,7 +10,6 @@ import { LoginLogPage } from "./pages/LoginLogPage";
 import { DownloadLogPage } from "./pages/DownloadLogPage";
 import { IdentityPage } from "./pages/IdentityPage";
 import { UsersPage } from "./pages/UsersPage";
-import { OidcUsersPage } from "./pages/OidcUsersPage";
 
 export function App() {
   return (
@@ -26,7 +25,6 @@ export function App() {
           <Route path="logs/login" element={<LoginLogPage />} />
           <Route path="logs/downloads" element={<DownloadLogPage />} />
           <Route path="admin/users" element={<UsersPage />} />
-          <Route path="admin/oidc-users" element={<OidcUsersPage />} />
         </Route>
       </Routes>
     </SessionProvider>

@@ -514,11 +514,11 @@ func TestStartWebUILoginLogAndDownloadLogRequireDedicatedPermission(t *testing.T
 	store, _ := newTestStore()
 	db := openTestStateDB(t)
 
-	if err := db.SaveWebUIUser(context.Background(), "viewer", "s3cret1", permission.PermissionView); err != nil {
+	if err := db.SaveUser(context.Background(), "viewer", "s3cret1", "", permission.PermissionView); err != nil {
 		t.Fatalf("CreateWebUIUser(viewer) unexpected error: %v", err)
 	}
 
-	if err := db.SaveWebUIUser(context.Background(), "auditor", "s3cret2", permission.PermissionViewLoginLog); err != nil {
+	if err := db.SaveUser(context.Background(), "auditor", "s3cret2", "", permission.PermissionViewLoginLog); err != nil {
 		t.Fatalf("CreateWebUIUser(auditor) unexpected error: %v", err)
 	}
 
@@ -818,7 +818,7 @@ func TestHandleIssueWebUIUserTokenRecordsToken(t *testing.T) {
 	db := openTestStateDB(t)
 	ctx := t.Context()
 
-	if err := db.SaveWebUIUser(ctx, "alice", "hunter2", permission.PermissionView); err != nil {
+	if err := db.SaveUser(ctx, "alice", "hunter2", "", permission.PermissionView); err != nil {
 		t.Fatalf("CreateWebUIUser(): %v", err)
 	}
 
@@ -867,7 +867,7 @@ func TestHandleListWebUIUserTokens(t *testing.T) {
 	db := openTestStateDB(t)
 	ctx := t.Context()
 
-	if err := db.SaveWebUIUser(ctx, "alice", "hunter2", permission.PermissionView); err != nil {
+	if err := db.SaveUser(ctx, "alice", "hunter2", "", permission.PermissionView); err != nil {
 		t.Fatalf("CreateWebUIUser(): %v", err)
 	}
 
@@ -927,7 +927,7 @@ func TestHandleRevokeWebUIUserTokenBlocksSessionAndIsIdempotent(t *testing.T) {
 
 	db := openTestStateDB(t)
 
-	if err := db.SaveWebUIUser(t.Context(), "alice", "hunter2", permission.PermissionView); err != nil {
+	if err := db.SaveUser(t.Context(), "alice", "hunter2", "", permission.PermissionView); err != nil {
 		t.Fatalf("CreateWebUIUser(): %v", err)
 	}
 

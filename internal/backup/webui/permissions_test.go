@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
-	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 // mustCreateSession mints a session token for username granting perm,
@@ -400,7 +399,7 @@ func TestHandleWebUILoginDBUserGrantsStoredPermissions(t *testing.T) {
 	db := openTestStateDB(t)
 	sessions := newTestSessionStore(t)
 
-	if err := db.SaveWebUIUser(context.Background(), "bob", "s3cret", permission.PermissionView); err != nil {
+	if err := db.SaveUser(context.Background(), "bob", "s3cret", "", permission.PermissionView); err != nil {
 		t.Fatalf("CreateWebUIUser() unexpected error: %v", err)
 	}
 
@@ -434,10 +433,10 @@ func TestHandleWebUIUserAdminAPILifecycle(t *testing.T) {
 
 	db := openTestStateDB(t)
 
-	create := handleCreateWebUIUser(db, "admin", discardLogger)
-	list := handleListWebUIUsers(db, discardLogger)
-	update := handleUpdateWebUIUser(db, discardLogger)
-	del := handleDeleteWebUIUser(db, discardLogger)
+	create := handleCreateUser(db, "admin", discardLogger)
+	list := handleListUsers(db, discardLogger)
+	update := handleUpdateUser(db, discardLogger)
+	del := handleDeleteUser(db, discardLogger)
 
 	// Create.
 	body := strings.NewReader(`{"username":"carol","password":"pw123456","permissions":["view"]}`)
@@ -464,7 +463,7 @@ func TestHandleWebUIUserAdminAPILifecycle(t *testing.T) {
 	rec = httptest.NewRecorder()
 	list(rec, req)
 
-	var users []webUIUserJSON
+	var users []userJSON
 	if err := json.NewDecoder(rec.Body).Decode(&users); err != nil {
 		t.Fatalf("decoding list response: %v", err)
 	}
@@ -484,9 +483,9 @@ func TestHandleWebUIUserAdminAPILifecycle(t *testing.T) {
 		t.Fatalf("update status = %d, want %d, body: %s", rec.Code, http.StatusNoContent, rec.Body.String())
 	}
 
-	perm, ok, err := db.VerifyWebUIUser(context.Background(), "carol", "pw123456")
+	perm, ok, err := db.VerifyUser(context.Background(), "carol", "pw123456")
 	if err != nil || !ok {
-		t.Fatalf("VerifyWebUIUser() after update = (ok=%v, err=%v), want (true, nil)", ok, err)
+		t.Fatalf("VerifyUser() after update = (ok=%v, err=%v), want (true, nil)", ok, err)
 	}
 
 	if want := permission.PermissionView | permission.PermissionDownload; perm != want {
@@ -504,7 +503,7 @@ func TestHandleWebUIUserAdminAPILifecycle(t *testing.T) {
 		t.Fatalf("delete status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
 
-	if _, ok, _ := db.VerifyWebUIUser(context.Background(), "carol", "pw123456"); ok {
+	if _, ok, _ := db.VerifyUser(context.Background(), "carol", "pw123456"); ok {
 		t.Error("carol still verifies after being deleted")
 	}
 
@@ -526,7 +525,7 @@ func TestHandleIssueWebUIUserToken(t *testing.T) {
 	db := openTestStateDB(t)
 	sessions := newTestSessionStore(t)
 
-	if err := db.SaveWebUIUser(context.Background(), "erin", "s3cret1", permission.PermissionView|permission.PermissionDownload); err != nil {
+	if err := db.SaveUser(context.Background(), "erin", "s3cret1", "", permission.PermissionView|permission.PermissionDownload); err != nil {
 		t.Fatalf("CreateWebUIUser() unexpected error: %v", err)
 	}
 
@@ -591,7 +590,7 @@ func TestHandleIssueWebUIUserTokenRejectsOutOfRangeDays(t *testing.T) {
 	db := openTestStateDB(t)
 	sessions := newTestSessionStore(t)
 
-	if err := db.SaveWebUIUser(context.Background(), "erin", "s3cret1", permission.PermissionView); err != nil {
+	if err := db.SaveUser(context.Background(), "erin", "s3cret1", "", permission.PermissionView); err != nil {
 		t.Fatalf("CreateWebUIUser() unexpected error: %v", err)
 	}
 
@@ -627,106 +626,79 @@ func TestHandleIssueWebUIUserTokenRequiresDB(t *testing.T) {
 	}
 }
 
-// TestHandleOIDCUserPermissionsAdminAPILifecycle drives set/list/re-set/
-// delete/delete-again in order (each stage depends on state the previous one
-// left in db) against one shared db and set of handlers, exercising
-// dave@example.com's permission override end to end. The stages live in
-// standalone helpers below (setOIDCPermissions and friends) rather than
-// inline, since gocyclo counts a t.Run closure's branches against this
-// function just as if they were inline.
-func TestHandleOIDCUserPermissionsAdminAPILifecycle(t *testing.T) {
+// TestHandleUpdateUserOIDCLinkLifecycle drives link/reject-conflict/unlink
+// in order (each stage depends on state the previous one left in db)
+// against handleUpdateUser's oidc_username field — the merged "Users"
+// admin API's replacement for the old dedicated /api/oidc-users endpoints.
+func TestHandleUpdateUserOIDCLinkLifecycle(t *testing.T) {
 	t.Parallel()
 
 	db := openTestStateDB(t)
 
-	set := handleSetOIDCUserPermissions(db, discardLogger)
-	list := handleListOIDCUserPermissions(db, discardLogger)
-	del := handleDeleteOIDCUserPermissions(db, discardLogger)
+	if err := db.SaveUser(context.Background(), "dave", "pw123456", "", permission.PermissionView); err != nil {
+		t.Fatalf("SaveUser() unexpected error: %v", err)
+	}
 
-	setOIDCPermissions(t, set, `{"permissions":["view"]}`, http.StatusNoContent)
-	requireOIDCPermissionListed(t, list, "view")
+	if err := db.SaveUser(context.Background(), "erin", "pw123456", "", permission.PermissionView); err != nil {
+		t.Fatalf("SaveUser() unexpected error: %v", err)
+	}
 
-	setOIDCPermissions(t, set, `{"permissions":["view","download"]}`, http.StatusNoContent)
-	requireOIDCPermissionsStored(t, db, permission.PermissionView|permission.PermissionDownload)
+	list := handleListUsers(db, discardLogger)
+	update := handleUpdateUser(db, discardLogger)
 
-	deleteOIDCPermissions(t, del, http.StatusNoContent)
-	requireNoOIDCPermissionsStored(t, db)
+	// Link dave to an OIDC identity.
+	putUser(t, update, "dave", `{"permissions":["view"],"oidc_username":"dave@example.com"}`, http.StatusNoContent)
+	requireUserOIDCUsername(t, list, "dave", "dave@example.com")
 
-	deleteOIDCPermissions(t, del, http.StatusNotFound)
+	// Linking a different user to the same identity is rejected, and
+	// leaves that user unlinked.
+	putUser(t, update, "erin", `{"permissions":["view"],"oidc_username":"dave@example.com"}`, http.StatusConflict)
+	requireUserOIDCUsername(t, list, "erin", "")
+
+	// Unlinking dave clears it.
+	putUser(t, update, "dave", `{"permissions":["view"],"oidc_username":""}`, http.StatusNoContent)
+	requireUserOIDCUsername(t, list, "dave", "")
 }
 
-// setOIDCPermissions PUTs body for dave@example.com through set and requires
-// the response status to be wantStatus.
-func setOIDCPermissions(t *testing.T, set http.HandlerFunc, body string, wantStatus int) {
+// putUser PUTs body for username through update and requires the response
+// status to be wantStatus.
+func putUser(t *testing.T, update http.HandlerFunc, username, body string, wantStatus int) {
 	t.Helper()
 
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodPut, "/api/oidc-users/dave@example.com", strings.NewReader(body))
-	req.SetPathValue("identity", "dave@example.com")
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPut, "/api/users/"+username, strings.NewReader(body))
+	req.SetPathValue("username", username)
 
 	rec := httptest.NewRecorder()
-	set(rec, req)
+	update(rec, req)
 
 	if rec.Code != wantStatus {
-		t.Fatalf("set status = %d, want %d, body: %s", rec.Code, wantStatus, rec.Body.String())
+		t.Fatalf("update status = %d, want %d, body: %s", rec.Code, wantStatus, rec.Body.String())
 	}
 }
 
-// deleteOIDCPermissions DELETEs dave@example.com's override through del and
-// requires the response status to be wantStatus.
-func deleteOIDCPermissions(t *testing.T, del http.HandlerFunc, wantStatus int) {
+// requireUserOIDCUsername requires list to report username's OIDCUsername
+// as exactly want.
+func requireUserOIDCUsername(t *testing.T, list http.HandlerFunc, username, want string) {
 	t.Helper()
 
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/api/oidc-users/dave@example.com", nil)
-	req.SetPathValue("identity", "dave@example.com")
-
-	rec := httptest.NewRecorder()
-	del(rec, req)
-
-	if rec.Code != wantStatus {
-		t.Errorf("delete status = %d, want %d", rec.Code, wantStatus)
-	}
-}
-
-// requireOIDCPermissionListed requires list to report exactly one entry, for
-// dave@example.com, holding exactly wantPerm.
-func requireOIDCPermissionListed(t *testing.T, list http.HandlerFunc, wantPerm string) {
-	t.Helper()
-
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/oidc-users", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/users", nil)
 	rec := httptest.NewRecorder()
 	list(rec, req)
 
-	var users []oidcUserPermissionJSON
+	var users []userJSON
 	if err := json.NewDecoder(rec.Body).Decode(&users); err != nil {
 		t.Fatalf("decoding list response: %v", err)
 	}
 
-	if len(users) != 1 || users[0].Identity != "dave@example.com" || len(users[0].Permissions) != 1 || users[0].Permissions[0] != wantPerm {
-		t.Fatalf("list = %+v, want exactly [dave@example.com: %s]", users, wantPerm)
-	}
-}
+	for _, u := range users {
+		if u.Username == username {
+			if u.OIDCUsername != want {
+				t.Errorf("%s.OIDCUsername = %q, want %q", username, u.OIDCUsername, want)
+			}
 
-// requireOIDCPermissionsStored requires dave@example.com's stored permission
-// override to be exactly want.
-func requireOIDCPermissionsStored(t *testing.T, db *store.Store, want permission.Permission) {
-	t.Helper()
-
-	perm, ok, err := db.GetOIDCUserPermissions(context.Background(), "dave@example.com")
-	if err != nil || !ok {
-		t.Fatalf("OIDCUserPermissions() = (ok=%v, err=%v), want (true, nil)", ok, err)
+			return
+		}
 	}
 
-	if perm != want {
-		t.Errorf("permissions = %v, want %v", perm, want)
-	}
-}
-
-// requireNoOIDCPermissionsStored requires dave@example.com to have no stored
-// permission override.
-func requireNoOIDCPermissionsStored(t *testing.T, db *store.Store) {
-	t.Helper()
-
-	if _, ok, _ := db.GetOIDCUserPermissions(context.Background(), "dave@example.com"); ok {
-		t.Error("dave@example.com still has a permission override after being deleted")
-	}
+	t.Fatalf("list = %+v, want an entry for %q", users, username)
 }

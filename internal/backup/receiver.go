@@ -50,11 +50,14 @@ func ReceiverTarget(recv config.ResolvedReceiver) *config.Target {
 
 // ReceiverFile is one object currently stored under a receiver's path, as
 // reported over /api/receivers/{id}/files, for display in the web UI
-// dashboard (see webui.go).
+// dashboard (see webui.go). ExpiresAt is the zero time.Time (see hasTime in
+// the frontend's format.ts) when the receiver has no retention: configured,
+// since there's then nothing to expire.
 type ReceiverFile struct {
-	Key     string    `json:"key"`
-	Size    int64     `json:"size"`
-	ModTime time.Time `json:"mod_time"`
+	Key       string    `json:"key"`
+	Size      int64     `json:"size"`
+	ModTime   time.Time `json:"mod_time"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // ListReceiverFiles walks recv.Path and returns every object currently
@@ -64,7 +67,12 @@ type ReceiverFile struct {
 // directory that doesn't exist yet (nothing has been received) is not an
 // error — it just yields no files.
 // Temp files left behind by an interrupted write (see WriteLocalObject's
-// ".*.tmp" pattern) are skipped since they're not yet complete objects.
+// ".*.tmp" pattern) are skipped since they're not yet complete objects. Each
+// file's ExpiresAt is derived from recv's current retention: setting rather
+// than the retention_seconds recorded at write time (see RecordObjectWrite),
+// so — like the rest of this listing, which just reflects what's on disk —
+// it can disagree with the state db's own sweep if retention: changed after
+// the file was written.
 func ListReceiverFiles(recv config.ResolvedReceiver) ([]ReceiverFile, error) {
 	if _, err := os.Stat(recv.Path); err != nil {
 		if os.IsNotExist(err) {
@@ -95,7 +103,14 @@ func ListReceiverFiles(recv config.ResolvedReceiver) ([]ReceiverFile, error) {
 			return err
 		}
 
-		files = append(files, ReceiverFile{Key: filepath.ToSlash(rel), Size: info.Size(), ModTime: info.ModTime()})
+		var expiresAt time.Time
+		if recv.Retention > 0 {
+			expiresAt = info.ModTime().Add(recv.Retention)
+		}
+
+		files = append(files, ReceiverFile{
+			Key: filepath.ToSlash(rel), Size: info.Size(), ModTime: info.ModTime(), ExpiresAt: expiresAt,
+		})
 
 		return nil
 	})

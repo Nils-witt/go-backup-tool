@@ -214,14 +214,17 @@ type OIDCSettings struct {
 	RedirectURL  string
 	Scopes       []string
 
-	// DefaultPermissions is granted to every session an SSO login starts
-	// (see handleOIDCCallback in oidc.go) — OIDC has no per-account
-	// permissions of its own the way a web UI "Users" admin-managed account
-	// does (see WebUIUser in webusers.go), so every account the provider
-	// lets in gets the same fixed set. Defaults to permission.PermissionView|
-	// permission.PermissionDownload (see resolveOIDCSettings) when
-	// webui.oidc.default-permissions: is unset, preserving the full access
-	// every SSO login had before per-user permissions existed.
+	// DefaultPermissions is granted at an identity's very first SSO login
+	// (see handleOIDCCallback in oidc.go), which auto-provisions a users row
+	// for it (see store.GetOrProvisionOIDCUser/store.User) the same way a
+	// web UI "Users" admin-managed account is stored — so an admin can
+	// still override an individual identity's permissions afterward the
+	// same way they would any other account's; this default only seeds
+	// what a brand new identity starts with. Defaults to
+	// permission.PermissionView|permission.PermissionDownload (see
+	// resolveOIDCSettings) when webui.oidc.default-permissions: is unset,
+	// preserving the full access every SSO login had before per-user
+	// permissions existed.
 	DefaultPermissions permission.Permission
 }
 

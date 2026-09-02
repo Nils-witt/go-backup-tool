@@ -33,10 +33,12 @@ const PERM_COLUMNS = [
 // UsersAdminSection is the "Users" admin CRUD panel: the table of
 // web-UI-managed accounts, permission checkboxes (each change re-submits
 // that row's whole permission set, since the API takes the full set rather
-// than a single add/remove), add-user form, and per-user API token
-// issuance/management.
+// than a single add/remove), an editable OIDC identity link per row,
+// add-user form, and per-user API token issuance/management.
 export function UsersAdminSection() {
   const [users, setUsers] = useState<WebUIUserJSON[]>([]);
+  const [oidcUsernameDrafts, setOidcUsernameDrafts] = useState<Record<string, string>>({});
+  const [oidcUsernameErrors, setOidcUsernameErrors] = useState<Record<string, string>>({});
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [tokensUser, setTokensUser] = useState<string | null>(null);
   const [issueTokenUser, setIssueTokenUser] = useState<string | null>(null);
@@ -45,7 +47,10 @@ export function UsersAdminSection() {
 
   function loadUsers() {
     apiFetchJSON<WebUIUserJSON[]>("/api/users")
-      .then((u) => setUsers(u || []))
+      .then((u) => {
+        setUsers(u || []);
+        setOidcUsernameDrafts(Object.fromEntries((u || []).map((x) => [x.username, x.oidc_username])));
+      })
       .catch(() => {});
   }
 
@@ -55,11 +60,36 @@ export function UsersAdminSection() {
 
   function setPermission(username: string, perm: string, checked: boolean, current: string[]) {
     const perms = checked ? [...current, perm] : current.filter((p) => p !== perm);
+    const oidcUsername = users.find((u) => u.username === username)?.oidc_username ?? "";
     apiFetch("/api/users/" + encodeURIComponent(username), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ permissions: perms }),
+      body: JSON.stringify({ permissions: perms, oidc_username: oidcUsername }),
     }).catch(() => {});
+  }
+
+  function submitOidcUsername(u: WebUIUserJSON) {
+    const oidcUsername = (oidcUsernameDrafts[u.username] ?? "").trim();
+    setOidcUsernameErrors((prev) => ({ ...prev, [u.username]: "" }));
+
+    if (oidcUsername === u.oidc_username) {
+      return;
+    }
+
+    apiFetchOK(
+      "/api/users/" + encodeURIComponent(u.username),
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ permissions: u.permissions, oidc_username: oidcUsername }),
+      },
+      "linking oidc identity failed",
+    )
+      .then(() => loadUsers())
+      .catch((err: Error) => {
+        setOidcUsernameErrors((prev) => ({ ...prev, [u.username]: err.message || "linking oidc identity failed" }));
+        setOidcUsernameDrafts((prev) => ({ ...prev, [u.username]: u.oidc_username }));
+      });
   }
 
   return (
@@ -69,6 +99,7 @@ export function UsersAdminSection() {
           <TableHead>
             <TableRow>
               <TableCell>Username</TableCell>
+              <TableCell>OIDC identity</TableCell>
               {PERM_COLUMNS.map((col) => (
                 <TableCell key={col.key}>{col.label}</TableCell>
               ))}
@@ -82,6 +113,21 @@ export function UsersAdminSection() {
             {users.map((u) => (
               <TableRow key={u.username}>
                 <TableCell sx={{ overflowWrap: "anywhere" }}>{u.username}</TableCell>
+                <TableCell sx={{ minWidth: 180 }}>
+                  <TextField
+                    size="small"
+                    variant="standard"
+                    placeholder="unlinked"
+                    fullWidth
+                    error={!!oidcUsernameErrors[u.username]}
+                    helperText={oidcUsernameErrors[u.username] || undefined}
+                    value={oidcUsernameDrafts[u.username] ?? ""}
+                    onChange={(e) =>
+                      setOidcUsernameDrafts((prev) => ({ ...prev, [u.username]: e.target.value }))
+                    }
+                    onBlur={() => submitOidcUsername(u)}
+                  />
+                </TableCell>
                 {PERM_COLUMNS.map((col) => (
                   <TableCell key={col.key}>
                     <Checkbox

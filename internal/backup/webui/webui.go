@@ -152,16 +152,13 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 	mux.HandleFunc("POST /api/logout", handleAPILogout(uiSessions, db, log))
 	mux.HandleFunc("GET /api/login-events", apiLoginLog(handleLoginEvents(db, log)))
 	mux.HandleFunc("GET /api/download-events", apiDownloadLog(handleDownloadEvents(db, log)))
-	mux.HandleFunc("GET /api/users", admin(handleListWebUIUsers(db, log)))
-	mux.HandleFunc("POST /api/users", admin(handleCreateWebUIUser(db, webUIUsername, log)))
-	mux.HandleFunc("PUT /api/users/{username}", admin(handleUpdateWebUIUser(db, log)))
-	mux.HandleFunc("DELETE /api/users/{username}", admin(handleDeleteWebUIUser(db, log)))
+	mux.HandleFunc("GET /api/users", admin(handleListUsers(db, log)))
+	mux.HandleFunc("POST /api/users", admin(handleCreateUser(db, webUIUsername, log)))
+	mux.HandleFunc("PUT /api/users/{username}", admin(handleUpdateUser(db, log)))
+	mux.HandleFunc("DELETE /api/users/{username}", admin(handleDeleteUser(db, log)))
 	mux.HandleFunc("POST /api/users/{username}/tokens", admin(handleIssueWebUIUserToken(uiSessions, db, log)))
 	mux.HandleFunc("GET /api/users/{username}/tokens", admin(handleListWebUIUserTokens(db, log)))
 	mux.HandleFunc("DELETE /api/users/{username}/tokens/{jti}", admin(handleRevokeWebUIUserToken(uiSessions, db, log)))
-	mux.HandleFunc("GET /api/oidc-users", admin(handleListOIDCUserPermissions(db, log)))
-	mux.HandleFunc("PUT /api/oidc-users/{identity...}", admin(handleSetOIDCUserPermissions(db, log)))
-	mux.HandleFunc("DELETE /api/oidc-users/{identity...}", admin(handleDeleteOIDCUserPermissions(db, log)))
 
 	if registerExtraRoutes != nil {
 		registerExtraRoutes(mux)
@@ -684,7 +681,7 @@ func newSessionStore(id *identity.ServerIdentity, db *store.Store) (*sessionStor
 // default, or a web UI "Users" admin-managed account — see
 // handleWebUILogin/handleOIDCCallback) and then trusted for the token's
 // whole lifetime, the same way Subject/ID are. A later change to that
-// account's stored permissions (see UpdateWebUIUserPermissions) therefore
+// account's stored permissions (see UpdateUserPermissions) therefore
 // only takes effect on that account's next login, not retroactively —
 // matching how a password change doesn't invalidate already-issued
 // sessions either.
@@ -925,10 +922,10 @@ type loginErrorJSON struct {
 // (see the perm assignment below for why); then, if that didn't match and
 // db is non-nil,
 // against the web UI's "Users" admin-managed accounts (see
-// db.VerifyWebUIUser/webusers.go), whose own granted permissions are
+// db.VerifyUser/users.go), whose own granted permissions are
 // used instead. Note that in practice a "Users" admin-managed account can
 // only exist once an operator has used the config-file admin to create one
-// (see handleCreateWebUIUser) — so this second check only ever matters
+// (see handleCreateUser) — so this second check only ever matters
 // when the config-file admin is also configured. A successful submission
 // starts a session (see sessionStore) carrying whichever permissions
 // matched and reports its token as JSON (loginResponseJSON) rather than a
@@ -986,7 +983,7 @@ func handleWebUILogin(username, password string, showSSO bool, sessions *session
 		perm := permission.PermissionView | permission.PermissionDownload | permission.PermissionAdmin | permission.PermissionViewLoginLog | permission.PermissionViewDownloadLog
 
 		if !success && db != nil {
-			dbPerm, ok, err := db.VerifyWebUIUser(r.Context(), submittedUser, submittedPass)
+			dbPerm, ok, err := db.VerifyUser(r.Context(), submittedUser, submittedPass)
 			if err != nil {
 				log.Warn("web UI: verifying db user failed", "err", err)
 			} else if ok {
@@ -1257,25 +1254,24 @@ func handleSessionInfo(sessions *sessionStore, authEnabled bool, adminUsername s
 	}
 }
 
-// webUIUserJSON is one store.WebUIUser's wire shape for the "Users" admin
-// API (handleListWebUIUsers/handleCreateWebUIUser), matching the
-// dashboard's own field naming (snake_case, as every other /api/...
-// endpoint here uses). It never carries a password: handleListWebUIUsers
-// doesn't have one to serve (see store.WebUIUser), and
-// handleCreateWebUIUser/handleUpdateWebUIUser take one only in their own
-// request body, write-only.
-type webUIUserJSON struct {
-	Username    string    `json:"username"`
-	Permissions []string  `json:"permissions"`
-	CreatedAt   time.Time `json:"created_at"`
+// userJSON is one store.User's wire shape for the "Users" admin API
+// (handleListUsers/handleCreateUser), matching the dashboard's own field
+// naming (snake_case, as every other /api/... endpoint here uses). It
+// never carries a password: handleListUsers doesn't have one to serve (see
+// store.User), and handleCreateUser/handleUpdateUser take one only in
+// their own request body, write-only. OIDCUsername is "" for an account
+// with no linked/auto-provisioned OIDC identity.
+type userJSON struct {
+	Username     string    `json:"username"`
+	OIDCUsername string    `json:"oidc_username"`
+	Permissions  []string  `json:"permissions"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // handleListJSON adapts a store.Store List* method value (e.g.
-// db.ListWebUIUsers) into a GET handler: an empty JSON array when db is
-// nil, a 500 on error (logged with errMsg), otherwise each item run through
-// convert and written as JSON. Shared by handleListWebUIUsers and
-// handleListOIDCUserPermissions, whose only difference is the row type and
-// conversion.
+// db.ListUsers) into a GET handler: an empty JSON array when db is nil, a
+// 500 on error (logged with errMsg), otherwise each item run through
+// convert and written as JSON. Used by handleListUsers.
 func handleListJSON[T, S any](db *store.Store, log *slog.Logger, errMsg string, list func(context.Context) ([]S, error), convert func(S) T) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if db == nil {
@@ -1300,43 +1296,69 @@ func handleListJSON[T, S any](db *store.Store, log *slog.Logger, errMsg string, 
 	}
 }
 
-// handleListWebUIUsers serves GET /api/users: every web UI "Users"
-// admin-managed account, for the dashboard's "Users" admin section —
-// requireAdmin (see StartWebUI) restricts this to the config-file admin.
-func handleListWebUIUsers(db *store.Store, log *slog.Logger) http.HandlerFunc {
-	return handleListJSON(db, log, "listing users failed", db.ListWebUIUsers, func(u store.WebUIUser) webUIUserJSON {
-		return webUIUserJSON{Username: u.Username, Permissions: u.Permissions.Names(), CreatedAt: u.CreatedAt}
+// handleListUsers serves GET /api/users: every dashboard account, for the
+// "Users" admin section — requireAdmin (see StartWebUI) restricts this to
+// the config-file admin.
+func handleListUsers(db *store.Store, log *slog.Logger) http.HandlerFunc {
+	return handleListJSON(db, log, "listing users failed", db.ListUsers, func(u store.User) userJSON {
+		return userJSON{Username: u.Username, OIDCUsername: u.OIDCUsername, Permissions: u.Permissions.Names(), CreatedAt: u.CreatedAt}
 	})
 }
 
-// webUIUserRequestJSON is handleCreateWebUIUser/handleUpdateWebUIUser's
-// request body: Username is only used (and required) by
-// handleCreateWebUIUser, which takes it from the body rather than the path
-// the way handleUpdateWebUIUser's PUT /api/users/{username} does, since
-// there's no username in a POST /api/users path to route on yet. Password
-// is required for handleCreateWebUIUser but optional for
-// handleUpdateWebUIUser, which leaves the stored password unchanged when
-// it's omitted.
-type webUIUserRequestJSON struct {
-	Username    string   `json:"username"`
-	Password    string   `json:"password"`
-	Permissions []string `json:"permissions"`
+// userRequestJSON is handleCreateUser/handleUpdateUser's request body.
+// Username is only used (and required) by handleCreateUser, which takes it
+// from the body rather than the path the way handleUpdateUser's PUT
+// /api/users/{username} does, since there's no username in a POST
+// /api/users path to route on yet. Password is required for
+// handleCreateUser but optional for handleUpdateUser, which leaves the
+// stored password unchanged when it's omitted. OIDCUsername, unlike
+// Password, is always a full-replace value for both handlers — blank
+// explicitly means "no link"/"clear the link," since (unlike a password,
+// which is never round-tripped back to the client) the dashboard always has
+// the row's current value on hand to resubmit unchanged or edit.
+type userRequestJSON struct {
+	Username     string   `json:"username"`
+	Password     string   `json:"password"`
+	OIDCUsername string   `json:"oidc_username"`
+	Permissions  []string `json:"permissions"`
 }
 
-// handleCreateWebUIUser serves POST /api/users: it adds a new web UI
-// "Users" admin-managed account from the request body (see
-// webUIUserRequestJSON), rejecting a username that collides with the
-// config-file admin's own (adminUsername) — that account's credentials
-// live in the config file, not this table, so it must never be shadowed
-// here — or one that's already taken (store.ErrWebUIUserExists).
-func handleCreateWebUIUser(db *store.Store, adminUsername string, log *slog.Logger) http.HandlerFunc {
+// handleUserErr writes the right response for err — store.ErrUserNotFound
+// as 404, store.ErrOIDCUsernameTaken as 409, any other error as a logged
+// 500 — and reports whether it wrote one at all (err == nil), so callers
+// can `if handleUserErr(...) { return }` rather than repeating this switch
+// themselves.
+func handleUserErr(w http.ResponseWriter, log *slog.Logger, verb string, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, store.ErrUserNotFound):
+		http.Error(w, "user not found", http.StatusNotFound)
+	case errors.Is(err, store.ErrOIDCUsernameTaken):
+		http.Error(w, "oidc identity is already linked to another user", http.StatusConflict)
+	default:
+		log.Warn("web UI: "+verb+" user failed", "err", err)
+		http.Error(w, verb+" user failed", http.StatusInternalServerError)
+	}
+
+	return true
+}
+
+// handleCreateUser serves POST /api/users: it adds a new dashboard account
+// from the request body (see userRequestJSON), rejecting a username that
+// collides with the config-file admin's own (adminUsername) — that
+// account's credentials live in the config file, not this table, so it
+// must never be shadowed here — one that's already taken
+// (store.ErrUserExists), or an OIDCUsername already linked to another row
+// (store.ErrOIDCUsernameTaken).
+func handleCreateUser(db *store.Store, adminUsername string, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if db == nil {
 			http.Error(w, "user management requires the job state db", http.StatusServiceUnavailable)
 			return
 		}
 
-		var req webUIUserRequestJSON
+		var req userRequestJSON
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
@@ -1358,25 +1380,22 @@ func handleCreateWebUIUser(db *store.Store, adminUsername string, log *slog.Logg
 			return
 		}
 
-		switch err := db.SaveWebUIUser(r.Context(), req.Username, req.Password, perm); {
-		case errors.Is(err, store.ErrWebUIUserExists):
+		switch err := db.SaveUser(r.Context(), req.Username, req.Password, req.OIDCUsername, perm); {
+		case errors.Is(err, store.ErrUserExists):
 			http.Error(w, "user already exists", http.StatusConflict)
-		case err != nil:
-			log.Warn("web UI: creating user failed", "err", err)
-			http.Error(w, "creating user failed", http.StatusInternalServerError)
+		case handleUserErr(w, log, "creating", err):
 		default:
 			w.WriteHeader(http.StatusCreated)
 		}
 	}
 }
 
-// handleUpdateWebUIUser serves PUT /api/users/{username}: it updates the
-// named web UI "Users" admin-managed account's permissions from the
-// request body (see webUIUserRequestJSON), and its password too if one was
-// given (a blank Password leaves the stored one unchanged, so the
-// dashboard's edit form doesn't have to re-submit it on every permission
-// change).
-func handleUpdateWebUIUser(db *store.Store, log *slog.Logger) http.HandlerFunc {
+// handleUpdateUser serves PUT /api/users/{username}: it updates the named
+// account's permissions and OIDC identity link from the request body (see
+// userRequestJSON), and its password too if one was given (a blank
+// Password leaves the stored one unchanged, so the dashboard's edit form
+// doesn't have to re-submit it on every permission change).
+func handleUpdateUser(db *store.Store, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if db == nil {
 			http.Error(w, "user management requires the job state db", http.StatusServiceUnavailable)
@@ -1385,7 +1404,7 @@ func handleUpdateWebUIUser(db *store.Store, log *slog.Logger) http.HandlerFunc {
 
 		username := r.PathValue("username")
 
-		var req webUIUserRequestJSON
+		var req userRequestJSON
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
@@ -1397,55 +1416,39 @@ func handleUpdateWebUIUser(db *store.Store, log *slog.Logger) http.HandlerFunc {
 			return
 		}
 
-		if err := db.UpdateWebUIUserPermissions(r.Context(), username, perm); handleWebUIUserErr(w, log, "updating", err) {
+		if err := db.UpdateUserPermissions(r.Context(), username, perm); handleUserErr(w, log, "updating", err) {
 			return
 		}
 
 		if req.Password != "" {
-			if err := db.UpdateWebUIUserPassword(r.Context(), username, req.Password); handleWebUIUserErr(w, log, "updating", err) {
+			if err := db.UpdateUserPassword(r.Context(), username, req.Password); handleUserErr(w, log, "updating", err) {
 				return
 			}
+		}
+
+		if err := db.SetUserOIDCUsername(r.Context(), username, req.OIDCUsername); handleUserErr(w, log, "updating", err) {
+			return
 		}
 
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
-// handleDeleteWebUIUser serves DELETE /api/users/{username}: it removes the
-// named web UI "Users" admin-managed account.
-func handleDeleteWebUIUser(db *store.Store, log *slog.Logger) http.HandlerFunc {
+// handleDeleteUser serves DELETE /api/users/{username}: it removes the
+// named account.
+func handleDeleteUser(db *store.Store, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if db == nil {
 			http.Error(w, "user management requires the job state db", http.StatusServiceUnavailable)
 			return
 		}
 
-		if err := db.DeleteWebUIUser(r.Context(), r.PathValue("username")); handleWebUIUserErr(w, log, "deleting", err) {
+		if err := db.DeleteUser(r.Context(), r.PathValue("username")); handleUserErr(w, log, "deleting", err) {
 			return
 		}
 
 		w.WriteHeader(http.StatusNoContent)
 	}
-}
-
-// handleWebUIUserErr writes the right response for err, as returned by one
-// of the backup.*WebUIUser* functions handleUpdateWebUIUser/
-// handleDeleteWebUIUser call — store.ErrWebUIUserNotFound as 404, any
-// other error as a logged 500 — and reports whether it wrote one at all
-// (err == nil), so those handlers can `if handleWebUIUserErr(...) { return }`
-// rather than repeating this switch themselves.
-func handleWebUIUserErr(w http.ResponseWriter, log *slog.Logger, verb string, err error) bool {
-	switch {
-	case err == nil:
-		return false
-	case errors.Is(err, store.ErrWebUIUserNotFound):
-		http.Error(w, "user not found", http.StatusNotFound)
-	default:
-		log.Warn("web UI: "+verb+" user failed", "err", err)
-		http.Error(w, verb+" user failed", http.StatusInternalServerError)
-	}
-
-	return true
 }
 
 // minAPITokenDays/maxAPITokenDays bound how many days an admin can request
@@ -1469,7 +1472,7 @@ type apiTokenRequestJSON struct {
 // handleIssueWebUIUserToken serves POST /api/users/{username}/tokens: it
 // mints a long-lived bearer token (see sessionStore.createWithTTL) for the
 // named "Users" admin-managed account, carrying that account's currently
-// granted permissions (see db.GetWebUIUser) — the same kind of token a
+// granted permissions (see db.GetUser) — the same kind of token a
 // normal login produces, just valid for Days days instead of sessionTTL, for
 // scripts/automation that can't sit through an interactive login. Returned
 // as loginResponseJSON, the same shape POST /login uses, since it's the same
@@ -1497,7 +1500,7 @@ func handleIssueWebUIUserToken(sessions *sessionStore, db *store.Store, log *slo
 			return
 		}
 
-		user, ok, err := db.GetWebUIUser(r.Context(), username)
+		user, ok, err := db.GetUser(r.Context(), username)
 		if err != nil {
 			log.Warn("web UI: looking up user failed", "err", err)
 			http.Error(w, "issuing token failed", http.StatusInternalServerError)
@@ -1625,100 +1628,6 @@ func handleRevokeWebUIUserToken(sessions *sessionStore, db *store.Store, log *sl
 		sessions.revokeJTI(t.JTI, t.ExpiresAt)
 
 		w.WriteHeader(http.StatusNoContent)
-	}
-}
-
-// oidcUserPermissionJSON is one store.OIDCUserPermission's wire shape for
-// the "Users" admin section's OIDC listing (handleListOIDCUserPermissions/
-// handleSetOIDCUserPermissions), matching the dashboard's own field naming
-// (snake_case, as every other /api/... endpoint here uses).
-type oidcUserPermissionJSON struct {
-	Identity    string    `json:"identity"`
-	Permissions []string  `json:"permissions"`
-	UpdatedAt   time.Time `json:"updated_at"`
-}
-
-// handleListOIDCUserPermissions serves GET /api/oidc-users: every stored
-// per-identity permission override for an SSO login (see
-// store.OIDCUserPermission), for the dashboard's "Users"
-// admin section's OIDC listing — requireAdmin (see StartWebUI) restricts
-// this to the config-file admin, same as handleListWebUIUsers.
-func handleListOIDCUserPermissions(db *store.Store, log *slog.Logger) http.HandlerFunc {
-	return handleListJSON(db, log, "listing oidc user permissions failed", db.ListOIDCUserPermissions, func(u store.OIDCUserPermission) oidcUserPermissionJSON {
-		return oidcUserPermissionJSON{Identity: u.Identity, Permissions: u.Permissions.Names(), UpdatedAt: u.UpdatedAt}
-	})
-}
-
-// oidcUserPermissionRequestJSON is handleSetOIDCUserPermissions's request
-// body.
-type oidcUserPermissionRequestJSON struct {
-	Permissions []string `json:"permissions"`
-}
-
-// handleSetOIDCUserPermissions serves PUT /api/oidc-users/{identity...}: it
-// stores (or replaces) the named identity's permission override (see
-// db.SaveOIDCUserPermissions/oidcusers.go), taken effect on that
-// identity's next SSO login (see handleOIDCCallback in oidc.go) — same as a
-// web UI "Users" admin-managed account's permissions only taking effect on
-// its own next login (see sessionClaims). Unlike handleCreateWebUIUser,
-// there's no separate create step: an admin grants an identity's first
-// override the same way they change an existing one.
-func handleSetOIDCUserPermissions(db *store.Store, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if db == nil {
-			http.Error(w, "user management requires the job state db", http.StatusServiceUnavailable)
-			return
-		}
-
-		identity := r.PathValue("identity")
-		if identity == "" {
-			http.Error(w, "identity is required", http.StatusBadRequest)
-			return
-		}
-
-		var req oidcUserPermissionRequestJSON
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
-			return
-		}
-
-		perm, err := permission.ParsePermissions(req.Permissions)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		if err := db.SaveOIDCUserPermissions(r.Context(), identity, perm); err != nil {
-			log.Warn("web UI: setting oidc user permissions failed", "err", err)
-			http.Error(w, "setting oidc user permissions failed", http.StatusInternalServerError)
-
-			return
-		}
-
-		w.WriteHeader(http.StatusNoContent)
-	}
-}
-
-// handleDeleteOIDCUserPermissions serves DELETE /api/oidc-users/{identity...}:
-// it removes the named identity's stored permission override (see
-// db.DeleteOIDCUserPermissions/oidcusers.go), reverting its next SSO
-// login to webui.oidc.default-permissions:.
-func handleDeleteOIDCUserPermissions(db *store.Store, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if db == nil {
-			http.Error(w, "user management requires the job state db", http.StatusServiceUnavailable)
-			return
-		}
-
-		switch err := db.DeleteOIDCUserPermissions(r.Context(), r.PathValue("identity")); {
-		case errors.Is(err, store.ErrOIDCUserPermissionsNotFound):
-			http.Error(w, "no permission override for this identity", http.StatusNotFound)
-		case err != nil:
-			log.Warn("web UI: deleting oidc user permissions failed", "err", err)
-			http.Error(w, "deleting oidc user permissions failed", http.StatusInternalServerError)
-		default:
-			w.WriteHeader(http.StatusNoContent)
-		}
 	}
 }
 
@@ -2040,7 +1949,7 @@ func requirePermission(authEnabled bool, sessions *sessionStore, required permis
 // requireAdmin wraps next (itself already wrapped in requireWebUISession),
 // additionally requiring the session either belong to the config-file admin
 // (webui.username) or hold permission.PermissionAdmin — the two ways to reach
-// the web UI's "Users" admin section (see handleListWebUIUsers and
+// the web UI's "Users" admin section (see handleListUsers and
 // friends): the single config-file admin always could, and a "Users"
 // admin-managed account or an OIDC login can too now, once granted
 // PermissionAdmin (see permission.Permission). adminUsername empty (no

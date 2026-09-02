@@ -98,6 +98,54 @@ func TestListReceiverFilesListsNestedObjectsSortedByCreatedTimeAscending(t *test
 	}
 }
 
+func TestListReceiverFilesExpiresAt(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "a.gpg")
+
+	writeFile(t, path, "a")
+
+	t.Run("retention set", func(t *testing.T) {
+		t.Parallel()
+
+		recv := config.ResolvedReceiver{ID: "a", Path: root, Retention: 24 * time.Hour}
+
+		files, err := ListReceiverFiles(recv)
+		if err != nil {
+			t.Fatalf("ListReceiverFiles() unexpected error: %v", err)
+		}
+
+		if len(files) != 1 {
+			t.Fatalf("ListReceiverFiles() = %+v, want 1 entry", files)
+		}
+
+		want := files[0].ModTime.Add(24 * time.Hour)
+		if !files[0].ExpiresAt.Equal(want) {
+			t.Errorf("files[0].ExpiresAt = %v, want %v", files[0].ExpiresAt, want)
+		}
+	})
+
+	t.Run("no retention", func(t *testing.T) {
+		t.Parallel()
+
+		recv := config.ResolvedReceiver{ID: "a", Path: root}
+
+		files, err := ListReceiverFiles(recv)
+		if err != nil {
+			t.Fatalf("ListReceiverFiles() unexpected error: %v", err)
+		}
+
+		if len(files) != 1 {
+			t.Fatalf("ListReceiverFiles() = %+v, want 1 entry", files)
+		}
+
+		if !files[0].ExpiresAt.IsZero() {
+			t.Errorf("files[0].ExpiresAt = %v, want zero", files[0].ExpiresAt)
+		}
+	})
+}
+
 // writeFile creates path (and any missing parent directories) with contents.
 func writeFile(t *testing.T, path, contents string) {
 	t.Helper()

@@ -211,17 +211,19 @@ func writeOIDCCompletePage(w http.ResponseWriter, token string, expiresAt time.T
 // password login would (see handleWebUILogin), then serves the bridge page
 // (see writeOIDCCompletePage) that hands the browser its token and sends it
 // on to the in-flight login's next. The session's permissions are
-// auth.defaultPerm, unless db (when non-nil) holds a stored permission
-// record for this login (see store.OIDCUserPermission) — set
-// through the "Users" admin section's OIDC listing (see
-// handleSetOIDCUserPermissions in webui.go) — in which case that takes
-// precedence. The very first login for an identity has no such record yet,
-// so this also provisions one then, granting auth.defaultPerm — the
-// identity shows up in that admin listing from then on, ready for an admin
-// to adjust, rather than only appearing once they've manually added it. db
-// also, independently of all that, gets every attempt appended to the login
-// log (see recordLoginEvent), win or lose, mirroring handleWebUILogin's own
-// recording.
+// auth.defaultPerm, unless db (when non-nil) already has a users row linked
+// to this identity (see store.User.OIDCUsername, matched only via
+// db.GetOrProvisionOIDCUser — never by comparing the identity string to an
+// unrelated row's username) — set through the "Users" admin section (see
+// handleUpdateUser in webui.go) — in which case that row's stored
+// permissions take precedence. The very first login for an identity has no
+// such row yet, so GetOrProvisionOIDCUser also provisions one then,
+// granting auth.defaultPerm — the identity shows up in that admin listing
+// from then on, ready for an admin to adjust or link to an existing
+// password account, rather than only appearing once they've manually added
+// it. db also, independently of all that, gets every attempt appended to
+// the login log (see recordLoginEvent), win or lose, mirroring
+// handleWebUILogin's own recording.
 func handleOIDCCallback(auth *OIDCAuth, pending *oidcPendingStore, sessions *sessionStore, log *slog.Logger, db *store.Store, trustProxyHeaders bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		record := func(username, detail string, success bool) {
@@ -281,22 +283,10 @@ func handleOIDCCallback(auth *OIDCAuth, pending *oidcPendingStore, sessions *ses
 		perm := auth.defaultPerm
 
 		if db != nil {
-			switch override, ok, err := db.GetOIDCUserPermissions(r.Context(), identity); {
-			case err != nil:
-				log.Warn("oidc: looking up user permission record failed", "err", err)
-			case ok:
-				perm = override
-			default:
-				// First login for this identity: provision its permission
-				// record now, granting auth.defaultPerm — the same
-				// permissions this session gets either way (see perm above)
-				// — so it shows up in the "Users" admin section's OIDC
-				// listing (see handleListOIDCUserPermissions in webui.go)
-				// ready for an admin to adjust, rather than only appearing
-				// once they've manually set an override for it.
-				if err := db.SaveOIDCUserPermissions(r.Context(), identity, perm); err != nil {
-					log.Warn("oidc: provisioning user permission record failed", "err", err)
-				}
+			if p, err := db.GetOrProvisionOIDCUser(r.Context(), identity, auth.defaultPerm); err != nil {
+				log.Warn("oidc: looking up/provisioning user record failed", "err", err)
+			} else {
+				perm = p
 			}
 		}
 
