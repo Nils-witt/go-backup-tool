@@ -1,40 +1,63 @@
 import type { LoginEventJSON } from "../api/types";
-import { Badge } from "./Badge";
+import { StatusChip } from "./StatusChip";
 import { fmtTime } from "../lib/format";
+import Paper from "@mui/material/Paper";
+import Table from "@mui/material/Table";
+import TableBody from "@mui/material/TableBody";
+import TableCell from "@mui/material/TableCell";
+import TableContainer from "@mui/material/TableContainer";
+import TableHead from "@mui/material/TableHead";
+import TableRow from "@mui/material/TableRow";
+import Typography from "@mui/material/Typography";
 
 export function LoginLogSection({ events }: { events: LoginEventJSON[] }) {
-  if (!events.length) return null;
+  if (!events.length) {
+    return (
+      <Typography color="text.secondary" sx={{ mt: 6, textAlign: "center" }}>
+        no login events recorded yet
+      </Typography>
+    );
+  }
 
   return (
-    <div id="login-log-wrap">
-      <h2 className="section-title">Login log</h2>
-      <div className="card login-log-card">
-        <table className="login-events">
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Username</th>
-              <th>Method</th>
-              <th>Result</th>
-              <th>Remote address</th>
-            </tr>
-          </thead>
-          <tbody>
-            {events.map((ev, i) => (
-              <tr key={i}>
-                <td className="nowrap">{fmtTime(ev.at)}</td>
-                <td>{ev.username || "(unknown)"}</td>
-                <td className="nowrap">{ev.method}</td>
-                <td className="nowrap">
-                  {ev.success ? <Badge state="ok" label="success" /> : <Badge state="failed" label="failed" />}
-                  {ev.detail ? <p className="err">{ev.detail}</p> : null}
-                </td>
-                <td>{ev.remote_addr}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
+    <TableContainer component={Paper} variant="outlined">
+      <Table size="small">
+        <TableHead>
+          <TableRow>
+            <TableCell>Time</TableCell>
+            <TableCell>Username</TableCell>
+            <TableCell>Method</TableCell>
+            <TableCell>Result</TableCell>
+            <TableCell>Remote address</TableCell>
+          </TableRow>
+        </TableHead>
+        <TableBody>
+          {events.map((ev, i) => (
+            <TableRow key={i}>
+              <TableCell sx={{ whiteSpace: "nowrap" }}>{fmtTime(ev.at)}</TableCell>
+              <TableCell>{ev.username || "(unknown)"}</TableCell>
+              <TableCell sx={{ whiteSpace: "nowrap" }}>{ev.method}</TableCell>
+              <TableCell sx={{ whiteSpace: "nowrap" }}>
+                {ev.success ? (
+                  <StatusChip state="ok" label="success" />
+                ) : (
+                  <StatusChip state="failed" label="failed" />
+                )}
+                {ev.detail ? (
+                  <Typography
+                    variant="caption"
+                    color="error"
+                    sx={{ display: "block", overflowWrap: "anywhere" }}
+                  >
+                    {ev.detail}
+                  </Typography>
+                ) : null}
+              </TableCell>
+              <TableCell sx={{ overflowWrap: "anywhere" }}>{ev.remote_addr}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </TableContainer>
   );
 }

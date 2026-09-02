@@ -1,8 +1,24 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { apiFetch, apiFetchJSON, apiFetchOK } from "../api/client";
 import type { OidcUserPermissionJSON } from "../api/types";
-import { ConfirmDialog } from "./Dialog";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { fmtTime } from "../lib/format";
+import Alert from "@mui/material/Alert";
+import Box from "@mui/material/Box";
+import Button from "@mui/material/Button";
+import Checkbox from "@mui/material/Checkbox";
+import FormControlLabel from "@mui/material/FormControlLabel";
+import Link from "@mui/material/Link";
+import Paper from "@mui/material/Paper";
+import Stack from "@mui/material/Stack";
+import Table from "@mui/material/Table";
+import TableBody from "@mui/material/TableBody";
+import TableCell from "@mui/material/TableCell";
+import TableContainer from "@mui/material/TableContainer";
+import TableHead from "@mui/material/TableHead";
+import TableRow from "@mui/material/TableRow";
+import TextField from "@mui/material/TextField";
+import Typography from "@mui/material/Typography";
 
 const PERM_COLUMNS = [
   { key: "view", label: "View" },
@@ -12,10 +28,9 @@ const PERM_COLUMNS = [
   { key: "admin", label: "Admin" },
 ];
 
-// OidcUsersAdminSection ports the "OIDC users" admin panel (dashboard.js:
-// 910-1050): per-identity permission overrides for SSO logins. Gated on
-// sessionInfo.admin && sessionInfo.oidc_enabled by the caller via `visible`.
-export function OidcUsersAdminSection({ visible }: { visible: boolean }) {
+// OidcUsersAdminSection is the "OIDC users" admin panel: per-identity
+// permission overrides for SSO logins.
+export function OidcUsersAdminSection() {
   const [users, setUsers] = useState<OidcUserPermissionJSON[]>([]);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
@@ -26,8 +41,8 @@ export function OidcUsersAdminSection({ visible }: { visible: boolean }) {
   }
 
   useEffect(() => {
-    if (visible) loadUsers();
-  }, [visible]);
+    loadUsers();
+  }, []);
 
   function setPermission(identity: string, perm: string, checked: boolean, current: string[]) {
     const perms = checked ? [...current, perm] : current.filter((p) => p !== perm);
@@ -38,62 +53,60 @@ export function OidcUsersAdminSection({ visible }: { visible: boolean }) {
     }).catch(() => {});
   }
 
-  if (!visible) return null;
-
   return (
-    <div id="oidc-users-wrap">
-      <h2 className="section-title">OIDC users</h2>
-      <div className="card users-card">
-        <p className="section-hint">
-          Per-identity permission overrides for SSO logins. An identity with no override here gets the configured
-          default permissions.
-        </p>
-        <table className="users-table">
-          <thead>
-            <tr>
-              <th>Identity</th>
-              <th>View</th>
-              <th>Download</th>
-              <th>Login log</th>
-              <th>Download log</th>
-              <th>Admin</th>
-              <th>Updated</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
+    <Stack spacing={2}>
+      <Typography variant="body2" color="text.secondary">
+        Per-identity permission overrides for SSO logins. An identity with no override here gets the
+        configured default permissions.
+      </Typography>
+      <TableContainer component={Paper} variant="outlined">
+        <Table size="small">
+          <TableHead>
+            <TableRow>
+              <TableCell>Identity</TableCell>
+              {PERM_COLUMNS.map((col) => (
+                <TableCell key={col.key}>{col.label}</TableCell>
+              ))}
+              <TableCell>Updated</TableCell>
+              <TableCell />
+            </TableRow>
+          </TableHead>
+          <TableBody>
             {users.map((u) => (
-              <tr key={u.identity}>
-                <td className="username">{u.identity}</td>
+              <TableRow key={u.identity}>
+                <TableCell sx={{ overflowWrap: "anywhere" }}>{u.identity}</TableCell>
                 {PERM_COLUMNS.map((col) => (
-                  <td key={col.key}>
-                    <input
-                      type="checkbox"
+                  <TableCell key={col.key}>
+                    <Checkbox
+                      size="small"
                       checked={u.permissions.includes(col.key)}
-                      onChange={(e) => setPermission(u.identity, col.key, e.target.checked, u.permissions)}
+                      onChange={(e) =>
+                        setPermission(u.identity, col.key, e.target.checked, u.permissions)
+                      }
                     />
-                  </td>
+                  </TableCell>
                 ))}
-                <td>{fmtTime(u.updated_at)}</td>
-                <td>
-                  <a
-                    href="#"
-                    className="remove-oidc-user-link"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      setPendingDelete(u.identity);
-                    }}
+                <TableCell sx={{ whiteSpace: "nowrap" }}>{fmtTime(u.updated_at)}</TableCell>
+                <TableCell sx={{ whiteSpace: "nowrap" }}>
+                  <Link
+                    component="button"
+                    variant="body2"
+                    color="error"
+                    underline="hover"
+                    onClick={() => setPendingDelete(u.identity)}
                   >
                     remove
-                  </a>
-                </td>
-              </tr>
+                  </Link>
+                </TableCell>
+              </TableRow>
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
+      </TableContainer>
 
+      <Paper variant="outlined" sx={{ p: 2 }}>
         <AddOidcUserForm onAdded={loadUsers} />
-      </div>
+      </Paper>
 
       <ConfirmDialog
         open={pendingDelete !== null}
@@ -113,7 +126,7 @@ export function OidcUsersAdminSection({ visible }: { visible: boolean }) {
         }}
         onCancel={() => setPendingDelete(null)}
       />
-    </div>
+    </Stack>
   );
 }
 
@@ -141,7 +154,11 @@ function AddOidcUserForm({ onAdded }: { onAdded: () => void }) {
 
     apiFetchOK(
       "/api/oidc-users/" + encodeURIComponent(id),
-      { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ permissions: perms }) },
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ permissions: perms }),
+      },
       "setting permissions failed",
     )
       .then(() => {
@@ -157,37 +174,68 @@ function AddOidcUserForm({ onAdded }: { onAdded: () => void }) {
   }
 
   return (
-    <>
-      <form className="add-user-form" onSubmit={submit}>
-        <input
-          type="text"
+    <Box component="form" onSubmit={submit}>
+      <Typography sx={{ fontWeight: 600, mb: 1.5 }}>Add override</Typography>
+      <Stack direction="row" spacing={1.5} sx={{ flexWrap: "wrap", alignItems: "center" }}>
+        <TextField
+          size="small"
           placeholder="Email or subject"
           autoComplete="off"
           required
           value={identity}
           onChange={(e) => setIdentity(e.target.value)}
         />
-        <label>
-          <input type="checkbox" checked={view} onChange={(e) => setView(e.target.checked)} /> View
-        </label>
-        <label>
-          <input type="checkbox" checked={download} onChange={(e) => setDownload(e.target.checked)} /> Download
-        </label>
-        <label>
-          <input type="checkbox" checked={loginLog} onChange={(e) => setLoginLog(e.target.checked)} /> Login log
-        </label>
-        <label>
-          <input type="checkbox" checked={downloadLog} onChange={(e) => setDownloadLog(e.target.checked)} /> Download
-          log
-        </label>
-        <label>
-          <input type="checkbox" checked={admin} onChange={(e) => setAdmin(e.target.checked)} /> Admin
-        </label>
-        <button type="submit" className="btn btn-primary">
+        <FormControlLabel
+          control={
+            <Checkbox size="small" checked={view} onChange={(e) => setView(e.target.checked)} />
+          }
+          label="View"
+        />
+        <FormControlLabel
+          control={
+            <Checkbox
+              size="small"
+              checked={download}
+              onChange={(e) => setDownload(e.target.checked)}
+            />
+          }
+          label="Download"
+        />
+        <FormControlLabel
+          control={
+            <Checkbox
+              size="small"
+              checked={loginLog}
+              onChange={(e) => setLoginLog(e.target.checked)}
+            />
+          }
+          label="Login log"
+        />
+        <FormControlLabel
+          control={
+            <Checkbox
+              size="small"
+              checked={downloadLog}
+              onChange={(e) => setDownloadLog(e.target.checked)}
+            />
+          }
+          label="Download log"
+        />
+        <FormControlLabel
+          control={
+            <Checkbox size="small" checked={admin} onChange={(e) => setAdmin(e.target.checked)} />
+          }
+          label="Admin"
+        />
+        <Button type="submit" variant="contained">
           Set permissions
-        </button>
-      </form>
-      {error ? <p className="err">{error}</p> : null}
-    </>
+        </Button>
+      </Stack>
+      {error ? (
+        <Alert severity="error" sx={{ mt: 1.5 }}>
+          {error}
+        </Alert>
+      ) : null}
+    </Box>
   );
 }

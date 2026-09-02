@@ -1,14 +1,29 @@
 import { useEffect, useState } from "react";
 import { apiFetch, apiFetchJSON } from "../api/client";
 import type { ApiTokenJSON } from "../api/types";
-import { Badge } from "./Badge";
-import { Dialog } from "./Dialog";
+import { StatusChip } from "./StatusChip";
 import { fmtTime } from "../lib/format";
+import Button from "@mui/material/Button";
+import Dialog from "@mui/material/Dialog";
+import DialogActions from "@mui/material/DialogActions";
+import DialogContent from "@mui/material/DialogContent";
+import DialogContentText from "@mui/material/DialogContentText";
+import Table from "@mui/material/Table";
+import TableBody from "@mui/material/TableBody";
+import TableCell from "@mui/material/TableCell";
+import TableHead from "@mui/material/TableHead";
+import TableRow from "@mui/material/TableRow";
+import Link from "@mui/material/Link";
 
 // UserTokensDialog lists every long-lived API token recorded for username,
-// with a "revoke" link per still-active one — mirrors tokens-dialog in
-// dashboard.html.
-export function UserTokensDialog({ username, onClose }: { username: string | null; onClose: () => void }) {
+// with a "revoke" link per still-active one.
+export function UserTokensDialog({
+  username,
+  onClose,
+}: {
+  username: string | null;
+  onClose: () => void;
+}) {
   const [tokens, setTokens] = useState<ApiTokenJSON[]>([]);
 
   function load(name: string) {
@@ -26,56 +41,63 @@ export function UserTokensDialog({ username, onClose }: { username: string | nul
 
   function revoke(jti: string) {
     if (!username) return;
-    apiFetch("/api/users/" + encodeURIComponent(username) + "/tokens/" + encodeURIComponent(jti), { method: "DELETE" })
+    apiFetch("/api/users/" + encodeURIComponent(username) + "/tokens/" + encodeURIComponent(jti), {
+      method: "DELETE",
+    })
       .then(() => load(username))
       .catch(() => {});
   }
 
   return (
-    <Dialog open={username !== null} onClose={() => onClose()}>
-      <form method="dialog">
-        <p className="confirm-message">
+    <Dialog open={username !== null} onClose={onClose} fullWidth maxWidth="sm">
+      <DialogContent>
+        <DialogContentText sx={{ mb: 2 }}>
           API tokens issued for <strong>{username}</strong>.
-        </p>
-        <table className="users-table">
-          <thead>
-            <tr>
-              <th>Issued</th>
-              <th>Expires</th>
-              <th>Status</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
+        </DialogContentText>
+        <Table size="small">
+          <TableHead>
+            <TableRow>
+              <TableCell>Issued</TableCell>
+              <TableCell>Expires</TableCell>
+              <TableCell>Status</TableCell>
+              <TableCell />
+            </TableRow>
+          </TableHead>
+          <TableBody>
             {tokens.map((tok) => (
-              <tr key={tok.jti}>
-                <td>{fmtTime(tok.created_at)}</td>
-                <td>{fmtTime(tok.expires_at)}</td>
-                <td>{tok.revoked ? <Badge state="failed" label="revoked" /> : <Badge state="ok" label="active" />}</td>
-                <td>
+              <TableRow key={tok.jti}>
+                <TableCell>{fmtTime(tok.created_at)}</TableCell>
+                <TableCell>{fmtTime(tok.expires_at)}</TableCell>
+                <TableCell>
+                  {tok.revoked ? (
+                    <StatusChip state="failed" label="revoked" />
+                  ) : (
+                    <StatusChip state="ok" label="active" />
+                  )}
+                </TableCell>
+                <TableCell>
                   {tok.revoked ? null : (
-                    <a
-                      href="#"
-                      className="revoke-token-link"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        revoke(tok.jti);
-                      }}
+                    <Link
+                      component="button"
+                      color="error"
+                      underline="hover"
+                      variant="body2"
+                      onClick={() => revoke(tok.jti)}
                     >
                       revoke
-                    </a>
+                    </Link>
                   )}
-                </td>
-              </tr>
+                </TableCell>
+              </TableRow>
             ))}
-          </tbody>
-        </table>
-        <div className="confirm-actions">
-          <button type="submit" value="ok" className="btn btn-primary" autoFocus>
-            Close
-          </button>
-        </div>
-      </form>
+          </TableBody>
+        </Table>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose} variant="contained" autoFocus>
+          Close
+        </Button>
+      </DialogActions>
     </Dialog>
   );
 }

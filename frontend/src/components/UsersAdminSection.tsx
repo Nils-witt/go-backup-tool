@@ -1,10 +1,26 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { apiFetch, apiFetchJSON, apiFetchOK } from "../api/client";
 import type { WebUIUserJSON } from "../api/types";
-import { ConfirmDialog } from "./Dialog";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { fmtTime } from "../lib/format";
 import { UserTokensDialog } from "./UserTokensDialog";
 import { TokenResultDialog, type TokenResult } from "./TokenResultDialog";
+import Alert from "@mui/material/Alert";
+import Box from "@mui/material/Box";
+import Button from "@mui/material/Button";
+import Checkbox from "@mui/material/Checkbox";
+import FormControlLabel from "@mui/material/FormControlLabel";
+import Link from "@mui/material/Link";
+import Paper from "@mui/material/Paper";
+import Stack from "@mui/material/Stack";
+import Table from "@mui/material/Table";
+import TableBody from "@mui/material/TableBody";
+import TableCell from "@mui/material/TableCell";
+import TableContainer from "@mui/material/TableContainer";
+import TableHead from "@mui/material/TableHead";
+import TableRow from "@mui/material/TableRow";
+import TextField from "@mui/material/TextField";
+import Typography from "@mui/material/Typography";
 
 const PERM_COLUMNS = [
   { key: "view", label: "View" },
@@ -14,14 +30,12 @@ const PERM_COLUMNS = [
   { key: "admin", label: "Admin" },
 ];
 
-// UsersAdminSection ports the "Users" admin CRUD panel (dashboard.js:637-908):
-// the table of web-UI-managed accounts, permission checkboxes (each change
-// re-submits that row's whole permission set, since the API takes the full
-// set rather than a single add/remove), add-user form, and per-user API
-// token issuance/management. Gated on sessionInfo.admin by the caller via
-// `visible` — mirroring renderUsersSection's client-side gate of the same
-// server-enforced rule (requireAdmin in webui.go).
-export function UsersAdminSection({ visible }: { visible: boolean }) {
+// UsersAdminSection is the "Users" admin CRUD panel: the table of
+// web-UI-managed accounts, permission checkboxes (each change re-submits
+// that row's whole permission set, since the API takes the full set rather
+// than a single add/remove), add-user form, and per-user API token
+// issuance/management.
+export function UsersAdminSection() {
   const [users, setUsers] = useState<WebUIUserJSON[]>([]);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [tokensUser, setTokensUser] = useState<string | null>(null);
@@ -36,8 +50,8 @@ export function UsersAdminSection({ visible }: { visible: boolean }) {
   }
 
   useEffect(() => {
-    if (visible) loadUsers();
-  }, [visible]);
+    loadUsers();
+  }, []);
 
   function setPermission(username: string, perm: string, checked: boolean, current: string[]) {
     const perms = checked ? [...current, perm] : current.filter((p) => p !== perm);
@@ -48,85 +62,81 @@ export function UsersAdminSection({ visible }: { visible: boolean }) {
     }).catch(() => {});
   }
 
-  if (!visible) return null;
-
   return (
-    <div id="users-wrap">
-      <h2 className="section-title">Users</h2>
-      <div className="card users-card">
-        <table className="users-table">
-          <thead>
-            <tr>
-              <th>Username</th>
-              <th>View</th>
-              <th>Download</th>
-              <th>Login log</th>
-              <th>Download log</th>
-              <th>Admin</th>
-              <th>Created</th>
-              <th></th>
-              <th></th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
+    <Stack spacing={2}>
+      <TableContainer component={Paper} variant="outlined">
+        <Table size="small">
+          <TableHead>
+            <TableRow>
+              <TableCell>Username</TableCell>
+              {PERM_COLUMNS.map((col) => (
+                <TableCell key={col.key}>{col.label}</TableCell>
+              ))}
+              <TableCell>Created</TableCell>
+              <TableCell />
+              <TableCell />
+              <TableCell />
+            </TableRow>
+          </TableHead>
+          <TableBody>
             {users.map((u) => (
-              <tr key={u.username}>
-                <td className="username">{u.username}</td>
+              <TableRow key={u.username}>
+                <TableCell sx={{ overflowWrap: "anywhere" }}>{u.username}</TableCell>
                 {PERM_COLUMNS.map((col) => (
-                  <td key={col.key}>
-                    <input
-                      type="checkbox"
+                  <TableCell key={col.key}>
+                    <Checkbox
+                      size="small"
                       checked={u.permissions.includes(col.key)}
-                      onChange={(e) => setPermission(u.username, col.key, e.target.checked, u.permissions)}
+                      onChange={(e) =>
+                        setPermission(u.username, col.key, e.target.checked, u.permissions)
+                      }
                     />
-                  </td>
+                  </TableCell>
                 ))}
-                <td>{fmtTime(u.created_at)}</td>
-                <td>
-                  <a
-                    href="#"
-                    className="issue-token-link"
-                    onClick={(e) => {
-                      e.preventDefault();
+                <TableCell sx={{ whiteSpace: "nowrap" }}>{fmtTime(u.created_at)}</TableCell>
+                <TableCell sx={{ whiteSpace: "nowrap" }}>
+                  <Link
+                    component="button"
+                    variant="body2"
+                    underline="hover"
+                    onClick={() => {
                       setIssueTokenDays("365");
                       setIssueTokenUser(u.username);
                     }}
                   >
                     issue token
-                  </a>
-                </td>
-                <td>
-                  <a
-                    href="#"
-                    className="manage-tokens-link"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      setTokensUser(u.username);
-                    }}
+                  </Link>
+                </TableCell>
+                <TableCell sx={{ whiteSpace: "nowrap" }}>
+                  <Link
+                    component="button"
+                    variant="body2"
+                    underline="hover"
+                    onClick={() => setTokensUser(u.username)}
                   >
                     tokens
-                  </a>
-                </td>
-                <td>
-                  <a
-                    href="#"
-                    className="remove-user-link"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      setPendingDelete(u.username);
-                    }}
+                  </Link>
+                </TableCell>
+                <TableCell sx={{ whiteSpace: "nowrap" }}>
+                  <Link
+                    component="button"
+                    variant="body2"
+                    color="error"
+                    underline="hover"
+                    onClick={() => setPendingDelete(u.username)}
                   >
                     remove
-                  </a>
-                </td>
-              </tr>
+                  </Link>
+                </TableCell>
+              </TableRow>
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
+      </TableContainer>
 
+      <Paper variant="outlined" sx={{ p: 2 }}>
         <AddUserForm onAdded={loadUsers} />
-      </div>
+      </Paper>
 
       <ConfirmDialog
         open={pendingDelete !== null}
@@ -151,8 +161,8 @@ export function UsersAdminSection({ visible }: { visible: boolean }) {
         open={issueTokenUser !== null}
         message={
           <>
-            Issue a long-lived API token for <strong>{issueTokenUser}</strong>, carrying that user's current
-            permissions.
+            Issue a long-lived API token for <strong>{issueTokenUser}</strong>, carrying that user's
+            current permissions.
           </>
         }
         confirmLabel="Issue"
@@ -163,36 +173,47 @@ export function UsersAdminSection({ visible }: { visible: boolean }) {
 
           apiFetchOK(
             "/api/users/" + encodeURIComponent(username) + "/tokens",
-            { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ days }) },
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ days }),
+            },
             "issuing token failed",
           )
             .then((r) => r.json())
             .then((resp: { token: string; expires_at: string }) => {
-              setTokenResult({ username, expiresAt: resp.expires_at, token: resp.token, error: "" });
+              setTokenResult({
+                username,
+                expiresAt: resp.expires_at,
+                token: resp.token,
+                error: "",
+              });
             })
             .catch((err: Error) => {
-              setTokenResult({ username, expiresAt: "", token: "", error: err.message || "issuing token failed" });
+              setTokenResult({
+                username,
+                expiresAt: "",
+                token: "",
+                error: err.message || "issuing token failed",
+              });
             });
         }}
         onCancel={() => setIssueTokenUser(null)}
       >
-        <label className="token-days-label">
-          Valid for
-          <input
-            type="number"
-            min={1}
-            max={3650}
-            value={issueTokenDays}
-            onChange={(e) => setIssueTokenDays(e.target.value)}
-            required
-          />
-          days
-        </label>
+        <TextField
+          label="Valid for (days)"
+          type="number"
+          size="small"
+          slotProps={{ htmlInput: { min: 1, max: 3650 } }}
+          value={issueTokenDays}
+          onChange={(e) => setIssueTokenDays(e.target.value)}
+          required
+        />
       </ConfirmDialog>
 
       <UserTokensDialog username={tokensUser} onClose={() => setTokensUser(null)} />
       <TokenResultDialog result={tokenResult} onClose={() => setTokenResult(null)} />
-    </div>
+    </Stack>
   );
 }
 
@@ -240,17 +261,19 @@ function AddUserForm({ onAdded }: { onAdded: () => void }) {
   }
 
   return (
-    <>
-      <form className="add-user-form" onSubmit={submit}>
-        <input
-          type="text"
+    <Box component="form" onSubmit={submit}>
+      <Typography sx={{ fontWeight: 600, mb: 1.5 }}>Add user</Typography>
+      <Stack direction="row" spacing={1.5} sx={{ flexWrap: "wrap", alignItems: "center" }}>
+        <TextField
+          size="small"
           placeholder="Username"
           autoComplete="off"
           required
           value={username}
           onChange={(e) => setUsername(e.target.value)}
         />
-        <input
+        <TextField
+          size="small"
           type="password"
           placeholder="Password"
           autoComplete="new-password"
@@ -258,27 +281,57 @@ function AddUserForm({ onAdded }: { onAdded: () => void }) {
           value={password}
           onChange={(e) => setPassword(e.target.value)}
         />
-        <label>
-          <input type="checkbox" checked={view} onChange={(e) => setView(e.target.checked)} /> View
-        </label>
-        <label>
-          <input type="checkbox" checked={download} onChange={(e) => setDownload(e.target.checked)} /> Download
-        </label>
-        <label>
-          <input type="checkbox" checked={loginLog} onChange={(e) => setLoginLog(e.target.checked)} /> Login log
-        </label>
-        <label>
-          <input type="checkbox" checked={downloadLog} onChange={(e) => setDownloadLog(e.target.checked)} /> Download
-          log
-        </label>
-        <label>
-          <input type="checkbox" checked={admin} onChange={(e) => setAdmin(e.target.checked)} /> Admin
-        </label>
-        <button type="submit" className="btn btn-primary">
+        <FormControlLabel
+          control={
+            <Checkbox size="small" checked={view} onChange={(e) => setView(e.target.checked)} />
+          }
+          label="View"
+        />
+        <FormControlLabel
+          control={
+            <Checkbox
+              size="small"
+              checked={download}
+              onChange={(e) => setDownload(e.target.checked)}
+            />
+          }
+          label="Download"
+        />
+        <FormControlLabel
+          control={
+            <Checkbox
+              size="small"
+              checked={loginLog}
+              onChange={(e) => setLoginLog(e.target.checked)}
+            />
+          }
+          label="Login log"
+        />
+        <FormControlLabel
+          control={
+            <Checkbox
+              size="small"
+              checked={downloadLog}
+              onChange={(e) => setDownloadLog(e.target.checked)}
+            />
+          }
+          label="Download log"
+        />
+        <FormControlLabel
+          control={
+            <Checkbox size="small" checked={admin} onChange={(e) => setAdmin(e.target.checked)} />
+          }
+          label="Admin"
+        />
+        <Button type="submit" variant="contained">
           Add user
-        </button>
-      </form>
-      {error ? <p className="err">{error}</p> : null}
-    </>
+        </Button>
+      </Stack>
+      {error ? (
+        <Alert severity="error" sx={{ mt: 1.5 }}>
+          {error}
+        </Alert>
+      ) : null}
+    </Box>
   );
 }

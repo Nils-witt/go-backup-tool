@@ -1,13 +1,31 @@
 import { useState } from "react";
 import type { JobRunEventJSON } from "../api/types";
-import { Badge } from "./Badge";
+import { StatusChip } from "./StatusChip";
 import { fmtDuration, fmtSize, fmtTime } from "../lib/format";
+import MenuItem from "@mui/material/MenuItem";
+import Paper from "@mui/material/Paper";
+import Select from "@mui/material/Select";
+import Stack from "@mui/material/Stack";
+import Table from "@mui/material/Table";
+import TableBody from "@mui/material/TableBody";
+import TableCell from "@mui/material/TableCell";
+import TableContainer from "@mui/material/TableContainer";
+import TableHead from "@mui/material/TableHead";
+import TableRow from "@mui/material/TableRow";
+import TextField from "@mui/material/TextField";
+import Typography from "@mui/material/Typography";
 
 export function JobRunLogSection({ events }: { events: JobRunEventJSON[] }) {
   const [job, setJob] = useState("");
   const [result, setResult] = useState("");
 
-  if (!events.length) return null;
+  if (!events.length) {
+    return (
+      <Typography color="text.secondary" sx={{ mt: 6, textAlign: "center" }}>
+        no job runs recorded yet
+      </Typography>
+    );
+  }
 
   const jobFilter = job.trim().toLowerCase();
   const filtered = events.filter((ev) => {
@@ -18,56 +36,76 @@ export function JobRunLogSection({ events }: { events: JobRunEventJSON[] }) {
   });
 
   return (
-    <div id="job-run-log-wrap">
-      <h2 className="section-title">Job run log</h2>
-      <div className="card job-run-log-card">
-        <div className="log-filters">
-          <input
-            type="text"
-            placeholder="Filter by job…"
-            value={job}
-            onChange={(e) => setJob(e.target.value)}
-          />
-          <select value={result} onChange={(e) => setResult(e.target.value)}>
-            <option value="">All results</option>
-            <option value="success">Success</option>
-            <option value="failed">Failed</option>
-          </select>
-        </div>
-        <table className="job-run-events">
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Job</th>
-              <th>Duration</th>
-              <th>Size</th>
-              <th>Result</th>
-            </tr>
-          </thead>
-          <tbody>
+    <Stack spacing={2}>
+      <Stack direction="row" spacing={1.5} sx={{ flexWrap: "wrap" }}>
+        <TextField
+          size="small"
+          placeholder="Filter by job…"
+          value={job}
+          onChange={(e) => setJob(e.target.value)}
+          sx={{ flex: "1 1 220px" }}
+        />
+        <Select
+          size="small"
+          value={result}
+          onChange={(e) => setResult(e.target.value)}
+          displayEmpty
+          sx={{ minWidth: 160 }}
+        >
+          <MenuItem value="">All results</MenuItem>
+          <MenuItem value="success">Success</MenuItem>
+          <MenuItem value="failed">Failed</MenuItem>
+        </Select>
+      </Stack>
+      <TableContainer component={Paper} variant="outlined">
+        <Table size="small">
+          <TableHead>
+            <TableRow>
+              <TableCell>Time</TableCell>
+              <TableCell>Job</TableCell>
+              <TableCell>Duration</TableCell>
+              <TableCell>Size</TableCell>
+              <TableCell>Result</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
             {filtered.length === 0 ? (
-              <tr>
-                <td className="empty-filter" colSpan={5}>
+              <TableRow>
+                <TableCell colSpan={5} align="center" sx={{ color: "text.secondary" }}>
                   No matching runs
-                </td>
-              </tr>
+                </TableCell>
+              </TableRow>
             ) : (
               filtered.map((ev, i) => (
-                <tr key={i}>
-                  <td className="nowrap">{fmtTime(ev.end)}</td>
-                  <td>{ev.job_name}</td>
-                  <td className="nowrap">{fmtDuration(new Date(ev.end).getTime() - new Date(ev.start).getTime())}</td>
-                  <td className="nowrap">{fmtSize(ev.size)}</td>
-                  <td className="nowrap">
-                    {ev.success ? <Badge state="ok" label="success" /> : <Badge state="failed" label="failed" />}
-                    {ev.error ? <p className="err">{ev.error}</p> : null}
-                  </td>
-                </tr>
+                <TableRow key={i}>
+                  <TableCell sx={{ whiteSpace: "nowrap" }}>{fmtTime(ev.end)}</TableCell>
+                  <TableCell>{ev.job_name}</TableCell>
+                  <TableCell sx={{ whiteSpace: "nowrap" }}>
+                    {fmtDuration(new Date(ev.end).getTime() - new Date(ev.start).getTime())}
+                  </TableCell>
+                  <TableCell sx={{ whiteSpace: "nowrap" }}>{fmtSize(ev.size)}</TableCell>
+                  <TableCell sx={{ whiteSpace: "nowrap" }}>
+                    {ev.success ? (
+                      <StatusChip state="ok" label="success" />
+                    ) : (
+                      <StatusChip state="failed" label="failed" />
+                    )}
+                    {ev.error ? (
+                      <Typography
+                        variant="caption"
+                        color="error"
+                        sx={{ display: "block", overflowWrap: "anywhere" }}
+                      >
+                        {ev.error}
+                      </Typography>
+                    ) : null}
+                  </TableCell>
+                </TableRow>
               ))
             )}
-          </tbody>
-        </table>
-      </div>
-    </div>
+          </TableBody>
+        </Table>
+      </TableContainer>
+    </Stack>
   );
 }
