@@ -155,6 +155,51 @@ func TestRecordLocalWriteSweepsExpiredObjects(t *testing.T) {
 	}
 }
 
+func TestRecordObjectWriteTracksWithoutSweeping(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	db := openTestRetentionDB(t)
+	tgt := &config.Target{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
+
+	oldCfg := &config.Config{Key: "old.gpg", StateDB: db}
+	if err := WriteLocalObject(oldCfg, tgt, strings.NewReader("stale")); err != nil {
+		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
+	}
+
+	oldPath := LocalObjectPath(oldCfg, tgt)
+
+	// Backdated past the target's one-hour retention, same as
+	// TestRecordLocalWriteSweepsExpiredObjects — but this time the write
+	// that follows goes through RecordObjectWrite, which must record
+	// without also sweeping it away.
+	if err := db.SaveObjectWrite(t.Context(), tgt.ServerName, tgt.Bucket, oldPath, time.Now().Add(-2*time.Hour), int64(tgt.Retention/time.Second)); err != nil {
+		t.Fatalf("SaveObjectWrite() unexpected error: %v", err)
+	}
+
+	newCfg := &config.Config{Key: "new.gpg", StateDB: db}
+	if err := WriteLocalObject(newCfg, tgt, strings.NewReader("fresh")); err != nil {
+		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
+	}
+
+	if err := RecordObjectWrite(t.Context(), newCfg, tgt, discardLogger); err != nil {
+		t.Fatalf("RecordObjectWrite() unexpected error: %v", err)
+	}
+
+	newPath := LocalObjectPath(newCfg, tgt)
+	if !hasRetentionRow(t, db, "nas", newPath) {
+		t.Errorf("no retention row for %q, want one", newPath)
+	}
+
+	if _, err := os.Stat(oldPath); err != nil {
+		t.Errorf("expired object removed despite RecordObjectWrite not sweeping: %v", err)
+	}
+
+	if !hasRetentionRow(t, db, "nas", oldPath) {
+		t.Errorf("retention row for expired %q removed despite RecordObjectWrite not sweeping, want it left for a later sweep", oldPath)
+	}
+}
+
 func TestSweepRetentionForTargetIgnoresMissingFile(t *testing.T) {
 	t.Parallel()
 

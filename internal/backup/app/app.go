@@ -69,8 +69,9 @@ func Run(args []string, stderr io.Writer) int {
 // startWebUIIfConfigured starts the web UI dashboard and receiver API (see
 // webui.StartWebUI, receiver.RegisterRoutes) when rc.Listen is set, along
 // with the stale-receiver webhook monitor (see
-// receiver.MonitorStaleReceivers). It returns nil, doing nothing else, when
-// rc.Listen is unset.
+// receiver.MonitorStaleReceivers) and the per-receiver retention sweep (see
+// receiver.MonitorReceiverRetention). It returns nil, doing nothing else,
+// when rc.Listen is unset.
 func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, statusStore *backup.StatusStore, stateDB *store.Store, logs *webui.LogRingBuffer, serverIdentity *identity.ServerIdentity, runner *pipeline.Runner, log *slog.Logger) *webui.Server {
 	if rc.Listen == "" {
 		return nil
@@ -85,7 +86,7 @@ func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, statusSto
 		receiver.SeedReceiverStatusFromState(ctx, stateDB, rc.Receivers, receiverStore, log)
 	}
 
-	receiver.SweepStartupReceiverRetention(ctx, stateDB, rc.Receivers, log)
+	go receiver.MonitorReceiverRetention(ctx, stateDB, rc.Receivers, log)
 
 	oAuth := webui.SetupOIDCAuth(ctx, rc.OIDC, log)
 	srv := webui.StartWebUI(rc.Listen, statusStore, rc.Jobs, runner, rc.Receivers, receiverStore, log, stateDB, logs, rc.WebUIUsername, rc.WebUIPassword, oAuth, serverIdentity, rc.TrustProxyHeaders, func(mux *http.ServeMux) {

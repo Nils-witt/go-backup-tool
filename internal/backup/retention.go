@@ -26,6 +26,28 @@ func RecordLocalWrite(ctx context.Context, cfg *config.Config, t *config.Target,
 		return nil
 	}
 
+	if err := RecordObjectWrite(ctx, cfg, t, log); err != nil {
+		return err
+	}
+
+	return sweepRetention(ctx, cfg.StateDB, t, log)
+}
+
+// RecordObjectWrite records, in the shared state db, that cfg's job just
+// wrote the object at LocalObjectPath(cfg, t), without sweeping for expired
+// objects — unlike RecordLocalWrite, whose immediate per-write sweep this
+// factors out so a caller with its own sweep schedule (see the receiver
+// package's MonitorReceiverRetention, which sweeps every receiver on a
+// one-minute timer instead) can record a write without also paying for a
+// sweep on every single request. retention == 0 means no tracking, and
+// cfg.StateDB == nil (the state db couldn't be opened at startup) also
+// disables tracking rather than erroring, since the backup write itself
+// already succeeded and this is auxiliary bookkeeping.
+func RecordObjectWrite(ctx context.Context, cfg *config.Config, t *config.Target, log *slog.Logger) error {
+	if t.Retention <= 0 || cfg.StateDB == nil {
+		return nil
+	}
+
 	path := LocalObjectPath(cfg, t)
 	retentionSeconds := int64(t.Retention / time.Second)
 
@@ -35,7 +57,7 @@ func RecordLocalWrite(ctx context.Context, cfg *config.Config, t *config.Target,
 
 	log.Debug("recorded write to state db", "path", path, "server", t.ServerName, "retention", t.Retention)
 
-	return sweepRetention(ctx, cfg.StateDB, t, log)
+	return nil
 }
 
 // RemoveRetentionRecord removes any retention record for the object at

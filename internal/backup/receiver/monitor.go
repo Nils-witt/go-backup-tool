@@ -65,17 +65,35 @@ func recordReceiverEventBestEffort(ctx context.Context, db *store.Store, log *sl
 	}
 }
 
-// SweepStartupReceiverRetention runs one retention sweep, before the web UI
-// starts serving, for every receiver with retention: set — mirroring
-// pipeline.SweepStartupRetention's reasoning for local server targets:
-// without this, a receiver would only get swept whenever it next happens to
-// receive a write, potentially long after files there actually expired. A
-// nil db (retention tracking unavailable this run) is a no-op.
-func SweepStartupReceiverRetention(ctx context.Context, db *store.Store, receivers map[string]config.ResolvedReceiver, log *slog.Logger) {
-	if db == nil {
+// receiverRetentionSweepInterval is how often MonitorReceiverRetention
+// re-sweeps every receiver with retention: set.
+const receiverRetentionSweepInterval = time.Minute
+
+// MonitorReceiverRetention periodically sweeps every receiver with
+// retention: set for objects now past their retention window (see
+// backup.SweepRetentionForTarget), replacing the old approach of sweeping a
+// receiver only when it next happened to receive a write: that tied a
+// receiver's retention sweep to its incoming traffic (a receiver that
+// stopped hearing from its sender would never get swept again) and made
+// every write pay for a sweep it usually didn't need. It sweeps once
+// immediately, then every receiverRetentionSweepInterval, until ctx is
+// done. A nil db (retention tracking unavailable this run) or no receiver
+// with retention: set is a no-op.
+func MonitorReceiverRetention(ctx context.Context, db *store.Store, receivers map[string]config.ResolvedReceiver, log *slog.Logger) {
+	if db == nil || !anyReceiverHasRetention(receivers) {
 		return
 	}
 
+	backup.RunPeriodically(ctx, receiverRetentionSweepInterval, true, func() {
+		sweepAllReceivers(ctx, db, receivers, log)
+	})
+}
+
+// sweepAllReceivers runs one retention sweep (see backup.SweepRetentionForTarget)
+// across every entry in receivers with retention: set, factored out of
+// MonitorReceiverRetention's periodic loop so a single sweep pass can be
+// exercised directly in tests without also driving RunPeriodically's timing.
+func sweepAllReceivers(ctx context.Context, db *store.Store, receivers map[string]config.ResolvedReceiver, log *slog.Logger) {
 	for _, recv := range receivers {
 		if recv.Retention <= 0 {
 			continue
@@ -83,12 +101,24 @@ func SweepStartupReceiverRetention(ctx context.Context, db *store.Store, receive
 
 		t := backup.ReceiverTarget(recv)
 
-		log.Debug("startup receiver retention sweep", "id", recv.ID, "path", recv.Path, "retention", recv.Retention)
+		log.Debug("receiver retention sweep", "id", recv.ID, "path", recv.Path, "retention", recv.Retention)
 
 		if err := backup.SweepRetentionForTarget(ctx, db, t, log); err != nil {
-			log.Warn("startup receiver retention sweep failed", "id", recv.ID, "err", err)
+			log.Warn("receiver retention sweep failed", "id", recv.ID, "err", err)
 		}
 	}
+}
+
+// anyReceiverHasRetention reports whether any entry in receivers has
+// retention: set, i.e. whether MonitorReceiverRetention has anything to do.
+func anyReceiverHasRetention(receivers map[string]config.ResolvedReceiver) bool {
+	for _, recv := range receivers {
+		if recv.Retention > 0 {
+			return true
+		}
+	}
+
+	return false
 }
 
 // staleReceiverCheckInterval is how often MonitorStaleReceivers re-checks

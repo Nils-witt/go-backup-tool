@@ -28,8 +28,12 @@ func RegisterRoutes(mux *http.ServeMux, receivers map[string]config.ResolvedRece
 // writes the request body to disk exactly as a type: local target would
 // (see backup.ReceiverTarget), so a remote target's PUT and this instance's
 // own local-target writes share the same on-disk behavior (atomic
-// temp-file-then-rename) and retention tracking. Every attempt is recorded
-// to status, win or lose, so /api/receivers reflects it.
+// temp-file-then-rename) and retention tracking. It records the write for
+// retention (backup.RecordObjectWrite) but doesn't sweep for expired objects
+// itself — MonitorReceiverRetention sweeps every receiver on its own
+// one-minute timer instead, so a PUT's latency isn't paying for a sweep.
+// Every attempt is recorded to status, win or lose, so /api/receivers
+// reflects it.
 func HandleReceiveObject(receivers map[string]config.ResolvedReceiver, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, cfg, t, key, ok := resolveReceiverRequest(w, r, receivers, db)
@@ -46,7 +50,7 @@ func HandleReceiveObject(receivers map[string]config.ResolvedReceiver, status *b
 			return
 		}
 
-		if err := backup.RecordLocalWrite(r.Context(), cfg, t, log); err != nil {
+		if err := backup.RecordObjectWrite(r.Context(), cfg, t, log); err != nil {
 			log.Warn("receiver: retention tracking failed", "id", recv.ID, "key", key, "err", err)
 		}
 

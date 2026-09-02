@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -402,6 +403,67 @@ func TestStaleReceiverMonitorCheckDefaultContentTypeWhenNoHeadersSet(t *testing.
 	if gotCT != defaultStaleWebhookContentType {
 		t.Errorf("webhook Content-Type = %q, want %q", gotCT, defaultStaleWebhookContentType)
 	}
+}
+
+func TestSweepAllReceiversRemovesExpiredObjects(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	db := openTestStateDB(t)
+
+	recv := config.ResolvedReceiver{ID: "a", Path: dir, Retention: time.Hour}
+	receivers := map[string]config.ResolvedReceiver{"a": recv}
+
+	tgt := backup.ReceiverTarget(recv)
+	cfg := &config.Config{Key: "old.gpg", StateDB: db}
+
+	if err := backup.WriteLocalObject(cfg, tgt, strings.NewReader("stale")); err != nil {
+		t.Fatalf("WriteLocalObject() error: %v", err)
+	}
+
+	oldPath := backup.LocalObjectPath(cfg, tgt)
+
+	if err := db.SaveObjectWrite(context.Background(), tgt.ServerName, tgt.Bucket, oldPath, time.Now().Add(-2*time.Hour), int64(tgt.Retention/time.Second)); err != nil {
+		t.Fatalf("SaveObjectWrite() error: %v", err)
+	}
+
+	// sweepAllReceivers is the single sweep pass MonitorReceiverRetention
+	// runs both immediately and on every subsequent tick (see
+	// RunPeriodically); testing it directly, with a live context, exercises
+	// that pass without also having to drive RunPeriodically's own timing
+	// loop in a background goroutine.
+	sweepAllReceivers(context.Background(), db, receivers, discardLogger)
+
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Errorf("expired object still present after sweep: err = %v", err)
+	}
+}
+
+func TestMonitorReceiverRetentionNilDBIsNoop(t *testing.T) {
+	t.Parallel()
+
+	receivers := map[string]config.ResolvedReceiver{"a": {ID: "a", Path: t.TempDir(), Retention: time.Hour}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Must return promptly rather than blocking on RunPeriodically's loop:
+	// a nil db means retention tracking is unavailable this run.
+	MonitorReceiverRetention(ctx, nil, receivers, discardLogger)
+}
+
+func TestMonitorReceiverRetentionNoRetentionConfiguredIsNoop(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	receivers := map[string]config.ResolvedReceiver{"a": {ID: "a", Path: t.TempDir()}} // Retention unset
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Same as the nil-db case: no receiver has retention: set, so there's
+	// nothing to sweep and this must return promptly.
+	MonitorReceiverRetention(ctx, db, receivers, discardLogger)
 }
 
 func TestSeedReceiverStatusFromState(t *testing.T) {
