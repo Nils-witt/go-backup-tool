@@ -88,13 +88,52 @@ function render(jobs) {
     const size = j.size ? (' &middot; ' + j.size) : '';
     const nextRun = hasTime(j.next_run) ? (' &middot; next run: ' + fmtTime(j.next_run)) : '';
 
+    const hasFailedTarget = (j.targets || []).some(function (t) { return t.state === "failed"; });
+    const retryBtn = (hasFailedTarget && canRetry())
+      ? '<button type="button" class="retry-btn" data-job="' + j.name + '">Retry failed targets</button>'
+      : '';
+
     return '<div class="card">' +
       '<div class="card-head"><span class="job-name">' + j.name + '</span>' + badge(j.state) + '</div>' +
       '<div class="meta">' + interval + ' &middot; last run: ' + fmtTime(j.last_start) + duration + size + nextRun + '</div>' +
       err +
       '<ul class="targets">' + targets + '</ul>' +
+      retryBtn +
       '</div>';
   }).join("");
+}
+
+// retry confirmation dialog: clicking a "Retry failed targets" button opens
+// the native <dialog> in dashboard.html instead of retrying immediately;
+// the actual retry request happens on "close" only if the form's submitted
+// value is "confirm" (the Retry button), mirroring the download confirm
+// dialog's wiring below.
+const retryDialog = document.getElementById("retry-confirm-dialog");
+const retryDialogJob = document.getElementById("retry-confirm-job");
+let pendingRetry = null;
+
+retryDialog.addEventListener("close", function () {
+  if (retryDialog.returnValue === "confirm" && pendingRetry) {
+    startRetry(pendingRetry);
+  }
+  pendingRetry = null;
+});
+
+document.getElementById("jobs").addEventListener("click", function (e) {
+  const btn = e.target.closest(".retry-btn");
+  if (!btn) return;
+  pendingRetry = btn.dataset.job;
+  retryDialogJob.textContent = pendingRetry;
+  retryDialog.showModal();
+});
+
+// startRetry POSTs to the retry endpoint, then re-polls immediately (rather
+// than waiting up to 2s for the next scheduled refresh()) so the job's
+// targets show "running" right away.
+function startRetry(name) {
+  apiFetch("/api/jobs/" + encodeURIComponent(name) + "/retry", { method: "POST" })
+    .then(function () { refresh(); })
+    .catch(function () {});
 }
 
 // expandedReceivers/receiverFilesCache/lastReceivers hold client-only UI
@@ -446,6 +485,13 @@ let sessionInfoLoaded = false;
 
 function canDownload() {
   return sessionInfo.permissions.indexOf("download") !== -1;
+}
+
+// canRetry mirrors the server's own gate on POST /api/jobs/{name}/retry
+// (requireAdmin in webui.go) so the button only appears for a session that
+// can actually use it.
+function canRetry() {
+  return sessionInfoLoaded && sessionInfo.admin;
 }
 
 function canViewLoginLog() {

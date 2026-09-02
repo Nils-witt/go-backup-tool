@@ -71,7 +71,7 @@ func Run(args []string, stderr io.Writer) int {
 // with the stale-receiver webhook monitor (see
 // receiver.MonitorStaleReceivers). It returns nil, doing nothing else, when
 // rc.Listen is unset.
-func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, statusStore *backup.StatusStore, stateDB *store.Store, logs *webui.LogRingBuffer, serverIdentity *identity.ServerIdentity, log *slog.Logger) *webui.Server {
+func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, statusStore *backup.StatusStore, stateDB *store.Store, logs *webui.LogRingBuffer, serverIdentity *identity.ServerIdentity, runner *pipeline.Runner, log *slog.Logger) *webui.Server {
 	if rc.Listen == "" {
 		return nil
 	}
@@ -88,7 +88,7 @@ func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, statusSto
 	receiver.SweepStartupReceiverRetention(ctx, stateDB, rc.Receivers, log)
 
 	oAuth := webui.SetupOIDCAuth(ctx, rc.OIDC, log)
-	srv := webui.StartWebUI(rc.Listen, statusStore, rc.Receivers, receiverStore, log, stateDB, logs, rc.WebUIUsername, rc.WebUIPassword, oAuth, serverIdentity, rc.TrustProxyHeaders, func(mux *http.ServeMux) {
+	srv := webui.StartWebUI(rc.Listen, statusStore, rc.Jobs, runner, rc.Receivers, receiverStore, log, stateDB, logs, rc.WebUIUsername, rc.WebUIPassword, oAuth, serverIdentity, rc.TrustProxyHeaders, func(mux *http.ServeMux) {
 		receiver.RegisterRoutes(mux, rc.Receivers, receiverStore, log, stateDB)
 	})
 
@@ -168,7 +168,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	// RunReportLoop itself no-ops when report.enabled isn't set.
 	go pipeline.RunReportLoop(ctx, rc, stateDB, log)
 
-	srv := startWebUIIfConfigured(ctx, rc, statusStore, stateDB, logs, serverIdentity, log)
+	srv := startWebUIIfConfigured(ctx, rc, statusStore, stateDB, logs, serverIdentity, r, log)
 
 	var wg sync.WaitGroup
 

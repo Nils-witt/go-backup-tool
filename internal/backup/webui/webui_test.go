@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
+	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -168,12 +170,111 @@ func TestHandleReceiverStatusWithoutStaleAfterOmitsStaleness(t *testing.T) {
 	}
 }
 
+func TestHandleRetryFailedTargetsUnknownJobReturns404(t *testing.T) {
+	t.Parallel()
+
+	statusStore, job := newTestStore()
+	jobs := map[string]*config.Config{job.Name: job}
+	runner := pipeline.NewRunner(discardLogger, statusStore, nil, nil)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/jobs/nope/retry", nil)
+	req.SetPathValue("name", "nope")
+
+	rec := httptest.NewRecorder()
+
+	handleRetryFailedTargets(jobs, statusStore, runner, discardLogger)(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestHandleRetryFailedTargetsNoFailedTargetsReturns409(t *testing.T) {
+	t.Parallel()
+
+	statusStore, job := newTestStore()
+	jobs := map[string]*config.Config{job.Name: job}
+	runner := pipeline.NewRunner(discardLogger, statusStore, nil, nil)
+
+	// No run has happened yet, so every target is idle, not failed.
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/jobs/test/retry", nil)
+	req.SetPathValue("name", job.Name)
+
+	rec := httptest.NewRecorder()
+
+	handleRetryFailedTargets(jobs, statusStore, runner, discardLogger)(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409", rec.Code)
+	}
+}
+
+// TestHandleRetryFailedTargetsKicksOffRetry is an end-to-end check (real
+// gpg) that a POST against a job with a failed target returns 202
+// immediately and, in the background, actually retries that target —
+// verified by polling /api/status until it turns ok, the same way
+// TestRunOnceRefreshesEachTargetIndependently does for a live run.
+func TestHandleRetryFailedTargetsKicksOffRetry(t *testing.T) {
+	if _, err := exec.LookPath("gpg"); err != nil {
+		t.Skip("gpg not found in PATH, skipping")
+	}
+
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	job := &config.Config{
+		Name:       "test",
+		Cmd:        "echo hi",
+		Key:        "backup-{time}.gpg",
+		Symmetric:  true,
+		Passphrase: "unit-test-passphrase",
+		GPGBin:     "gpg",
+		Targets: []config.Target{
+			{ServerName: "good", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir},
+		},
+	}
+
+	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore.Starting(job.Name)
+	statusStore.TargetDone(job.Name, 0, context.DeadlineExceeded) // simulate a prior failure
+	statusStore.Finished(job.Name, context.DeadlineExceeded, 0)
+
+	jobs := map[string]*config.Config{job.Name: job}
+	runner := pipeline.NewRunner(discardLogger, statusStore, nil, nil)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/jobs/test/retry", nil)
+	req.SetPathValue("name", job.Name)
+
+	rec := httptest.NewRecorder()
+
+	handleRetryFailedTargets(jobs, statusStore, runner, discardLogger)(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the background retry to finish")
+		}
+
+		if statusStore.Snapshot()[0].Targets[0].State == backup.StateOK {
+			break
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestStartWebUIServesRequests(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore()
 
-	srv := StartWebUI("127.0.0.1:0", store, nil, nil, discardLogger, nil, nil, "", "", nil, nil, false, nil)
+	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, discardLogger, nil, nil, "", "", nil, nil, false, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}
@@ -272,7 +373,7 @@ func TestStartWebUIWithLoginRequiresSession(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := StartWebUI("127.0.0.1:0", store, nil, nil, discardLogger, nil, nil, "admin", "secret", nil, nil, false, nil)
+	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, discardLogger, nil, nil, "admin", "secret", nil, nil, false, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}
@@ -421,7 +522,7 @@ func TestStartWebUILoginLogAndDownloadLogRequireDedicatedPermission(t *testing.T
 		t.Fatalf("CreateWebUIUser(auditor) unexpected error: %v", err)
 	}
 
-	srv := StartWebUI("127.0.0.1:0", store, nil, nil, discardLogger, db, nil, "admin", "secret", nil, nil, false, nil)
+	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, discardLogger, db, nil, "admin", "secret", nil, nil, false, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}
@@ -509,7 +610,7 @@ func TestStartWebUIBadAddrReturnsNil(t *testing.T) {
 	store, _ := newTestStore()
 
 	// Port 0 is valid (means "pick one"); an unparseable address is not.
-	srv := StartWebUI("not-a-valid-address", store, nil, nil, discardLogger, nil, nil, "", "", nil, nil, false, nil)
+	srv := StartWebUI("not-a-valid-address", store, nil, nil, nil, nil, discardLogger, nil, nil, "", "", nil, nil, false, nil)
 	if srv != nil {
 		t.Cleanup(srv.Shutdown)
 		t.Fatal("StartWebUI() with an invalid address = non-nil, want nil")

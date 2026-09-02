@@ -2,6 +2,7 @@ package backup
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -305,6 +306,55 @@ func (s *StatusStore) SeedTargetRun(name, target string, state RunState, errText
 			return
 		}
 	}
+}
+
+// RetryStarting marks name's targets (identified by TargetSnapshot.Server)
+// as running, resetting each one's last error, the same way Starting does —
+// but, unlike Starting, leaves every other target's already-recorded state
+// untouched, since pipeline.Runner.RetryFailedTargets only re-runs this
+// specific subset rather than the whole job. It still updates the job's own
+// LastStart, so the dashboard's "last run" timestamp reflects this retry.
+func (s *StatusStore) RetryStarting(name string, targets []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	j, ok := s.jobs[name]
+	if !ok {
+		return
+	}
+
+	j.LastStart = time.Now()
+
+	for i := range j.Targets {
+		if slices.Contains(targets, j.Targets[i].Server) {
+			j.Targets[i].State = StateRunning
+			j.Targets[i].Error = ""
+		}
+	}
+}
+
+// FailedTargets returns the server names of every target in name currently
+// reported as failed, for the web UI's "retry failed targets" action (see
+// handleRetryFailedTargets in webui.go) to determine which targets a retry
+// request applies to. Returns nil if name is unknown or none are failed.
+func (s *StatusStore) FailedTargets(name string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	j, ok := s.jobs[name]
+	if !ok {
+		return nil
+	}
+
+	var out []string
+
+	for _, t := range j.Targets {
+		if t.State == StateFailed {
+			out = append(out, t.Server)
+		}
+	}
+
+	return out
 }
 
 // Snapshot returns every job's current status, in config-file order, each a

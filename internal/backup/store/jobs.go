@@ -41,6 +41,14 @@ const targetRunsSchema = `CREATE TABLE IF NOT EXISTS target_runs (
 	error    TEXT
 )`
 
+const outstandingTargetUploads = `CREATE TABLE IF NOT EXISTS outstanding_target_uploads (
+	id       INTEGER PRIMARY KEY AUTOINCREMENT,
+	job_name TEXT NOT NULL,
+	target   TEXT NOT NULL,
+	run_at   TIMESTAMP NOT NULL,
+	fileName  TEXT NOT NULL
+)`
+
 // SaveJobRun appends a job_runs row recording that job name's run starting
 // at startTime and ending at endTime just completed, succeeding or failing
 // with errText (empty on success) and having written bytesWritten bytes.
@@ -240,4 +248,15 @@ func (s *Store) ListTargetRunEvents(ctx context.Context, limit int) ([]TargetRun
 
 		return ev, nil
 	})
+}
+
+// AddOutstandingTargetUpload records a target upload that needs to be retried at a later time.
+func (s *Store) AddOutstandingTargetUpload(ctx context.Context, jobName, targetName, fileName string, retryAt time.Time) error {
+	const insert = `INSERT INTO outstanding_target_uploads (job_name, target, run_at, fileName) VALUES (?, ?, ?, ?)`
+
+	if _, err := s.db.ExecContext(ctx, insert, jobName, targetName, retryAt, fileName); err != nil {
+		return fmt.Errorf("recording outstanding target upload for job %q target %q: %w", jobName, targetName, err)
+	}
+
+	return nil
 }

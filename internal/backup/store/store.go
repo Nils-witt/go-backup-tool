@@ -60,6 +60,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		webUIUsersSchema,
 		oidcUserPermissionsSchema,
 		apiTokensSchema,
+		outstandingTargetUploads,
 	}
 
 	for _, schema := range preMigration {

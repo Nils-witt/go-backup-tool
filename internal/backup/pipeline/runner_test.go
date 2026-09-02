@@ -365,6 +365,113 @@ func TestRunOnceDeletesStagedFileOnSuccess(t *testing.T) {
 	}
 }
 
+// TestRetryFailedTargetsRetriesOnlyNamedTargets is an end-to-end check (real
+// gpg, real runOnce/RetryFailedTargets) that retrying re-runs the whole
+// pipeline (since the original run's staged file is already gone — see
+// RetryFailedTargets's doc comment) for just the named target, leaving the
+// other target's already-recorded outcome untouched, and that a fixed
+// target which failed on the first run can succeed on retry.
+func TestRetryFailedTargetsRetriesOnlyNamedTargets(t *testing.T) {
+	if _, err := exec.LookPath("gpg"); err != nil {
+		t.Skip("gpg not found in PATH, skipping")
+	}
+
+	t.Parallel()
+
+	dir := t.TempDir()
+	goodDir := t.TempDir()
+	badDir := t.TempDir()
+
+	// Make the "bad" target's parent directory path a regular file, so
+	// WriteLocalObject's os.MkdirAll for it fails deterministically on the
+	// first run; removing it before the retry lets that same target
+	// succeed the second time.
+	badParent := filepath.Join(badDir, "blocked")
+	if err := os.WriteFile(badParent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("setting up blocked path: %v", err)
+	}
+
+	job := &config.Config{
+		Name:       "test",
+		Cmd:        "echo hi",
+		Key:        "backup-{time}.gpg",
+		Symmetric:  true,
+		Passphrase: "unit-test-passphrase",
+		GPGBin:     "gpg",
+		Targets: []config.Target{
+			{ServerName: "bad", Kind: config.ServerKindLocal, Bucket: "blocked/sub", LocalPath: badDir},
+			{ServerName: "good", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: goodDir},
+		},
+	}
+
+	stateDB, err := store.Open(context.Background(), filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatalf("store.Open() error: %v", err)
+	}
+
+	t.Cleanup(func() { _ = stateDB.Close() })
+
+	statusStore := backup.NewStatusStore([]*config.Config{job})
+	r := &Runner{log: discardLogger, store: statusStore, stateDB: stateDB}
+
+	r.runOnce(context.Background(), job)
+
+	snap := statusStore.Snapshot()[0]
+	if snap.Targets[0].State != backup.StateFailed {
+		t.Fatalf("bad target state after first run = %q, want failed", snap.Targets[0].State)
+	}
+
+	if snap.Targets[1].State != backup.StateOK {
+		t.Fatalf("good target state after first run = %q, want ok", snap.Targets[1].State)
+	}
+
+	goodLastError := snap.Targets[1].Error
+
+	// Unblock the bad target so its retry can actually succeed.
+	if err := os.Remove(badParent); err != nil {
+		t.Fatalf("unblocking bad target: %v", err)
+	}
+
+	if err := r.RetryFailedTargets(context.Background(), job, []string{"bad"}); err != nil {
+		t.Fatalf("RetryFailedTargets() error: %v", err)
+	}
+
+	snap = statusStore.Snapshot()[0]
+
+	if snap.Targets[0].State != backup.StateOK {
+		t.Errorf("bad target state after retry = %q, want ok", snap.Targets[0].State)
+	}
+
+	if snap.Targets[1].State != backup.StateOK || snap.Targets[1].Error != goodLastError {
+		t.Errorf("good target after retry = {state: %q, error: %q}, want unchanged {ok, %q}", snap.Targets[1].State, snap.Targets[1].Error, goodLastError)
+	}
+
+	if snap.State != backup.StateOK {
+		t.Errorf("job State after retry = %q, want ok", snap.State)
+	}
+}
+
+// TestRetryFailedTargetsUnknownTargetNameReturnsError verifies
+// RetryFailedTargets rejects a request naming no target that actually
+// exists on the job, rather than silently doing nothing.
+func TestRetryFailedTargetsUnknownTargetNameReturnsError(t *testing.T) {
+	t.Parallel()
+
+	job := &config.Config{
+		Name: "test",
+		Targets: []config.Target{
+			{ServerName: "good", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: t.TempDir()},
+		},
+	}
+
+	statusStore := backup.NewStatusStore([]*config.Config{job})
+	r := &Runner{log: discardLogger, store: statusStore}
+
+	if err := r.RetryFailedTargets(context.Background(), job, []string{"nope"}); err == nil {
+		t.Fatal("RetryFailedTargets() error = nil, want an error for a target name that doesn't exist on the job")
+	}
+}
+
 // TestSeedStatusFromStateAcrossRestart simulates a restart: a first runner
 // (with its own status store) runs a job and persists its outcome; a
 // second, independent status store — standing in for the fresh one a

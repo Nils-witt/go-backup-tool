@@ -160,7 +160,7 @@
     margin: 2.5rem auto 1rem;
     max-width: 1200px;
   }
-  .files-toggle {
+  .files-toggle, .retry-btn {
     margin-top: .6rem;
     padding: .3rem .6rem;
     font-size: .78rem;
@@ -171,7 +171,7 @@
     border-radius: 6px;
     cursor: pointer;
   }
-  .files-toggle:hover {
+  .files-toggle:hover, .retry-btn:hover {
     filter: brightness(0.95);
   }
   .files-wrap {
@@ -258,6 +258,7 @@
     padding: .4rem .5rem;
     border-bottom: 1px solid var(--border);
     white-space: nowrap;
+    min-width: 80px;
   }
   table.login-events td,
   table.download-events td,
@@ -602,6 +603,16 @@
     <div class="confirm-actions">
       <button type="submit" value="cancel" class="btn btn-secondary">Cancel</button>
       <button type="submit" value="confirm" class="btn btn-primary" autofocus>Download</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="retry-confirm-dialog" class="confirm-dialog">
+  <form method="dialog">
+    <p class="confirm-message">Retry failed targets for <strong id="retry-confirm-job"></strong>?</p>
+    <div class="confirm-actions">
+      <button type="submit" value="cancel" class="btn btn-secondary">Cancel</button>
+      <button type="submit" value="confirm" class="btn btn-primary" autofocus>Retry</button>
     </div>
   </form>
 </dialog>

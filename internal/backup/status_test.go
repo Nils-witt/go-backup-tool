@@ -373,6 +373,94 @@ func TestStatusStoreSeedLastRunUnknownJobIsNoOp(t *testing.T) {
 	}
 }
 
+// TestStatusStoreRetryStartingTouchesOnlyGivenTargets verifies RetryStarting
+// resets state/error only for the named targets, leaving every other
+// target's already-recorded outcome untouched — unlike Starting, which
+// resets the whole job.
+func TestStatusStoreRetryStartingTouchesOnlyGivenTargets(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore()
+	boom := errors.New("boom")
+
+	store.Starting("test")
+	store.TargetDone("test", 0, boom)
+	store.TargetDone("test", 1, nil)
+	store.Finished("test", boom, 1024)
+
+	store.RetryStarting("test", []string{"sibling"})
+
+	snap := store.Snapshot()[0]
+
+	if snap.Targets[0].State != StateRunning || snap.Targets[0].Error != "" {
+		t.Errorf("retried target[0] = {state: %q, error: %q}, want {running, \"\"}", snap.Targets[0].State, snap.Targets[0].Error)
+	}
+
+	if snap.Targets[1].State != StateOK {
+		t.Errorf("untouched target[1].State = %q, want ok (RetryStarting must not touch it)", snap.Targets[1].State)
+	}
+
+	if snap.LastStart.IsZero() {
+		t.Error("job LastStart still zero after RetryStarting, want it updated")
+	}
+}
+
+func TestStatusStoreRetryStartingUnknownJobIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore()
+
+	store.RetryStarting("nope", []string{"sibling"})
+
+	snap := store.Snapshot()[0]
+	if snap.State != StateIdle {
+		t.Errorf("job State = %q after RetryStarting on an unknown job, want idle", snap.State)
+	}
+}
+
+// TestStatusStoreFailedTargets verifies FailedTargets returns exactly the
+// server names of targets currently in stateFailed, in target order.
+func TestStatusStoreFailedTargets(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore()
+	boom := errors.New("boom")
+
+	store.Starting("test")
+	store.TargetDone("test", 0, boom)
+	store.TargetDone("test", 1, nil)
+	store.Finished("test", boom, 1024)
+
+	if got := store.FailedTargets("test"); len(got) != 1 || got[0] != "sibling" {
+		t.Errorf("FailedTargets() = %v, want [sibling]", got)
+	}
+}
+
+func TestStatusStoreFailedTargetsNoneFailed(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore()
+
+	store.Starting("test")
+	store.TargetDone("test", 0, nil)
+	store.TargetDone("test", 1, nil)
+	store.Finished("test", nil, 1024)
+
+	if got := store.FailedTargets("test"); got != nil {
+		t.Errorf("FailedTargets() = %v, want nil", got)
+	}
+}
+
+func TestStatusStoreFailedTargetsUnknownJob(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore()
+
+	if got := store.FailedTargets("nope"); got != nil {
+		t.Errorf("FailedTargets(nope) = %v, want nil", got)
+	}
+}
+
 func TestStatusStoreSnapshotIsIndependentCopy(t *testing.T) {
 	t.Parallel()
 

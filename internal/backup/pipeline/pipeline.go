@@ -411,6 +411,12 @@ func uploadStagedToTargets(ctx context.Context, cfg *config.Config, stagingPath 
 
 			log.Warn("target upload failed", "target", targetLabel(t), "duration", time.Since(start), "err", err)
 
+			if cfg.StateDB != nil {
+				if err1 := cfg.StateDB.AddOutstandingTargetUpload(ctx, cfg.Name, cfg.Targets[i].ServerName, stagingPath, time.Now().Add(5*time.Minute)); err1 != nil {
+					log.Warn("recording outstanding target upload failed", "target", targetLabel(t), "err", err1)
+				}
+			}
+
 			targetErrs[i] = fmt.Errorf("target (%s): %w", targetLabel(t), err)
 			onTargetDone(i, targetErrs[i])
 		})

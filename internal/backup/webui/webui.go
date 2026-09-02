@@ -36,6 +36,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
+	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 	"nilswitt.dev/go-backup-tool/internal/version"
 )
@@ -51,7 +52,12 @@ type Server struct {
 // StartWebUI starts the -listen web UI dashboard and returns a Server the
 // caller can shut down with Server.Shutdown. Returns nil if the server
 // fails to start.
-func StartWebUI(addr string, statusStore *backup.StatusStore, receivers map[string]config.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store, logs *LogRingBuffer, webUIUsername, webUIPassword string, oidcAuth *OIDCAuth, identity *identity.ServerIdentity, trustProxyHeaders bool, registerExtraRoutes func(*http.ServeMux)) *Server {
+func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Config, runner *pipeline.Runner, receivers map[string]config.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store, logs *LogRingBuffer, webUIUsername, webUIPassword string, oidcAuth *OIDCAuth, identity *identity.ServerIdentity, trustProxyHeaders bool, registerExtraRoutes func(*http.ServeMux)) *Server {
+	jobsByName := make(map[string]*config.Config, len(jobs))
+	for _, j := range jobs {
+		jobsByName[j.Name] = j
+	}
+
 	uiSessions, err := newSessionStore(identity, db)
 	if err != nil {
 		log.Error("web UI: starting session store", "err", err)
@@ -137,6 +143,7 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, receivers map[stri
 	mux.HandleFunc("GET /api/receivers", api(handleReceiverStatus(receivers, receiverStore, log)))
 	mux.HandleFunc("GET /api/job-runs", api(handleJobRunEvents(db, log)))
 	mux.HandleFunc("GET /api/target-runs", api(handleTargetRunEvents(db, log)))
+	mux.HandleFunc("POST /api/jobs/{name}/retry", admin(handleRetryFailedTargets(jobsByName, statusStore, runner, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/files", api(handleReceiverFiles(receivers, log)))
 	mux.HandleFunc("POST /api/receivers/{id}/download/{key...}", apiDownload(handleMintDownloadTicket(receivers, downloadTickets, uiSessions)))
 	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", handleDownloadFile(receivers, log, db, downloadTickets, trustProxyHeaders))
@@ -297,6 +304,50 @@ func (s *Server) Shutdown() {
 func handleStatus(store *backup.StatusStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, store.Snapshot())
+	}
+}
+
+// handleRetryFailedTargets serves POST /api/jobs/{name}/retry (see the
+// dashboard's "Retry failed targets" button, dashboard.js): it kicks off a
+// re-run of the named job's pipeline for whichever of its targets
+// /api/status currently reports as failed (see
+// pipeline.Runner.RetryFailedTargets's doc comment for why that means
+// re-running the whole pipeline, not just re-uploading). Gated on admin
+// like the "Users" section rather than plain view/download, since it
+// re-executes the job's configured backup command — a broader capability
+// than anything else those two permissions grant.
+//
+// The retry runs in the background: this handler only starts it and
+// returns immediately, since a backup can take far longer than an HTTP
+// client wants to wait for a response. The dashboard's existing 2s
+// /api/status poll picks up the retry's progress instead.
+// context.WithoutCancel detaches the retry from this request's own
+// context, so it isn't cut short the moment the response is written.
+func handleRetryFailedTargets(jobs map[string]*config.Config, statusStore *backup.StatusStore, runner *pipeline.Runner, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+
+		job, ok := jobs[name]
+		if !ok {
+			http.Error(w, "unknown job", http.StatusNotFound)
+			return
+		}
+
+		targets := statusStore.FailedTargets(name)
+		if len(targets) == 0 {
+			http.Error(w, "no failed targets to retry", http.StatusConflict)
+			return
+		}
+
+		retryCtx := context.WithoutCancel(r.Context())
+
+		go func() {
+			if err := runner.RetryFailedTargets(retryCtx, job, targets); err != nil {
+				log.Warn("web UI: retrying failed targets", "job", name, "targets", targets, "err", err)
+			}
+		}()
+
+		w.WriteHeader(http.StatusAccepted)
 	}
 }
 

@@ -2,7 +2,9 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -254,6 +256,88 @@ func (r *Runner) runOnce(ctx context.Context, job *config.Config) {
 
 	log.Info("job finished", "duration", duration, "bytes", bytesWritten)
 	r.recordJobRun(ctx, job.Name, state, true, start, bytesWritten, "")
+}
+
+// RetryFailedTargets re-runs job for just the targets in job.Targets whose
+// ServerName is in targetNames, leaving every other target's already-
+// recorded status untouched. Unlike a live run's per-target handling (there
+// is no per-target retry within a single run — see runPipeline's doc
+// comment), this re-executes the whole pipeline for the given targets: the
+// source command, gpg encryption, and staging, since the original run's
+// staged file was already removed once it finished, leaving nothing to
+// re-upload from. It's used by the web UI's "retry failed targets" action
+// (see handleRetryFailedTargets in webui.go); ctx is expected to be
+// detached from the triggering HTTP request's own cancellation (see
+// context.WithoutCancel) so the retry isn't cut short just because that
+// request has already returned its response.
+func (r *Runner) RetryFailedTargets(ctx context.Context, job *config.Config, targetNames []string) error {
+	indices := make([]int, 0, len(targetNames))
+
+	for i, t := range job.Targets {
+		if slices.Contains(targetNames, t.ServerName) {
+			indices = append(indices, i)
+		}
+	}
+
+	if len(indices) == 0 {
+		return fmt.Errorf("no matching targets to retry among %v", targetNames)
+	}
+
+	run := *job
+	run.Key = substituteKeyTime(job.Key)
+	run.StateDB = r.stateDB
+	run.Identity = r.identity
+	run.Targets = make([]config.Target, len(indices))
+
+	for i, idx := range indices {
+		run.Targets[i] = job.Targets[idx]
+	}
+
+	log := r.log.With("job", job.Name, "key", run.Key, "retry_targets", targetNames)
+
+	start := time.Now()
+
+	r.store.RetryStarting(job.Name, targetNames)
+	log.Info("retrying failed targets", "targets", len(run.Targets))
+
+	// onTargetDone is called with indices into run.Targets (the retried
+	// subset); indices[localIndex] maps that back to the target's original
+	// position in job.Targets, which is what the status store and target-run
+	// persistence are keyed on.
+	onTargetDone := func(localIndex int, terr error) {
+		if localIndex < 0 || localIndex >= len(indices) {
+			return
+		}
+
+		origIndex := indices[localIndex]
+
+		r.store.TargetDone(job.Name, origIndex, terr)
+		r.persistTargetRun(ctx, job.Name, terr == nil, job.Targets[origIndex].ServerName, terr)
+	}
+
+	bytesWritten, err := runPipeline(ctx, &run, log, onTargetDone)
+	duration := time.Since(start)
+
+	state := r.store.Finished(job.Name, err, bytesWritten)
+
+	if err != nil {
+		r.failed.Store(true)
+
+		if state == backup.StateIncomplete {
+			log.Warn("retry incomplete: some targets still failing", "duration", duration, "err", config.JobError(job, err))
+		} else {
+			log.Error("retry failed", "duration", duration, "err", config.JobError(job, err))
+		}
+
+		r.recordJobRun(ctx, job.Name, state, false, start, bytesWritten, config.JobError(job, err).Error())
+
+		return err
+	}
+
+	log.Info("retry finished", "duration", duration, "bytes", bytesWritten)
+	r.recordJobRun(ctx, job.Name, state, true, start, bytesWritten, "")
+
+	return nil
 }
 
 // recordJobRun persists job name's just-finished run (whether it fully
