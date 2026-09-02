@@ -13,6 +13,29 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 )
 
+// ParseCreationTime parses raw (the receiver API's creationTime query
+// parameter, RFC3339) against now (the time the upload request is being
+// handled), returning the zero Time and no error when raw is empty —
+// meaning "not provided, use upload time" (see RecordObjectWrite). A
+// non-empty raw that fails to parse, or that names a time not strictly
+// before now, is an error.
+func ParseCreationTime(raw string, now time.Time) (time.Time, error) {
+	if raw == "" {
+		return time.Time{}, nil
+	}
+
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid creationTime %q: %w", raw, err)
+	}
+
+	if !t.Before(now) {
+		return time.Time{}, fmt.Errorf("creationTime %q must be before the upload time", raw)
+	}
+
+	return t, nil
+}
+
 // SanitizeObjectKey validates key (the {key...} wildcard segment of a
 // receiver API request path) before it's joined into a filesystem path.
 // Although the request is already authenticated, key still comes from the

@@ -1,3 +1,9 @@
+// Package backup holds go-backup-tool's shared run-time state and storage
+// primitives, used by both a job's own uploads and the receiver API: local
+// object read/write (this file), retention tracking and sweeping
+// (retention.go), receiver status/listing (receiver.go), job/target status
+// for the web UI (status.go), and the periodic-loop helper (periodic.go)
+// they're all built on.
 package backup
 
 import (
@@ -6,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 )
@@ -62,6 +69,15 @@ func WriteLocalObject(cfg *config.Config, t *config.Target, r io.Reader) error {
 	}
 
 	return nil
+}
+
+// SetObjectModTime backdates the file at LocalObjectPath(cfg, t)'s mtime
+// (and atime) to at, used by the receiver API when a PUT's creationTime
+// query parameter was given, so the dashboard's mtime-derived ExpiresAt
+// (see ListReceiverFiles) stays consistent with the retention db record
+// RecordObjectWrite made for the same write.
+func SetObjectModTime(cfg *config.Config, t *config.Target, at time.Time) error {
+	return os.Chtimes(LocalObjectPath(cfg, t), at, at)
 }
 
 // DeleteLocalObject removes the file at LocalObjectPath(cfg, t), used by the

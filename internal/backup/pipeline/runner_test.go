@@ -515,7 +515,7 @@ func TestSeedStatusFromStateAcrossRestart(t *testing.T) { //nolint:paralleltest 
 func TestSubstituteKeyTime(t *testing.T) {
 	t.Parallel()
 
-	got := substituteKeyTime("prefix-{time}-suffix.gpg")
+	got := substituteKeyTime("prefix-{time}-suffix.gpg", time.Now().UTC())
 
 	if strings.Contains(got, "{time}") {
 		t.Errorf("substituteKeyTime() = %q, want {time} placeholder substituted", got)

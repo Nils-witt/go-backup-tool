@@ -42,7 +42,10 @@ func RecordLocalWrite(ctx context.Context, cfg *config.Config, t *config.Target,
 // sweep on every single request. retention == 0 means no tracking, and
 // cfg.StateDB == nil (the state db couldn't be opened at startup) also
 // disables tracking rather than erroring, since the backup write itself
-// already succeeded and this is auxiliary bookkeeping.
+// already succeeded and this is auxiliary bookkeeping. The retention basis
+// is cfg.CreatedAt when set (the receiver API's creationTime, or a run's job
+// start time — see pipeline.UploadToRemote/backup.ParseCreationTime), or
+// upload time otherwise.
 func RecordObjectWrite(ctx context.Context, cfg *config.Config, t *config.Target, log *slog.Logger) error {
 	if t.Retention <= 0 || cfg.StateDB == nil {
 		return nil
@@ -51,7 +54,12 @@ func RecordObjectWrite(ctx context.Context, cfg *config.Config, t *config.Target
 	path := LocalObjectPath(cfg, t)
 	retentionSeconds := int64(t.Retention / time.Second)
 
-	if err := cfg.StateDB.SaveObjectWrite(ctx, t.ServerName, t.Bucket, path, time.Now().UTC(), retentionSeconds); err != nil {
+	writtenAt := cfg.CreatedAt
+	if writtenAt.IsZero() {
+		writtenAt = time.Now().UTC()
+	}
+
+	if err := cfg.StateDB.SaveObjectWrite(ctx, t.ServerName, t.Bucket, path, writtenAt, retentionSeconds); err != nil {
 		return err
 	}
 

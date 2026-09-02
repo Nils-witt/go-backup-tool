@@ -469,6 +469,17 @@ func RemoteObjectURL(t *config.Target, key string) string {
 		strings.TrimSuffix(t.Endpoint, "/"), url.PathEscape(t.Bucket), url.PathEscape(key))
 }
 
+// remoteObjectURL is RemoteObjectURL with an optional query string appended
+// (e.g. UploadToRemote's creationTime), for doAuthenticatedRemoteRequest.
+func remoteObjectURL(t *config.Target, key string, query url.Values) string {
+	u := RemoteObjectURL(t, key)
+	if len(query) > 0 {
+		u += "?" + query.Encode()
+	}
+
+	return u
+}
+
 // remoteAuthHeader signs a fresh JWT with cfg.Identity (this instance's own
 // RSA key and UUID — see loadServerIdentity) scoped to t.Bucket (the
 // destination instance's receiver id) and formats it as an Authorization:
@@ -491,9 +502,18 @@ func remoteAuthHeader(cfg *config.Config, t *config.Target) (string, error) {
 // go-backup-tool instance's receiver API (target t, kind ==
 // config.ServerKindRemote), authenticated with a JWT signed by this instance's own
 // identity (see remoteAuthHeader). r is streamed directly as the request
-// body, never buffered.
+// body, never buffered. When cfg.CreatedAt is set, it's sent as the
+// creationTime query parameter (RFC3339), so the receiver bases retention on
+// when this run's backup content was actually produced rather than on
+// upload time — see backup.ParseCreationTime. A zero cfg.CreatedAt sends no
+// creationTime at all, matching the receiver's own upload-time fallback.
 func UploadToRemote(ctx context.Context, cfg *config.Config, t *config.Target, r io.Reader) error {
-	return doAuthenticatedRemoteRequest(ctx, cfg, t, http.MethodPut, r, "application/octet-stream")
+	var query url.Values
+	if !cfg.CreatedAt.IsZero() {
+		query = url.Values{"creationTime": {cfg.CreatedAt.UTC().Format(time.RFC3339)}}
+	}
+
+	return doAuthenticatedRemoteRequest(ctx, cfg, t, http.MethodPut, r, "application/octet-stream", query)
 }
 
 // DeleteRemoteObject removes the object at target t's destination instance
@@ -505,21 +525,22 @@ func UploadToRemote(ctx context.Context, cfg *config.Config, t *config.Target, r
 // tested against the real receiver handler, see remote_test.go) as part of
 // the receiver API's client surface.
 func DeleteRemoteObject(ctx context.Context, cfg *config.Config, t *config.Target) error {
-	return doAuthenticatedRemoteRequest(ctx, cfg, t, http.MethodDelete, nil, "")
+	return doAuthenticatedRemoteRequest(ctx, cfg, t, http.MethodDelete, nil, "", nil)
 }
 
 // doAuthenticatedRemoteRequest signs, sends, and status-checks a method
 // request (with body, whose Content-Type is set only when contentType is
-// non-empty) to target t's receiver API — shared by UploadToRemote and
-// DeleteRemoteObject, which otherwise duplicate this build/send/check
-// sequence identically apart from method, body, and Content-Type.
-func doAuthenticatedRemoteRequest(ctx context.Context, cfg *config.Config, t *config.Target, method string, body io.Reader, contentType string) error {
+// non-empty, and an optional query string) to target t's receiver API —
+// shared by UploadToRemote and DeleteRemoteObject, which otherwise
+// duplicate this build/send/check sequence identically apart from method,
+// body, Content-Type, and query.
+func doAuthenticatedRemoteRequest(ctx context.Context, cfg *config.Config, t *config.Target, method string, body io.Reader, contentType string, query url.Values) error {
 	auth, err := remoteAuthHeader(cfg, t)
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, RemoteObjectURL(t, cfg.Key), body)
+	req, err := http.NewRequestWithContext(ctx, method, remoteObjectURL(t, cfg.Key, query), body)
 	if err != nil {
 		return fmt.Errorf("building request: %w", err)
 	}

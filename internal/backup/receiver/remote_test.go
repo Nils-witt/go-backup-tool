@@ -3,6 +3,7 @@ package receiver
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
@@ -66,6 +68,136 @@ func TestRemoteTargetInteropWithReceiver(t *testing.T) {
 	if _, err := os.Stat(dir + "/backup-20260101.gpg"); err == nil {
 		t.Error("object still present on the receiver after pipeline.DeleteRemoteObject()")
 	}
+}
+
+func TestRemoteTargetInteropWithCreationTime(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	id, key := testServerIdentityAndKey(t)
+	receivers := map[string]config.ResolvedReceiver{
+		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: dir},
+	}
+
+	srv := httptest.NewServer(newReceiverMux(receivers))
+	defer srv.Close()
+
+	createdAt := time.Now().Add(-48 * time.Hour).Truncate(time.Second).UTC()
+	cfg := &config.Config{Key: "backup-20260101.gpg", Identity: id, CreatedAt: createdAt}
+	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
+
+	if err := pipeline.UploadToRemote(t.Context(), cfg, tgt, strings.NewReader("x")); err != nil {
+		t.Fatalf("pipeline.UploadToRemote() unexpected error: %v", err)
+	}
+
+	info, err := os.Stat(filepath.Join(dir, "backup-20260101.gpg"))
+	if err != nil {
+		t.Fatalf("stat-ing received object: %v", err)
+	}
+
+	if !info.ModTime().Equal(createdAt) {
+		t.Errorf("received object mtime = %v, want %v (cfg.CreatedAt)", info.ModTime(), createdAt)
+	}
+}
+
+func TestRemoteTargetInteropWithoutCreationTimeUsesUploadTime(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	id, key := testServerIdentityAndKey(t)
+	receivers := map[string]config.ResolvedReceiver{
+		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: dir},
+	}
+
+	srv := httptest.NewServer(newReceiverMux(receivers))
+	defer srv.Close()
+
+	before := time.Now().Add(-time.Minute)
+	cfg := &config.Config{Key: "backup-20260101.gpg", Identity: id}
+	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
+
+	if err := pipeline.UploadToRemote(t.Context(), cfg, tgt, strings.NewReader("x")); err != nil {
+		t.Fatalf("pipeline.UploadToRemote() unexpected error: %v", err)
+	}
+
+	info, err := os.Stat(filepath.Join(dir, "backup-20260101.gpg"))
+	if err != nil {
+		t.Fatalf("stat-ing received object: %v", err)
+	}
+
+	if info.ModTime().Before(before) {
+		t.Errorf("received object mtime = %v, want at or after %v (upload time, unmodified)", info.ModTime(), before)
+	}
+}
+
+func TestRemoteTargetInteropFutureCreationTimeRejected(t *testing.T) {
+	t.Parallel()
+
+	id, key := testServerIdentityAndKey(t)
+	receivers := map[string]config.ResolvedReceiver{
+		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: t.TempDir()},
+	}
+
+	srv := httptest.NewServer(newReceiverMux(receivers))
+	defer srv.Close()
+
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+
+	resp := putWithRawQuery(t, srv.URL, id, "instance-a", "backup.gpg", "creationTime="+url.QueryEscape(future))
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d (creationTime in the future)", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestRemoteTargetInteropMalformedCreationTimeRejected(t *testing.T) {
+	t.Parallel()
+
+	id, key := testServerIdentityAndKey(t)
+	receivers := map[string]config.ResolvedReceiver{
+		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: t.TempDir()},
+	}
+
+	srv := httptest.NewServer(newReceiverMux(receivers))
+	defer srv.Close()
+
+	resp := putWithRawQuery(t, srv.URL, id, "instance-a", "backup.gpg", "creationTime=not-a-time")
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d (malformed creationTime)", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
+// putWithRawQuery sends an authenticated (signed with id, matching the
+// receiver's configured public key) PUT to baseURL/api/v1/objects/recvID/key
+// with rawQuery attached as-is, for tests exercising HandleReceiveObject's
+// creationTime validation (which runs after authorization, so a valid
+// Authorization header is required to reach it).
+func putWithRawQuery(t *testing.T, baseURL string, id *identity.ServerIdentity, recvID, key, rawQuery string) *http.Response {
+	t.Helper()
+
+	token, err := id.SignRequest(recvID)
+	if err != nil {
+		t.Fatalf("signing request: %v", err)
+	}
+
+	u := baseURL + "/api/v1/objects/" + recvID + "/" + key + "?" + rawQuery
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, u, strings.NewReader("x"))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("sending request: %v", err)
+	}
+
+	return resp
 }
 
 func TestRemoteTargetInteropWrongIdentity(t *testing.T) {

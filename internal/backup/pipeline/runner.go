@@ -213,8 +213,11 @@ func nextGridTime(start time.Time, interval time.Duration, now time.Time) time.T
 // key first so a repeating job doesn't overwrite the same object on every
 // run, and reports the outcome to r.log.
 func (r *Runner) runOnce(ctx context.Context, job *config.Config) {
+	now := time.Now().UTC()
+
 	run := *job
-	run.Key = substituteKeyTime(job.Key)
+	run.Key = substituteKeyTime(job.Key, now)
+	run.CreatedAt = now
 	run.StateDB = r.stateDB
 	run.Identity = r.identity
 
@@ -283,8 +286,11 @@ func (r *Runner) RetryFailedTargets(ctx context.Context, job *config.Config, tar
 		return fmt.Errorf("no matching targets to retry among %v", targetNames)
 	}
 
+	now := time.Now().UTC()
+
 	run := *job
-	run.Key = substituteKeyTime(job.Key)
+	run.Key = substituteKeyTime(job.Key, now)
+	run.CreatedAt = now
 	run.StateDB = r.stateDB
 	run.Identity = r.identity
 	run.Targets = make([]config.Target, len(indices))
@@ -376,11 +382,13 @@ func (r *Runner) persistTargetRun(ctx context.Context, jobName string, success b
 }
 
 // substituteKeyTime replaces the {time} placeholder in key, if present,
-// with the current UTC timestamp. Called fresh immediately before every
-// run (see Runner.runOnce) rather than once at parse time, so a job that
-// repeats gets a distinct object key on every run.
-func substituteKeyTime(key string) string {
-	return strings.ReplaceAll(key, "{time}", time.Now().UTC().Format("20060102-150405"))
+// with now (formatted as a UTC timestamp). Called fresh immediately before
+// every run (see Runner.runOnce) rather than once at parse time, so a job
+// that repeats gets a distinct object key on every run; now is also stamped
+// on that run's Config.CreatedAt, so the key and the retention basis sent to
+// a receiver agree on the same instant.
+func substituteKeyTime(key string, now time.Time) string {
+	return strings.ReplaceAll(key, "{time}", now.Format("20060102-150405"))
 }
 
 // WarnIfKeyWontChange warns when a repeating job's key has no {time}

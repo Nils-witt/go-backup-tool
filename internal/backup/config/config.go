@@ -36,9 +36,16 @@ func (s *stringSlice) Set(v string) error {
 
 // Config holds one backup job's parameters.
 type Config struct {
-	Name       string // job name, from its jobs: entry; always set
-	Cmd        string
-	Key        string         // may still contain the {time} placeholder; resolved fresh per run
+	Name string // job name, from its jobs: entry; always set
+	Cmd  string
+	Key  string // may still contain the {time} placeholder; resolved fresh per run
+
+	// CreatedAt is when this run's backup content was actually produced, set
+	// once per run by runner.runOnce/RetryFailedTargets from the same
+	// instant used to resolve the {time} key placeholder. Zero means "use
+	// upload time" — see RecordObjectWrite and pipeline.UploadToRemote.
+	CreatedAt time.Time
+
 	targetRefs []jobTargetRef // raw targets: entries, resolved against servers by resolveJobTargets
 	Targets    []Target       // resolved destinations; empty until resolveJobTargets runs
 	Recipients stringSlice

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
@@ -31,7 +32,12 @@ func RegisterRoutes(mux *http.ServeMux, receivers map[string]config.ResolvedRece
 // temp-file-then-rename) and retention tracking. It records the write for
 // retention (backup.RecordObjectWrite) but doesn't sweep for expired objects
 // itself — MonitorReceiverRetention sweeps every receiver on its own
-// one-minute timer instead, so a PUT's latency isn't paying for a sweep.
+// one-minute timer instead, so a PUT's latency isn't paying for a sweep. An
+// optional creationTime query parameter (RFC3339, must be strictly before
+// the upload time — see backup.ParseCreationTime) lets the caller base
+// retention on when the backup content was actually produced rather than on
+// upload time; when given, it's also stamped as the written file's mtime
+// (backup.SetObjectModTime) so the dashboard's file listing agrees with it.
 // Every attempt is recorded to status, win or lose, so /api/receivers
 // reflects it.
 func HandleReceiveObject(receivers map[string]config.ResolvedReceiver, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
@@ -41,6 +47,16 @@ func HandleReceiveObject(receivers map[string]config.ResolvedReceiver, status *b
 			return
 		}
 
+		createdAt, err := backup.ParseCreationTime(r.URL.Query().Get("creationTime"), time.Now())
+		if err != nil {
+			log.Warn("receiver: invalid creationTime", "id", recv.ID, "key", key, "err", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+
+			return
+		}
+
+		cfg.CreatedAt = createdAt
+
 		if err := backup.WriteLocalObject(cfg, t, r.Body); err != nil {
 			log.Warn("receiver: writing object failed", "id", recv.ID, "key", key, "err", err)
 			status.Record(recv.ID, key, err)
@@ -48,6 +64,12 @@ func HandleReceiveObject(receivers map[string]config.ResolvedReceiver, status *b
 			http.Error(w, "writing object failed", http.StatusInternalServerError)
 
 			return
+		}
+
+		if !cfg.CreatedAt.IsZero() {
+			if err := backup.SetObjectModTime(cfg, t, cfg.CreatedAt); err != nil {
+				log.Warn("receiver: setting object mod time failed", "id", recv.ID, "key", key, "err", err)
+			}
 		}
 
 		if err := backup.RecordObjectWrite(r.Context(), cfg, t, log); err != nil {
