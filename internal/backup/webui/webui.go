@@ -12,19 +12,19 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/subtle"
-	_ "embed"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -132,10 +132,10 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 		return authOnly(requireAdmin(authEnabled, uiSessions, webUIUsername, h))
 	}
 
-	dashboardPage := strings.Replace(dashboardHTML, "{{LOGOUT_HIDDEN}}", logoutLinkAttr(authEnabled), 1)
-
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", handleDashboard(dashboardPage))
+	mux.HandleFunc("GET /", handleDashboard(dashboardIndexHTML))
+	mux.Handle("GET /assets/", http.StripPrefix("/assets/", cacheForever(http.FileServerFS(dashboardAssetsFS))))
+	mux.HandleFunc("GET /api/meta", handleMeta(authEnabled, oidcAuth != nil))
 	mux.HandleFunc("GET /api/session", authOnly(handleSessionInfo(uiSessions, authEnabled, webUIUsername, oidcAuth != nil)))
 	mux.HandleFunc("GET /api/status", api(handleStatus(statusStore)))
 	mux.HandleFunc("GET /api/logs", api(handleLogs(logs)))
@@ -403,6 +403,29 @@ func handleIdentity(identity *identity.ServerIdentity) http.HandlerFunc {
 		}
 
 		writeJSON(w, out)
+	}
+}
+
+// metaJSON is this instance's build/auth metadata, as served by GET
+// /api/meta, for the dashboard's footer and its "Log out" link's visibility
+// — the SPA's index.html is a static build artifact with no server-side
+// templating, so this replaces what dashboardHTML's now-removed
+// {{VERSION}}/{{COMMIT}}/{{LOGOUT_HIDDEN}} placeholder substitutions did.
+type metaJSON struct {
+	Version     string `json:"version"`
+	Commit      string `json:"commit"`
+	AuthEnabled bool   `json:"auth_enabled"`
+	OIDCEnabled bool   `json:"oidc_enabled"`
+}
+
+// handleMeta serves GET /api/meta: always public/unauthenticated, since the
+// dashboard shell itself (GET /) is public and needs this before any
+// session exists. Leaks nothing a viewer of GET /login couldn't already
+// see (authEnabled/oidcEnabled) or the binary's own --version already
+// reports (version/commit).
+func handleMeta(authEnabled, oidcEnabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, metaJSON{Version: version.Version, Commit: version.Commit, AuthEnabled: authEnabled, OIDCEnabled: oidcEnabled})
 	}
 }
 
@@ -2010,11 +2033,10 @@ func requireAdmin(authEnabled bool, sessions *sessionStore, adminUsername string
 	}
 }
 
-// handleDashboard serves the static dashboard page, which polls
-// /api/status itself; the page has no server-rendered state beyond whether
-// its "Log out" link is shown, which is baked into html once at startup
-// (see StartWebUI) based on authEnabled, since a login-less deployment has
-// no session for that link to end.
+// handleDashboard serves the SPA shell (the built dist/index.html), which
+// fetches /api/meta and /api/status (among others) itself and polls from
+// there; the page carries no server-rendered state at all any more (see
+// metaJSON/handleMeta).
 func handleDashboard(html string) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -2022,36 +2044,54 @@ func handleDashboard(html string) http.HandlerFunc {
 	}
 }
 
-// logoutLinkAttr returns the dashboard's "{{LOGOUT_HIDDEN}}" substitution
-// (see dashboardHTML/handleDashboard): the "Log out" link is hidden unless
-// authEnabled, mirroring requireWebUISession's own gating condition.
-func logoutLinkAttr(authEnabled bool) string {
-	if authEnabled {
-		return ""
-	}
-
-	return " hidden"
+// cacheForever wraps next, marking every response immutable and
+// long-lived — safe here because Vite content-hashes every file under
+// dist/assets, so a given URL's content never changes; a new build simply
+// produces new URLs (see dashboardIndexHTML, re-read at each startup, which
+// is how a new build's asset URLs actually reach a client).
+func cacheForever(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		next.ServeHTTP(w, r)
+	})
 }
 
-// dashboardHTMLSrc is the dashboard page's markup and CSS, kept in its own
-// file so the web UI's HTML doesn't live as a Go string literal; the JS is
-// kept separately in dashboard.js and spliced into the "{{DASHBOARD_JS}}"
-// placeholder below rather than fetched by the browser as its own request,
-// preserving dashboardHTML's single-self-contained-page behavior (see
-// handleDashboard).
+// dashboardDistFS holds the dashboard SPA's production build (see
+// frontend/, built by `npm run build` into this directory — not committed,
+// see .gitignore), embedded via go:embed rather than fetched at runtime.
+// The "all:" prefix matters: Vite can emit dotfiles, which go:embed's
+// default patterns skip.
 //
-//go:embed dashboard.html
-var dashboardHTMLSrc string
+//go:embed all:dist
+var dashboardDistFS embed.FS
 
-//go:embed dashboard.js
-var dashboardJS string
+// dashboardAssetsFS serves dist/assets/* at GET /assets/* (see StartWebUI),
+// stripped of its "dist/assets/" prefix.
+var dashboardAssetsFS = mustSubFS(dashboardDistFS, "dist/assets")
 
-// dashboardHTML is the entire web UI: a single self-contained page (no
-// external assets) that polls /api/status every couple of seconds and
-// re-renders the job/target table.
-var dashboardHTML = strings.NewReplacer(
-	"{{DASHBOARD_JS}}", dashboardJS,
-	"{{VERSION}}", version.Version,
-	"{{COMMIT}}", version.Commit,
-	"{{COPYRIGHT_YEAR}}", strconv.Itoa(time.Now().Year()),
-).Replace(dashboardHTMLSrc)
+// dashboardIndexHTML is the SPA shell's HTML, read once at package init
+// (mirroring the pre-SPA dashboardHTML var's own "build it once, not per
+// request" shape) rather than on every GET /.
+var dashboardIndexHTML = mustReadFS(dashboardDistFS, "dist/index.html")
+
+// mustSubFS/mustReadFS panic on error rather than returning one: both only
+// ever fail if the frontend/ build didn't run before `go build` (see
+// frontend/README.md), which is a build-time misconfiguration to fail fast
+// and loudly on, not a runtime condition any caller could recover from.
+func mustSubFS(fsys embed.FS, dir string) fs.FS {
+	sub, err := fs.Sub(fsys, dir)
+	if err != nil {
+		panic("webui: " + err.Error())
+	}
+
+	return sub
+}
+
+func mustReadFS(fsys embed.FS, name string) string {
+	b, err := fsys.ReadFile(name)
+	if err != nil {
+		panic("webui: " + err.Error())
+	}
+
+	return string(b)
+}

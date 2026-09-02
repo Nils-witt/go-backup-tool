@@ -9,6 +9,7 @@
 
 # goreleaser build/release output
 /dist
+/demoServer
 
 ### JetBrains template
 # Covers JetBrains IDEs: IntelliJ, RubyMine, PhpStorm, AppCode, PyCharm, CLion, Android Studio, WebStorm and Rider
@@ -126,6 +127,15 @@ go.work.sum
 # Node (Husky dev-only tooling for git hooks; package-lock.json is still
 # committed for reproducible `npm ci`)
 /node_modules
+
+# Frontend dashboard SPA (frontend/): built via `npm run build`, output
+# embedded by internal/backup/webui via go:embed. Not committed — `go
+# build`/`go test`/`go vet` require it to be built first, see
+# frontend/README.md.
+frontend/node_modules
+frontend/dist
+frontend/.env.local
+internal/backup/webui/dist
 
 ### macOS template
 # General

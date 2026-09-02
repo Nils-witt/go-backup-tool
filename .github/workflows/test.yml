@@ -27,6 +27,22 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
 
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # internal/backup/webui embeds frontend/'s build output via go:embed,
+      # which fails to compile without it (dist/ isn't committed, see
+      # .gitignore) — every Go build/vet/test step below needs this first.
+      - name: Build dashboard frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
       - name: Verify dependencies
         run: |
           go mod verify

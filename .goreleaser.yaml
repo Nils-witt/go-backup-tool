@@ -1,5 +1,13 @@
 version: 2
 
+before:
+  hooks:
+    # The dashboard SPA (frontend/) must be built before the Go builds
+    # below run: internal/backup/webui embeds frontend/'s dist/ output via
+    # go:embed, which fails to compile without it (dist/ isn't committed,
+    # see .gitignore).
+    - sh -c "cd frontend && npm ci && npm run build"
+
 builds:
   - main: ./cmd/go-backup-tool
     binary: go-backup-tool

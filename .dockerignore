@@ -5,6 +5,9 @@
 .claude
 .husky
 node_modules
+frontend/node_modules
+internal/backup/webui/dist
+/dist
 data
 agent
 

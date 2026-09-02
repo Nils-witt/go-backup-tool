@@ -21,6 +21,22 @@ jobs:
         with:
           go-version: stable
 
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # internal/backup/webui embeds frontend/'s build output via go:embed,
+      # which fails to compile without it (dist/ isn't committed, see
+      # .gitignore) — go vet/golangci-lint both need the module to compile.
+      - name: Build dashboard frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
       - name: Run go vet
         run: go vet ./...
 

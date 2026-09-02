@@ -22,6 +22,22 @@ jobs:
         with:
           go-version: stable
 
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # internal/backup/webui embeds frontend/'s build output via go:embed,
+      # which fails to compile without it (dist/ isn't committed, see
+      # .gitignore) — govulncheck needs a buildable module to analyze.
+      - name: Build dashboard frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
       - name: Run govulncheck
         uses: golang/govulncheck-action@v1
 
@@ -31,6 +47,21 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # gosec's go/analysis-based checks need the module to compile, same
+      # as govulncheck above.
+      - name: Build dashboard frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
 
       - name: Run gosec
         uses: securego/gosec@v2.28.0

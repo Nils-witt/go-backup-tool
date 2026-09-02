@@ -1,4 +1,16 @@
 # syntax=docker/dockerfile:1
+
+# Builds the dashboard SPA (see frontend/) into internal/backup/webui/dist,
+# which the Go builder stage below embeds via go:embed — that directive
+# fails to compile without it, since dist/ isn't committed (see .gitignore).
+FROM node:22-alpine AS frontend-builder
+
+WORKDIR /src/frontend
+
+COPY frontend/ .
+RUN --mount=type=cache,target=/root/.npm npm ci
+RUN npm run build
+
 FROM golang:alpine AS builder
 
 WORKDIR /src
@@ -11,6 +23,7 @@ RUN go mod download
 
 COPY cmd/ cmd/
 COPY internal/ internal/
+COPY --from=frontend-builder /src/internal/backup/webui/dist internal/backup/webui/dist
 
 # CGO is off on purpose: the sqlite driver (modernc.org/sqlite) is pure Go,
 # so the binary builds static with no libc/gcc dependency in the final image.

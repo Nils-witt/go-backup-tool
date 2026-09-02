@@ -51,14 +51,14 @@ func TestHandleDashboardServesHTML(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 
-	handleDashboard(dashboardHTML)(rec, req)
+	handleDashboard(dashboardIndexHTML)(rec, req)
 
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Errorf("Content-Type = %q, want text/html prefix", ct)
 	}
 
-	if !strings.Contains(rec.Body.String(), "/api/status") {
-		t.Error("dashboard HTML doesn't reference /api/status")
+	if !strings.Contains(rec.Body.String(), `<div id="root">`) {
+		t.Error("dashboard HTML doesn't contain the SPA's root element")
 	}
 }
 
