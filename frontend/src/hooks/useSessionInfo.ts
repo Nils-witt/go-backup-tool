@@ -11,6 +11,7 @@ export interface SessionInfoState {
   canViewDownloadLog: boolean;
   canViewJobRunLog: boolean;
   canViewTargetRunLog: boolean;
+  canViewReceiverLog: boolean;
 }
 
 // useSessionInfo fetches GET /api/session once (a session's own permissions
@@ -49,5 +50,6 @@ export function useSessionInfo(): SessionInfoState {
     canViewDownloadLog: permissions.includes("download-log"),
     canViewJobRunLog: permissions.includes("job-run-log"),
     canViewTargetRunLog: permissions.includes("target-run-log"),
+    canViewReceiverLog: permissions.includes("receiver-log"),
   };
 }

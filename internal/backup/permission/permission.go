@@ -1,6 +1,7 @@
 // Package permission defines the web UI dashboard's session permission
 // bitmask (view/download/admin/login-log/download-log/job-run-log/
-// target-run-log) and its config-file and admin-API name parsing.
+// target-run-log/receiver-log) and its config-file and admin-API name
+// parsing.
 package permission
 
 import (
@@ -24,8 +25,9 @@ const (
 	// download ticket, viewing the login history
 	// (PermissionViewLoginLog), viewing the download history
 	// (PermissionViewDownloadLog), viewing the job run log
-	// (PermissionViewJobRunLog), and viewing the target run log
-	// (PermissionViewTargetRunLog) — those four are granted separately.
+	// (PermissionViewJobRunLog), viewing the target run log
+	// (PermissionViewTargetRunLog), and viewing the receiver log
+	// (PermissionViewReceiverLog) — those five are granted separately.
 	PermissionView Permission = 1 << iota
 
 	// PermissionDownload lets a session mint a download ticket and pull a
@@ -43,11 +45,12 @@ const (
 	// assignable to a "Users" admin-managed account or an OIDC identity
 	// instead. It implies PermissionView, PermissionDownload,
 	// PermissionViewLoginLog, PermissionViewDownloadLog,
-	// PermissionViewJobRunLog, and PermissionViewTargetRunLog (see
+	// PermissionViewJobRunLog, PermissionViewTargetRunLog, and
+	// PermissionViewReceiverLog (see
 	// CanView/CanDownload/CanViewLoginLog/CanViewDownloadLog/
-	// CanViewJobRunLog/CanViewTargetRunLog) — there'd be no way to
-	// administer the dashboard's users without also being able to use the
-	// dashboard itself.
+	// CanViewJobRunLog/CanViewTargetRunLog/CanViewReceiverLog) — there'd be
+	// no way to administer the dashboard's users without also being able to
+	// use the dashboard itself.
 	PermissionAdmin
 
 	// PermissionViewLoginLog lets a session see the dashboard's login
@@ -78,6 +81,14 @@ const (
 	// PermissionView can't see it; implied by PermissionAdmin (see
 	// CanViewTargetRunLog).
 	PermissionViewTargetRunLog
+
+	// PermissionViewReceiverLog lets a session see the dashboard's receiver
+	// log (see handleReceiverEvents in webui.go) — the history of every
+	// receiver API request (PUT or DELETE) this instance has served, win or
+	// lose, across every receiver. Granted independently of PermissionView,
+	// so a session holding only PermissionView can't see it; implied by
+	// PermissionAdmin (see CanViewReceiverLog).
+	PermissionViewReceiverLog
 )
 
 // permissionNames maps each individual bit to its wire/config name, in
@@ -96,6 +107,7 @@ var permissionNames = []struct {
 	{PermissionViewDownloadLog, "download-log"},
 	{PermissionViewJobRunLog, "job-run-log"},
 	{PermissionViewTargetRunLog, "target-run-log"},
+	{PermissionViewReceiverLog, "receiver-log"},
 }
 
 // CanView reports whether p includes the ability to view dashboard data —
@@ -143,6 +155,13 @@ func (p Permission) CanViewJobRunLog() bool {
 // PermissionAdmin.
 func (p Permission) CanViewTargetRunLog() bool {
 	return p&(PermissionViewTargetRunLog|PermissionAdmin) != 0
+}
+
+// CanViewReceiverLog reports whether p includes the ability to see the
+// dashboard's receiver log — either granted directly, or implied by
+// PermissionAdmin.
+func (p Permission) CanViewReceiverLog() bool {
+	return p&(PermissionViewReceiverLog|PermissionAdmin) != 0
 }
 
 // Names returns the individually-granted permission names in p, in

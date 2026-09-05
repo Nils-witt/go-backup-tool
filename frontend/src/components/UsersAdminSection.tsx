@@ -29,6 +29,7 @@ const PERM_COLUMNS = [
   { key: "download-log", label: "Download log" },
   { key: "job-run-log", label: "Job run log" },
   { key: "target-run-log", label: "Target run log" },
+  { key: "receiver-log", label: "Receiver log" },
   { key: "admin", label: "Admin" },
 ];
 

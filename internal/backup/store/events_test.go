@@ -153,6 +153,79 @@ func TestListDownloadEventsEmpty(t *testing.T) {
 	}
 }
 
+func TestSaveListReceiverEventsNewestFirst(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := context.Background()
+
+	events := []ReceiverEvent{
+		{At: time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC), ReceiverID: "a", Kind: ReceiverEventReceive, Key: "backup.gpg", Size: 100, Success: true},
+		{At: time.Date(2026, 1, 1, 3, 1, 0, 0, time.UTC), ReceiverID: "a", Kind: ReceiverEventDelete, Key: "backup.gpg", Success: false, Error: "not found"},
+	}
+
+	for _, ev := range events {
+		if err := db.SaveReceiverEvent(ctx, ev); err != nil {
+			t.Fatalf("SaveReceiverEvent() error: %v", err)
+		}
+	}
+
+	got, err := db.ListReceiverEvents(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListReceiverEvents() error: %v", err)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("ListReceiverEvents() returned %d events, want 2", len(got))
+	}
+
+	if got[0].Success || got[0].Kind != ReceiverEventDelete || got[0].Error != "not found" {
+		t.Errorf("ListReceiverEvents()[0] = %+v, want the most recently recorded (failed delete) attempt first", got[0])
+	}
+
+	if !got[1].At.Equal(events[0].At) || got[1].Kind != ReceiverEventReceive || got[1].Size != 100 || !got[1].Success {
+		t.Errorf("ListReceiverEvents()[1] = %+v, want the earlier successful receive", got[1])
+	}
+}
+
+func TestListReceiverEventsRespectsLimit(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := context.Background()
+
+	for i := range 5 {
+		ev := ReceiverEvent{At: time.Date(2026, 1, 1, 0, i, 0, 0, time.UTC), ReceiverID: "a", Kind: ReceiverEventReceive, Key: "backup.gpg", Success: true}
+		if err := db.SaveReceiverEvent(ctx, ev); err != nil {
+			t.Fatalf("SaveReceiverEvent() error: %v", err)
+		}
+	}
+
+	got, err := db.ListReceiverEvents(ctx, 2)
+	if err != nil {
+		t.Fatalf("ListReceiverEvents() error: %v", err)
+	}
+
+	if len(got) != 2 {
+		t.Errorf("ListReceiverEvents(limit=2) returned %d events, want 2", len(got))
+	}
+}
+
+func TestListReceiverEventsEmpty(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+
+	got, err := db.ListReceiverEvents(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListReceiverEvents() error: %v", err)
+	}
+
+	if len(got) != 0 {
+		t.Errorf("ListReceiverEvents() on an empty log = %+v, want none", got)
+	}
+}
+
 func TestGetLastReceiverEventReturnsMostRecent(t *testing.T) {
 	t.Parallel()
 

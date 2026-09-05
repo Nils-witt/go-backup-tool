@@ -8,6 +8,7 @@ import { JobRunsPage } from "./pages/JobRunsPage";
 import { TargetRunsPage } from "./pages/TargetRunsPage";
 import { LoginLogPage } from "./pages/LoginLogPage";
 import { DownloadLogPage } from "./pages/DownloadLogPage";
+import { ReceiverLogPage } from "./pages/ReceiverLogPage";
 import { IdentityPage } from "./pages/IdentityPage";
 import { UsersPage } from "./pages/UsersPage";
 
@@ -24,6 +25,7 @@ export function App() {
           <Route path="logs/target-runs" element={<TargetRunsPage />} />
           <Route path="logs/login" element={<LoginLogPage />} />
           <Route path="logs/downloads" element={<DownloadLogPage />} />
+          <Route path="logs/receivers" element={<ReceiverLogPage />} />
           <Route path="admin/users" element={<UsersPage />} />
         </Route>
       </Routes>

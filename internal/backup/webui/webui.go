@@ -94,50 +94,42 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 		return requireWebUISession(authEnabled, uiSessions, h)
 	}
 
-	// api additionally requires the session hold permission.PermissionView (see
-	// requirePermission) — every endpoint below except /api/session (any
-	// authenticated session, regardless of its permissions, needs to be
-	// able to read its own), the login/download/job-run/target-run history
-	// endpoints (see apiLoginLog/apiDownloadLog/apiJobRunLog/apiTargetRunLog
+	// apiPerm builds an authOnly gate that additionally requires the
+	// session hold a specific permission (see requirePermission) — shared
+	// by every apiXxx gate below so each only has to name which permission
+	// it requires.
+	apiPerm := func(required permission.Permission) func(http.HandlerFunc) http.HandlerFunc {
+		return func(h http.HandlerFunc) http.HandlerFunc {
+			return authOnly(requirePermission(authEnabled, uiSessions, required, h))
+		}
+	}
+
+	// api requires permission.PermissionView — every endpoint below except
+	// /api/session (any authenticated session, regardless of its
+	// permissions, needs to be able to read its own), the
+	// login/download/job-run/target-run/receiver history endpoints (see
+	// apiLoginLog/apiDownloadLog/apiJobRunLog/apiTargetRunLog/apiReceiverLog
 	// below, their own dedicated permissions instead), and the "Users"
 	// admin endpoints (see admin below, requireAdmin's own gate instead).
-	api := func(h http.HandlerFunc) http.HandlerFunc {
-		return authOnly(requirePermission(authEnabled, uiSessions, permission.PermissionView, h))
-	}
+	api := apiPerm(permission.PermissionView)
 
 	// apiDownload requires permission.PermissionDownload instead of View,
 	// gating handleMintDownloadTicket — the one step in the download flow a
 	// bearer token actually authorizes (see downloadTicketStore's own doc
 	// comment for why the second, actual download request can't be gated
 	// the same way).
-	apiDownload := func(h http.HandlerFunc) http.HandlerFunc {
-		return authOnly(requirePermission(authEnabled, uiSessions, permission.PermissionDownload, h))
-	}
+	apiDownload := apiPerm(permission.PermissionDownload)
 
-	// apiLoginLog and apiDownloadLog gate the login/download history
-	// endpoints on their own dedicated permissions (see
-	// permission.PermissionViewLoginLog/PermissionViewDownloadLog) rather than
-	// api's permission.PermissionView — a session can see the rest of the
-	// dashboard without being able to see either history, and vice versa.
-	apiLoginLog := func(h http.HandlerFunc) http.HandlerFunc {
-		return authOnly(requirePermission(authEnabled, uiSessions, permission.PermissionViewLoginLog, h))
-	}
-	apiDownloadLog := func(h http.HandlerFunc) http.HandlerFunc {
-		return authOnly(requirePermission(authEnabled, uiSessions, permission.PermissionViewDownloadLog, h))
-	}
-
-	// apiJobRunLog and apiTargetRunLog gate the job/target run log endpoints
-	// on their own dedicated permissions (see
-	// permission.PermissionViewJobRunLog/PermissionViewTargetRunLog) rather
-	// than api's permission.PermissionView — a session can see the rest of
-	// the dashboard without being able to see either run log, and vice
-	// versa.
-	apiJobRunLog := func(h http.HandlerFunc) http.HandlerFunc {
-		return authOnly(requirePermission(authEnabled, uiSessions, permission.PermissionViewJobRunLog, h))
-	}
-	apiTargetRunLog := func(h http.HandlerFunc) http.HandlerFunc {
-		return authOnly(requirePermission(authEnabled, uiSessions, permission.PermissionViewTargetRunLog, h))
-	}
+	// apiLoginLog, apiDownloadLog, apiJobRunLog, apiTargetRunLog, and
+	// apiReceiverLog each gate one history/log endpoint on its own
+	// dedicated permission rather than api's permission.PermissionView — a
+	// session can see the rest of the dashboard without being able to see
+	// any one of these logs, and vice versa.
+	apiLoginLog := apiPerm(permission.PermissionViewLoginLog)
+	apiDownloadLog := apiPerm(permission.PermissionViewDownloadLog)
+	apiJobRunLog := apiPerm(permission.PermissionViewJobRunLog)
+	apiTargetRunLog := apiPerm(permission.PermissionViewTargetRunLog)
+	apiReceiverLog := apiPerm(permission.PermissionViewReceiverLog)
 
 	// admin requires the session belong to the config-file admin (see
 	// requireAdmin), gating the "Users" admin section's own endpoints.
@@ -165,6 +157,7 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 	mux.HandleFunc("POST /api/logout", handleAPILogout(uiSessions, db, log))
 	mux.HandleFunc("GET /api/login-events", apiLoginLog(handleLoginEvents(db, log)))
 	mux.HandleFunc("GET /api/download-events", apiDownloadLog(handleDownloadEvents(db, log)))
+	mux.HandleFunc("GET /api/receiver-events", apiReceiverLog(handleReceiverEvents(db, log)))
 	mux.HandleFunc("GET /api/users", admin(handleListUsers(db, log)))
 	mux.HandleFunc("POST /api/users", admin(handleCreateUser(db, webUIUsername, log)))
 	mux.HandleFunc("PUT /api/users/{username}", admin(handleUpdateUser(db, log)))
@@ -993,7 +986,7 @@ func handleWebUILogin(username, password string, showSSO bool, sessions *session
 		// canDownload), so a session meant to look and behave like full
 		// access needs every bit set explicitly, matching handleSessionInfo's
 		// own authEnabled-false case below.
-		perm := permission.PermissionView | permission.PermissionDownload | permission.PermissionAdmin | permission.PermissionViewLoginLog | permission.PermissionViewDownloadLog | permission.PermissionViewJobRunLog | permission.PermissionViewTargetRunLog
+		perm := permission.PermissionView | permission.PermissionDownload | permission.PermissionAdmin | permission.PermissionViewLoginLog | permission.PermissionViewDownloadLog | permission.PermissionViewJobRunLog | permission.PermissionViewTargetRunLog | permission.PermissionViewReceiverLog
 
 		if !success && db != nil {
 			dbPerm, ok, err := db.VerifyUser(r.Context(), submittedUser, submittedPass)
@@ -1197,6 +1190,37 @@ func handleTargetRunEvents(db *store.Store, log *slog.Logger) http.HandlerFunc {
 	}
 }
 
+// receiverEventJSON is store.ReceiverEvent's wire shape for
+// handleReceiverEvents, matching the dashboard's own field naming
+// (snake_case, as every other /api/... endpoint here uses).
+type receiverEventJSON struct {
+	At         time.Time `json:"at"`
+	ReceiverID string    `json:"receiver_id"`
+	Kind       string    `json:"kind"`
+	Key        string    `json:"key"`
+	Size       int64     `json:"size"`
+	Success    bool      `json:"success"`
+	Error      string    `json:"error"`
+}
+
+// receiverEventsLimit caps how many of the most recent receiver events
+// handleReceiverEvents serves, for the dashboard's receiver log view.
+const receiverEventsLimit = 200
+
+// handleReceiverEvents serves GET /api/receiver-events: the most recently
+// recorded receiver API requests (see recordReceiverEventBestEffort in
+// internal/backup/receiver), newest first, across every receiver, as JSON.
+// db nil (state tracking unavailable) serves an empty list rather than
+// failing the request, matching handleLoginEvents's own tolerance for a
+// missing dependency.
+func handleReceiverEvents(db *store.Store, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		serveEventLog(w, r, log, db, receiverEventsLimit, db.ListReceiverEvents,
+			func(ev store.ReceiverEvent) receiverEventJSON { return receiverEventJSON(ev) },
+			"reading receiver events failed")
+	}
+}
+
 // handleAPILogout serves POST /api/logout: it revokes the bearer token
 // carried in the request's Authorization header, if any — a missing or
 // already-invalid one is a no-op, since there's nothing to revoke — and
@@ -1230,9 +1254,10 @@ func handleAPILogout(sessions *sessionStore, db *store.Store, log *slog.Logger) 
 // the login history only when Permissions includes "login-log", the
 // download history only when Permissions includes "download-log", the job
 // run log only when Permissions includes "job-run-log", the target run log
-// only when Permissions includes "target-run-log", the "Users" admin
-// section only when Admin, and its "OIDC users" listing (permission
-// overrides for SSO logins) only when both Admin and OIDCEnabled.
+// only when Permissions includes "target-run-log", the receiver log only
+// when Permissions includes "receiver-log", the "Users" admin section only
+// when Admin, and its "OIDC users" listing (permission overrides for SSO
+// logins) only when both Admin and OIDCEnabled.
 type sessionInfoJSON struct {
 	Username    string   `json:"username"`
 	Permissions []string `json:"permissions"`
@@ -1252,7 +1277,7 @@ type sessionInfoJSON struct {
 func handleSessionInfo(sessions *sessionStore, authEnabled bool, adminUsername string, oidcEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !authEnabled {
-			writeJSON(w, sessionInfoJSON{Permissions: (permission.PermissionView | permission.PermissionDownload | permission.PermissionAdmin | permission.PermissionViewLoginLog | permission.PermissionViewDownloadLog | permission.PermissionViewJobRunLog | permission.PermissionViewTargetRunLog).Names(), Admin: true, OIDCEnabled: oidcEnabled})
+			writeJSON(w, sessionInfoJSON{Permissions: (permission.PermissionView | permission.PermissionDownload | permission.PermissionAdmin | permission.PermissionViewLoginLog | permission.PermissionViewDownloadLog | permission.PermissionViewJobRunLog | permission.PermissionViewTargetRunLog | permission.PermissionViewReceiverLog).Names(), Admin: true, OIDCEnabled: oidcEnabled})
 			return
 		}
 
@@ -1926,9 +1951,10 @@ func requireWebUISession(authEnabled bool, sessions *sessionStore, next http.Han
 // authorized for this endpoint. required must be one of
 // permission.PermissionDownload, permission.PermissionViewLoginLog,
 // permission.PermissionViewDownloadLog, permission.PermissionViewJobRunLog,
-// or permission.PermissionViewTargetRunLog (checked via the matching
+// permission.PermissionViewTargetRunLog, or
+// permission.PermissionViewReceiverLog (checked via the matching
 // CanDownload/CanViewLoginLog/CanViewDownloadLog/CanViewJobRunLog/
-// CanViewTargetRunLog method); anything else, including
+// CanViewTargetRunLog/CanViewReceiverLog method); anything else, including
 // permission.PermissionView, falls back to CanView. authEnabled false skips the
 // check entirely, matching requireWebUISession's own bypass, since there's
 // no session to hold a permission in that case.
@@ -1950,6 +1976,8 @@ func requirePermission(authEnabled bool, sessions *sessionStore, required permis
 				allowed = perm.CanViewJobRunLog()
 			case permission.PermissionViewTargetRunLog:
 				allowed = perm.CanViewTargetRunLog()
+			case permission.PermissionViewReceiverLog:
+				allowed = perm.CanViewReceiverLog()
 			case permission.PermissionView, permission.PermissionAdmin:
 				allowed = perm.CanView()
 			default:

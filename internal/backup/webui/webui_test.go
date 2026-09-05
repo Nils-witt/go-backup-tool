@@ -499,17 +499,18 @@ func webUIGetStatus(t *testing.T, client *http.Client, srv *Server, token, path 
 
 // TestStartWebUILoginLogAndDownloadLogRequireDedicatedPermission is an
 // end-to-end check, through the real mux StartWebUI wires up, that
-// /api/login-events, /api/download-events, /api/job-runs, and
-// /api/target-runs are each gated on their own dedicated permission
+// /api/login-events, /api/download-events, /api/job-runs, /api/target-runs,
+// and /api/receiver-events are each gated on their own dedicated permission
 // (permission.PermissionViewLoginLog/PermissionViewDownloadLog/
-// PermissionViewJobRunLog/PermissionViewTargetRunLog) rather than the
-// general permission.PermissionView every other api(...) route uses — a
-// view-only db-backed account can reach /api/status but not any of the four
-// logs, granting just the dedicated permission (without "view") is enough
-// for that one log alone, and the single config-file admin (webui.username/
-// webui.password) can still reach all four despite its session never
-// holding PermissionView/PermissionDownload's usual db-backed-account shape
-// (see handleWebUILogin's own perm assignment).
+// PermissionViewJobRunLog/PermissionViewTargetRunLog/
+// PermissionViewReceiverLog) rather than the general permission.PermissionView
+// every other api(...) route uses — a view-only db-backed account can reach
+// /api/status but not any of the five logs, granting just the dedicated
+// permission (without "view") is enough for that one log alone, and the
+// single config-file admin (webui.username/webui.password) can still reach
+// all five despite its session never holding
+// PermissionView/PermissionDownload's usual db-backed-account shape (see
+// handleWebUILogin's own perm assignment).
 func TestStartWebUILoginLogAndDownloadLogRequireDedicatedPermission(t *testing.T) {
 	t.Parallel()
 
@@ -528,6 +529,10 @@ func TestStartWebUILoginLogAndDownloadLogRequireDedicatedPermission(t *testing.T
 		t.Fatalf("CreateWebUIUser(runwatcher) unexpected error: %v", err)
 	}
 
+	if err := db.SaveUser(context.Background(), "receiverwatcher", "s3cret4", "", permission.PermissionViewReceiverLog); err != nil {
+		t.Fatalf("CreateWebUIUser(receiverwatcher) unexpected error: %v", err)
+	}
+
 	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, discardLogger, db, nil, "admin", "secret", nil, nil, false, false, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
@@ -539,6 +544,7 @@ func TestStartWebUILoginLogAndDownloadLogRequireDedicatedPermission(t *testing.T
 	viewerToken := webUILogin(t, client, srv, "viewer", "s3cret1")
 	auditorToken := webUILogin(t, client, srv, "auditor", "s3cret2")
 	runwatcherToken := webUILogin(t, client, srv, "runwatcher", "s3cret3")
+	receiverwatcherToken := webUILogin(t, client, srv, "receiverwatcher", "s3cret4")
 	adminToken := webUILogin(t, client, srv, "admin", "secret")
 
 	tests := []struct {
@@ -552,15 +558,19 @@ func TestStartWebUILoginLogAndDownloadLogRequireDedicatedPermission(t *testing.T
 		{"viewer cannot see download log", viewerToken, "/api/download-events", http.StatusForbidden},
 		{"viewer cannot see job run log", viewerToken, "/api/job-runs", http.StatusForbidden},
 		{"viewer cannot see target run log", viewerToken, "/api/target-runs", http.StatusForbidden},
+		{"viewer cannot see receiver log", viewerToken, "/api/receiver-events", http.StatusForbidden},
 		{"login-log-only account can see login log", auditorToken, "/api/login-events", http.StatusOK},
 		{"login-log-only account cannot see download log", auditorToken, "/api/download-events", http.StatusForbidden},
 		{"login-log-only account cannot see job run log", auditorToken, "/api/job-runs", http.StatusForbidden},
 		{"job-run-log-only account can see job run log", runwatcherToken, "/api/job-runs", http.StatusOK},
 		{"job-run-log-only account cannot see target run log", runwatcherToken, "/api/target-runs", http.StatusForbidden},
+		{"receiver-log-only account can see receiver log", receiverwatcherToken, "/api/receiver-events", http.StatusOK},
+		{"receiver-log-only account cannot see download log", receiverwatcherToken, "/api/download-events", http.StatusForbidden},
 		{"config-file admin can see login log", adminToken, "/api/login-events", http.StatusOK},
 		{"config-file admin can see download log", adminToken, "/api/download-events", http.StatusOK},
 		{"config-file admin can see job run log", adminToken, "/api/job-runs", http.StatusOK},
 		{"config-file admin can see target run log", adminToken, "/api/target-runs", http.StatusOK},
+		{"config-file admin can see receiver log", adminToken, "/api/receiver-events", http.StatusOK},
 	}
 
 	for _, tt := range tests {
@@ -1469,6 +1479,52 @@ func TestHandleDownloadEventsWithoutDBServesEmptyList(t *testing.T) {
 	handleDownloadEvents(nil, discardLogger)(rec, req)
 
 	var got []downloadEventJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding response body: %v", err)
+	}
+
+	if len(got) != 0 {
+		t.Errorf("decoded events = %+v, want none", got)
+	}
+}
+
+func TestHandleReceiverEventsServesJSON(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+
+	if err := db.SaveReceiverEvent(t.Context(), store.ReceiverEvent{At: time.Now(), ReceiverID: "a", Kind: store.ReceiverEventReceive, Key: "backup.gpg", Size: 42, Success: true}); err != nil {
+		t.Fatalf("SaveReceiverEvent() error: %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receiver-events", nil)
+	rec := httptest.NewRecorder()
+
+	handleReceiverEvents(db, discardLogger)(rec, req)
+
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json prefix", ct)
+	}
+
+	var got []receiverEventJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding response body: %v", err)
+	}
+
+	if len(got) != 1 || got[0].ReceiverID != "a" || got[0].Kind != store.ReceiverEventReceive || got[0].Key != "backup.gpg" || got[0].Size != 42 || !got[0].Success {
+		t.Errorf("decoded events = %+v, want one successful receive of backup.gpg", got)
+	}
+}
+
+func TestHandleReceiverEventsWithoutDBServesEmptyList(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receiver-events", nil)
+	rec := httptest.NewRecorder()
+
+	handleReceiverEvents(nil, discardLogger)(rec, req)
+
+	var got []receiverEventJSON
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decoding response body: %v", err)
 	}

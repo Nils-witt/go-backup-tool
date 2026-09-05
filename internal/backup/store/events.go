@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // loginEventModel is login_events: records every dashboard login attempt,
@@ -135,21 +137,32 @@ func (s *Store) SaveDownloadEvent(ctx context.Context, ev DownloadEvent) error {
 	return nil
 }
 
-// ListDownloadEvents returns up to limit of the most recently recorded
-// download events, newest first, for the dashboard's download log view.
-func (s *Store) ListDownloadEvents(ctx context.Context, limit int) ([]DownloadEvent, error) {
-	var rows []downloadEventModel
+// listRecentEvents returns up to limit of db's most recently recorded rows of
+// model type M, newest first, converting each to its public event type E via
+// convert. Shared by ListDownloadEvents and ListReceiverEvents, whose bodies
+// would otherwise be identical but for the model/event types and error
+// message involved.
+func listRecentEvents[M, E any](ctx context.Context, db *gorm.DB, limit int, convert func(M) E, errMsg string) ([]E, error) {
+	var rows []M
 
-	if err := s.db.WithContext(ctx).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
-		return nil, fmt.Errorf("reading download events: %w", err)
+	if err := db.WithContext(ctx).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("%s: %w", errMsg, err)
 	}
 
-	events := make([]DownloadEvent, len(rows))
+	events := make([]E, len(rows))
 	for i, m := range rows {
-		events[i] = DownloadEvent{At: m.At, Username: m.Username, ReceiverID: m.ReceiverID, Key: m.Key, Success: m.Success, RemoteAddr: m.RemoteAddr, Detail: m.Detail}
+		events[i] = convert(m)
 	}
 
 	return events, nil
+}
+
+// ListDownloadEvents returns up to limit of the most recently recorded
+// download events, newest first, for the dashboard's download log view.
+func (s *Store) ListDownloadEvents(ctx context.Context, limit int) ([]DownloadEvent, error) {
+	return listRecentEvents(ctx, s.db, limit, func(m downloadEventModel) DownloadEvent {
+		return DownloadEvent{At: m.At, Username: m.Username, ReceiverID: m.ReceiverID, Key: m.Key, Success: m.Success, RemoteAddr: m.RemoteAddr, Detail: m.Detail}
+	}, "reading download events")
 }
 
 // ReceiverEventReceive and ReceiverEventDelete are the kind values
@@ -211,6 +224,15 @@ func (s *Store) GetLastReceiverEvent(ctx context.Context, id string) (ReceiverEv
 	default:
 		return ReceiverEvent{At: m.At, ReceiverID: m.ReceiverID, Kind: m.Kind, Key: m.Key, Size: m.Size, Success: m.Success, Error: m.Error}, true, nil
 	}
+}
+
+// ListReceiverEvents returns up to limit of the most recently recorded
+// receiver API requests (receive or delete, win or lose), newest first, for
+// the dashboard's receiver log view.
+func (s *Store) ListReceiverEvents(ctx context.Context, limit int) ([]ReceiverEvent, error) {
+	return listRecentEvents(ctx, s.db, limit, func(m receiverEventModel) ReceiverEvent {
+		return ReceiverEvent{At: m.At, ReceiverID: m.ReceiverID, Kind: m.Kind, Key: m.Key, Size: m.Size, Success: m.Success, Error: m.Error}
+	}, "reading receiver events")
 }
 
 // ReceiverDaySummary is one receiver's activity over a time window, as

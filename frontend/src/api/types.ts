@@ -88,6 +88,16 @@ export interface TargetRunEventJSON {
   error: string;
 }
 
+export interface ReceiverEventJSON {
+  at: string;
+  receiver_id: string;
+  kind: string;
+  key: string;
+  size: number;
+  success: boolean;
+  error: string;
+}
+
 export interface SessionInfoJSON {
   username: string;
   permissions: string[];
@@ -149,6 +159,7 @@ export const PERMISSIONS = [
   "download-log",
   "job-run-log",
   "target-run-log",
+  "receiver-log",
   "admin",
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];

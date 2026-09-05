@@ -6,6 +6,7 @@ import LoginIcon from "@mui/icons-material/Login";
 import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
 import HistoryIcon from "@mui/icons-material/History";
 import PlaylistAddCheckIcon from "@mui/icons-material/PlaylistAddCheck";
+import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import GroupIcon from "@mui/icons-material/Group";
 import type { SessionInfoState } from "./hooks/useSessionInfo";
@@ -60,6 +61,12 @@ export const NAV_GROUPS: NavGroup[] = [
         label: "Download log",
         icon: <CloudDownloadIcon />,
         visible: (s) => s.canViewDownloadLog,
+      },
+      {
+        to: "/logs/receivers",
+        label: "Receiver log",
+        icon: <CloudUploadIcon />,
+        visible: (s) => s.canViewReceiverLog,
       },
     ],
   },

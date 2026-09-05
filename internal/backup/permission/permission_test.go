@@ -106,6 +106,31 @@ func TestPermissionCanViewJobRunLogCanViewTargetRunLog(t *testing.T) {
 	}
 }
 
+func TestPermissionCanViewReceiverLog(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		perm Permission
+		want bool
+	}{
+		{"none", 0, false},
+		{"view alone does not grant it", PermissionView, false},
+		{"receiver log only", PermissionViewReceiverLog, true},
+		{"admin implies receiver log", PermissionAdmin, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := tt.perm.CanViewReceiverLog(); got != tt.want {
+				t.Errorf("CanViewReceiverLog() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPermissionNames(t *testing.T) {
 	t.Parallel()
 
@@ -125,6 +150,7 @@ func TestPermissionNames(t *testing.T) {
 		{PermissionViewJobRunLog, []string{"job-run-log"}},
 		{PermissionViewTargetRunLog, []string{"target-run-log"}},
 		{PermissionViewJobRunLog | PermissionViewTargetRunLog, []string{"job-run-log", "target-run-log"}},
+		{PermissionViewReceiverLog, []string{"receiver-log"}},
 	}
 
 	for _, tt := range tests {
@@ -137,12 +163,12 @@ func TestPermissionNames(t *testing.T) {
 func TestParsePermissionsRoundTripsNames(t *testing.T) {
 	t.Parallel()
 
-	perm, err := ParsePermissions([]string{"view", "download", "admin", "login-log", "download-log", "job-run-log", "target-run-log"})
+	perm, err := ParsePermissions([]string{"view", "download", "admin", "login-log", "download-log", "job-run-log", "target-run-log", "receiver-log"})
 	if err != nil {
 		t.Fatalf("ParsePermissions() unexpected error: %v", err)
 	}
 
-	if want := PermissionView | PermissionDownload | PermissionAdmin | PermissionViewLoginLog | PermissionViewDownloadLog | PermissionViewJobRunLog | PermissionViewTargetRunLog; perm != want {
+	if want := PermissionView | PermissionDownload | PermissionAdmin | PermissionViewLoginLog | PermissionViewDownloadLog | PermissionViewJobRunLog | PermissionViewTargetRunLog | PermissionViewReceiverLog; perm != want {
 		t.Errorf("ParsePermissions() = %v, want %v", perm, want)
 	}
 }
