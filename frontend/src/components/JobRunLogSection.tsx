@@ -1,6 +1,8 @@
 import { useState } from "react";
 import type { JobRunEventJSON } from "../api/types";
 import { StatusChip } from "./StatusChip";
+import { SortableHeaderCell } from "./SortableHeaderCell";
+import { useSortedRows } from "../hooks/useSortedRows";
 import { fmtDuration, fmtSize, fmtTime } from "../lib/format";
 import MenuItem from "@mui/material/MenuItem";
 import Paper from "@mui/material/Paper";
@@ -15,17 +17,22 @@ import TableRow from "@mui/material/TableRow";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 
+type SortKey = "end" | "job_name" | "duration" | "size" | "result";
+
+const comparators: Record<SortKey, (a: JobRunEventJSON, b: JobRunEventJSON) => number> = {
+  end: (a, b) => new Date(a.end).getTime() - new Date(b.end).getTime(),
+  job_name: (a, b) => a.job_name.localeCompare(b.job_name),
+  duration: (a, b) =>
+    new Date(a.end).getTime() -
+    new Date(a.start).getTime() -
+    (new Date(b.end).getTime() - new Date(b.start).getTime()),
+  size: (a, b) => a.size - b.size,
+  result: (a, b) => Number(a.success) - Number(b.success),
+};
+
 export function JobRunLogSection({ events }: { events: JobRunEventJSON[] }) {
   const [job, setJob] = useState("");
   const [result, setResult] = useState("");
-
-  if (!events.length) {
-    return (
-      <Typography color="text.secondary" sx={{ mt: 6, textAlign: "center" }}>
-        no job runs recorded yet
-      </Typography>
-    );
-  }
 
   const jobFilter = job.trim().toLowerCase();
   const filtered = events.filter((ev) => {
@@ -34,6 +41,20 @@ export function JobRunLogSection({ events }: { events: JobRunEventJSON[] }) {
     if (result === "failed" && ev.success) return false;
     return true;
   });
+
+  const { sorted, sortKey, sortDir, toggleSort } = useSortedRows<JobRunEventJSON, SortKey>(
+    filtered,
+    comparators,
+    "end",
+  );
+
+  if (!events.length) {
+    return (
+      <Typography color="text.secondary" sx={{ mt: 6, textAlign: "center" }}>
+        no job runs recorded yet
+      </Typography>
+    );
+  }
 
   return (
     <Stack spacing={2}>
@@ -61,22 +82,56 @@ export function JobRunLogSection({ events }: { events: JobRunEventJSON[] }) {
         <Table size="small">
           <TableHead>
             <TableRow>
-              <TableCell>Time</TableCell>
-              <TableCell>Job</TableCell>
-              <TableCell>Duration</TableCell>
-              <TableCell>Size</TableCell>
-              <TableCell>Result</TableCell>
+              <SortableHeaderCell<SortKey>
+                label="Time"
+                sortKey="end"
+                activeKey={sortKey}
+                direction={sortDir}
+                onSort={toggleSort}
+                whiteSpace
+              />
+              <SortableHeaderCell<SortKey>
+                label="Job"
+                sortKey="job_name"
+                activeKey={sortKey}
+                direction={sortDir}
+                onSort={toggleSort}
+              />
+              <SortableHeaderCell<SortKey>
+                label="Duration"
+                sortKey="duration"
+                activeKey={sortKey}
+                direction={sortDir}
+                onSort={toggleSort}
+                whiteSpace
+              />
+              <SortableHeaderCell<SortKey>
+                label="Size"
+                sortKey="size"
+                activeKey={sortKey}
+                direction={sortDir}
+                onSort={toggleSort}
+                whiteSpace
+              />
+              <SortableHeaderCell<SortKey>
+                label="Result"
+                sortKey="result"
+                activeKey={sortKey}
+                direction={sortDir}
+                onSort={toggleSort}
+                whiteSpace
+              />
             </TableRow>
           </TableHead>
           <TableBody>
-            {filtered.length === 0 ? (
+            {sorted.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={5} align="center" sx={{ color: "text.secondary" }}>
                   No matching runs
                 </TableCell>
               </TableRow>
             ) : (
-              filtered.map((ev, i) => (
+              sorted.map((ev, i) => (
                 <TableRow key={i}>
                   <TableCell sx={{ whiteSpace: "nowrap" }}>{fmtTime(ev.end)}</TableCell>
                   <TableCell>{ev.job_name}</TableCell>

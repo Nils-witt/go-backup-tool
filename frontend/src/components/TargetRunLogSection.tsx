@@ -1,6 +1,8 @@
 import { useState } from "react";
 import type { TargetRunEventJSON } from "../api/types";
 import { StatusChip } from "./StatusChip";
+import { SortableHeaderCell } from "./SortableHeaderCell";
+import { useSortedRows } from "../hooks/useSortedRows";
 import { fmtTime } from "../lib/format";
 import MenuItem from "@mui/material/MenuItem";
 import Paper from "@mui/material/Paper";
@@ -15,18 +17,19 @@ import TableRow from "@mui/material/TableRow";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 
+type SortKey = "at" | "job_name" | "target" | "result";
+
+const comparators: Record<SortKey, (a: TargetRunEventJSON, b: TargetRunEventJSON) => number> = {
+  at: (a, b) => new Date(a.at).getTime() - new Date(b.at).getTime(),
+  job_name: (a, b) => a.job_name.localeCompare(b.job_name),
+  target: (a, b) => a.target.localeCompare(b.target),
+  result: (a, b) => Number(a.success) - Number(b.success),
+};
+
 export function TargetRunLogSection({ events }: { events: TargetRunEventJSON[] }) {
   const [job, setJob] = useState("");
   const [target, setTarget] = useState("");
   const [result, setResult] = useState("");
-
-  if (!events.length) {
-    return (
-      <Typography color="text.secondary" sx={{ mt: 6, textAlign: "center" }}>
-        no target runs recorded yet
-      </Typography>
-    );
-  }
 
   const jobFilter = job.trim().toLowerCase();
   const targetFilter = target.trim().toLowerCase();
@@ -37,6 +40,20 @@ export function TargetRunLogSection({ events }: { events: TargetRunEventJSON[] }
     if (result === "failed" && ev.success) return false;
     return true;
   });
+
+  const { sorted, sortKey, sortDir, toggleSort } = useSortedRows<TargetRunEventJSON, SortKey>(
+    filtered,
+    comparators,
+    "at",
+  );
+
+  if (!events.length) {
+    return (
+      <Typography color="text.secondary" sx={{ mt: 6, textAlign: "center" }}>
+        no target runs recorded yet
+      </Typography>
+    );
+  }
 
   return (
     <Stack spacing={2}>
@@ -71,21 +88,47 @@ export function TargetRunLogSection({ events }: { events: TargetRunEventJSON[] }
         <Table size="small">
           <TableHead>
             <TableRow>
-              <TableCell>Time</TableCell>
-              <TableCell>Job</TableCell>
-              <TableCell>Target</TableCell>
-              <TableCell>Result</TableCell>
+              <SortableHeaderCell<SortKey>
+                label="Time"
+                sortKey="at"
+                activeKey={sortKey}
+                direction={sortDir}
+                onSort={toggleSort}
+                whiteSpace
+              />
+              <SortableHeaderCell<SortKey>
+                label="Job"
+                sortKey="job_name"
+                activeKey={sortKey}
+                direction={sortDir}
+                onSort={toggleSort}
+              />
+              <SortableHeaderCell<SortKey>
+                label="Target"
+                sortKey="target"
+                activeKey={sortKey}
+                direction={sortDir}
+                onSort={toggleSort}
+              />
+              <SortableHeaderCell<SortKey>
+                label="Result"
+                sortKey="result"
+                activeKey={sortKey}
+                direction={sortDir}
+                onSort={toggleSort}
+                whiteSpace
+              />
             </TableRow>
           </TableHead>
           <TableBody>
-            {filtered.length === 0 ? (
+            {sorted.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={4} align="center" sx={{ color: "text.secondary" }}>
                   No matching runs
                 </TableCell>
               </TableRow>
             ) : (
-              filtered.map((ev, i) => (
+              sorted.map((ev, i) => (
                 <TableRow key={i}>
                   <TableCell sx={{ whiteSpace: "nowrap" }}>{fmtTime(ev.at)}</TableCell>
                   <TableCell>{ev.job_name}</TableCell>
