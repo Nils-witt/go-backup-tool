@@ -17,16 +17,61 @@ tags:
     description: Read-only JSON endpoints backing the web UI dashboard
   - name: auth
     description: Dashboard login/logout (bearer-token based)
+  - name: admin
+    description: "The dashboard's \"Users\" admin section: managing accounts and their long-lived API tokens"
   - name: receiver-api
     description: "Object ingestion API for `type: remote` targets, authenticated per-receiver via a signed JWT bearer token"
 
 paths:
+  /api/meta:
+    get:
+      tags: [dashboard]
+      summary: Build/auth metadata for the dashboard shell
+      operationId: getMeta
+      description: >
+        Always public/unauthenticated, since the dashboard shell (GET /)
+        itself is public and needs this before any session exists. Backs the
+        dashboard's footer and its login-link visibility.
+      security: []
+      responses:
+        "200":
+          description: Build/auth metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Meta"
+
+  /api/session:
+    get:
+      tags: [dashboard]
+      summary: The currently authenticated session's identity and permissions
+      operationId: getSession
+      description: >
+        Everything the dashboard's own JavaScript needs to decide which
+        sections to show; the server-side handlers behind those sections
+        enforce the same rules independently on every actual request. Unlike
+        every other `/api/...` endpoint, this only requires a currently
+        valid session, not any specific permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Session info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /api/status:
     get:
       tags: [dashboard]
       summary: Current job/target statuses
       operationId: getStatus
-      description: Snapshot of every configured backup job and its targets, polled by the dashboard.
+      description: >
+        Snapshot of every configured backup job and its targets, polled by
+        the dashboard. Requires the `view` permission.
       security:
         - webUIBearer: []
       responses:
@@ -40,13 +85,17 @@ paths:
                   $ref: "#/components/schemas/JobSnapshot"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /api/logs:
     get:
       tags: [dashboard]
       summary: Recent log lines
       operationId: getLogs
-      description: "The most recent buffered log lines (see `enable-log-viewer:` in the config file), oldest first."
+      description: >
+        The most recent buffered log lines (see `enable-log-viewer:` in the
+        config file), oldest first. Requires the `view` permission.
       security:
         - webUIBearer: []
       responses:
@@ -60,6 +109,8 @@ paths:
                   type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /api/identity:
     get:
@@ -69,7 +120,8 @@ paths:
       description: >
         This instance's persistent UUID and PEM-encoded public key, used to
         fill in a `receivers:` entry on another instance. A zero-value object
-        is returned if no identity was loaded at startup.
+        is returned if no identity was loaded at startup. Requires the
+        `view` permission.
       security:
         - webUIBearer: []
       responses:
@@ -81,13 +133,18 @@ paths:
                 $ref: "#/components/schemas/Identity"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /api/receivers:
     get:
       tags: [dashboard]
       summary: Current receiver statuses
       operationId: getReceivers
-      description: "Live state of every configured receiver, annotated with staleness for any receiver with `stale-after:` set."
+      description: >
+        Live state of every configured receiver, annotated with staleness
+        for any receiver with `stale-after:` set. Requires the `view`
+        permission.
       security:
         - webUIBearer: []
       responses:
@@ -101,12 +158,106 @@ paths:
                   $ref: "#/components/schemas/ReceiverSnapshot"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/job-runs:
+    get:
+      tags: [dashboard]
+      summary: Historical job run log
+      operationId: getJobRunEvents
+      description: >
+        The most recently recorded job runs (up to 200) across every job,
+        newest first. Requires the `job-run-log` permission, independent of
+        `view`.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Job run events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/JobRunEvent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/target-runs:
+    get:
+      tags: [dashboard]
+      summary: Historical job target run log
+      operationId: getTargetRunEvents
+      description: >
+        The most recently recorded job target runs (up to 200) across every
+        job, newest first. Requires the `target-run-log` permission,
+        independent of `view`.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Target run events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TargetRunEvent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/jobs/{name}/retry:
+    post:
+      tags: [admin]
+      summary: Retry a job's currently failed targets
+      operationId: retryFailedTargets
+      description: >
+        Kicks off a re-run of the named job's pipeline for whichever of its
+        targets `/api/status` currently reports as failed (re-running the
+        whole pipeline, not just re-uploading). Starts the retry in the
+        background and returns immediately; poll `/api/status` for
+        progress. Requires admin access (the config-file admin, or a
+        session holding the `admin` permission).
+      security:
+        - webUIBearer: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: Job name, as configured under `jobs:` in the config file.
+          schema:
+            type: string
+      responses:
+        "202":
+          description: Retry started
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Unknown job name
+          content:
+            text/plain:
+              schema:
+                type: string
+        "409":
+          description: No failed targets to retry
+          content:
+            text/plain:
+              schema:
+                type: string
 
   /api/receivers/{id}/files:
     get:
       tags: [dashboard]
       summary: Files currently stored under a receiver
       operationId: getReceiverFiles
+      description: Requires the `view` permission.
       security:
         - webUIBearer: []
       parameters:
@@ -122,6 +273,8 @@ paths:
                   $ref: "#/components/schemas/ReceiverFile"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           description: Unknown receiver id
           content:
@@ -140,6 +293,7 @@ paths:
         dashboard's own JavaScript calls this (bearer-authenticated) right
         before navigating the browser to the matching GET below, which — as
         a plain page navigation — can't carry an Authorization header.
+        Requires the `download` permission (which implies `view`).
       security:
         - webUIBearer: []
       parameters:
@@ -169,6 +323,8 @@ paths:
                 type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           description: Unknown receiver id
           content:
@@ -230,7 +386,9 @@ paths:
       tags: [dashboard]
       summary: Recent dashboard login attempts
       operationId: getLoginEvents
-      description: The most recently recorded login attempts (up to 200), newest first.
+      description: >
+        The most recently recorded login attempts (up to 200), newest
+        first. Requires the `login-log` permission, independent of `view`.
       security:
         - webUIBearer: []
       responses:
@@ -244,13 +402,18 @@ paths:
                   $ref: "#/components/schemas/LoginEvent"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /api/download-events:
     get:
       tags: [dashboard]
       summary: Recent file download attempts
       operationId: getDownloadEvents
-      description: The most recently recorded download attempts (up to 200), newest first.
+      description: >
+        The most recently recorded download attempts (up to 200), newest
+        first. Requires the `download-log` permission, independent of
+        `view`/`download`.
       security:
         - webUIBearer: []
       responses:
@@ -264,6 +427,33 @@ paths:
                   $ref: "#/components/schemas/DownloadEvent"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/receiver-events:
+    get:
+      tags: [dashboard]
+      summary: Recent receiver API requests
+      operationId: getReceiverEvents
+      description: >
+        The most recently recorded receiver API requests (PUT or DELETE, up
+        to 200) across every receiver, win or lose, newest first. Requires
+        the `receiver-log` permission, independent of `view`.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Receiver events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ReceiverEvent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /login:
     get:
@@ -333,6 +523,85 @@ paths:
         "404":
           description: No username/password configured on this instance
 
+  /login/oidc:
+    get:
+      tags: [auth]
+      summary: Start an OIDC SSO login
+      operationId: getOIDCLogin
+      description: >
+        Only mounted when `webui.oidc.enabled:` is configured. Starts a new
+        in-flight login (tracked server-side by a `state` value) and
+        redirects the browser to the identity provider to authenticate.
+      security: []
+      parameters:
+        - name: next
+          in: query
+          required: false
+          description: Same-site path to redirect to once the login completes.
+          schema:
+            type: string
+      responses:
+        "303":
+          description: Redirect to the identity provider's authorization endpoint
+
+  /login/oidc/callback:
+    get:
+      tags: [auth]
+      summary: OIDC SSO callback
+      operationId: getOIDCCallback
+      description: >
+        Only mounted when `webui.oidc.enabled:` is configured. The redirect
+        target the identity provider sends the browser back to once
+        authenticated. On success it starts a dashboard session and serves
+        a small bridge page whose inline script stores the token
+        client-side (the way `POST /login`'s JSON response lets the
+        dashboard's own JS do directly) and navigates on to the original
+        `next`.
+      security: []
+      parameters:
+        - name: state
+          in: query
+          required: true
+          description: The in-flight login this callback corresponds to.
+          schema:
+            type: string
+        - name: code
+          in: query
+          required: false
+          description: Authorization code to exchange for tokens.
+          schema:
+            type: string
+        - name: error
+          in: query
+          required: false
+          description: Set by the provider instead of `code` if authentication failed there.
+          schema:
+            type: string
+        - name: error_description
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Bridge page (HTML) that stores the new session token and redirects
+          content:
+            text/html:
+              schema:
+                type: string
+        "400":
+          description: Unknown or expired login state
+          content:
+            text/plain:
+              schema:
+                type: string
+        "502":
+          description: The identity provider returned an error, or the code exchange/ID token verification failed
+          content:
+            text/plain:
+              schema:
+                type: string
+
   /api/logout:
     post:
       tags: [auth]
@@ -349,6 +618,278 @@ paths:
         "204":
           description: Token revoked (or there was none to revoke)
 
+  /api/users:
+    get:
+      tags: [admin]
+      summary: List dashboard accounts
+      operationId: listUsers
+      description: >
+        Every web UI account managed through the "Users" admin section.
+        Requires admin access (the config-file admin, or a session holding
+        the `admin` permission).
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [admin]
+      summary: Create a dashboard account
+      operationId: createUser
+      description: >
+        Requires admin access. Rejects a username already taken, one
+        reserved for the config-file admin, or an `oidc_username` already
+        linked to another account.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRequest"
+      responses:
+        "201":
+          description: User created
+        "400":
+          description: Missing username/password, or an unknown permission name
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Username already exists, or `oidc_username` is already linked to another account
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          description: User management requires the job state db, which isn't configured
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/users/{username}:
+    put:
+      tags: [admin]
+      summary: Update a dashboard account
+      operationId: updateUser
+      description: >
+        Updates the named account's permissions and OIDC identity link, and
+        its password too if `password` is non-empty (a blank `password`
+        leaves the stored one unchanged). Requires admin access.
+      security:
+        - webUIBearer: []
+      parameters:
+        - $ref: "#/components/parameters/Username"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRequest"
+      responses:
+        "204":
+          description: User updated
+        "400":
+          description: Unknown permission name
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Unknown username
+          content:
+            text/plain:
+              schema:
+                type: string
+        "409":
+          description: "`oidc_username` is already linked to another account"
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          description: User management requires the job state db, which isn't configured
+          content:
+            text/plain:
+              schema:
+                type: string
+    delete:
+      tags: [admin]
+      summary: Delete a dashboard account
+      operationId: deleteUser
+      description: Requires admin access.
+      security:
+        - webUIBearer: []
+      parameters:
+        - $ref: "#/components/parameters/Username"
+      responses:
+        "204":
+          description: User deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Unknown username
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          description: User management requires the job state db, which isn't configured
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/users/{username}/tokens:
+    get:
+      tags: [admin]
+      summary: List a dashboard account's issued long-lived API tokens
+      operationId: listUserTokens
+      description: >
+        Every long-lived API token issued for the named account, most
+        recently issued first. Requires admin access.
+      security:
+        - webUIBearer: []
+      parameters:
+        - $ref: "#/components/parameters/Username"
+      responses:
+        "200":
+          description: API tokens
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/APIToken"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [admin]
+      summary: Issue a long-lived API token for a dashboard account
+      operationId: issueUserToken
+      description: >
+        Mints a bearer token carrying the named account's currently granted
+        permissions, valid for the requested number of days — the same
+        kind of token an interactive login produces, for
+        scripts/automation that can't sit through one. The raw token is
+        returned once, here, and never again; only its `jti` is kept for
+        later revocation (see `DELETE
+        /api/users/{username}/tokens/{jti}`). Requires admin access.
+      security:
+        - webUIBearer: []
+      parameters:
+        - $ref: "#/components/parameters/Username"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                days:
+                  type: integer
+                  description: How many days the token should stay valid for (1-3650).
+              required: [days]
+      responses:
+        "200":
+          description: Token issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                  expires_at:
+                    type: string
+                    format: date-time
+                required: [token, expires_at]
+        "400":
+          description: days out of range, or invalid request body
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Unknown username
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          description: User management requires the job state db, which isn't configured
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/users/{username}/tokens/{jti}:
+    delete:
+      tags: [admin]
+      summary: Revoke a dashboard account's long-lived API token
+      operationId: revokeUserToken
+      description: >
+        Revoking an already-revoked token is a no-op, not an error.
+        Requires admin access.
+      security:
+        - webUIBearer: []
+      parameters:
+        - $ref: "#/components/parameters/Username"
+        - name: jti
+          in: path
+          required: true
+          description: The token's id, from the matching `GET .../tokens` listing.
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Token revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Unknown jti, or jti does not belong to username
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          description: User management requires the job state db, which isn't configured
+          content:
+            text/plain:
+              schema:
+                type: string
+
   /api/v1/objects/{id}/{key}:
     put:
       tags: [receiver-api]
@@ -364,6 +905,17 @@ paths:
       parameters:
         - $ref: "#/components/parameters/ReceiverId"
         - $ref: "#/components/parameters/ObjectKey"
+        - name: creationTime
+          in: query
+          required: false
+          description: >
+            RFC3339 timestamp of when the backup content was actually
+            produced, for retention purposes, rather than upload time. Must
+            be strictly before the upload time. Also stamped as the written
+            file's mtime.
+          schema:
+            type: string
+            format: date-time
       requestBody:
         required: true
         content:
@@ -474,6 +1026,13 @@ components:
       description: Object key, relative to the receiver's storage path (may contain "/").
       schema:
         type: string
+    Username:
+      name: username
+      in: path
+      required: true
+      description: A dashboard account's username, as created via `POST /api/users`.
+      schema:
+        type: string
 
   responses:
     Unauthorized:
@@ -482,8 +1041,185 @@ components:
         text/plain:
           schema:
             type: string
+    Forbidden:
+      description: Valid session, but missing the permission this endpoint requires
+      content:
+        text/plain:
+          schema:
+            type: string
 
   schemas:
+    Permission:
+      type: string
+      description: >
+        A single dashboard session capability. `download` implies `view`;
+        `admin` implies every other permission.
+      enum:
+        [
+          view,
+          download,
+          admin,
+          login-log,
+          download-log,
+          job-run-log,
+          target-run-log,
+          receiver-log,
+        ]
+
+    Meta:
+      type: object
+      description: Build/auth metadata for the dashboard shell (always public).
+      properties:
+        version:
+          type: string
+        commit:
+          type: string
+        auth_enabled:
+          type: boolean
+        oidc_enabled:
+          type: boolean
+      required: [version, commit, auth_enabled, oidc_enabled]
+
+    SessionInfo:
+      type: object
+      properties:
+        username:
+          type: string
+        permissions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Permission"
+        admin:
+          type: boolean
+          description: True if this session can reach the "Users" admin section.
+        oidc_enabled:
+          type: boolean
+      required: [permissions, admin, oidc_enabled]
+
+    JobRunEvent:
+      type: object
+      properties:
+        job_name:
+          type: string
+        start:
+          type: string
+          format: date-time
+        end:
+          type: string
+          format: date-time
+        success:
+          type: boolean
+        size:
+          type: integer
+          format: int64
+        error:
+          type: string
+      required: [job_name, start, end, success, size]
+
+    TargetRunEvent:
+      type: object
+      properties:
+        at:
+          type: string
+          format: date-time
+        job_name:
+          type: string
+        target:
+          type: string
+        success:
+          type: boolean
+        state:
+          $ref: "#/components/schemas/RunState"
+        error:
+          type: string
+      required: [at, job_name, target, success, state]
+
+    ReceiverEvent:
+      type: object
+      properties:
+        at:
+          type: string
+          format: date-time
+        receiver_id:
+          type: string
+        kind:
+          type: string
+          description: Which receiver API request this was.
+          enum: [receive, delete]
+        key:
+          type: string
+        size:
+          type: integer
+          format: int64
+        success:
+          type: boolean
+        error:
+          type: string
+      required: [at, receiver_id, kind, key, size, success]
+
+    User:
+      type: object
+      description: One dashboard account managed through the "Users" admin section.
+      properties:
+        username:
+          type: string
+        oidc_username:
+          type: string
+          description: Empty if this account has no linked/auto-provisioned OIDC identity.
+        permissions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Permission"
+        created_at:
+          type: string
+          format: date-time
+      required: [username, oidc_username, permissions, created_at]
+
+    UserRequest:
+      type: object
+      description: >
+        Request body for creating (`POST /api/users`) or updating (`PUT
+        /api/users/{username}`) a dashboard account. `username` is only
+        used (and required) when creating one. `password` is required when
+        creating one, but optional when updating one — omitted or blank
+        leaves the stored password unchanged. `oidc_username` is always a
+        full-replace value; blank explicitly clears the link.
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+        oidc_username:
+          type: string
+        permissions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Permission"
+      required: [permissions]
+
+    APIToken:
+      type: object
+      description: >
+        One long-lived API token issued for a dashboard account (see `POST
+        /api/users/{username}/tokens`). Never carries the token's own
+        signed value — only its `jti`, shown once at issuance and never
+        again.
+      properties:
+        jti:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        revoked:
+          type: boolean
+        revoked_at:
+          type: string
+          format: date-time
+      required: [jti, created_at, expires_at, revoked]
+
     RunState:
       type: string
       description: >
