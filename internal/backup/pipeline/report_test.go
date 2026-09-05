@@ -132,6 +132,76 @@ func TestBuildReportSummarizesReceiverEvents(t *testing.T) {
 	}
 }
 
+func TestBuildReportSummarizesJobRuns(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	db, err := store.Open(ctx, filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatalf("store.Open() error: %v", err)
+	}
+
+	t.Cleanup(func() { _ = db.Close() })
+
+	end := time.Date(2026, 8, 28, 7, 0, 0, 0, time.UTC)
+	start := end.Add(-24 * time.Hour)
+	inWindow := end.Add(-time.Hour)
+	outOfWindow := end.Add(-25 * time.Hour) // just outside the window
+
+	runs := []struct {
+		name         string
+		success      bool
+		endTime      time.Time
+		bytesWritten int64
+		errText      string
+	}{
+		{name: "job-a", success: true, endTime: inWindow, bytesWritten: 100},
+		{name: "job-a", success: true, endTime: inWindow, bytesWritten: 200},
+		{name: "job-a", success: false, endTime: inWindow, errText: "disk full"},
+		{name: "job-a", success: true, endTime: outOfWindow, bytesWritten: 999},
+	}
+
+	for _, r := range runs {
+		if err := db.SaveJobRun(ctx, r.name, "done", r.success, r.endTime.Add(-time.Minute), r.endTime, r.bytesWritten, r.errText); err != nil {
+			t.Fatalf("SaveJobRun() error: %v", err)
+		}
+	}
+
+	rc := &config.RunConfig{Jobs: []*config.Config{
+		{Name: "job-a"},
+		{Name: "job-b"}, // no runs at all in the window
+	}}
+
+	report := buildReport(ctx, rc, db, start, end, discardLogger)
+
+	if len(report.jobs) != 2 {
+		t.Fatalf("report.jobs = %+v, want 2 entries (one per configured job)", report.jobs)
+	}
+
+	byID := make(map[string]jobReportLine, len(report.jobs))
+	for _, j := range report.jobs {
+		byID[j.id] = j
+	}
+
+	want := map[string]jobReportLine{
+		"job-a": {id: "job-a", runsCompleted: 2, bytesWritten: 300, errors: 1},
+		"job-b": {id: "job-b"}, // no runs at all
+	}
+
+	for id, want := range want {
+		if got := byID[id]; got != want {
+			t.Errorf("%s summary = %+v, want %+v", id, got, want)
+		}
+	}
+
+	wantErrors := []store.JobRunErrorEvent{{At: inWindow, JobName: "job-a", Error: "disk full"}}
+	if !reflect.DeepEqual(report.jobErrors, wantErrors) {
+		t.Errorf("report.jobErrors = %+v, want %+v", report.jobErrors, wantErrors)
+	}
+}
+
 func TestBuildReportDetectsStaleReceiver(t *testing.T) {
 	t.Parallel()
 
@@ -196,7 +266,31 @@ func TestRenderReportBodyEmpty(t *testing.T) {
 
 	body := renderReportBody(reportContent{})
 
-	for _, want := range []string{"No receivers configured", "No receivers currently stale", "No errors recorded"} {
+	for _, want := range []string{
+		"No receivers configured", "No receivers currently stale", "No receiver errors recorded",
+		"No jobs configured", "No job errors recorded",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("renderReportBody() = %q, want it to contain %q", body, want)
+		}
+	}
+}
+
+func TestRenderReportBodyIncludesJobs(t *testing.T) {
+	t.Parallel()
+
+	report := reportContent{
+		jobs: []jobReportLine{
+			{id: "job-a", runsCompleted: 2, bytesWritten: 4096, errors: 1},
+		},
+		jobErrors: []store.JobRunErrorEvent{
+			{At: time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC), JobName: "job-a", Error: "boom"},
+		},
+	}
+
+	body := renderReportBody(report)
+
+	for _, want := range []string{"job-a", "2 run(s)", "boom"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("renderReportBody() = %q, want it to contain %q", body, want)
 		}

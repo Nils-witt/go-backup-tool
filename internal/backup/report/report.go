@@ -14,11 +14,12 @@ import (
 
 // FileReport is the top-level report: entry, configuring an optional
 // email: an overview of how many files each configured receiver received,
-// any receiver API errors, and any receiver currently stale, sent to an
-// operator's inbox via SMTP on a cron schedule. It's independent of the web UI
-// dashboard (webui.go) — useful for anyone monitoring receivers by inbox,
-// not just those watching the dashboard — but reads the same
-// receiver_events history (schedule_state.go) and on-disk receiver state
+// any receiver API errors, any receiver currently stale, how many runs each
+// configured job completed, and any job errors, sent to an operator's inbox
+// via SMTP on a cron schedule. It's independent of the web UI dashboard
+// (webui.go) — useful for anyone monitoring receivers/jobs by inbox, not
+// just those watching the dashboard — but reads the same receiver_events/
+// job_runs history (schedule_state.go) and on-disk receiver state
 // (receiver.go) the dashboard itself uses. Unset (the default) disables it.
 type FileReport struct {
 	Enabled bool     `yaml:"enabled"`

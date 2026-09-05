@@ -17,11 +17,11 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
-// RunReportLoop sends rc's receiver report on rc.Report's configured cron
-// schedule, in this process's local time zone, until ctx is done. A no-op if
-// the report isn't enabled. db may be nil (the state db couldn't be opened
-// at startup); the report is still sent, just without any receiver_events
-// history (see buildReport).
+// RunReportLoop sends rc's receiver/job report on rc.Report's configured
+// cron schedule, in this process's local time zone, until ctx is done. A
+// no-op if the report isn't enabled. db may be nil (the state db couldn't be
+// opened at startup); the report is still sent, just without any
+// receiver_events/job_runs history (see buildReport).
 func RunReportLoop(ctx context.Context, rc *config.RunConfig, db *store.Store, log *slog.Logger) {
 	if !rc.Report.Enabled {
 		return
@@ -67,6 +67,16 @@ type staleReceiverLine struct {
 	lastSeen   time.Time // zero if it has never received anything at all
 }
 
+// jobReportLine is one configured job's activity over a reportContent's
+// window, in the order its config file entry was listed — mirroring
+// receiverReportLine.
+type jobReportLine struct {
+	id            string
+	runsCompleted int
+	bytesWritten  int64
+	errors        int
+}
+
 // reportContent is the computed content of one report email, built by
 // buildReport and rendered to a message body by renderReportBody.
 type reportContent struct {
@@ -74,19 +84,36 @@ type reportContent struct {
 	receivers  []receiverReportLine
 	errors     []store.ReceiverErrorEvent
 	stale      []staleReceiverLine
+	jobs       []jobReportLine
+	jobErrors  []store.JobRunErrorEvent
 }
 
-// buildReport summarizes rc's configured receivers' activity in the window
-// from start to end: files received and errors from receiver_events (db,
-// skipped if nil), and current staleness read live from disk (see
+// buildReport summarizes rc's configured receivers' and jobs' activity in
+// the window from start to end: files received/runs completed and errors
+// from receiver_events/job_runs (db, skipped if nil), and current receiver
+// staleness read live from disk (see backup.LastReceivedAt), mirroring the
+// dashboard's own annotateReceiverStaleness so the two never disagree. A
+// query failure is logged and leaves that section empty rather than failing
+// the whole report — a partial report is better than none, matching this
+// codebase's usual failure handling.
+func buildReport(ctx context.Context, rc *config.RunConfig, db *store.Store, start, end time.Time, log *slog.Logger) reportContent {
+	report := reportContent{start: start, end: end}
+
+	report.receivers, report.stale, report.errors = buildReceiverReport(ctx, rc, db, start, end, log)
+	report.jobs, report.jobErrors = buildJobReport(ctx, rc, db, start, end, log)
+
+	return report
+}
+
+// buildReceiverReport summarizes rc's configured receivers' activity in the
+// window from start to end: files received and errors from receiver_events
+// (db, skipped if nil), and current staleness read live from disk (see
 // backup.LastReceivedAt), mirroring the dashboard's own
 // annotateReceiverStaleness so the two never disagree. A query failure is
 // logged and leaves that section empty rather than failing the whole
 // report — a partial report is better than none, matching this codebase's
 // usual failure handling.
-func buildReport(ctx context.Context, rc *config.RunConfig, db *store.Store, start, end time.Time, log *slog.Logger) reportContent {
-	report := reportContent{start: start, end: end}
-
+func buildReceiverReport(ctx context.Context, rc *config.RunConfig, db *store.Store, start, end time.Time, log *slog.Logger) ([]receiverReportLine, []staleReceiverLine, []store.ReceiverErrorEvent) {
 	ids := make([]string, 0, len(rc.Receivers))
 	for id := range rc.Receivers {
 		ids = append(ids, id)
@@ -95,6 +122,8 @@ func buildReport(ctx context.Context, rc *config.RunConfig, db *store.Store, sta
 	sort.Strings(ids)
 
 	byID := make(map[string]store.ReceiverDaySummary, len(ids))
+
+	var errs []store.ReceiverErrorEvent
 
 	if db != nil {
 		summaries, err := db.SummarizeReceiverEvents(ctx, start, end)
@@ -106,17 +135,21 @@ func buildReport(ctx context.Context, rc *config.RunConfig, db *store.Store, sta
 			byID[s.ReceiverID] = s
 		}
 
-		errs, err := db.ListReceiverErrorEvents(ctx, start, end)
+		errs, err = db.ListReceiverErrorEvents(ctx, start, end)
 		if err != nil {
 			log.Warn("daily report: reading receiver error events failed", "err", err)
-		} else {
-			report.errors = errs
+
+			errs = nil
 		}
 	}
 
+	var receivers []receiverReportLine
+
+	var stale []staleReceiverLine
+
 	for _, id := range ids {
 		s := byID[id]
-		report.receivers = append(report.receivers, receiverReportLine{
+		receivers = append(receivers, receiverReportLine{
 			id: id, filesReceived: s.FilesReceived, bytesReceived: s.BytesReceived, errors: s.Errors,
 		})
 
@@ -132,18 +165,64 @@ func buildReport(ctx context.Context, rc *config.RunConfig, db *store.Store, sta
 		}
 
 		if ok && time.Since(lastSeen) > recv.StaleAfter {
-			report.stale = append(report.stale, staleReceiverLine{id: id, staleAfter: recv.StaleAfter, lastSeen: lastSeen})
+			stale = append(stale, staleReceiverLine{id: id, staleAfter: recv.StaleAfter, lastSeen: lastSeen})
 		}
 	}
 
-	return report
+	return receivers, stale, errs
+}
+
+// buildJobReport summarizes rc's configured jobs' activity in the window
+// from start to end: runs completed and errors from job_runs (db, skipped
+// if nil), mirroring buildReceiverReport. A query failure is logged and
+// leaves that section empty rather than failing the whole report.
+func buildJobReport(ctx context.Context, rc *config.RunConfig, db *store.Store, start, end time.Time, log *slog.Logger) ([]jobReportLine, []store.JobRunErrorEvent) {
+	ids := make([]string, 0, len(rc.Jobs))
+	for _, job := range rc.Jobs {
+		ids = append(ids, job.Name)
+	}
+
+	sort.Strings(ids)
+
+	byID := make(map[string]store.JobRunDaySummary, len(ids))
+
+	var errs []store.JobRunErrorEvent
+
+	if db != nil {
+		summaries, err := db.SummarizeJobRuns(ctx, start, end)
+		if err != nil {
+			log.Warn("daily report: summarizing job runs failed", "err", err)
+		}
+
+		for _, s := range summaries {
+			byID[s.JobName] = s
+		}
+
+		errs, err = db.ListJobRunErrorEvents(ctx, start, end)
+		if err != nil {
+			log.Warn("daily report: reading job run error events failed", "err", err)
+
+			errs = nil
+		}
+	}
+
+	var jobs []jobReportLine
+
+	for _, id := range ids {
+		s := byID[id]
+		jobs = append(jobs, jobReportLine{
+			id: id, runsCompleted: s.RunsCompleted, bytesWritten: s.BytesWritten, errors: s.Errors,
+		})
+	}
+
+	return jobs, errs
 }
 
 // renderReportBody renders report as a plain-text email body.
 func renderReportBody(report reportContent) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "go-backup-tool receiver report\n")
+	fmt.Fprintf(&b, "go-backup-tool report\n")
 	fmt.Fprintf(&b, "Period: %s to %s (UTC)\n\n", report.start.UTC().Format(time.RFC3339), report.end.UTC().Format(time.RFC3339))
 
 	if len(report.receivers) == 0 {
@@ -176,12 +255,36 @@ func renderReportBody(report reportContent) string {
 	}
 
 	if len(report.errors) == 0 {
-		b.WriteString("No errors recorded.\n")
+		b.WriteString("No receiver errors recorded.\n\n")
 	} else {
-		b.WriteString("Errors:\n")
+		b.WriteString("Receiver errors:\n")
 
 		for _, e := range report.errors {
 			fmt.Fprintf(&b, "  [%s] %s %s %q: %s\n", e.At.UTC().Format(time.RFC3339), e.ReceiverID, e.Kind, e.Key, e.Error)
+		}
+
+		b.WriteString("\n")
+	}
+
+	if len(report.jobs) == 0 {
+		b.WriteString("No jobs configured.\n\n")
+	} else {
+		b.WriteString("Runs completed per job:\n")
+
+		for _, j := range report.jobs {
+			fmt.Fprintf(&b, "  %-24s %5d run(s), %10s, %d error(s)\n", j.id, j.runsCompleted, formatReportBytes(j.bytesWritten), j.errors)
+		}
+
+		b.WriteString("\n")
+	}
+
+	if len(report.jobErrors) == 0 {
+		b.WriteString("No job errors recorded.\n")
+	} else {
+		b.WriteString("Job errors:\n")
+
+		for _, e := range report.jobErrors {
+			fmt.Fprintf(&b, "  [%s] %s: %s\n", e.At.UTC().Format(time.RFC3339), e.JobName, e.Error)
 		}
 	}
 
@@ -219,7 +322,9 @@ func sendReport(ctx context.Context, rc *config.RunConfig, db *store.Store, star
 		return
 	}
 
-	log.Info("report sent", "to", rc.Report.To, "receivers", len(report.receivers), "errors", len(report.errors), "stale", len(report.stale))
+	log.Info("report sent", "to", rc.Report.To,
+		"receivers", len(report.receivers), "errors", len(report.errors), "stale", len(report.stale),
+		"jobs", len(report.jobs), "jobErrors", len(report.jobErrors))
 }
 
 // dialSMTP connects to cfg's mail server and returns a ready-to-use

@@ -192,6 +192,68 @@ func (s *Store) ListJobRunEvents(ctx context.Context, limit int) ([]JobRunEvent,
 	return events, nil
 }
 
+// JobRunDaySummary is one job's activity over a time window, as returned by
+// SummarizeJobRuns for a daily report: how many runs completed successfully,
+// their total bytes written, and how many runs (of either outcome) failed.
+type JobRunDaySummary struct {
+	JobName       string
+	RunsCompleted int
+	BytesWritten  int64
+	Errors        int
+}
+
+// SummarizeJobRuns returns, in job name order, every job name's
+// JobRunDaySummary for the runs completed (endTime) in [start, end). Stays
+// raw SQL: the conditional-aggregation columns (SUM(CASE WHEN ...)) have no
+// GORM chain equivalent, mirroring SummarizeReceiverEvents.
+func (s *Store) SummarizeJobRuns(ctx context.Context, start, end time.Time) ([]JobRunDaySummary, error) {
+	const query = `SELECT name AS job_name,
+		SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS runs_completed,
+		SUM(CASE WHEN success = 1 THEN size ELSE 0 END) AS bytes_written,
+		SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS errors
+		FROM job_runs
+		WHERE endTime >= ? AND endTime < ?
+		GROUP BY name
+		ORDER BY name`
+
+	var out []JobRunDaySummary
+
+	if err := s.db.WithContext(ctx).Raw(query, start.UTC(), end.UTC()).Scan(&out).Error; err != nil {
+		return nil, fmt.Errorf("summarizing job runs: %w", err)
+	}
+
+	return out, nil
+}
+
+// JobRunErrorEvent is one failed job run in a time window, as returned by
+// ListJobRunErrorEvents for a daily report's error listing.
+type JobRunErrorEvent struct {
+	At      time.Time
+	JobName string
+	Error   string
+}
+
+// ListJobRunErrorEvents returns every failed job run completed (endTime) in
+// [start, end), oldest first, mirroring ListReceiverErrorEvents.
+func (s *Store) ListJobRunErrorEvents(ctx context.Context, start, end time.Time) ([]JobRunErrorEvent, error) {
+	var rows []jobRunModel
+
+	err := s.db.WithContext(ctx).
+		Where("success = 0 AND endTime >= ? AND endTime < ?", start.UTC(), end.UTC()).
+		Order("endTime ASC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("reading job run error events: %w", err)
+	}
+
+	events := make([]JobRunErrorEvent, len(rows))
+	for i, m := range rows {
+		events[i] = JobRunErrorEvent{At: m.EndTime.Time, JobName: m.Name, Error: m.Error.String}
+	}
+
+	return events, nil
+}
+
 // maxTargetRunsPerTarget caps how many target_runs rows SaveTargetRun
 // retains per job name/target pair, so the table doesn't grow unbounded
 // over a target's lifetime.
