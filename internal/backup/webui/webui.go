@@ -97,10 +97,10 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 	// api additionally requires the session hold permission.PermissionView (see
 	// requirePermission) — every endpoint below except /api/session (any
 	// authenticated session, regardless of its permissions, needs to be
-	// able to read its own), the login/download history endpoints (see
-	// apiLoginLog/apiDownloadLog below, their own dedicated permissions
-	// instead), and the "Users" admin endpoints (see admin below,
-	// requireAdmin's own gate instead).
+	// able to read its own), the login/download/job-run/target-run history
+	// endpoints (see apiLoginLog/apiDownloadLog/apiJobRunLog/apiTargetRunLog
+	// below, their own dedicated permissions instead), and the "Users"
+	// admin endpoints (see admin below, requireAdmin's own gate instead).
 	api := func(h http.HandlerFunc) http.HandlerFunc {
 		return authOnly(requirePermission(authEnabled, uiSessions, permission.PermissionView, h))
 	}
@@ -126,6 +126,19 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 		return authOnly(requirePermission(authEnabled, uiSessions, permission.PermissionViewDownloadLog, h))
 	}
 
+	// apiJobRunLog and apiTargetRunLog gate the job/target run log endpoints
+	// on their own dedicated permissions (see
+	// permission.PermissionViewJobRunLog/PermissionViewTargetRunLog) rather
+	// than api's permission.PermissionView — a session can see the rest of
+	// the dashboard without being able to see either run log, and vice
+	// versa.
+	apiJobRunLog := func(h http.HandlerFunc) http.HandlerFunc {
+		return authOnly(requirePermission(authEnabled, uiSessions, permission.PermissionViewJobRunLog, h))
+	}
+	apiTargetRunLog := func(h http.HandlerFunc) http.HandlerFunc {
+		return authOnly(requirePermission(authEnabled, uiSessions, permission.PermissionViewTargetRunLog, h))
+	}
+
 	// admin requires the session belong to the config-file admin (see
 	// requireAdmin), gating the "Users" admin section's own endpoints.
 	admin := func(h http.HandlerFunc) http.HandlerFunc {
@@ -141,8 +154,8 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 	mux.HandleFunc("GET /api/logs", api(handleLogs(logs)))
 	mux.HandleFunc("GET /api/identity", api(handleIdentity(identity)))
 	mux.HandleFunc("GET /api/receivers", api(handleReceiverStatus(receivers, receiverStore, log)))
-	mux.HandleFunc("GET /api/job-runs", api(handleJobRunEvents(db, log)))
-	mux.HandleFunc("GET /api/target-runs", api(handleTargetRunEvents(db, log)))
+	mux.HandleFunc("GET /api/job-runs", apiJobRunLog(handleJobRunEvents(db, log)))
+	mux.HandleFunc("GET /api/target-runs", apiTargetRunLog(handleTargetRunEvents(db, log)))
 	mux.HandleFunc("POST /api/jobs/{name}/retry", admin(handleRetryFailedTargets(jobsByName, statusStore, runner, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/files", api(handleReceiverFiles(receivers, log)))
 	mux.HandleFunc("POST /api/receivers/{id}/download/{key...}", apiDownload(handleMintDownloadTicket(receivers, downloadTickets, uiSessions)))
@@ -980,7 +993,7 @@ func handleWebUILogin(username, password string, showSSO bool, sessions *session
 		// canDownload), so a session meant to look and behave like full
 		// access needs every bit set explicitly, matching handleSessionInfo's
 		// own authEnabled-false case below.
-		perm := permission.PermissionView | permission.PermissionDownload | permission.PermissionAdmin | permission.PermissionViewLoginLog | permission.PermissionViewDownloadLog
+		perm := permission.PermissionView | permission.PermissionDownload | permission.PermissionAdmin | permission.PermissionViewLoginLog | permission.PermissionViewDownloadLog | permission.PermissionViewJobRunLog | permission.PermissionViewTargetRunLog
 
 		if !success && db != nil {
 			dbPerm, ok, err := db.VerifyUser(r.Context(), submittedUser, submittedPass)
@@ -1215,10 +1228,11 @@ func handleAPILogout(sessions *sessionStore, db *store.Store, log *slog.Logger) 
 // handleSessionInfo), for the dashboard's own JavaScript to decide what to
 // show: a download link/button only when Permissions includes "download",
 // the login history only when Permissions includes "login-log", the
-// download history only when Permissions includes "download-log", the
-// "Users" admin section only when Admin, and its "OIDC users" listing
-// (permission overrides for SSO logins) only when both Admin and
-// OIDCEnabled.
+// download history only when Permissions includes "download-log", the job
+// run log only when Permissions includes "job-run-log", the target run log
+// only when Permissions includes "target-run-log", the "Users" admin
+// section only when Admin, and its "OIDC users" listing (permission
+// overrides for SSO logins) only when both Admin and OIDCEnabled.
 type sessionInfoJSON struct {
 	Username    string   `json:"username"`
 	Permissions []string `json:"permissions"`
@@ -1238,7 +1252,7 @@ type sessionInfoJSON struct {
 func handleSessionInfo(sessions *sessionStore, authEnabled bool, adminUsername string, oidcEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !authEnabled {
-			writeJSON(w, sessionInfoJSON{Permissions: (permission.PermissionView | permission.PermissionDownload | permission.PermissionAdmin | permission.PermissionViewLoginLog | permission.PermissionViewDownloadLog).Names(), Admin: true, OIDCEnabled: oidcEnabled})
+			writeJSON(w, sessionInfoJSON{Permissions: (permission.PermissionView | permission.PermissionDownload | permission.PermissionAdmin | permission.PermissionViewLoginLog | permission.PermissionViewDownloadLog | permission.PermissionViewJobRunLog | permission.PermissionViewTargetRunLog).Names(), Admin: true, OIDCEnabled: oidcEnabled})
 			return
 		}
 
@@ -1910,9 +1924,11 @@ func requireWebUISession(authEnabled bool, sessions *sessionStore, next http.Han
 // that session to hold required — reporting 403 rather than
 // requireWebUISession's 401, since the request is authenticated, just not
 // authorized for this endpoint. required must be one of
-// permission.PermissionDownload, permission.PermissionViewLoginLog, or
-// permission.PermissionViewDownloadLog (checked via the matching CanDownload/
-// CanViewLoginLog/CanViewDownloadLog method); anything else, including
+// permission.PermissionDownload, permission.PermissionViewLoginLog,
+// permission.PermissionViewDownloadLog, permission.PermissionViewJobRunLog,
+// or permission.PermissionViewTargetRunLog (checked via the matching
+// CanDownload/CanViewLoginLog/CanViewDownloadLog/CanViewJobRunLog/
+// CanViewTargetRunLog method); anything else, including
 // permission.PermissionView, falls back to CanView. authEnabled false skips the
 // check entirely, matching requireWebUISession's own bypass, since there's
 // no session to hold a permission in that case.
@@ -1930,6 +1946,10 @@ func requirePermission(authEnabled bool, sessions *sessionStore, required permis
 				allowed = perm.CanViewLoginLog()
 			case permission.PermissionViewDownloadLog:
 				allowed = perm.CanViewDownloadLog()
+			case permission.PermissionViewJobRunLog:
+				allowed = perm.CanViewJobRunLog()
+			case permission.PermissionViewTargetRunLog:
+				allowed = perm.CanViewTargetRunLog()
 			case permission.PermissionView, permission.PermissionAdmin:
 				allowed = perm.CanView()
 			default:

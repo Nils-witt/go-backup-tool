@@ -412,11 +412,12 @@ type fileWebUIOIDC struct {
 	Scopes []string `yaml:"scopes"`
 
 	// DefaultPermissions lists the dashboard permissions ("view", "download",
-	// "admin", "login-log", and/or "download-log") granted to every session
-	// an SSO login starts — see OIDCSettings.DefaultPermissions. Unset
-	// defaults to "view" and "download", matching the full access every SSO
-	// login had before per-user permissions existed; "admin", "login-log",
-	// and "download-log" are never defaulted in.
+	// "admin", "login-log", "download-log", "job-run-log", and/or
+	// "target-run-log") granted to every session an SSO login starts — see
+	// OIDCSettings.DefaultPermissions. Unset defaults to "view" and
+	// "download", matching the full access every SSO login had before
+	// per-user permissions existed; "admin", "login-log", "download-log",
+	// "job-run-log", and "target-run-log" are never defaulted in.
 	DefaultPermissions []string `yaml:"default-permissions"`
 }
 

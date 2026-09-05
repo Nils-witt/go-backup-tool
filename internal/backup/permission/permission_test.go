@@ -74,6 +74,38 @@ func TestPermissionCanViewLoginLogCanViewDownloadLog(t *testing.T) {
 	}
 }
 
+func TestPermissionCanViewJobRunLogCanViewTargetRunLog(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		perm          Permission
+		wantJobRunLog bool
+		wantTargetRun bool
+	}{
+		{"none", 0, false, false},
+		{"view alone does not grant either run log", PermissionView, false, false},
+		{"job run log only", PermissionViewJobRunLog, true, false},
+		{"target run log only", PermissionViewTargetRunLog, false, true},
+		{"both run logs", PermissionViewJobRunLog | PermissionViewTargetRunLog, true, true},
+		{"admin implies both run logs", PermissionAdmin, true, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := tt.perm.CanViewJobRunLog(); got != tt.wantJobRunLog {
+				t.Errorf("CanViewJobRunLog() = %v, want %v", got, tt.wantJobRunLog)
+			}
+
+			if got := tt.perm.CanViewTargetRunLog(); got != tt.wantTargetRun {
+				t.Errorf("CanViewTargetRunLog() = %v, want %v", got, tt.wantTargetRun)
+			}
+		})
+	}
+}
+
 func TestPermissionNames(t *testing.T) {
 	t.Parallel()
 
@@ -90,6 +122,9 @@ func TestPermissionNames(t *testing.T) {
 		{PermissionViewLoginLog, []string{"login-log"}},
 		{PermissionViewDownloadLog, []string{"download-log"}},
 		{PermissionViewLoginLog | PermissionViewDownloadLog, []string{"login-log", "download-log"}},
+		{PermissionViewJobRunLog, []string{"job-run-log"}},
+		{PermissionViewTargetRunLog, []string{"target-run-log"}},
+		{PermissionViewJobRunLog | PermissionViewTargetRunLog, []string{"job-run-log", "target-run-log"}},
 	}
 
 	for _, tt := range tests {
@@ -102,12 +137,12 @@ func TestPermissionNames(t *testing.T) {
 func TestParsePermissionsRoundTripsNames(t *testing.T) {
 	t.Parallel()
 
-	perm, err := ParsePermissions([]string{"view", "download", "admin", "login-log", "download-log"})
+	perm, err := ParsePermissions([]string{"view", "download", "admin", "login-log", "download-log", "job-run-log", "target-run-log"})
 	if err != nil {
 		t.Fatalf("ParsePermissions() unexpected error: %v", err)
 	}
 
-	if want := PermissionView | PermissionDownload | PermissionAdmin | PermissionViewLoginLog | PermissionViewDownloadLog; perm != want {
+	if want := PermissionView | PermissionDownload | PermissionAdmin | PermissionViewLoginLog | PermissionViewDownloadLog | PermissionViewJobRunLog | PermissionViewTargetRunLog; perm != want {
 		t.Errorf("ParsePermissions() = %v, want %v", perm, want)
 	}
 }

@@ -142,5 +142,13 @@ export interface DownloadTicketJSON {
   ticket: string;
 }
 
-export const PERMISSIONS = ["view", "download", "login-log", "download-log", "admin"] as const;
+export const PERMISSIONS = [
+  "view",
+  "download",
+  "login-log",
+  "download-log",
+  "job-run-log",
+  "target-run-log",
+  "admin",
+] as const;
 export type Permission = (typeof PERMISSIONS)[number];

@@ -1,15 +1,20 @@
 import type { JobRunEventJSON } from "../api/types";
-import { usePoll } from "../hooks/usePoll";
+import { usePermissionPoll } from "../hooks/usePermissionPoll";
+import { useSession } from "../context/SessionContext";
 import { JobRunLogSection } from "../components/JobRunLogSection";
 import { PageHeader } from "../components/PageHeader";
+import { RequirePermission } from "../components/RequirePermission";
 
 export function JobRunsPage() {
-  const { data: events } = usePoll<JobRunEventJSON>("/api/job-runs");
+  const session = useSession();
+  const events = usePermissionPoll<JobRunEventJSON>("/api/job-runs", session.canViewJobRunLog);
 
   return (
     <>
       <PageHeader title="Job runs" subtitle="History of completed backup job runs." />
-      <JobRunLogSection events={events} />
+      <RequirePermission test={(s) => s.canViewJobRunLog}>
+        <JobRunLogSection events={events} />
+      </RequirePermission>
     </>
   );
 }

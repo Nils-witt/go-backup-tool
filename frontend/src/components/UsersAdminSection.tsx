@@ -27,6 +27,8 @@ const PERM_COLUMNS = [
   { key: "download", label: "Download" },
   { key: "login-log", label: "Login log" },
   { key: "download-log", label: "Download log" },
+  { key: "job-run-log", label: "Job run log" },
+  { key: "target-run-log", label: "Target run log" },
   { key: "admin", label: "Admin" },
 ];
 
@@ -49,7 +51,9 @@ export function UsersAdminSection() {
     apiFetchJSON<WebUIUserJSON[]>("/api/users")
       .then((u) => {
         setUsers(u || []);
-        setOidcUsernameDrafts(Object.fromEntries((u || []).map((x) => [x.username, x.oidc_username])));
+        setOidcUsernameDrafts(
+          Object.fromEntries((u || []).map((x) => [x.username, x.oidc_username])),
+        );
       })
       .catch(() => {});
   }
@@ -87,7 +91,10 @@ export function UsersAdminSection() {
     )
       .then(() => loadUsers())
       .catch((err: Error) => {
-        setOidcUsernameErrors((prev) => ({ ...prev, [u.username]: err.message || "linking oidc identity failed" }));
+        setOidcUsernameErrors((prev) => ({
+          ...prev,
+          [u.username]: err.message || "linking oidc identity failed",
+        }));
         setOidcUsernameDrafts((prev) => ({ ...prev, [u.username]: u.oidc_username }));
       });
   }
@@ -270,6 +277,8 @@ function AddUserForm({ onAdded }: { onAdded: () => void }) {
   const [download, setDownload] = useState(false);
   const [loginLog, setLoginLog] = useState(false);
   const [downloadLog, setDownloadLog] = useState(false);
+  const [jobRunLog, setJobRunLog] = useState(false);
+  const [targetRunLog, setTargetRunLog] = useState(false);
   const [admin, setAdmin] = useState(false);
   const [error, setError] = useState("");
 
@@ -282,6 +291,8 @@ function AddUserForm({ onAdded }: { onAdded: () => void }) {
     if (download) perms.push("download");
     if (loginLog) perms.push("login-log");
     if (downloadLog) perms.push("download-log");
+    if (jobRunLog) perms.push("job-run-log");
+    if (targetRunLog) perms.push("target-run-log");
     if (admin) perms.push("admin");
 
     apiFetchOK(
@@ -300,6 +311,8 @@ function AddUserForm({ onAdded }: { onAdded: () => void }) {
         setDownload(false);
         setLoginLog(false);
         setDownloadLog(false);
+        setJobRunLog(false);
+        setTargetRunLog(false);
         setAdmin(false);
         onAdded();
       })
@@ -362,6 +375,26 @@ function AddUserForm({ onAdded }: { onAdded: () => void }) {
             />
           }
           label="Download log"
+        />
+        <FormControlLabel
+          control={
+            <Checkbox
+              size="small"
+              checked={jobRunLog}
+              onChange={(e) => setJobRunLog(e.target.checked)}
+            />
+          }
+          label="Job run log"
+        />
+        <FormControlLabel
+          control={
+            <Checkbox
+              size="small"
+              checked={targetRunLog}
+              onChange={(e) => setTargetRunLog(e.target.checked)}
+            />
+          }
+          label="Target run log"
         />
         <FormControlLabel
           control={

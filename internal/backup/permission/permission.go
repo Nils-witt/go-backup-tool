@@ -1,6 +1,6 @@
 // Package permission defines the web UI dashboard's session permission
-// bitmask (view/download/admin/login-log/download-log) and its config-file
-// and admin-API name parsing.
+// bitmask (view/download/admin/login-log/download-log/job-run-log/
+// target-run-log) and its config-file and admin-API name parsing.
 package permission
 
 import (
@@ -22,8 +22,10 @@ const (
 	// status, file listings, and application log views — everything
 	// StartWebUI serves under its api(...) wrapper except minting a
 	// download ticket, viewing the login history
-	// (PermissionViewLoginLog), and viewing the download history
-	// (PermissionViewDownloadLog) — those three are granted separately.
+	// (PermissionViewLoginLog), viewing the download history
+	// (PermissionViewDownloadLog), viewing the job run log
+	// (PermissionViewJobRunLog), and viewing the target run log
+	// (PermissionViewTargetRunLog) — those four are granted separately.
 	PermissionView Permission = 1 << iota
 
 	// PermissionDownload lets a session mint a download ticket and pull a
@@ -40,10 +42,12 @@ const (
 	// single config-file admin (webui.username/webui.password), now
 	// assignable to a "Users" admin-managed account or an OIDC identity
 	// instead. It implies PermissionView, PermissionDownload,
-	// PermissionViewLoginLog, and PermissionViewDownloadLog (see
-	// CanView/CanDownload/CanViewLoginLog/CanViewDownloadLog) — there'd be
-	// no way to administer the dashboard's users without also being able to
-	// use the dashboard itself.
+	// PermissionViewLoginLog, PermissionViewDownloadLog,
+	// PermissionViewJobRunLog, and PermissionViewTargetRunLog (see
+	// CanView/CanDownload/CanViewLoginLog/CanViewDownloadLog/
+	// CanViewJobRunLog/CanViewTargetRunLog) — there'd be no way to
+	// administer the dashboard's users without also being able to use the
+	// dashboard itself.
 	PermissionAdmin
 
 	// PermissionViewLoginLog lets a session see the dashboard's login
@@ -59,6 +63,21 @@ const (
 	// PermissionView/PermissionDownload, so a session holding only those
 	// can't see it; implied by PermissionAdmin (see CanViewDownloadLog).
 	PermissionViewDownloadLog
+
+	// PermissionViewJobRunLog lets a session see the dashboard's job run
+	// log (see handleJobRunEvents in webui.go) — the history of completed
+	// backup job runs across every job. Granted independently of
+	// PermissionView, so a session holding only PermissionView can't see
+	// it; implied by PermissionAdmin (see CanViewJobRunLog).
+	PermissionViewJobRunLog
+
+	// PermissionViewTargetRunLog lets a session see the dashboard's target
+	// run log (see handleTargetRunEvents in webui.go) — the history of
+	// completed backup job target runs across every job. Granted
+	// independently of PermissionView, so a session holding only
+	// PermissionView can't see it; implied by PermissionAdmin (see
+	// CanViewTargetRunLog).
+	PermissionViewTargetRunLog
 )
 
 // permissionNames maps each individual bit to its wire/config name, in
@@ -75,6 +94,8 @@ var permissionNames = []struct {
 	{PermissionAdmin, "admin"},
 	{PermissionViewLoginLog, "login-log"},
 	{PermissionViewDownloadLog, "download-log"},
+	{PermissionViewJobRunLog, "job-run-log"},
+	{PermissionViewTargetRunLog, "target-run-log"},
 }
 
 // CanView reports whether p includes the ability to view dashboard data —
@@ -108,6 +129,20 @@ func (p Permission) CanViewLoginLog() bool {
 // by PermissionAdmin.
 func (p Permission) CanViewDownloadLog() bool {
 	return p&(PermissionViewDownloadLog|PermissionAdmin) != 0
+}
+
+// CanViewJobRunLog reports whether p includes the ability to see the
+// dashboard's job run log — either granted directly, or implied by
+// PermissionAdmin.
+func (p Permission) CanViewJobRunLog() bool {
+	return p&(PermissionViewJobRunLog|PermissionAdmin) != 0
+}
+
+// CanViewTargetRunLog reports whether p includes the ability to see the
+// dashboard's target run log — either granted directly, or implied by
+// PermissionAdmin.
+func (p Permission) CanViewTargetRunLog() bool {
+	return p&(PermissionViewTargetRunLog|PermissionAdmin) != 0
 }
 
 // Names returns the individually-granted permission names in p, in

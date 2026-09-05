@@ -9,6 +9,8 @@ export interface SessionInfoState {
   canRetry: boolean;
   canViewLoginLog: boolean;
   canViewDownloadLog: boolean;
+  canViewJobRunLog: boolean;
+  canViewTargetRunLog: boolean;
 }
 
 // useSessionInfo fetches GET /api/session once (a session's own permissions
@@ -45,5 +47,7 @@ export function useSessionInfo(): SessionInfoState {
     canRetry: loaded && !!info?.admin,
     canViewLoginLog: permissions.includes("login-log"),
     canViewDownloadLog: permissions.includes("download-log"),
+    canViewJobRunLog: permissions.includes("job-run-log"),
+    canViewTargetRunLog: permissions.includes("target-run-log"),
   };
 }

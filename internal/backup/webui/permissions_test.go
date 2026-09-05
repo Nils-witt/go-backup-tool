@@ -342,12 +342,12 @@ func TestHandleSessionInfoAuthDisabledReportsFullAccess(t *testing.T) {
 		t.Error("Admin = false with auth disabled, want true (everything's open anyway)")
 	}
 
-	if len(body.Permissions) != 5 {
-		t.Errorf("Permissions = %v, want view, download, admin, login-log, and download-log", body.Permissions)
-	}
-
 	if !body.OIDCEnabled {
 		t.Error("OIDCEnabled = false, want true (passed through from StartWebUI's oidcAuth != nil)")
+	}
+
+	if len(body.Permissions) != 7 {
+		t.Errorf("Permissions = %v, want view, download, admin, login-log, download-log, job-run-log, and target-run-log", body.Permissions)
 	}
 }
 
@@ -383,13 +383,13 @@ func TestHandleWebUILoginConfigAdminGrantsEveryPermissionBit(t *testing.T) {
 
 	perm := sessions.permissionsFor(&http.Request{Header: http.Header{"Authorization": {"Bearer " + body.Token}}})
 
-	want := permission.PermissionView | permission.PermissionDownload | permission.PermissionAdmin | permission.PermissionViewLoginLog | permission.PermissionViewDownloadLog
+	want := permission.PermissionView | permission.PermissionDownload | permission.PermissionAdmin | permission.PermissionViewLoginLog | permission.PermissionViewDownloadLog | permission.PermissionViewJobRunLog | permission.PermissionViewTargetRunLog
 	if perm != want {
 		t.Errorf("session permissions = %v, want %v", perm, want)
 	}
 
-	if names := perm.Names(); len(names) != 5 {
-		t.Errorf("session permission names = %v, want all 5 permissions listed individually", names)
+	if names := perm.Names(); len(names) != 7 {
+		t.Errorf("session permission names = %v, want all 7 permissions listed individually", names)
 	}
 }
 

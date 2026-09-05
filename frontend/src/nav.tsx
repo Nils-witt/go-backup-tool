@@ -37,8 +37,18 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "Logs",
     items: [
       { to: "/logs", label: "Live logs", icon: <TerminalIcon /> },
-      { to: "/logs/job-runs", label: "Job runs", icon: <HistoryIcon /> },
-      { to: "/logs/target-runs", label: "Target runs", icon: <PlaylistAddCheckIcon /> },
+      {
+        to: "/logs/job-runs",
+        label: "Job runs",
+        icon: <HistoryIcon />,
+        visible: (s) => s.canViewJobRunLog,
+      },
+      {
+        to: "/logs/target-runs",
+        label: "Target runs",
+        icon: <PlaylistAddCheckIcon />,
+        visible: (s) => s.canViewTargetRunLog,
+      },
       {
         to: "/logs/login",
         label: "Login log",

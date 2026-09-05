@@ -499,15 +499,17 @@ func webUIGetStatus(t *testing.T, client *http.Client, srv *Server, token, path 
 
 // TestStartWebUILoginLogAndDownloadLogRequireDedicatedPermission is an
 // end-to-end check, through the real mux StartWebUI wires up, that
-// /api/login-events and /api/download-events are gated on
-// permission.PermissionViewLoginLog/PermissionViewDownloadLog rather than the
+// /api/login-events, /api/download-events, /api/job-runs, and
+// /api/target-runs are each gated on their own dedicated permission
+// (permission.PermissionViewLoginLog/PermissionViewDownloadLog/
+// PermissionViewJobRunLog/PermissionViewTargetRunLog) rather than the
 // general permission.PermissionView every other api(...) route uses — a
-// view-only db-backed account can reach /api/status but not either log,
-// granting just the dedicated permission (without "view") is enough for
-// that one log alone, and the single config-file admin (webui.username/
-// webui.password) can still reach both despite its session never holding
-// PermissionView/PermissionDownload's usual db-backed-account shape (see
-// handleWebUILogin's own perm assignment).
+// view-only db-backed account can reach /api/status but not any of the four
+// logs, granting just the dedicated permission (without "view") is enough
+// for that one log alone, and the single config-file admin (webui.username/
+// webui.password) can still reach all four despite its session never
+// holding PermissionView/PermissionDownload's usual db-backed-account shape
+// (see handleWebUILogin's own perm assignment).
 func TestStartWebUILoginLogAndDownloadLogRequireDedicatedPermission(t *testing.T) {
 	t.Parallel()
 
@@ -522,6 +524,10 @@ func TestStartWebUILoginLogAndDownloadLogRequireDedicatedPermission(t *testing.T
 		t.Fatalf("CreateWebUIUser(auditor) unexpected error: %v", err)
 	}
 
+	if err := db.SaveUser(context.Background(), "runwatcher", "s3cret3", "", permission.PermissionViewJobRunLog); err != nil {
+		t.Fatalf("CreateWebUIUser(runwatcher) unexpected error: %v", err)
+	}
+
 	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, discardLogger, db, nil, "admin", "secret", nil, nil, false, false, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
@@ -532,6 +538,7 @@ func TestStartWebUILoginLogAndDownloadLogRequireDedicatedPermission(t *testing.T
 	client := &http.Client{}
 	viewerToken := webUILogin(t, client, srv, "viewer", "s3cret1")
 	auditorToken := webUILogin(t, client, srv, "auditor", "s3cret2")
+	runwatcherToken := webUILogin(t, client, srv, "runwatcher", "s3cret3")
 	adminToken := webUILogin(t, client, srv, "admin", "secret")
 
 	tests := []struct {
@@ -543,10 +550,17 @@ func TestStartWebUILoginLogAndDownloadLogRequireDedicatedPermission(t *testing.T
 		{"viewer can see status", viewerToken, "/api/status", http.StatusOK},
 		{"viewer cannot see login log", viewerToken, "/api/login-events", http.StatusForbidden},
 		{"viewer cannot see download log", viewerToken, "/api/download-events", http.StatusForbidden},
+		{"viewer cannot see job run log", viewerToken, "/api/job-runs", http.StatusForbidden},
+		{"viewer cannot see target run log", viewerToken, "/api/target-runs", http.StatusForbidden},
 		{"login-log-only account can see login log", auditorToken, "/api/login-events", http.StatusOK},
 		{"login-log-only account cannot see download log", auditorToken, "/api/download-events", http.StatusForbidden},
+		{"login-log-only account cannot see job run log", auditorToken, "/api/job-runs", http.StatusForbidden},
+		{"job-run-log-only account can see job run log", runwatcherToken, "/api/job-runs", http.StatusOK},
+		{"job-run-log-only account cannot see target run log", runwatcherToken, "/api/target-runs", http.StatusForbidden},
 		{"config-file admin can see login log", adminToken, "/api/login-events", http.StatusOK},
 		{"config-file admin can see download log", adminToken, "/api/download-events", http.StatusOK},
+		{"config-file admin can see job run log", adminToken, "/api/job-runs", http.StatusOK},
+		{"config-file admin can see target run log", adminToken, "/api/target-runs", http.StatusOK},
 	}
 
 	for _, tt := range tests {
