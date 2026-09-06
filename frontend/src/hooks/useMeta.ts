@@ -10,8 +10,11 @@ export function useMeta(): MetaJSON | null {
 
   useEffect(() => {
     let cancelled = false;
-
-    fetch("/api/meta")
+    let url = "/api/meta";
+    if (import.meta.env.DEV) {
+      url = url.startsWith("/") ? "http://localhost:8082" + url : url;
+    }
+    fetch(url)
       .then((r) => r.json())
       .then((data: MetaJSON) => {
         if (!cancelled) setMeta(data);

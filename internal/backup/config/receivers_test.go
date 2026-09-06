@@ -285,6 +285,113 @@ func TestBuildReceiversWebhookMethodRequiresURL(t *testing.T) {
 	}
 }
 
+func TestBuildReceiversDownloadWebhookIndependentOfStaleAfter(t *testing.T) {
+	t.Parallel()
+
+	pemText, pub := testReceiverPublicKeyPEM(t)
+
+	receivers, err := buildReceivers([]FileReceiver{
+		{ID: "a", PublicKey: pemText, Path: "/mnt/a", DownloadWebhook: fileWebhook{URL: "https://example.com/downloaded"}},
+	})
+	if err != nil {
+		t.Fatalf("buildReceivers() unexpected error: %v", err)
+	}
+
+	want := ResolvedReceiver{
+		ID: "a", PublicKey: pub, Path: "/mnt/a",
+		DownloadWebhook: ResolvedWebhook{URL: "https://example.com/downloaded", Method: http.MethodPost},
+	}
+
+	if got := receivers["a"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("buildReceivers()[%q] = %+v, want %+v", "a", got, want)
+	}
+}
+
+func TestBuildReceiversDownloadWebhookAndStaleWebhookCoexist(t *testing.T) {
+	t.Parallel()
+
+	pemText, _ := testReceiverPublicKeyPEM(t)
+
+	receivers, err := buildReceivers([]FileReceiver{
+		{
+			ID: "a", PublicKey: pemText, Path: "/mnt/a",
+			StaleAfter:      "6h",
+			Webhook:         fileWebhook{URL: "https://example.com/stale"},
+			DownloadWebhook: fileWebhook{URL: "https://example.com/downloaded"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildReceivers() unexpected error: %v", err)
+	}
+
+	got := receivers["a"]
+	if got.Webhook.URL != "https://example.com/stale" {
+		t.Errorf("Webhook.URL = %q, want %q", got.Webhook.URL, "https://example.com/stale")
+	}
+
+	if got.DownloadWebhook.URL != "https://example.com/downloaded" {
+		t.Errorf("DownloadWebhook.URL = %q, want %q", got.DownloadWebhook.URL, "https://example.com/downloaded")
+	}
+}
+
+func TestBuildReceiversDownloadWebhookMethodHeadersAndBody(t *testing.T) {
+	t.Parallel()
+
+	pemText, _ := testReceiverPublicKeyPEM(t)
+
+	receivers, err := buildReceivers([]FileReceiver{
+		{
+			ID: "a", PublicKey: pemText, Path: "/mnt/a",
+			DownloadWebhook: fileWebhook{
+				URL:     "https://example.com/downloaded",
+				Method:  "put",
+				Headers: map[string]string{"Content-Type": "application/json; charset=utf-8"},
+				Body:    `{"text":"{user} downloaded {file} from {receiver} at {time}"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildReceivers() unexpected error: %v", err)
+	}
+
+	want := ResolvedWebhook{
+		URL:     "https://example.com/downloaded",
+		Method:  http.MethodPut, // lowercase "put" in the config file is normalized to uppercase
+		Headers: map[string]string{"Content-Type": "application/json; charset=utf-8"},
+		Body:    `{"text":"{user} downloaded {file} from {receiver} at {time}"}`,
+	}
+
+	if got := receivers["a"].DownloadWebhook; !reflect.DeepEqual(got, want) {
+		t.Errorf("buildReceivers()[%q].DownloadWebhook = %+v, want %+v", "a", got, want)
+	}
+}
+
+func TestBuildReceiversDownloadWebhookBodyRequiresURL(t *testing.T) {
+	t.Parallel()
+
+	pemText, _ := testReceiverPublicKeyPEM(t)
+
+	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", DownloadWebhook: fileWebhook{Body: "custom"}}})
+	if err == nil {
+		t.Fatal("buildReceivers() expected error for download-webhook.body without download-webhook.url, got nil")
+	}
+}
+
+func TestBuildReceiversNoWebhooksResolveToZeroValue(t *testing.T) {
+	t.Parallel()
+
+	pemText, _ := testReceiverPublicKeyPEM(t)
+
+	receivers, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a"}})
+	if err != nil {
+		t.Fatalf("buildReceivers() unexpected error: %v", err)
+	}
+
+	if got := receivers["a"].DownloadWebhook; !reflect.DeepEqual(got, ResolvedWebhook{}) {
+		t.Errorf("DownloadWebhook = %+v, want zero value when unset", got)
+	}
+}
+
 func TestParseRetention(t *testing.T) {
 	t.Parallel()
 

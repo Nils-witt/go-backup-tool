@@ -37,6 +37,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
+	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 	"nilswitt.dev/go-backup-tool/internal/version"
 )
@@ -1911,6 +1912,8 @@ func handleDownloadFile(receivers map[string]config.ResolvedReceiver, log *slog.
 		w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(key)+`"`)
 
 		record(true, "")
+
+		go receiver.NotifyDownloadWebhook(recv, receiver.DownloadWebhookEvent{Username: username, Key: key, At: time.Now()}, log)
 
 		if _, err := io.Copy(w, f); err != nil {
 			log.Warn("download: streaming file failed", "id", recv.ID, "key", key, "err", err)

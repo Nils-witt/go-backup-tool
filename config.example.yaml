@@ -282,6 +282,14 @@ jobs:
 # yourself for a webhook receiver that expects its own shape (Slack,
 # PagerDuty, ...): it supports {receiver_id}, {path}, {stale_after}, and
 # {last_received} (an RFC 3339 timestamp) placeholders.
+#
+# download-webhook (optional, independent of stale-after/webhook) sends a
+# request every time a file is successfully downloaded from this receiver
+# through the dashboard. Same shape as webhook above: url is the only
+# required field, method defaults to POST, headers is optional, and body
+# defaults to JSON: {user, file, receiver, time}. Set body yourself using
+# the {user}, {file}, {receiver}, and {time} (an RFC 3339 timestamp)
+# placeholders for a webhook receiver that expects its own shape.
 # receivers:
 #   - id: from-primary
 #     public-key: |
@@ -297,6 +305,9 @@ jobs:
 #       headers:
 #         Content-Type: application/json
 #       body: '{"payload":{"summary":"from-primary backup stale, last file {last_received}","severity":"critical","source":"go-backup-tool"},"routing_key":"replace-with-your-pagerduty-routing-key","event_action":"trigger"}'
+#     download-webhook:
+#       url: "https://hooks.slack.com/services/replace-with-your-webhook-path"
+#       body: '{"text":"{user} downloaded {file} from {receiver} at {time}"}'
 
 # A job's key keeps its {time} placeholder each time it (re-)runs, so a
 # repeating job gets a fresh object on every run instead of overwriting the

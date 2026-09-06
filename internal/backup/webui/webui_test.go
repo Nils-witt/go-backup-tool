@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1439,6 +1440,122 @@ func TestHandleDownloadFileRecordsDownloadEvents(t *testing.T) {
 
 	if !events[1].Success || events[1].Username != "alice" || events[1].ReceiverID != "a" || events[1].Key != "backup.gpg" || events[1].RemoteAddr != "198.51.100.1:4321" {
 		t.Errorf("readDownloadEvents()[1] = %+v, want the successful attempt attributed to alice", events[1])
+	}
+}
+
+// TestHandleDownloadFileFiresDownloadWebhookOnSuccess is an end-to-end check
+// that a successful download through handleDownloadFile fires the
+// receiver's configured download-webhook (see
+// receiver.NotifyDownloadWebhook), in a background goroutine so it doesn't
+// delay the file already streamed to the caller.
+func TestHandleDownloadFileFiresDownloadWebhookOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	type call struct {
+		user, file, receiver string
+	}
+
+	calls := make(chan call, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			User     string `json:"user"`
+			File     string `json:"file"`
+			Receiver string `json:"receiver"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("webhook server: decoding request body: %v", err)
+		}
+
+		calls <- call{user: body.User, file: body.File, receiver: body.Receiver}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "backup.gpg"), "secret data")
+
+	receivers := map[string]config.ResolvedReceiver{
+		"a": {ID: "a", Path: root, DownloadWebhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}},
+	}
+
+	tickets := newDownloadTicketStore()
+
+	ticket, err := tickets.create("a", "backup.gpg", "alice")
+	if err != nil {
+		t.Fatalf("tickets.create(): %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/backup.gpg?ticket="+ticket, nil)
+	req.SetPathValue("id", "a")
+	req.SetPathValue("key", "backup.gpg")
+
+	handleDownloadFile(receivers, discardLogger, nil, tickets, false)(httptest.NewRecorder(), req)
+
+	select {
+	case got := <-calls:
+		want := call{user: "alice", file: "backup.gpg", receiver: "a"}
+		if got != want {
+			t.Errorf("webhook call = %+v, want %+v", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("download-webhook was not called within 5s")
+	}
+}
+
+// TestHandleDownloadFileDoesNotFireDownloadWebhookOnFailure checks that a
+// failed download (key not found) never fires the configured
+// download-webhook, only a successful one.
+func TestHandleDownloadFileDoesNotFireDownloadWebhookOnFailure(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu          sync.Mutex
+		requestSeen bool
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		requestSeen = true
+		mu.Unlock()
+	}))
+	t.Cleanup(srv.Close)
+
+	root := t.TempDir()
+
+	receivers := map[string]config.ResolvedReceiver{
+		"a": {ID: "a", Path: root, DownloadWebhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}},
+	}
+
+	tickets := newDownloadTicketStore()
+
+	ticket, err := tickets.create("a", "missing.gpg", "alice")
+	if err != nil {
+		t.Fatalf("tickets.create(): %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/missing.gpg?ticket="+ticket, nil)
+	req.SetPathValue("id", "a")
+	req.SetPathValue("key", "missing.gpg")
+
+	rec := httptest.NewRecorder()
+	handleDownloadFile(receivers, discardLogger, nil, tickets, false)(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+
+	// There's no notification to wait on for the negative case, so give any
+	// wrongly-fired goroutine a moment to reach the fake server first.
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if requestSeen {
+		t.Error("download-webhook fired for a failed download, want none")
 	}
 }
 

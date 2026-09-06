@@ -190,6 +190,8 @@ export function ReceiversCard({receiver, canDownload}: { receiver: ReceiverSnaps
                 message={
                     <>
                         Download <strong>{pendingDownload?.key}</strong>?
+                        Downloading may trigger notifications and other hooks to record and inform about the download.
+                        Make sure you have permission and cause to download this file.
                     </>
                 }
                 confirmLabel="Download"

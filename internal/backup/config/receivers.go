@@ -28,21 +28,23 @@ type FileReceiver struct {
 	// private key (see signRemoteAuthToken/verifyRemoteAuthToken and
 	// authorizeReceiver in webui.go); unlike the token: field this replaces,
 	// nothing here is itself a secret; it just names who's allowed to send.
-	PublicKey  string      `yaml:"public-key"`
-	Path       string      `yaml:"path"`        // root directory incoming objects for this id are written under
-	Retention  string      `yaml:"retention"`   // optional, same syntax as a local server's retention: e.g. "30d"
-	StaleAfter string      `yaml:"stale-after"` // optional, same duration syntax as retention: e.g. "6h" or "1d"; requires webhook.url: and enables the stale-receiver webhook monitor (see MonitorStaleReceivers)
-	Webhook    fileWebhook `yaml:"webhook"`     // the request sent once this receiver's most recent file turns older than stale-after: (a receiver that has never received anything never fires); webhook.url requires stale-after:
+	PublicKey       string      `yaml:"public-key"`
+	Path            string      `yaml:"path"`             // root directory incoming objects for this id are written under
+	Retention       string      `yaml:"retention"`        // optional, same syntax as a local server's retention: e.g. "30d"
+	StaleAfter      string      `yaml:"stale-after"`      // optional, same duration syntax as retention: e.g. "6h" or "1d"; requires webhook.url: and enables the stale-receiver webhook monitor (see MonitorStaleReceivers)
+	Webhook         fileWebhook `yaml:"webhook"`          // the request sent once this receiver's most recent file turns older than stale-after: (a receiver that has never received anything never fires); webhook.url requires stale-after:
+	DownloadWebhook fileWebhook `yaml:"download-webhook"` // optional; the request sent every time a file is successfully downloaded from this receiver (see handleDownloadFile/receiver.NotifyDownloadWebhook); independent of webhook:/stale-after:
 }
 
-// fileWebhook is a receiver's webhook: block: the HTTP request the
-// stale-receiver monitor sends (see MonitorStaleReceivers/
-// notifyStaleReceiverWebhook) once that receiver goes stale. Only url is
-// required; method defaults to POST, headers is optional (e.g.
-// Content-Type), and body, if unset, defaults to a JSON summary (see
-// staleReceiverPayload) — set it to send a body your own webhook receiver
-// (PagerDuty, Slack, ...) already understands, using the {placeholder}
-// syntax documented on renderStaleWebhookPayload.
+// fileWebhook is one of a receiver's webhook: or download-webhook: blocks:
+// the HTTP request either the stale-receiver monitor (see
+// MonitorStaleReceivers/notifyStaleReceiverWebhook) or a successful file
+// download (see receiver.NotifyDownloadWebhook) sends. Only url is required;
+// method defaults to POST, headers is optional (e.g. Content-Type), and
+// body, if unset, defaults to a JSON summary — set it to send a body your
+// own webhook receiver (PagerDuty, Slack, ...) already understands, using
+// the {placeholder} syntax documented on renderStaleWebhookPayload/
+// renderDownloadWebhookPayload.
 type fileWebhook struct {
 	URL     string            `yaml:"url"`
 	Method  string            `yaml:"method"`
@@ -51,8 +53,9 @@ type fileWebhook struct {
 }
 
 // ResolvedWebhook is one fileWebhook after validation, ready to be sent by
-// the receiver package's stale-receiver monitor. A zero value (URL == "")
-// means the receiver it belongs to has no webhook: configured.
+// the receiver package (either the stale-receiver monitor or a download
+// notification). A zero value (URL == "") means the receiver it belongs to
+// has no webhook configured for that trigger.
 type ResolvedWebhook struct {
 	URL     string
 	Method  string            // resolved: defaults to http.MethodPost when unset in the config file
@@ -63,12 +66,13 @@ type ResolvedWebhook struct {
 // ResolvedReceiver is one fileReceiver after validation, ready to be used by
 // the receiver API's handlers.
 type ResolvedReceiver struct {
-	ID         string
-	PublicKey  *rsa.PublicKey
-	Path       string
-	Retention  time.Duration
-	StaleAfter time.Duration   // 0 disables the stale-receiver webhook monitor for this receiver
-	Webhook    ResolvedWebhook // set together with StaleAfter; zero value means unset
+	ID              string
+	PublicKey       *rsa.PublicKey
+	Path            string
+	Retention       time.Duration
+	StaleAfter      time.Duration   // 0 disables the stale-receiver webhook monitor for this receiver
+	Webhook         ResolvedWebhook // set together with StaleAfter; zero value means unset
+	DownloadWebhook ResolvedWebhook // independent of StaleAfter/Webhook; zero value means unset
 }
 
 // buildReceivers validates fileReceivers and builds an id -> resolvedReceiver
@@ -111,13 +115,19 @@ func buildReceivers(fileReceivers []FileReceiver) (map[string]ResolvedReceiver, 
 			return nil, fmt.Errorf("receiver %q: %w", id, err)
 		}
 
+		downloadWebhook, err := resolveWebhook(&fr.DownloadWebhook)
+		if err != nil {
+			return nil, fmt.Errorf("receiver %q: download-webhook: %w", id, err)
+		}
+
 		receivers[id] = ResolvedReceiver{
-			ID:         id,
-			PublicKey:  publicKey,
-			Path:       fr.Path,
-			Retention:  retention,
-			StaleAfter: staleAfter,
-			Webhook:    webhook,
+			ID:              id,
+			PublicKey:       publicKey,
+			Path:            fr.Path,
+			Retention:       retention,
+			StaleAfter:      staleAfter,
+			Webhook:         webhook,
+			DownloadWebhook: downloadWebhook,
 		}
 	}
 
@@ -148,17 +158,25 @@ func parseReceiverPublicKey(raw string) (*rsa.PublicKey, error) {
 }
 
 // buildWebhook validates fw (a receiver's webhook: block) against that
-// receiver's already-parsed staleAfter, and resolves it: url must be set
-// together with staleAfter (both, or neither); method defaults to
-// http.MethodPost; headers, if any, are copied so the ResolvedWebhook
-// doesn't alias the config file's own map. A receiver with no webhook: at
-// all (fw's zero value) resolves to a zero ResolvedWebhook.
+// receiver's already-parsed staleAfter: url must be set together with
+// staleAfter (both, or neither); everything else is resolveWebhook's rule.
 func buildWebhook(fw *fileWebhook, staleAfter time.Duration) (ResolvedWebhook, error) {
-	url := strings.TrimSpace(fw.URL)
-
-	if (staleAfter > 0) != (url != "") {
+	if (staleAfter > 0) != (strings.TrimSpace(fw.URL) != "") {
 		return ResolvedWebhook{}, errors.New("stale-after and webhook.url must be set together")
 	}
+
+	return resolveWebhook(fw)
+}
+
+// resolveWebhook validates and resolves fw (one of a receiver's webhook: or
+// download-webhook: blocks) on its own, with no pairing requirement: method
+// defaults to http.MethodPost; headers, if any, are copied so the
+// ResolvedWebhook doesn't alias the config file's own map. A block with no
+// url: (fw's zero value, or one with only url: unset) resolves to a zero
+// ResolvedWebhook, unless method/headers/body are set without a url, which
+// is rejected as meaningless.
+func resolveWebhook(fw *fileWebhook) (ResolvedWebhook, error) {
+	url := strings.TrimSpace(fw.URL)
 
 	if url == "" {
 		if fw.Method != "" || len(fw.Headers) > 0 || fw.Body != "" {

@@ -125,10 +125,9 @@ func anyReceiverHasRetention(receivers map[string]config.ResolvedReceiver) bool 
 // every receiver with stale-after: set.
 const staleReceiverCheckInterval = time.Minute
 
-// staleWebhookTimeout bounds a single stale-receiver webhook POST, since
-// notifyStaleReceiverWebhook runs on its own background schedule rather than
-// under a run's -timeout.
-const staleWebhookTimeout = 10 * time.Second
+// webhookTimeout bounds a single receiver webhook POST — stale-receiver or
+// download — since neither runs under a run's -timeout.
+const webhookTimeout = 10 * time.Second
 
 // staleReceiverMonitor tracks, per receiver id, whether its stale webhook has
 // already fired for the receiver's current gap in incoming files, so
@@ -239,7 +238,7 @@ func notifyStaleReceiverWebhook(recv config.ResolvedReceiver, lastSeen time.Time
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), staleWebhookTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), webhookTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, recv.Webhook.Method, recv.Webhook.URL, bytes.NewReader(body))
@@ -256,7 +255,7 @@ func notifyStaleReceiverWebhook(recv config.ResolvedReceiver, lastSeen time.Time
 		req.Header.Set("Content-Type", defaultStaleWebhookContentType)
 	}
 
-	resp, err := staleWebhookHTTPClient.Do(req)
+	resp, err := webhookHTTPClient.Do(req)
 	if err != nil {
 		log.Warn("stale receiver webhook: request failed", "id", recv.ID, "webhook", recv.Webhook.URL, "err", err)
 		return
@@ -271,10 +270,9 @@ func notifyStaleReceiverWebhook(recv config.ResolvedReceiver, lastSeen time.Time
 	log.Info("stale receiver webhook fired", "id", recv.ID, "webhook", recv.Webhook.URL, "stale_after", recv.StaleAfter, "last_received", lastSeen)
 }
 
-// staleWebhookHTTPClient is shared by every stale-receiver webhook POST;
-// staleWebhookTimeout bounds each request since these run on a background
-// schedule rather than under a run's -timeout.
-var staleWebhookHTTPClient = &http.Client{Timeout: staleWebhookTimeout}
+// webhookHTTPClient is shared by every receiver webhook POST — stale-receiver
+// or download; webhookTimeout bounds each request.
+var webhookHTTPClient = &http.Client{Timeout: webhookTimeout}
 
 // MonitorStaleReceivers periodically checks every receiver with stale-after:
 // set, POSTing to its webhook: whenever the most recent file under its path
