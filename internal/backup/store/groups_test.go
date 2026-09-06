@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
@@ -14,11 +15,11 @@ func TestSaveGroupRejectsDuplicateName(t *testing.T) {
 	db := openTestStore(t)
 	ctx := context.Background()
 
-	if err := db.SaveGroup(ctx, "ops", permission.PermissionView); err != nil {
+	if err := db.SaveGroup(ctx, "ops", permission.PermissionView, ""); err != nil {
 		t.Fatalf("SaveGroup() unexpected error: %v", err)
 	}
 
-	if err := db.SaveGroup(ctx, "ops", permission.PermissionDownload); !errors.Is(err, ErrGroupExists) {
+	if err := db.SaveGroup(ctx, "ops", permission.PermissionDownload, ""); !errors.Is(err, ErrGroupExists) {
 		t.Errorf("SaveGroup() with a duplicate name = %v, want ErrGroupExists", err)
 	}
 }
@@ -29,7 +30,7 @@ func TestUpdateGroupPermissions(t *testing.T) {
 	db := openTestStore(t)
 	ctx := context.Background()
 
-	if err := db.SaveGroup(ctx, "ops", permission.PermissionView); err != nil {
+	if err := db.SaveGroup(ctx, "ops", permission.PermissionView, ""); err != nil {
 		t.Fatalf("SaveGroup() unexpected error: %v", err)
 	}
 
@@ -57,11 +58,11 @@ func TestListGroupsOrdersByName(t *testing.T) {
 	db := openTestStore(t)
 	ctx := context.Background()
 
-	if err := db.SaveGroup(ctx, "zeta", permission.PermissionView); err != nil {
+	if err := db.SaveGroup(ctx, "zeta", permission.PermissionView, ""); err != nil {
 		t.Fatalf("SaveGroup() unexpected error: %v", err)
 	}
 
-	if err := db.SaveGroup(ctx, "alpha", permission.PermissionDownload); err != nil {
+	if err := db.SaveGroup(ctx, "alpha", permission.PermissionDownload, ""); err != nil {
 		t.Fatalf("SaveGroup() unexpected error: %v", err)
 	}
 
@@ -85,7 +86,7 @@ func TestDeleteGroupClearsMemberships(t *testing.T) {
 		t.Fatalf("SaveUser() unexpected error: %v", err)
 	}
 
-	if err := db.SaveGroup(ctx, "ops", permission.PermissionDownload); err != nil {
+	if err := db.SaveGroup(ctx, "ops", permission.PermissionDownload, ""); err != nil {
 		t.Fatalf("SaveGroup() unexpected error: %v", err)
 	}
 
@@ -141,11 +142,11 @@ func TestSetUserGroupsReplacesMembershipWholesale(t *testing.T) {
 		t.Fatalf("SaveUser() unexpected error: %v", err)
 	}
 
-	if err := db.SaveGroup(ctx, "readers", permission.PermissionView); err != nil {
+	if err := db.SaveGroup(ctx, "readers", permission.PermissionView, ""); err != nil {
 		t.Fatalf("SaveGroup() unexpected error: %v", err)
 	}
 
-	if err := db.SaveGroup(ctx, "downloaders", permission.PermissionDownload); err != nil {
+	if err := db.SaveGroup(ctx, "downloaders", permission.PermissionDownload, ""); err != nil {
 		t.Fatalf("SaveGroup() unexpected error: %v", err)
 	}
 
@@ -185,7 +186,7 @@ func TestVerifyUserIncludesGroupPermissions(t *testing.T) {
 		t.Fatalf("SaveUser() unexpected error: %v", err)
 	}
 
-	if err := db.SaveGroup(ctx, "downloaders", permission.PermissionDownload); err != nil {
+	if err := db.SaveGroup(ctx, "downloaders", permission.PermissionDownload, ""); err != nil {
 		t.Fatalf("SaveGroup() unexpected error: %v", err)
 	}
 
@@ -203,6 +204,135 @@ func TestVerifyUserIncludesGroupPermissions(t *testing.T) {
 	}
 }
 
+func TestSaveGroupRejectsDuplicateOIDCGroupName(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := context.Background()
+
+	if err := db.SaveGroup(ctx, "engineers", permission.PermissionView, "eng"); err != nil {
+		t.Fatalf("SaveGroup() unexpected error: %v", err)
+	}
+
+	if err := db.SaveGroup(ctx, "other", permission.PermissionView, "eng"); !errors.Is(err, ErrOIDCGroupNameTaken) {
+		t.Errorf("SaveGroup() with a duplicate oidc group name = %v, want ErrOIDCGroupNameTaken", err)
+	}
+
+	g, ok, err := db.GetGroup(ctx, "engineers")
+	if err != nil || !ok {
+		t.Fatalf("GetGroup() = (ok=%v, err=%v), want (true, nil)", ok, err)
+	}
+
+	if g.OIDCGroupName != "eng" {
+		t.Errorf("GetGroup().OIDCGroupName = %q, want %q", g.OIDCGroupName, "eng")
+	}
+}
+
+func TestSetGroupOIDCGroupName(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := context.Background()
+
+	if err := db.SaveGroup(ctx, "engineers", permission.PermissionView, ""); err != nil {
+		t.Fatalf("SaveGroup() unexpected error: %v", err)
+	}
+
+	if err := db.SetGroupOIDCGroupName(ctx, "engineers", "eng"); err != nil {
+		t.Fatalf("SetGroupOIDCGroupName() unexpected error: %v", err)
+	}
+
+	g, ok, err := db.GetGroup(ctx, "engineers")
+	if err != nil || !ok {
+		t.Fatalf("GetGroup() = (ok=%v, err=%v), want (true, nil)", ok, err)
+	}
+
+	if g.OIDCGroupName != "eng" {
+		t.Errorf("GetGroup().OIDCGroupName = %q, want %q", g.OIDCGroupName, "eng")
+	}
+
+	if err := db.SaveGroup(ctx, "admins", permission.PermissionAdmin, "admin"); err != nil {
+		t.Fatalf("SaveGroup() unexpected error: %v", err)
+	}
+
+	if err := db.SetGroupOIDCGroupName(ctx, "admins", "eng"); !errors.Is(err, ErrOIDCGroupNameTaken) {
+		t.Errorf("SetGroupOIDCGroupName() with a taken name = %v, want ErrOIDCGroupNameTaken", err)
+	}
+
+	if err := db.SetGroupOIDCGroupName(ctx, "nonexistent", "x"); !errors.Is(err, ErrGroupNotFound) {
+		t.Errorf("SetGroupOIDCGroupName() for unknown group = %v, want ErrGroupNotFound", err)
+	}
+}
+
+func TestSyncOIDCGroupsLeavesUnmanagedGroupsAlone(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := context.Background()
+
+	if _, err := db.GetOrProvisionOIDCUser(ctx, "alice@example.com", permission.PermissionView); err != nil {
+		t.Fatalf("GetOrProvisionOIDCUser() unexpected error: %v", err)
+	}
+
+	if err := db.SaveGroup(ctx, "engineers", permission.PermissionDownload, "eng"); err != nil {
+		t.Fatalf("SaveGroup() unexpected error: %v", err)
+	}
+
+	if err := db.SaveGroup(ctx, "manual", permission.PermissionViewLoginLog, ""); err != nil {
+		t.Fatalf("SaveGroup() unexpected error: %v", err)
+	}
+
+	if err := db.SetUserGroups(ctx, "alice@example.com", []string{"manual"}); err != nil {
+		t.Fatalf("SetUserGroups() unexpected error: %v", err)
+	}
+
+	perm, err := db.SyncOIDCGroups(ctx, "alice@example.com", []string{"eng"})
+	if err != nil {
+		t.Fatalf("SyncOIDCGroups() unexpected error: %v", err)
+	}
+
+	if want := permission.PermissionView | permission.PermissionDownload | permission.PermissionViewLoginLog; perm != want {
+		t.Errorf("SyncOIDCGroups() perm = %v, want %v", perm, want)
+	}
+
+	assertGroups(t, mustGetUser(ctx, t, db, "alice@example.com"), "engineers", "manual")
+
+	// A second sync reporting no OIDC groups drops the managed membership but
+	// keeps the unmanaged one.
+	if _, err := db.SyncOIDCGroups(ctx, "alice@example.com", nil); err != nil {
+		t.Fatalf("SyncOIDCGroups() unexpected error: %v", err)
+	}
+
+	assertGroups(t, mustGetUser(ctx, t, db, "alice@example.com"), "manual")
+}
+
+// assertGroups fails t unless user.Groups holds exactly want, ignoring
+// order.
+func assertGroups(t *testing.T, user User, want ...string) {
+	t.Helper()
+
+	got := slices.Clone(user.Groups)
+	slices.Sort(got)
+
+	wantSorted := slices.Clone(want)
+	slices.Sort(wantSorted)
+
+	if !slices.Equal(got, wantSorted) {
+		t.Errorf("Groups = %v, want %v", user.Groups, want)
+	}
+}
+
+func TestSyncOIDCGroupsUnknownIdentity(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := context.Background()
+
+	if _, err := db.SyncOIDCGroups(ctx, "nobody@example.com", nil); !errors.Is(err, ErrUserNotFound) {
+		t.Errorf("SyncOIDCGroups() for unknown identity = %v, want ErrUserNotFound", err)
+	}
+}
+
 func TestGetOrProvisionOIDCUserIncludesGroupPermissions(t *testing.T) {
 	t.Parallel()
 
@@ -213,7 +343,7 @@ func TestGetOrProvisionOIDCUserIncludesGroupPermissions(t *testing.T) {
 		t.Fatalf("GetOrProvisionOIDCUser() unexpected error: %v", err)
 	}
 
-	if err := db.SaveGroup(ctx, "admins", permission.PermissionAdmin); err != nil {
+	if err := db.SaveGroup(ctx, "admins", permission.PermissionAdmin, ""); err != nil {
 		t.Fatalf("SaveGroup() unexpected error: %v", err)
 	}
 

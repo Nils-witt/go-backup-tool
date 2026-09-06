@@ -34,15 +34,21 @@ const PERM_COLUMNS = [
 // GroupsAdminSection is the "Users" admin section's group management panel:
 // a table of groups with permission checkboxes (each change re-submits that
 // group's whole permission set, matching UsersAdminSection's own checkbox
-// behavior) and an add-group form. Assigning users to a group happens on
+// behavior), an editable OIDC group mapping per row (see oidcGroupName on
+// the Go side), and an add-group form. Assigning users to a group happens on
 // the Users table itself (see UsersAdminSection), not here.
 export function GroupsAdminSection() {
   const [groups, setGroups] = useState<WebUIGroupJSON[]>([]);
+  const [oidcGroupNameDrafts, setOidcGroupNameDrafts] = useState<Record<string, string>>({});
+  const [oidcGroupNameErrors, setOidcGroupNameErrors] = useState<Record<string, string>>({});
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
   function loadGroups() {
     apiFetchJSON<WebUIGroupJSON[]>("/api/groups")
-      .then((g) => setGroups(g || []))
+      .then((g) => {
+        setGroups(g || []);
+        setOidcGroupNameDrafts(Object.fromEntries((g || []).map((x) => [x.name, x.oidc_group_name])));
+      })
       .catch(() => {});
   }
 
@@ -55,10 +61,37 @@ export function GroupsAdminSection() {
     apiFetch("/api/groups/" + encodeURIComponent(g.name), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ permissions: perms }),
+      body: JSON.stringify({ permissions: perms, oidc_group_name: g.oidc_group_name }),
     })
       .then(() => loadGroups())
       .catch(() => {});
+  }
+
+  function submitOidcGroupName(g: WebUIGroupJSON) {
+    const oidcGroupName = (oidcGroupNameDrafts[g.name] ?? "").trim();
+    setOidcGroupNameErrors((prev) => ({ ...prev, [g.name]: "" }));
+
+    if (oidcGroupName === g.oidc_group_name) {
+      return;
+    }
+
+    apiFetchOK(
+      "/api/groups/" + encodeURIComponent(g.name),
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ permissions: g.permissions, oidc_group_name: oidcGroupName }),
+      },
+      "mapping oidc group failed",
+    )
+      .then(() => loadGroups())
+      .catch((err: Error) => {
+        setOidcGroupNameErrors((prev) => ({
+          ...prev,
+          [g.name]: err.message || "mapping oidc group failed",
+        }));
+        setOidcGroupNameDrafts((prev) => ({ ...prev, [g.name]: g.oidc_group_name }));
+      });
   }
 
   return (
@@ -68,6 +101,7 @@ export function GroupsAdminSection() {
           <TableHead>
             <TableRow>
               <TableCell>Name</TableCell>
+              <TableCell>OIDC group</TableCell>
               {PERM_COLUMNS.map((col) => (
                 <TableCell key={col.key}>{col.label}</TableCell>
               ))}
@@ -79,6 +113,21 @@ export function GroupsAdminSection() {
             {groups.map((g) => (
               <TableRow key={g.name}>
                 <TableCell sx={{ overflowWrap: "anywhere" }}>{g.name}</TableCell>
+                <TableCell sx={{ minWidth: 160 }}>
+                  <TextField
+                    size="small"
+                    variant="standard"
+                    placeholder="unmapped"
+                    fullWidth
+                    error={!!oidcGroupNameErrors[g.name]}
+                    helperText={oidcGroupNameErrors[g.name] || undefined}
+                    value={oidcGroupNameDrafts[g.name] ?? ""}
+                    onChange={(e) =>
+                      setOidcGroupNameDrafts((prev) => ({ ...prev, [g.name]: e.target.value }))
+                    }
+                    onBlur={() => submitOidcGroupName(g)}
+                  />
+                </TableCell>
                 {PERM_COLUMNS.map((col) => (
                   <TableCell key={col.key}>
                     <Checkbox
@@ -135,6 +184,7 @@ export function GroupsAdminSection() {
 
 function AddGroupForm({ onAdded }: { onAdded: () => void }) {
   const [name, setName] = useState("");
+  const [oidcGroupName, setOidcGroupName] = useState("");
   const [view, setView] = useState(true);
   const [download, setDownload] = useState(false);
   const [loginLog, setLoginLog] = useState(false);
@@ -164,12 +214,17 @@ function AddGroupForm({ onAdded }: { onAdded: () => void }) {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim(), permissions: perms }),
+        body: JSON.stringify({
+          name: name.trim(),
+          permissions: perms,
+          oidc_group_name: oidcGroupName.trim(),
+        }),
       },
       "adding group failed",
     )
       .then(() => {
         setName("");
+        setOidcGroupName("");
         setView(true);
         setDownload(false);
         setLoginLog(false);
@@ -194,6 +249,13 @@ function AddGroupForm({ onAdded }: { onAdded: () => void }) {
           required
           value={name}
           onChange={(e) => setName(e.target.value)}
+        />
+        <TextField
+          size="small"
+          placeholder="OIDC group (optional)"
+          autoComplete="off"
+          value={oidcGroupName}
+          onChange={(e) => setOidcGroupName(e.target.value)}
         />
         <FormControlLabel
           control={

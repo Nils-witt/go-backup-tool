@@ -1543,13 +1543,19 @@ func handleDeleteUser(db *store.Store, log *slog.Logger) http.HandlerFunc {
 // group management (handleListGroups/handleCreateGroup/handleUpdateGroup),
 // matching userJSON's own field naming.
 type groupJSON struct {
-	Name        string    `json:"name"`
-	Permissions []string  `json:"permissions"`
-	CreatedAt   time.Time `json:"created_at"`
+	Name          string    `json:"name"`
+	Permissions   []string  `json:"permissions"`
+	OIDCGroupName string    `json:"oidc_group_name"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 func toGroupJSON(g store.Group) groupJSON {
-	return groupJSON{Name: g.Name, Permissions: nonNilStrings(g.Permissions.Names()), CreatedAt: g.CreatedAt}
+	return groupJSON{
+		Name:          g.Name,
+		Permissions:   nonNilStrings(g.Permissions.Names()),
+		OIDCGroupName: g.OIDCGroupName,
+		CreatedAt:     g.CreatedAt,
+	}
 }
 
 // handleListGroups serves GET /api/groups: every group, for the "Users"
@@ -1561,21 +1567,28 @@ func handleListGroups(db *store.Store, log *slog.Logger) http.HandlerFunc {
 // groupRequestJSON is handleCreateGroup/handleUpdateGroup's request body.
 // Name is only used (and required) by handleCreateGroup, which takes it
 // from the body rather than the path the way handleUpdateGroup's PUT
-// /api/groups/{name} does, mirroring userRequestJSON.Username.
+// /api/groups/{name} does, mirroring userRequestJSON.Username. OIDCGroupName
+// is always a full-replace value, like userRequestJSON.OIDCUsername — blank
+// explicitly means "no mapping"/"clear the mapping" (see
+// db.SetGroupOIDCGroupName).
 type groupRequestJSON struct {
-	Name        string   `json:"name"`
-	Permissions []string `json:"permissions"`
+	Name          string   `json:"name"`
+	Permissions   []string `json:"permissions"`
+	OIDCGroupName string   `json:"oidc_group_name"`
 }
 
 // handleGroupErr writes the right response for err — store.ErrGroupNotFound
-// as 404, any other error as a logged 500 — and reports whether it wrote
-// one at all (err == nil), mirroring handleUserErr.
+// as 404, store.ErrOIDCGroupNameTaken as 409, any other error as a logged
+// 500 — and reports whether it wrote one at all (err == nil), mirroring
+// handleUserErr.
 func handleGroupErr(w http.ResponseWriter, log *slog.Logger, verb string, err error) bool {
 	switch {
 	case err == nil:
 		return false
 	case errors.Is(err, store.ErrGroupNotFound):
 		http.Error(w, "group not found", http.StatusNotFound)
+	case errors.Is(err, store.ErrOIDCGroupNameTaken):
+		http.Error(w, "oidc group name is already mapped to another group", http.StatusConflict)
 	default:
 		log.Warn("web UI: "+verb+" group failed", "err", err)
 		http.Error(w, verb+" group failed", http.StatusInternalServerError)
@@ -1611,7 +1624,7 @@ func handleCreateGroup(db *store.Store, log *slog.Logger) http.HandlerFunc {
 			return
 		}
 
-		switch err := db.SaveGroup(r.Context(), req.Name, perm); {
+		switch err := db.SaveGroup(r.Context(), req.Name, perm, req.OIDCGroupName); {
 		case errors.Is(err, store.ErrGroupExists):
 			http.Error(w, "group already exists", http.StatusConflict)
 		case handleGroupErr(w, log, "creating", err):
@@ -1622,8 +1635,9 @@ func handleCreateGroup(db *store.Store, log *slog.Logger) http.HandlerFunc {
 }
 
 // handleUpdateGroup serves PUT /api/groups/{name}: it replaces the named
-// group's granted permissions with the request body's (see
-// groupRequestJSON) — every member's next login picks up the change (see
+// group's granted permissions and OIDC group mapping with the request
+// body's (see groupRequestJSON) — every member's next login picks up the
+// change (see
 // db.VerifyUser/db.GetOrProvisionOIDCUser), though any of its members'
 // already-issued sessions or long-lived API tokens keep whatever they were
 // minted with until they expire or are revoked.
@@ -1646,7 +1660,13 @@ func handleUpdateGroup(db *store.Store, log *slog.Logger) http.HandlerFunc {
 			return
 		}
 
-		if err := db.UpdateGroupPermissions(r.Context(), r.PathValue("name"), perm); handleGroupErr(w, log, "updating", err) {
+		name := r.PathValue("name")
+
+		if err := db.UpdateGroupPermissions(r.Context(), name, perm); handleGroupErr(w, log, "updating", err) {
+			return
+		}
+
+		if err := db.SetGroupOIDCGroupName(r.Context(), name, req.OIDCGroupName); handleGroupErr(w, log, "updating", err) {
 			return
 		}
 

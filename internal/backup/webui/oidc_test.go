@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -41,6 +42,10 @@ type fakeOIDCProvider struct {
 
 	// email, if non-empty, is embedded as the ID token's "email" claim.
 	email atomic.Value // string
+
+	// groups, if non-nil, is embedded as the ID token's "groups" claim (see
+	// TestOIDCCallbackSyncsGroups).
+	groups atomic.Value // []string
 }
 
 func newFakeOIDCProvider(t *testing.T, clientID string) *fakeOIDCProvider {
@@ -130,6 +135,10 @@ func (p *fakeOIDCProvider) signIDToken() (string, error) {
 
 	if email, _ := p.email.Load().(string); email != "" {
 		claims["email"] = email
+	}
+
+	if groups, _ := p.groups.Load().([]string); groups != nil {
+		claims["groups"] = groups
 	}
 
 	header := map[string]any{"alg": "RS256", "typ": "JWT", "kid": "test-key"}
@@ -441,6 +450,103 @@ func TestOIDCCallbackDoesNotOverwriteAdminEditOnLaterLogin(t *testing.T) {
 	perm := sessions.permissionsFor(&http.Request{Header: http.Header{"Authorization": {"Bearer " + token}}})
 	if perm != permission.PermissionView {
 		t.Errorf("session permissions after second login = %v, want %v (the admin's edit, not auth.defaultPerm)", perm, permission.PermissionView)
+	}
+}
+
+// TestOIDCCallbackSyncsGroups checks that handleOIDCCallback resyncs an
+// identity's membership in OIDC-managed groups (see groupJSON.OIDCGroupName)
+// on every login to match the ID token's "groups" claim — joining a newly
+// reported group, dropping one no longer reported — while leaving an
+// unmanaged group (no OIDCGroupName mapping, assigned by hand) untouched.
+func TestOIDCCallbackSyncsGroups(t *testing.T) {
+	t.Parallel()
+
+	const clientID = "test-client"
+
+	provider := newFakeOIDCProvider(t, clientID)
+	provider.email.Store("grouped@example.com")
+
+	auth, err := newOIDCAuth(t.Context(), config.OIDCSettings{
+		Enabled:            true,
+		Issuer:             provider.issuer(),
+		ClientID:           clientID,
+		ClientSecret:       "test-secret",
+		RedirectURL:        "https://backups.example.com/login/oidc/callback",
+		Scopes:             []string{"profile", "email", "groups"},
+		DefaultPermissions: permission.PermissionView,
+	})
+	if err != nil {
+		t.Fatalf("newOIDCAuth() unexpected error: %v", err)
+	}
+
+	db := openTestStateDB(t)
+
+	if err := db.SaveGroup(t.Context(), "engineers", permission.PermissionDownload, "eng"); err != nil {
+		t.Fatalf("SaveGroup() unexpected error: %v", err)
+	}
+
+	if err := db.SaveGroup(t.Context(), "admins", permission.PermissionAdmin, "admin"); err != nil {
+		t.Fatalf("SaveGroup() unexpected error: %v", err)
+	}
+
+	if err := db.SaveGroup(t.Context(), "manual", permission.PermissionViewDownloadLog, ""); err != nil {
+		t.Fatalf("SaveGroup() unexpected error: %v", err)
+	}
+
+	pending := newOIDCPendingStore()
+	sessions := newTestSessionStore(t)
+
+	// First login reports the "eng" OIDC group only.
+	provider.groups.Store([]string{"eng"})
+	doOIDCLogin(t, provider, auth, pending, sessions, db)
+
+	assertGroups(t, mustGetUser(t, db, "grouped@example.com"), "engineers")
+
+	// An admin separately assigns the unmanaged "manual" group by hand.
+	if err := db.SetUserGroups(t.Context(), "grouped@example.com", []string{"engineers", "manual"}); err != nil {
+		t.Fatalf("SetUserGroups() unexpected error: %v", err)
+	}
+
+	// Second login now reports "admin" instead of "eng": membership in the
+	// OIDC-managed "engineers" group should drop and "admins" should join,
+	// but the unmanaged "manual" group must survive the resync untouched.
+	provider.groups.Store([]string{"admin"})
+	doOIDCLogin(t, provider, auth, pending, sessions, db)
+
+	user := mustGetUser(t, db, "grouped@example.com")
+	assertGroups(t, user, "admins", "manual")
+
+	if want := permission.PermissionView | permission.PermissionAdmin | permission.PermissionViewDownloadLog; user.EffectivePermissions != want {
+		t.Errorf("EffectivePermissions after second login = %v, want %v", user.EffectivePermissions, want)
+	}
+}
+
+// mustGetUser looks up username via db, failing t if the lookup errors or
+// finds no such user.
+func mustGetUser(t *testing.T, db *store.Store, username string) store.User {
+	t.Helper()
+
+	user, ok, err := db.GetUser(t.Context(), username)
+	if err != nil || !ok {
+		t.Fatalf("GetUser(%q) = (ok=%v, err=%v), want (true, nil)", username, ok, err)
+	}
+
+	return user
+}
+
+// assertGroups fails t unless user.Groups holds exactly want, ignoring
+// order.
+func assertGroups(t *testing.T, user store.User, want ...string) {
+	t.Helper()
+
+	got := slices.Clone(user.Groups)
+	slices.Sort(got)
+
+	wantSorted := slices.Clone(want)
+	slices.Sort(wantSorted)
+
+	if !slices.Equal(got, wantSorted) {
+		t.Errorf("Groups = %v, want %v", user.Groups, want)
 	}
 }
 

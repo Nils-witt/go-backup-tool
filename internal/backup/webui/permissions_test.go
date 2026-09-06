@@ -849,7 +849,7 @@ func TestHandleUpdateUserAssignsGroupsAndRejectsUnknownGroup(t *testing.T) {
 		t.Fatalf("SaveUser() unexpected error: %v", err)
 	}
 
-	if err := db.SaveGroup(ctx, "downloaders", permission.PermissionDownload); err != nil {
+	if err := db.SaveGroup(ctx, "downloaders", permission.PermissionDownload, ""); err != nil {
 		t.Fatalf("SaveGroup() unexpected error: %v", err)
 	}
 

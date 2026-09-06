@@ -408,7 +408,10 @@ type fileWebUIOIDC struct {
 	// Scopes are the OpenID Connect scopes requested at login, in addition
 	// to "openid" (always requested, and required by the protocol). Unset
 	// defaults to {"profile", "email"}, enough for most providers to return
-	// a usable display name.
+	// a usable display name. Group sync (see store.SyncOIDCGroups and a
+	// group's oidcGroupName mapping in the "Users" admin section) reads a
+	// "groups" claim off the ID token; most providers only populate it when
+	// a "groups" scope (or an equivalent claim mapper) is requested here too.
 	Scopes []string `yaml:"scopes"`
 
 	// DefaultPermissions lists the dashboard permissions ("view", "download",

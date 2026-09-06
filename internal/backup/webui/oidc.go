@@ -221,9 +221,14 @@ func writeOIDCCompletePage(w http.ResponseWriter, token string, expiresAt time.T
 // granting auth.defaultPerm — the identity shows up in that admin listing
 // from then on, ready for an admin to adjust or link to an existing
 // password account, rather than only appearing once they've manually added
-// it. db also, independently of all that, gets every attempt appended to
-// the login log (see recordLoginEvent), win or lose, mirroring
-// handleWebUILogin's own recording.
+// it. Once that row is resolved, db.SyncOIDCGroups reconciles its
+// membership in every OIDC-managed group (see groupJSON.OIDCGroupName in
+// webui.go) against the ID token's own "groups" claim (see oidcGroups),
+// folding any resulting change into the session's final permissions —
+// unmanaged groups (no mapping set) are left exactly as the "Users" admin
+// section last set them. db also, independently of all that, gets every
+// attempt appended to the login log (see recordLoginEvent), win or lose,
+// mirroring handleWebUILogin's own recording.
 func handleOIDCCallback(auth *OIDCAuth, pending *oidcPendingStore, sessions *sessionStore, log *slog.Logger, db *store.Store, trustProxyHeaders bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		record := func(username, detail string, success bool) {
@@ -283,11 +288,7 @@ func handleOIDCCallback(auth *OIDCAuth, pending *oidcPendingStore, sessions *ses
 		perm := auth.defaultPerm
 
 		if db != nil {
-			if p, err := db.GetOrProvisionOIDCUser(r.Context(), identity, auth.defaultPerm); err != nil {
-				log.Warn("oidc: looking up/provisioning user record failed", "err", err)
-			} else {
-				perm = p
-			}
+			perm = oidcSessionPermissions(r.Context(), db, identity, auth.defaultPerm, idToken, log)
 		}
 
 		id, err := sessions.create(identity, perm)
@@ -303,6 +304,31 @@ func handleOIDCCallback(auth *OIDCAuth, pending *oidcPendingStore, sessions *ses
 	}
 }
 
+// oidcSessionPermissions resolves the permission a session for identity
+// should carry: it provisions/looks up identity's users row (see
+// db.GetOrProvisionOIDCUser) and, once that succeeds, syncs its OIDC-managed
+// group membership against idToken's own "groups" claim (see
+// db.SyncOIDCGroups/oidcGroups), returning whichever of those two calls'
+// permission last succeeded. Either failure is logged as a warning rather
+// than aborting the login — a lookup/sync problem shouldn't lock out someone
+// the provider itself has just authenticated — falling back to defaultPerm
+// if even the first call failed.
+func oidcSessionPermissions(ctx context.Context, db *store.Store, identity string, defaultPerm permission.Permission, idToken *oidc.IDToken, log *slog.Logger) permission.Permission {
+	perm, err := db.GetOrProvisionOIDCUser(ctx, identity, defaultPerm)
+	if err != nil {
+		log.Warn("oidc: looking up/provisioning user record failed", "err", err)
+		return defaultPerm
+	}
+
+	if p, err := db.SyncOIDCGroups(ctx, identity, oidcGroups(idToken)); err != nil {
+		log.Warn("oidc: syncing group membership failed", "err", err)
+	} else {
+		perm = p
+	}
+
+	return perm
+}
+
 // oidcIdentity returns the best-effort human identity to record for a
 // verified idToken (see handleOIDCCallback's login log entries): its "email"
 // claim if the provider sent one, otherwise its subject.
@@ -316,4 +342,22 @@ func oidcIdentity(idToken *oidc.IDToken) string {
 	}
 
 	return idToken.Subject
+}
+
+// oidcGroups returns idToken's "groups" claim — the provider's own list of
+// group names/IDs this identity belongs to — or nil if the provider didn't
+// send one (see db.SyncOIDCGroups, which treats nil the same as an explicit
+// empty list: membership in every OIDC-managed group). Most providers only
+// populate this claim when a "groups" scope (or equivalent claim mapper) is
+// requested — see fileWebUIOIDC.Scopes.
+func oidcGroups(idToken *oidc.IDToken) []string {
+	var claims struct {
+		Groups []string `json:"groups"`
+	}
+
+	if err := idToken.Claims(&claims); err != nil {
+		return nil
+	}
+
+	return claims.Groups
 }

@@ -138,12 +138,14 @@ export interface WebUIUserUpdateRequestJSON {
 export interface WebUIGroupJSON {
   name: string;
   permissions: string[];
+  oidc_group_name: string;
   created_at: string;
 }
 
 export interface WebUIGroupRequestJSON {
   name: string;
   permissions: string[];
+  oidc_group_name: string;
 }
 
 export interface ApiTokenJSON {
