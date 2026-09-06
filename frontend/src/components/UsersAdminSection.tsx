@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { apiFetch, apiFetchJSON, apiFetchOK } from "../api/client";
-import type { WebUIUserJSON } from "../api/types";
+import type { WebUIGroupJSON, WebUIUserJSON } from "../api/types";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { fmtTime } from "../lib/format";
 import { UserTokensDialog } from "./UserTokensDialog";
@@ -9,9 +9,12 @@ import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Checkbox from "@mui/material/Checkbox";
+import Chip from "@mui/material/Chip";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import Link from "@mui/material/Link";
+import MenuItem from "@mui/material/MenuItem";
 import Paper from "@mui/material/Paper";
+import Select, { type SelectChangeEvent } from "@mui/material/Select";
 import Stack from "@mui/material/Stack";
 import Table from "@mui/material/Table";
 import TableBody from "@mui/material/TableBody";
@@ -40,6 +43,7 @@ const PERM_COLUMNS = [
 // add-user form, and per-user API token issuance/management.
 export function UsersAdminSection() {
   const [users, setUsers] = useState<WebUIUserJSON[]>([]);
+  const [groups, setGroups] = useState<WebUIGroupJSON[]>([]);
   const [oidcUsernameDrafts, setOidcUsernameDrafts] = useState<Record<string, string>>({});
   const [oidcUsernameErrors, setOidcUsernameErrors] = useState<Record<string, string>>({});
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
@@ -59,17 +63,34 @@ export function UsersAdminSection() {
       .catch(() => {});
   }
 
+  function loadGroups() {
+    apiFetchJSON<WebUIGroupJSON[]>("/api/groups")
+      .then((g) => setGroups(g || []))
+      .catch(() => {});
+  }
+
   useEffect(() => {
     loadUsers();
+    loadGroups();
   }, []);
 
-  function setPermission(username: string, perm: string, checked: boolean, current: string[]) {
-    const perms = checked ? [...current, perm] : current.filter((p) => p !== perm);
-    const oidcUsername = users.find((u) => u.username === username)?.oidc_username ?? "";
-    apiFetch("/api/users/" + encodeURIComponent(username), {
+  function updateUser(
+    username: string,
+    fields: { permissions: string[]; groups: string[]; oidc_username: string },
+  ) {
+    return apiFetch("/api/users/" + encodeURIComponent(username), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ permissions: perms, oidc_username: oidcUsername }),
+      body: JSON.stringify(fields),
+    });
+  }
+
+  function setPermission(u: WebUIUserJSON, perm: string, checked: boolean) {
+    const perms = checked ? [...u.permissions, perm] : u.permissions.filter((p) => p !== perm);
+    updateUser(u.username, {
+      permissions: perms,
+      groups: u.groups,
+      oidc_username: u.oidc_username,
     }).catch(() => {});
   }
 
@@ -86,7 +107,11 @@ export function UsersAdminSection() {
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ permissions: u.permissions, oidc_username: oidcUsername }),
+        body: JSON.stringify({
+          permissions: u.permissions,
+          groups: u.groups,
+          oidc_username: oidcUsername,
+        }),
       },
       "linking oidc identity failed",
     )
@@ -111,6 +136,7 @@ export function UsersAdminSection() {
               {PERM_COLUMNS.map((col) => (
                 <TableCell key={col.key}>{col.label}</TableCell>
               ))}
+              <TableCell>Groups</TableCell>
               <TableCell>Created</TableCell>
               <TableCell />
               <TableCell />
@@ -141,12 +167,51 @@ export function UsersAdminSection() {
                     <Checkbox
                       size="small"
                       checked={u.permissions.includes(col.key)}
-                      onChange={(e) =>
-                        setPermission(u.username, col.key, e.target.checked, u.permissions)
-                      }
+                      onChange={(e) => setPermission(u, col.key, e.target.checked)}
                     />
                   </TableCell>
                 ))}
+                <TableCell sx={{ minWidth: 180 }}>
+                  <Select<string[]>
+                    multiple
+                    size="small"
+                    variant="standard"
+                    fullWidth
+                    displayEmpty
+                    value={u.groups}
+                    onChange={(e: SelectChangeEvent<string[]>) => {
+                      const next =
+                        typeof e.target.value === "string"
+                          ? e.target.value.split(",")
+                          : e.target.value;
+                      updateUser(u.username, {
+                        permissions: u.permissions,
+                        groups: next,
+                        oidc_username: u.oidc_username,
+                      })
+                        .then(() => loadUsers())
+                        .catch(() => {});
+                    }}
+                    renderValue={(selected) =>
+                      !selected || selected.length === 0 ? (
+                        <em style={{ opacity: 0.6 }}>none</em>
+                      ) : (
+                        <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap" }}>
+                          {selected.map((g) => (
+                            <Chip key={g} label={g} size="small" />
+                          ))}
+                        </Stack>
+                      )
+                    }
+                  >
+                    {groups.map((g) => (
+                      <MenuItem key={g.name} value={g.name}>
+                        <Checkbox size="small" checked={u.groups.includes(g.name)} />
+                        {g.name}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </TableCell>
                 <TableCell sx={{ whiteSpace: "nowrap" }}>{fmtTime(u.created_at)}</TableCell>
                 <TableCell sx={{ whiteSpace: "nowrap" }}>
                   <Link

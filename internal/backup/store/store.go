@@ -74,6 +74,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		&objectModel{},
 		&loginEventModel{}, &downloadEventModel{}, &receiverEventModel{},
 		&userModel{}, &apiTokenModel{},
+		&groupModel{}, &userGroupModel{},
 	); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)

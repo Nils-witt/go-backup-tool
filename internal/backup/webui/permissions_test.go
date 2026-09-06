@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -701,4 +702,181 @@ func requireUserOIDCUsername(t *testing.T, list http.HandlerFunc, username, want
 	}
 
 	t.Fatalf("list = %+v, want an entry for %q", users, username)
+}
+
+// decodeUserList decodes list's GET /api/users response body into a
+// []userJSON, failing the test on a decode error.
+func decodeUserList(t *testing.T, list http.HandlerFunc) []userJSON {
+	t.Helper()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/users", nil)
+	rec := httptest.NewRecorder()
+	list(rec, req)
+
+	var users []userJSON
+	if err := json.NewDecoder(rec.Body).Decode(&users); err != nil {
+		t.Fatalf("decoding list response: %v", err)
+	}
+
+	return users
+}
+
+// findUserJSON returns username's entry from users, failing the test if
+// none exists.
+func findUserJSON(t *testing.T, users []userJSON, username string) userJSON {
+	t.Helper()
+
+	for _, u := range users {
+		if u.Username == username {
+			return u
+		}
+	}
+
+	t.Fatalf("list = %+v, want an entry for %q", users, username)
+
+	return userJSON{}
+}
+
+func TestHandleGroupAdminAPILifecycle(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+
+	create := handleCreateGroup(db, discardLogger)
+	list := handleListGroups(db, discardLogger)
+	update := handleUpdateGroup(db, discardLogger)
+	del := handleDeleteGroup(db, discardLogger)
+
+	// Create.
+	body := strings.NewReader(`{"name":"ops","permissions":["view"]}`)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/groups", body)
+	rec := httptest.NewRecorder()
+	create(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	// Reject a duplicate name.
+	body = strings.NewReader(`{"name":"ops","permissions":["view"]}`)
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/groups", body)
+	rec = httptest.NewRecorder()
+	create(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Errorf("create duplicate status = %d, want %d", rec.Code, http.StatusConflict)
+	}
+
+	// List.
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/groups", nil)
+	rec = httptest.NewRecorder()
+	list(rec, req)
+
+	var groups []groupJSON
+	if err := json.NewDecoder(rec.Body).Decode(&groups); err != nil {
+		t.Fatalf("decoding list response: %v", err)
+	}
+
+	if len(groups) != 1 || groups[0].Name != "ops" {
+		t.Fatalf("list = %+v, want exactly [ops]", groups)
+	}
+
+	// Update permissions.
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodPut, "/api/groups/ops", strings.NewReader(`{"permissions":["view","download"]}`))
+	req.SetPathValue("name", "ops")
+
+	rec = httptest.NewRecorder()
+	update(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("update status = %d, want %d, body: %s", rec.Code, http.StatusNoContent, rec.Body.String())
+	}
+
+	g, ok, err := db.GetGroup(context.Background(), "ops")
+	if err != nil || !ok {
+		t.Fatalf("GetGroup() after update = (ok=%v, err=%v), want (true, nil)", ok, err)
+	}
+
+	if want := permission.PermissionView | permission.PermissionDownload; g.Permissions != want {
+		t.Errorf("permissions after update = %v, want %v", g.Permissions, want)
+	}
+
+	// Updating an unknown group reports 404.
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodPut, "/api/groups/nonexistent", strings.NewReader(`{"permissions":["view"]}`))
+	req.SetPathValue("name", "nonexistent")
+
+	rec = httptest.NewRecorder()
+	update(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("update of an unknown group status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+
+	// Delete.
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/api/groups/ops", nil)
+	req.SetPathValue("name", "ops")
+
+	rec = httptest.NewRecorder()
+	del(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+
+	// Deleting again reports 404.
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/api/groups/ops", nil)
+	req.SetPathValue("name", "ops")
+
+	rec = httptest.NewRecorder()
+	del(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("delete of an already-deleted group status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+// TestHandleUpdateUserAssignsGroupsAndRejectsUnknownGroup drives
+// handleUpdateUser's req.Groups field: a valid group name is applied (and
+// shows up in both handleListUsers' groups and effective_permissions), and
+// an unknown one is rejected with 400 rather than silently ignored.
+func TestHandleUpdateUserAssignsGroupsAndRejectsUnknownGroup(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+	ctx := context.Background()
+
+	if err := db.SaveUser(ctx, "dave", "pw123456", "", permission.PermissionView); err != nil {
+		t.Fatalf("SaveUser() unexpected error: %v", err)
+	}
+
+	if err := db.SaveGroup(ctx, "downloaders", permission.PermissionDownload); err != nil {
+		t.Fatalf("SaveGroup() unexpected error: %v", err)
+	}
+
+	update := handleUpdateUser(db, discardLogger)
+	list := handleListUsers(db, discardLogger)
+
+	// Assigning an unknown group is rejected, and leaves membership
+	// unchanged.
+	putUser(t, update, "dave", `{"permissions":["view"],"groups":["nonexistent"]}`, http.StatusBadRequest)
+	putUser(t, update, "dave", `{"permissions":["view"],"groups":["downloaders"]}`, http.StatusNoContent)
+
+	dave := findUserJSON(t, decodeUserList(t, list), "dave")
+
+	if !slices.Equal(dave.Groups, []string{"downloaders"}) {
+		t.Errorf("dave.Groups = %v, want [downloaders]", dave.Groups)
+	}
+
+	if want := []string{"view", "download"}; !slices.Equal(dave.EffectivePermissions, want) {
+		t.Errorf("dave.EffectivePermissions = %v, want %v", dave.EffectivePermissions, want)
+	}
+
+	perm, ok, err := db.VerifyUser(ctx, "dave", "pw123456")
+	if err != nil || !ok {
+		t.Fatalf("VerifyUser() = (ok=%v, err=%v), want (true, nil)", ok, err)
+	}
+
+	if want := permission.PermissionView | permission.PermissionDownload; perm != want {
+		t.Errorf("VerifyUser() perm = %v, want %v (own + group)", perm, want)
+	}
 }

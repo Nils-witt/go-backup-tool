@@ -116,6 +116,8 @@ export interface WebUIUserJSON {
   username: string;
   oidc_username: string;
   permissions: string[];
+  groups: string[];
+  effective_permissions: string[];
   created_at: string;
 }
 
@@ -124,10 +126,23 @@ export interface WebUIUserRequestJSON {
   password: string;
   oidc_username: string;
   permissions: string[];
+  groups: string[];
 }
 
 export interface WebUIUserUpdateRequestJSON {
   oidc_username: string;
+  permissions: string[];
+  groups: string[];
+}
+
+export interface WebUIGroupJSON {
+  name: string;
+  permissions: string[];
+  created_at: string;
+}
+
+export interface WebUIGroupRequestJSON {
+  name: string;
   permissions: string[];
 }
 

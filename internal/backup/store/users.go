@@ -40,12 +40,18 @@ func (userModel) TableName() string { return "users" }
 // User is one users row, as returned by ListUsers/GetUser. It never carries
 // the password hash — nothing outside VerifyUser/UpdateUserPassword needs
 // it. OIDCUsername is "" if this account has no linked or auto-provisioned
-// OIDC identity.
+// OIDC identity. Permissions is this row's own directly-granted bitmask
+// (what UpdateUserPermissions edits); Groups is the names of every group
+// (see groups.go) it belongs to; EffectivePermissions is Permissions OR'd
+// with every one of those groups' own permissions — what a login session
+// for this account actually carries (see VerifyUser/GetOrProvisionOIDCUser).
 type User struct {
-	Username     string
-	OIDCUsername string
-	Permissions  permission.Permission
-	CreatedAt    time.Time
+	Username             string
+	OIDCUsername         string
+	Permissions          permission.Permission
+	EffectivePermissions permission.Permission
+	Groups               []string
+	CreatedAt            time.Time
 }
 
 // ErrUserExists is returned by SaveUser when username is already taken.
@@ -194,14 +200,31 @@ func (s *Store) DeleteUser(ctx context.Context, username string) error {
 	return checkRowsAffected(result, "deleting", username)
 }
 
-// toUser converts a userModel row into the exported User shape.
+// toUser converts a userModel row into the exported User shape. Groups and
+// EffectivePermissions are left at their zero value (no groups, effective
+// == own) — ListUsers/GetUser fill both in with a follow-up
+// loadUserGroups query, since a single row's group memberships aren't on
+// userModel itself.
 func toUser(m userModel) User {
+	perm := permission.Permission(m.Permissions)
+
 	return User{
-		Username:     m.Username,
-		OIDCUsername: m.OIDCUsername.String,
-		Permissions:  permission.Permission(m.Permissions),
-		CreatedAt:    m.CreatedAt,
+		Username:             m.Username,
+		OIDCUsername:         m.OIDCUsername.String,
+		Permissions:          perm,
+		EffectivePermissions: perm,
+		CreatedAt:            m.CreatedAt,
 	}
+}
+
+// applyGroups sets u's Groups and EffectivePermissions from info, the
+// loadUserGroups entry for u.Username (its zero value if the map has none),
+// so its effective permission reflects every group it belongs to.
+func applyGroups(u User, info userGroupInfo) User {
+	u.Groups = info.Names
+	u.EffectivePermissions = u.Permissions | info.Perm
+
+	return u
 }
 
 // ListUsers returns every account, in username order, for the "Users"
@@ -213,9 +236,19 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 		return nil, fmt.Errorf("listing users: %w", err)
 	}
 
+	usernames := make([]string, len(rows))
+	for i, m := range rows {
+		usernames[i] = m.Username
+	}
+
+	groupsByUser, err := s.loadUserGroups(ctx, usernames)
+	if err != nil {
+		return nil, err
+	}
+
 	users := make([]User, len(rows))
 	for i, m := range rows {
-		users[i] = toUser(m)
+		users[i] = applyGroups(toUser(m), groupsByUser[m.Username])
 	}
 
 	return users, nil
@@ -233,13 +266,19 @@ func (s *Store) GetUser(ctx context.Context, username string) (User, bool, error
 		return User{}, false, nil
 	case err != nil:
 		return User{}, false, fmt.Errorf("looking up user %q: %w", username, err)
-	default:
-		return toUser(m), true, nil
 	}
+
+	groupsByUser, err := s.loadUserGroups(ctx, []string{username})
+	if err != nil {
+		return User{}, false, err
+	}
+
+	return applyGroups(toUser(m), groupsByUser[username]), true, nil
 }
 
 // VerifyUser checks username/password against the stored account (see
-// SaveUser), returning its granted permissions and ok=true only if
+// SaveUser), returning its effective permissions (its own Permissions OR'd
+// with every group it belongs to — see loadUserGroups) and ok=true only if
 // username exists, has a password set, and password matches its stored
 // hash. An OIDC-only row (NULL password_hash) always fails verification
 // rather than being compared against. bcrypt.CompareHashAndPassword's own
@@ -263,7 +302,12 @@ func (s *Store) VerifyUser(ctx context.Context, username, password string) (perm
 		return 0, false, nil //nolint:nilerr // failed verification, not a caller-facing error
 	}
 
-	return permission.Permission(m.Permissions), true, nil
+	groupPerm, err := s.groupPermissionsFor(ctx, username)
+	if err != nil {
+		return 0, false, err
+	}
+
+	return permission.Permission(m.Permissions) | groupPerm, true, nil
 }
 
 // uniqueUsernameFor returns candidate if no row already has it as its
@@ -315,11 +359,16 @@ func uniqueUsernameFor(ctx context.Context, db *gorm.DB, candidate string) (stri
 func (s *Store) GetOrProvisionOIDCUser(ctx context.Context, oidcUsername string, defaultPerm permission.Permission) (permission.Permission, error) {
 	var m userModel
 
-	err := s.db.WithContext(ctx).Select("permissions").Where("oidc_username = ?", oidcUsername).Take(&m).Error
+	err := s.db.WithContext(ctx).Select("username", "permissions").Where("oidc_username = ?", oidcUsername).Take(&m).Error
 
 	switch {
 	case err == nil:
-		return permission.Permission(m.Permissions), nil
+		groupPerm, err := s.groupPermissionsFor(ctx, m.Username)
+		if err != nil {
+			return 0, err
+		}
+
+		return permission.Permission(m.Permissions) | groupPerm, nil
 	case !errors.Is(err, gorm.ErrRecordNotFound):
 		return 0, fmt.Errorf("looking up oidc user %q: %w", oidcUsername, err)
 	}

@@ -166,6 +166,10 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 	mux.HandleFunc("POST /api/users/{username}/tokens", admin(handleIssueWebUIUserToken(uiSessions, db, log)))
 	mux.HandleFunc("GET /api/users/{username}/tokens", admin(handleListWebUIUserTokens(db, log)))
 	mux.HandleFunc("DELETE /api/users/{username}/tokens/{jti}", admin(handleRevokeWebUIUserToken(uiSessions, db, log)))
+	mux.HandleFunc("GET /api/groups", admin(handleListGroups(db, log)))
+	mux.HandleFunc("POST /api/groups", admin(handleCreateGroup(db, log)))
+	mux.HandleFunc("PUT /api/groups/{name}", admin(handleUpdateGroup(db, log)))
+	mux.HandleFunc("DELETE /api/groups/{name}", admin(handleDeleteGroup(db, log)))
 
 	if registerExtraRoutes != nil {
 		registerExtraRoutes(mux)
@@ -1300,12 +1304,17 @@ func handleSessionInfo(sessions *sessionStore, authEnabled bool, adminUsername s
 // never carries a password: handleListUsers doesn't have one to serve (see
 // store.User), and handleCreateUser/handleUpdateUser take one only in
 // their own request body, write-only. OIDCUsername is "" for an account
-// with no linked/auto-provisioned OIDC identity.
+// with no linked/auto-provisioned OIDC identity. Permissions is this
+// account's own directly-granted set (what userRequestJSON.Permissions
+// edits); EffectivePermissions additionally includes whatever Groups grant
+// — the set a login session for this account actually carries.
 type userJSON struct {
-	Username     string    `json:"username"`
-	OIDCUsername string    `json:"oidc_username"`
-	Permissions  []string  `json:"permissions"`
-	CreatedAt    time.Time `json:"created_at"`
+	Username             string    `json:"username"`
+	OIDCUsername         string    `json:"oidc_username"`
+	Permissions          []string  `json:"permissions"`
+	Groups               []string  `json:"groups"`
+	EffectivePermissions []string  `json:"effective_permissions"`
+	CreatedAt            time.Time `json:"created_at"`
 }
 
 // handleListJSON adapts a store.Store List* method value (e.g.
@@ -1336,13 +1345,35 @@ func handleListJSON[T, S any](db *store.Store, log *slog.Logger, errMsg string, 
 	}
 }
 
+// nonNilStrings returns ss, or an empty (non-nil) slice in its place — so a
+// user with no groups serves "groups": [] rather than "groups": null, which
+// the dashboard's Array.prototype.includes-based checkbox state can't
+// handle.
+func nonNilStrings(ss []string) []string {
+	if ss == nil {
+		return []string{}
+	}
+
+	return ss
+}
+
+// toUserJSON converts one store.User into its wire shape (see userJSON).
+func toUserJSON(u store.User) userJSON {
+	return userJSON{
+		Username:             u.Username,
+		OIDCUsername:         u.OIDCUsername,
+		Permissions:          nonNilStrings(u.Permissions.Names()),
+		Groups:               nonNilStrings(u.Groups),
+		EffectivePermissions: nonNilStrings(u.EffectivePermissions.Names()),
+		CreatedAt:            u.CreatedAt,
+	}
+}
+
 // handleListUsers serves GET /api/users: every dashboard account, for the
 // "Users" admin section — requireAdmin (see StartWebUI) restricts this to
 // the config-file admin.
 func handleListUsers(db *store.Store, log *slog.Logger) http.HandlerFunc {
-	return handleListJSON(db, log, "listing users failed", db.ListUsers, func(u store.User) userJSON {
-		return userJSON{Username: u.Username, OIDCUsername: u.OIDCUsername, Permissions: u.Permissions.Names(), CreatedAt: u.CreatedAt}
-	})
+	return handleListJSON(db, log, "listing users failed", db.ListUsers, toUserJSON)
 }
 
 // userRequestJSON is handleCreateUser/handleUpdateUser's request body.
@@ -1355,16 +1386,21 @@ func handleListUsers(db *store.Store, log *slog.Logger) http.HandlerFunc {
 // Password, is always a full-replace value for both handlers — blank
 // explicitly means "no link"/"clear the link," since (unlike a password,
 // which is never round-tripped back to the client) the dashboard always has
-// the row's current value on hand to resubmit unchanged or edit.
+// the row's current value on hand to resubmit unchanged or edit. Groups is
+// likewise always a full-replace value — the full membership set to give
+// the account (see db.SetUserGroups) — and, like Permissions, only ever
+// named a group that must already exist (store.ErrGroupNotFound otherwise).
 type userRequestJSON struct {
 	Username     string   `json:"username"`
 	Password     string   `json:"password"`
 	OIDCUsername string   `json:"oidc_username"`
 	Permissions  []string `json:"permissions"`
+	Groups       []string `json:"groups"`
 }
 
 // handleUserErr writes the right response for err — store.ErrUserNotFound
-// as 404, store.ErrOIDCUsernameTaken as 409, any other error as a logged
+// as 404, store.ErrOIDCUsernameTaken as 409, store.ErrGroupNotFound as 400
+// (a client-named group that doesn't exist), any other error as a logged
 // 500 — and reports whether it wrote one at all (err == nil), so callers
 // can `if handleUserErr(...) { return }` rather than repeating this switch
 // themselves.
@@ -1376,6 +1412,8 @@ func handleUserErr(w http.ResponseWriter, log *slog.Logger, verb string, err err
 		http.Error(w, "user not found", http.StatusNotFound)
 	case errors.Is(err, store.ErrOIDCUsernameTaken):
 		http.Error(w, "oidc identity is already linked to another user", http.StatusConflict)
+	case errors.Is(err, store.ErrGroupNotFound):
+		http.Error(w, err.Error(), http.StatusBadRequest)
 	default:
 		log.Warn("web UI: "+verb+" user failed", "err", err)
 		http.Error(w, verb+" user failed", http.StatusInternalServerError)
@@ -1423,18 +1461,24 @@ func handleCreateUser(db *store.Store, adminUsername string, log *slog.Logger) h
 		switch err := db.SaveUser(r.Context(), req.Username, req.Password, req.OIDCUsername, perm); {
 		case errors.Is(err, store.ErrUserExists):
 			http.Error(w, "user already exists", http.StatusConflict)
+			return
 		case handleUserErr(w, log, "creating", err):
-		default:
-			w.WriteHeader(http.StatusCreated)
+			return
 		}
+
+		if err := db.SetUserGroups(r.Context(), req.Username, req.Groups); handleUserErr(w, log, "creating", err) {
+			return
+		}
+
+		w.WriteHeader(http.StatusCreated)
 	}
 }
 
 // handleUpdateUser serves PUT /api/users/{username}: it updates the named
-// account's permissions and OIDC identity link from the request body (see
-// userRequestJSON), and its password too if one was given (a blank
-// Password leaves the stored one unchanged, so the dashboard's edit form
-// doesn't have to re-submit it on every permission change).
+// account's permissions, group memberships, and OIDC identity link from the
+// request body (see userRequestJSON), and its password too if one was given
+// (a blank Password leaves the stored one unchanged, so the dashboard's edit
+// form doesn't have to re-submit it on every permission change).
 func handleUpdateUser(db *store.Store, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if db == nil {
@@ -1466,6 +1510,10 @@ func handleUpdateUser(db *store.Store, log *slog.Logger) http.HandlerFunc {
 			}
 		}
 
+		if err := db.SetUserGroups(r.Context(), username, req.Groups); handleUserErr(w, log, "updating", err) {
+			return
+		}
+
 		if err := db.SetUserOIDCUsername(r.Context(), username, req.OIDCUsername); handleUserErr(w, log, "updating", err) {
 			return
 		}
@@ -1484,6 +1532,138 @@ func handleDeleteUser(db *store.Store, log *slog.Logger) http.HandlerFunc {
 		}
 
 		if err := db.DeleteUser(r.Context(), r.PathValue("username")); handleUserErr(w, log, "deleting", err) {
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// groupJSON is one store.Group's wire shape for the "Users" admin API's
+// group management (handleListGroups/handleCreateGroup/handleUpdateGroup),
+// matching userJSON's own field naming.
+type groupJSON struct {
+	Name        string    `json:"name"`
+	Permissions []string  `json:"permissions"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+func toGroupJSON(g store.Group) groupJSON {
+	return groupJSON{Name: g.Name, Permissions: nonNilStrings(g.Permissions.Names()), CreatedAt: g.CreatedAt}
+}
+
+// handleListGroups serves GET /api/groups: every group, for the "Users"
+// admin section's group management panel.
+func handleListGroups(db *store.Store, log *slog.Logger) http.HandlerFunc {
+	return handleListJSON(db, log, "listing groups failed", db.ListGroups, toGroupJSON)
+}
+
+// groupRequestJSON is handleCreateGroup/handleUpdateGroup's request body.
+// Name is only used (and required) by handleCreateGroup, which takes it
+// from the body rather than the path the way handleUpdateGroup's PUT
+// /api/groups/{name} does, mirroring userRequestJSON.Username.
+type groupRequestJSON struct {
+	Name        string   `json:"name"`
+	Permissions []string `json:"permissions"`
+}
+
+// handleGroupErr writes the right response for err — store.ErrGroupNotFound
+// as 404, any other error as a logged 500 — and reports whether it wrote
+// one at all (err == nil), mirroring handleUserErr.
+func handleGroupErr(w http.ResponseWriter, log *slog.Logger, verb string, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, store.ErrGroupNotFound):
+		http.Error(w, "group not found", http.StatusNotFound)
+	default:
+		log.Warn("web UI: "+verb+" group failed", "err", err)
+		http.Error(w, verb+" group failed", http.StatusInternalServerError)
+	}
+
+	return true
+}
+
+// handleCreateGroup serves POST /api/groups: it adds a new group from the
+// request body (see groupRequestJSON), rejecting a name that's already
+// taken (store.ErrGroupExists).
+func handleCreateGroup(db *store.Store, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			http.Error(w, "group management requires the job state db", http.StatusServiceUnavailable)
+			return
+		}
+
+		var req groupRequestJSON
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if req.Name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+
+		perm, err := permission.ParsePermissions(req.Permissions)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		switch err := db.SaveGroup(r.Context(), req.Name, perm); {
+		case errors.Is(err, store.ErrGroupExists):
+			http.Error(w, "group already exists", http.StatusConflict)
+		case handleGroupErr(w, log, "creating", err):
+		default:
+			w.WriteHeader(http.StatusCreated)
+		}
+	}
+}
+
+// handleUpdateGroup serves PUT /api/groups/{name}: it replaces the named
+// group's granted permissions with the request body's (see
+// groupRequestJSON) — every member's next login picks up the change (see
+// db.VerifyUser/db.GetOrProvisionOIDCUser), though any of its members'
+// already-issued sessions or long-lived API tokens keep whatever they were
+// minted with until they expire or are revoked.
+func handleUpdateGroup(db *store.Store, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			http.Error(w, "group management requires the job state db", http.StatusServiceUnavailable)
+			return
+		}
+
+		var req groupRequestJSON
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		perm, err := permission.ParsePermissions(req.Permissions)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := db.UpdateGroupPermissions(r.Context(), r.PathValue("name"), perm); handleGroupErr(w, log, "updating", err) {
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// handleDeleteGroup serves DELETE /api/groups/{name}: it removes the named
+// group and every user's membership in it (see db.DeleteGroup).
+func handleDeleteGroup(db *store.Store, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			http.Error(w, "group management requires the job state db", http.StatusServiceUnavailable)
+			return
+		}
+
+		if err := db.DeleteGroup(r.Context(), r.PathValue("name")); handleGroupErr(w, log, "deleting", err) {
 			return
 		}
 
@@ -1511,8 +1691,9 @@ type apiTokenRequestJSON struct {
 
 // handleIssueWebUIUserToken serves POST /api/users/{username}/tokens: it
 // mints a long-lived bearer token (see sessionStore.createWithTTL) for the
-// named "Users" admin-managed account, carrying that account's currently
-// granted permissions (see db.GetUser) — the same kind of token a
+// named "Users" admin-managed account, carrying that account's effective
+// permissions — its own directly-granted set plus whatever its groups grant
+// (see db.GetUser/store.User.EffectivePermissions) — the same kind of token a
 // normal login produces, just valid for Days days instead of sessionTTL, for
 // scripts/automation that can't sit through an interactive login. Returned
 // as loginResponseJSON, the same shape POST /login uses, since it's the same
@@ -1557,7 +1738,7 @@ func handleIssueWebUIUserToken(sessions *sessionStore, db *store.Store, log *slo
 		issuedAt := time.Now()
 		expiresAt := issuedAt.Add(ttl)
 
-		token, jti, err := sessions.createWithTTL(user.Username, user.Permissions, ttl)
+		token, jti, err := sessions.createWithTTL(user.Username, user.EffectivePermissions, ttl)
 		if err != nil {
 			log.Warn("web UI: issuing token failed", "err", err)
 			http.Error(w, "issuing token failed", http.StatusInternalServerError)
@@ -1565,7 +1746,7 @@ func handleIssueWebUIUserToken(sessions *sessionStore, db *store.Store, log *slo
 			return
 		}
 
-		if err := db.SaveAPIToken(r.Context(), jti, user.Username, user.Permissions, issuedAt, expiresAt); err != nil {
+		if err := db.SaveAPIToken(r.Context(), jti, user.Username, user.EffectivePermissions, issuedAt, expiresAt); err != nil {
 			log.Warn("web UI: recording issued token failed", "err", err)
 			http.Error(w, "issuing token failed", http.StatusInternalServerError)
 
