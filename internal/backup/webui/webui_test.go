@@ -17,6 +17,7 @@ import (
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
@@ -101,7 +102,7 @@ func TestHandleReceiverStatusIncludesStaleness(t *testing.T) {
 	}
 
 	receivers := map[string]config.ResolvedReceiver{
-		"a": {ID: "a", Path: root, StaleAfter: time.Hour, Webhook: config.ResolvedWebhook{URL: "https://example.com/hook", Method: http.MethodPost}},
+		"a": {ID: "a", Path: root, StaleAfter: time.Hour},
 	}
 	store := backup.NewReceiverStatusStore(receivers)
 
@@ -131,7 +132,7 @@ func TestHandleReceiverStatusFreshFileIsNotStale(t *testing.T) {
 	writeFile(t, filepath.Join(root, "recent.gpg"), "a")
 
 	receivers := map[string]config.ResolvedReceiver{
-		"a": {ID: "a", Path: root, StaleAfter: time.Hour, Webhook: config.ResolvedWebhook{URL: "https://example.com/hook", Method: http.MethodPost}},
+		"a": {ID: "a", Path: root, StaleAfter: time.Hour},
 	}
 	store := backup.NewReceiverStatusStore(receivers)
 
@@ -1478,7 +1479,7 @@ func TestHandleDownloadFileFiresDownloadWebhookOnSuccess(t *testing.T) {
 	writeFile(t, filepath.Join(root, "backup.gpg"), "secret data")
 
 	receivers := map[string]config.ResolvedReceiver{
-		"a": {ID: "a", Path: root, DownloadWebhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}},
+		"a": {ID: "a", Path: root, DownloadNotifications: []notify.Notification{{ID: "test", Webhook: &notify.Webhook{URL: srv.URL, Method: http.MethodPost}}}},
 	}
 
 	tickets := newDownloadTicketStore()
@@ -1526,7 +1527,7 @@ func TestHandleDownloadFileDoesNotFireDownloadWebhookOnFailure(t *testing.T) {
 	root := t.TempDir()
 
 	receivers := map[string]config.ResolvedReceiver{
-		"a": {ID: "a", Path: root, DownloadWebhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}},
+		"a": {ID: "a", Path: root, DownloadNotifications: []notify.Notification{{ID: "test", Webhook: &notify.Webhook{URL: srv.URL, Method: http.MethodPost}}}},
 	}
 
 	tickets := newDownloadTicketStore()

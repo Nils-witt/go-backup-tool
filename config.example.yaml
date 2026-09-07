@@ -109,6 +109,14 @@ servers:
 # pair + UUID, generated on first run — see type: remote above) is stored.
 # Defaults to ./data/keys, next to this file.
 
+# server-name identifies this instance in notifications: (see below) — a
+# {server_name} placeholder, substituted the same way as a stale/download
+# notification's other placeholders or a report notification's, is
+# available in every notification webhook.body/email.subject/email.body.
+# Handy for telling which go-backup-tool instance a notification came from
+# when several instances share the same webhook/inbox. Omit to leave it "".
+# server-name: primary-backup-host
+
 # webui: configures the optional web UI dashboard (http://host:port/),
 # showing every job's and target's live status (idle/running/ok/failed, last
 # run time, duration, error), and — since it's served by the same HTTP
@@ -264,32 +272,26 @@ jobs:
 # local server's path/bucket/key); retention (optional, same syntax as a
 # local server's) deletes objects here once they're older than that.
 #
-# stale-after and webhook (optional, set together) monitor this receiver for
-# a sender that's stopped showing up: once at least one file has been
-# received under path, if the most recent one is older than stale-after
-# (same duration syntax as retention), go-backup-tool sends the request
-# described by webhook. A receiver that has never received anything at all
-# never fires — there's no file to be stale — so this only alerts on a
-# sender that stopped, not one that never started. It's checked about once a
-# minute and fires once per gap, not on every check — a fresh file resets it
-# so it can fire again on the next gap.
+# stale-after and stale-notifications (optional, set together) monitor this
+# receiver for a sender that's stopped showing up: once at least one file has
+# been received under path, if the most recent one is older than stale-after
+# (same duration syntax as retention), go-backup-tool fires every
+# notifications: entry named in stale-notifications (see notifications:
+# below). A receiver that has never received anything at all never fires —
+# there's no file to be stale — so this only alerts on a sender that
+# stopped, not one that never started. It's checked about once a minute and
+# fires once per gap, not on every check — a fresh file resets it so it can
+# fire again on the next gap.
 #
-# webhook.url is the only required field; webhook.method defaults to POST.
-# webhook.headers (optional) is a map of header name to value — handy for
-# Content-Type, an Authorization token, or anything else your endpoint
-# needs. webhook.body (optional) is the request body; if unset, it defaults
-# to JSON: {receiver_id, path, stale_after, last_received}. Set body
-# yourself for a webhook receiver that expects its own shape (Slack,
-# PagerDuty, ...): it supports {receiver_id}, {path}, {stale_after}, and
-# {last_received} (an RFC 3339 timestamp) placeholders.
+# download-notifications (optional, independent of stale-after/
+# stale-notifications) names notifications: entries to fire every time a
+# file is successfully downloaded from this receiver through the dashboard.
 #
-# download-webhook (optional, independent of stale-after/webhook) sends a
-# request every time a file is successfully downloaded from this receiver
-# through the dashboard. Same shape as webhook above: url is the only
-# required field, method defaults to POST, headers is optional, and body
-# defaults to JSON: {user, file, receiver, time}. Set body yourself using
-# the {user}, {file}, {receiver}, and {time} (an RFC 3339 timestamp)
-# placeholders for a webhook receiver that expects its own shape.
+# Both accept the {receiver_id}, {path}, {stale_after}, {last_received} (an
+# RFC 3339 timestamp) placeholders (stale-notifications) or {user}, {file},
+# {receiver}, {time} (an RFC 3339 timestamp) placeholders
+# (download-notifications) in a notification's webhook.body/email.subject/
+# email.body — see notifications: below.
 # receivers:
 #   - id: from-primary
 #     public-key: |
@@ -299,22 +301,64 @@ jobs:
 #     path: /mnt/remote-backups/from-primary
 #     retention: 30d
 #     stale-after: 26h # alert if sibling-instance's daily job hasn't shown up
-#     webhook:
-#       url: "https://events.eu.pagerduty.com/v2/enqueue"
-#       method: POST
-#       headers:
-#         Content-Type: application/json
-#       body: '{"payload":{"summary":"from-primary backup stale, last file {last_received}","severity":"critical","source":"go-backup-tool"},"routing_key":"replace-with-your-pagerduty-routing-key","event_action":"trigger"}'
-#     download-webhook:
-#       url: "https://hooks.slack.com/services/replace-with-your-webhook-path"
-#       body: '{"text":"{user} downloaded {file} from {receiver} at {time}"}'
+#     stale-notifications: [pagerduty]
+#     download-notifications: [slack-downloads]
 
 # A job's key keeps its {time} placeholder each time it (re-)runs, so a
 # repeating job gets a fresh object on every run instead of overwriting the
 # last one; go-backup-tool warns at startup if a repeating job's key has no
 # {time} placeholder at all.
 
-# report: configures an optional email summarizing this instance's receiver
+# smtp: is the outgoing mail server used by any notifications: entry below
+# with an email: block. Omit entirely if no notification uses email.
+# smtp:
+#   host: "smtp.example.com"
+#   # port: 587 # default 587, or 465 if security: tls
+#   username: "backups@example.com"
+#   # password/password-env are mutually exclusive — set at most one,
+#   # together with username; omit all three to send unauthenticated (e.g.
+#   # a trusted local relay). password writes the credential directly in
+#   # this file; password-env instead names an environment variable to
+#   # read it from, same as GPG_PASSPHRASE above.
+#   password: "app-password-here"
+#   # password-env: SMTP_PASSWORD
+#   # security selects the connection's encryption: "starttls" (the
+#   # default) connects in plaintext and upgrades before authenticating;
+#   # "tls" connects already encrypted (the traditional port 465); "none"
+#   # never encrypts, for a trusted local relay only.
+#   security: starttls
+
+# notifications: are named, reusable webhook/email destinations, referenced
+# by id from report.notifications: below and a receivers: entry's
+# stale-notifications:/download-notifications: above. Each entry needs at
+# least one of webhook: or email: — set both to fire both channels for that
+# id. webhook.url is the only required field; webhook.method defaults to
+# POST, webhook.headers (optional) is a map of header name to value, and
+# webhook.body (optional) is the request body — if unset, it defaults to a
+# JSON summary of whatever fired it. email.to is the only required field;
+# email.from defaults to smtp.username, and email.subject/email.body
+# (optional) default to the firing trigger's own text — set them to
+# override with the same {placeholder} syntax webhook.body accepts. Every
+# trigger's placeholders (stale/download/report, see receivers: and report:
+# below) also include {server_name}, this instance's top-level server-name:
+# (see above), "" if unset.
+# notifications:
+#   - id: ops-email
+#     email:
+#       to: ["ops@example.com"]
+#   - id: pagerduty
+#     webhook:
+#       url: "https://events.eu.pagerduty.com/v2/enqueue"
+#       method: POST
+#       headers:
+#         Content-Type: application/json
+#       body: '{"payload":{"summary":"from-primary backup stale, last file {last_received}","severity":"critical","source":"go-backup-tool"},"routing_key":"replace-with-your-pagerduty-routing-key","event_action":"trigger"}'
+#   - id: slack-downloads
+#     webhook:
+#       url: "https://hooks.slack.com/services/replace-with-your-webhook-path"
+#       body: '{"text":"{user} downloaded {file} from {receiver} at {time}"}'
+
+# report: configures an optional summary of this instance's receiver
 # activity: how many files each configured receivers: entry received since
 # the previous report, any receiver API errors, and any receiver currently
 # stale (see receivers: above). Independent of webui: — it's sent regardless
@@ -323,32 +367,17 @@ jobs:
 # disable it.
 # report:
 #   enabled: true
-#   to: ["ops@example.com"]
-#   # from: "backups@example.com" # defaults to smtp.username if unset;
-#   # it's an error to leave both unset.
 #   # schedule: a standard 5-field cron expression (minute hour
 #   # day-of-month month day-of-week), evaluated in this process's local
 #   # time zone; also accepts cron's descriptor shorthands (e.g. "@daily",
 #   # "@every 6h"). Default "0 7 * * *" (once a day at 07:00).
 #   schedule: "0 7 * * *"
-#   # subject is the email's Subject: header. {start} and {end} are the
-#   # report window's bounds, formatted "2006-01-02 15:04"; {receivers},
-#   # {errors}, {stale}, {jobs}, and {job-errors} are counts of each
-#   # section. Default "go-backup-tool report - {end}".
-#   subject: "go-backup-tool report - {end} ({errors} error(s))"
-#   smtp:
-#     host: "smtp.example.com"
-#     # port: 587 # default 587, or 465 if security: tls
-#     username: "backups@example.com"
-#     # password/password-env are mutually exclusive — set at most one,
-#     # together with username; omit all three to send unauthenticated (e.g.
-#     # a trusted local relay). password writes the credential directly in
-#     # this file; password-env instead names an environment variable to
-#     # read it from, same as GPG_PASSPHRASE above.
-#     password: "app-password-here"
-#     # password-env: SMTP_PASSWORD
-#     # security selects the connection's encryption: "starttls" (the
-#     # default) connects in plaintext and upgrades before authenticating;
-#     # "tls" connects already encrypted (the traditional port 465); "none"
-#     # never encrypts, for a trusted local relay only.
-#     security: starttls
+#   # notifications: names notifications: entries (see above) to send this
+#   # report to. An email: channel receives the full report as its body,
+#   # with its subject: (default "go-backup-tool report - {end}")
+#   # substituted the same way a stale/download notification's placeholders
+#   # are — {start}/{end} are the report window's bounds, formatted
+#   # "2006-01-02 15:04"; {receivers}, {errors}, {stale}, {jobs}, and
+#   # {job-errors} are counts of each section. A webhook: channel receives a
+#   # JSON summary of the same counts, or its own body: template.
+#   notifications: [ops-email]

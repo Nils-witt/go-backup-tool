@@ -5,10 +5,11 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
-	"net/http"
 	"reflect"
 	"testing"
 	"time"
+
+	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 )
 
 // testReceiverPublicKeyPEM generates a fresh (test-speed) RSA key pair and
@@ -42,7 +43,7 @@ func TestBuildReceivers(t *testing.T) {
 	receivers, err := buildReceivers([]FileReceiver{
 		{ID: "a", PublicKey: pemA, Path: "/mnt/a"},
 		{ID: "b", PublicKey: pemB, Path: "/mnt/b", Retention: "7d"},
-	})
+	}, nil, "")
 	if err != nil {
 		t.Fatalf("buildReceivers() unexpected error: %v", err)
 	}
@@ -68,7 +69,7 @@ func TestBuildReceiversRequiresID(t *testing.T) {
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
-	_, err := buildReceivers([]FileReceiver{{PublicKey: pemText, Path: "/mnt/a"}})
+	_, err := buildReceivers([]FileReceiver{{PublicKey: pemText, Path: "/mnt/a"}}, nil, "")
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for missing id, got nil")
 	}
@@ -79,7 +80,7 @@ func TestBuildReceiversRequiresPath(t *testing.T) {
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
-	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText}})
+	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText}}, nil, "")
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for missing path, got nil")
 	}
@@ -88,7 +89,7 @@ func TestBuildReceiversRequiresPath(t *testing.T) {
 func TestBuildReceiversRequiresPublicKey(t *testing.T) {
 	t.Parallel()
 
-	_, err := buildReceivers([]FileReceiver{{ID: "a", Path: "/mnt/a"}})
+	_, err := buildReceivers([]FileReceiver{{ID: "a", Path: "/mnt/a"}}, nil, "")
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for missing public-key, got nil")
 	}
@@ -97,7 +98,7 @@ func TestBuildReceiversRequiresPublicKey(t *testing.T) {
 func TestBuildReceiversRejectsInvalidPublicKey(t *testing.T) {
 	t.Parallel()
 
-	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: "not a PEM key", Path: "/mnt/a"}})
+	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: "not a PEM key", Path: "/mnt/a"}}, nil, "")
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for invalid public-key, got nil")
 	}
@@ -114,7 +115,7 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEF4MRFTT9HV60ttWqYkFekzGqdpVY
 If1SoUSBRfFVHGlXZJjmfRQxikr35aLMtrCtQ4GvhyLhd81I0HfA3+H0gg==
 -----END PUBLIC KEY-----`
 
-	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: ecPublicKeyPEM, Path: "/mnt/a"}})
+	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: ecPublicKeyPEM, Path: "/mnt/a"}}, nil, "")
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for a non-RSA public-key, got nil")
 	}
@@ -153,22 +154,31 @@ func TestParseStaleAfter(t *testing.T) {
 	}
 }
 
-func TestBuildReceiversStaleAfterAndWebhook(t *testing.T) {
+// testNotification builds a single-webhook notify.Notification for a test
+// fixture's notifications map.
+func testNotification(id, url string) notify.Notification {
+	return notify.Notification{ID: id, Webhook: &notify.Webhook{URL: url, Method: "POST"}}
+}
+
+func TestBuildReceiversStaleAfterAndNotifications(t *testing.T) {
 	t.Parallel()
 
 	pemText, pub := testReceiverPublicKeyPEM(t)
 
+	pagerduty := testNotification("pagerduty", "https://example.com/hook")
+	notifications := map[string]notify.Notification{"pagerduty": pagerduty}
+
 	receivers, err := buildReceivers([]FileReceiver{
-		{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h", Webhook: fileWebhook{URL: "https://example.com/hook"}},
-	})
+		{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h", StaleNotifications: []string{"pagerduty"}},
+	}, notifications, "")
 	if err != nil {
 		t.Fatalf("buildReceivers() unexpected error: %v", err)
 	}
 
 	want := ResolvedReceiver{
 		ID: "a", PublicKey: pub, Path: "/mnt/a",
-		StaleAfter: 6 * time.Hour,
-		Webhook:    ResolvedWebhook{URL: "https://example.com/hook", Method: http.MethodPost},
+		StaleAfter:         6 * time.Hour,
+		StaleNotifications: []notify.Notification{pagerduty},
 	}
 
 	if got := receivers["a"]; !reflect.DeepEqual(got, want) {
@@ -176,130 +186,64 @@ func TestBuildReceiversStaleAfterAndWebhook(t *testing.T) {
 	}
 }
 
-func TestBuildReceiversStaleAfterRequiresWebhook(t *testing.T) {
+func TestBuildReceiversStaleAfterRequiresNotifications(t *testing.T) {
 	t.Parallel()
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
-	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h"}})
+	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h"}}, nil, "")
 	if err == nil {
-		t.Fatal("buildReceivers() expected error for stale-after without webhook.url, got nil")
+		t.Fatal("buildReceivers() expected error for stale-after without stale-notifications, got nil")
 	}
 }
 
-func TestBuildReceiversWebhookRequiresStaleAfter(t *testing.T) {
+func TestBuildReceiversNotificationsRequireStaleAfter(t *testing.T) {
 	t.Parallel()
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
-	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", Webhook: fileWebhook{URL: "https://example.com/hook"}}})
+	pagerduty := testNotification("pagerduty", "https://example.com/hook")
+	notifications := map[string]notify.Notification{"pagerduty": pagerduty}
+
+	_, err := buildReceivers([]FileReceiver{
+		{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleNotifications: []string{"pagerduty"}},
+	}, notifications, "")
 	if err == nil {
-		t.Fatal("buildReceivers() expected error for webhook.url without stale-after, got nil")
+		t.Fatal("buildReceivers() expected error for stale-notifications without stale-after, got nil")
 	}
 }
 
-func TestBuildReceiversWebhookMethodHeadersAndBody(t *testing.T) {
-	t.Parallel()
-
-	pemText, _ := testReceiverPublicKeyPEM(t)
-
-	receivers, err := buildReceivers([]FileReceiver{
-		{
-			ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h",
-			Webhook: fileWebhook{
-				URL:     "https://example.com/hook",
-				Method:  "put",
-				Headers: map[string]string{"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer tok"},
-				Body:    `{"text":"{receiver_id} stale since {last_received}"}`,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("buildReceivers() unexpected error: %v", err)
-	}
-
-	want := ResolvedWebhook{
-		URL:    "https://example.com/hook",
-		Method: http.MethodPut, // lowercase "put" in the config file is normalized to uppercase
-		Headers: map[string]string{
-			"Content-Type":  "application/json; charset=utf-8",
-			"Authorization": "Bearer tok",
-		},
-		Body: `{"text":"{receiver_id} stale since {last_received}"}`,
-	}
-
-	if got := receivers["a"].Webhook; !reflect.DeepEqual(got, want) {
-		t.Errorf("buildReceivers()[%q].Webhook = %+v, want %+v", "a", got, want)
-	}
-}
-
-func TestBuildReceiversWebhookMethodDefaultsToPost(t *testing.T) {
-	t.Parallel()
-
-	pemText, _ := testReceiverPublicKeyPEM(t)
-
-	receivers, err := buildReceivers([]FileReceiver{
-		{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h", Webhook: fileWebhook{URL: "https://example.com/hook"}},
-	})
-	if err != nil {
-		t.Fatalf("buildReceivers() unexpected error: %v", err)
-	}
-
-	if got := receivers["a"].Webhook.Method; got != http.MethodPost {
-		t.Errorf("webhook.method = %q, want %q when unset", got, http.MethodPost)
-	}
-}
-
-func TestBuildReceiversWebhookBodyRequiresURL(t *testing.T) {
-	t.Parallel()
-
-	pemText, _ := testReceiverPublicKeyPEM(t)
-
-	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", Webhook: fileWebhook{Body: "custom"}}})
-	if err == nil {
-		t.Fatal("buildReceivers() expected error for webhook.body without webhook.url, got nil")
-	}
-}
-
-func TestBuildReceiversWebhookHeadersRequireURL(t *testing.T) {
+func TestBuildReceiversUnknownStaleNotificationID(t *testing.T) {
 	t.Parallel()
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
 	_, err := buildReceivers([]FileReceiver{
-		{ID: "a", PublicKey: pemText, Path: "/mnt/a", Webhook: fileWebhook{Headers: map[string]string{"X-Test": "y"}}},
-	})
+		{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h", StaleNotifications: []string{"nope"}},
+	}, nil, "")
 	if err == nil {
-		t.Fatal("buildReceivers() expected error for webhook.headers without webhook.url, got nil")
+		t.Fatal("buildReceivers() expected error for unknown stale-notifications id, got nil")
 	}
 }
 
-func TestBuildReceiversWebhookMethodRequiresURL(t *testing.T) {
-	t.Parallel()
-
-	pemText, _ := testReceiverPublicKeyPEM(t)
-
-	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", Webhook: fileWebhook{Method: "PUT"}}})
-	if err == nil {
-		t.Fatal("buildReceivers() expected error for webhook.method without webhook.url, got nil")
-	}
-}
-
-func TestBuildReceiversDownloadWebhookIndependentOfStaleAfter(t *testing.T) {
+func TestBuildReceiversDownloadNotificationsIndependentOfStaleAfter(t *testing.T) {
 	t.Parallel()
 
 	pemText, pub := testReceiverPublicKeyPEM(t)
 
+	slack := testNotification("slack", "https://example.com/downloaded")
+	notifications := map[string]notify.Notification{"slack": slack}
+
 	receivers, err := buildReceivers([]FileReceiver{
-		{ID: "a", PublicKey: pemText, Path: "/mnt/a", DownloadWebhook: fileWebhook{URL: "https://example.com/downloaded"}},
-	})
+		{ID: "a", PublicKey: pemText, Path: "/mnt/a", DownloadNotifications: []string{"slack"}},
+	}, notifications, "")
 	if err != nil {
 		t.Fatalf("buildReceivers() unexpected error: %v", err)
 	}
 
 	want := ResolvedReceiver{
 		ID: "a", PublicKey: pub, Path: "/mnt/a",
-		DownloadWebhook: ResolvedWebhook{URL: "https://example.com/downloaded", Method: http.MethodPost},
+		DownloadNotifications: []notify.Notification{slack},
 	}
 
 	if got := receivers["a"]; !reflect.DeepEqual(got, want) {
@@ -307,88 +251,81 @@ func TestBuildReceiversDownloadWebhookIndependentOfStaleAfter(t *testing.T) {
 	}
 }
 
-func TestBuildReceiversDownloadWebhookAndStaleWebhookCoexist(t *testing.T) {
+func TestBuildReceiversDownloadAndStaleNotificationsCoexist(t *testing.T) {
 	t.Parallel()
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
+	pagerduty := testNotification("pagerduty", "https://example.com/stale")
+	slack := testNotification("slack", "https://example.com/downloaded")
+	notifications := map[string]notify.Notification{"pagerduty": pagerduty, "slack": slack}
+
 	receivers, err := buildReceivers([]FileReceiver{
 		{
 			ID: "a", PublicKey: pemText, Path: "/mnt/a",
-			StaleAfter:      "6h",
-			Webhook:         fileWebhook{URL: "https://example.com/stale"},
-			DownloadWebhook: fileWebhook{URL: "https://example.com/downloaded"},
+			StaleAfter:            "6h",
+			StaleNotifications:    []string{"pagerduty"},
+			DownloadNotifications: []string{"slack"},
 		},
-	})
+	}, notifications, "")
 	if err != nil {
 		t.Fatalf("buildReceivers() unexpected error: %v", err)
 	}
 
 	got := receivers["a"]
-	if got.Webhook.URL != "https://example.com/stale" {
-		t.Errorf("Webhook.URL = %q, want %q", got.Webhook.URL, "https://example.com/stale")
+	if len(got.StaleNotifications) != 1 || got.StaleNotifications[0].Webhook.URL != "https://example.com/stale" {
+		t.Errorf("StaleNotifications = %+v, want [pagerduty]", got.StaleNotifications)
 	}
 
-	if got.DownloadWebhook.URL != "https://example.com/downloaded" {
-		t.Errorf("DownloadWebhook.URL = %q, want %q", got.DownloadWebhook.URL, "https://example.com/downloaded")
+	if len(got.DownloadNotifications) != 1 || got.DownloadNotifications[0].Webhook.URL != "https://example.com/downloaded" {
+		t.Errorf("DownloadNotifications = %+v, want [slack]", got.DownloadNotifications)
 	}
 }
 
-func TestBuildReceiversDownloadWebhookMethodHeadersAndBody(t *testing.T) {
+func TestBuildReceiversUnknownDownloadNotificationID(t *testing.T) {
 	t.Parallel()
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
-	receivers, err := buildReceivers([]FileReceiver{
-		{
-			ID: "a", PublicKey: pemText, Path: "/mnt/a",
-			DownloadWebhook: fileWebhook{
-				URL:     "https://example.com/downloaded",
-				Method:  "put",
-				Headers: map[string]string{"Content-Type": "application/json; charset=utf-8"},
-				Body:    `{"text":"{user} downloaded {file} from {receiver} at {time}"}`,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("buildReceivers() unexpected error: %v", err)
-	}
-
-	want := ResolvedWebhook{
-		URL:     "https://example.com/downloaded",
-		Method:  http.MethodPut, // lowercase "put" in the config file is normalized to uppercase
-		Headers: map[string]string{"Content-Type": "application/json; charset=utf-8"},
-		Body:    `{"text":"{user} downloaded {file} from {receiver} at {time}"}`,
-	}
-
-	if got := receivers["a"].DownloadWebhook; !reflect.DeepEqual(got, want) {
-		t.Errorf("buildReceivers()[%q].DownloadWebhook = %+v, want %+v", "a", got, want)
-	}
-}
-
-func TestBuildReceiversDownloadWebhookBodyRequiresURL(t *testing.T) {
-	t.Parallel()
-
-	pemText, _ := testReceiverPublicKeyPEM(t)
-
-	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", DownloadWebhook: fileWebhook{Body: "custom"}}})
+	_, err := buildReceivers([]FileReceiver{
+		{ID: "a", PublicKey: pemText, Path: "/mnt/a", DownloadNotifications: []string{"nope"}},
+	}, nil, "")
 	if err == nil {
-		t.Fatal("buildReceivers() expected error for download-webhook.body without download-webhook.url, got nil")
+		t.Fatal("buildReceivers() expected error for unknown download-notifications id, got nil")
 	}
 }
 
-func TestBuildReceiversNoWebhooksResolveToZeroValue(t *testing.T) {
+func TestBuildReceiversNoNotificationsResolveToNil(t *testing.T) {
 	t.Parallel()
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
-	receivers, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a"}})
+	receivers, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a"}}, nil, "")
 	if err != nil {
 		t.Fatalf("buildReceivers() unexpected error: %v", err)
 	}
 
-	if got := receivers["a"].DownloadWebhook; !reflect.DeepEqual(got, ResolvedWebhook{}) {
-		t.Errorf("DownloadWebhook = %+v, want zero value when unset", got)
+	if got := receivers["a"].DownloadNotifications; got != nil {
+		t.Errorf("DownloadNotifications = %+v, want nil when unset", got)
+	}
+
+	if got := receivers["a"].StaleNotifications; got != nil {
+		t.Errorf("StaleNotifications = %+v, want nil when unset", got)
+	}
+}
+
+func TestBuildReceiversServerNamePropagatesToNotificationPlaceholder(t *testing.T) {
+	t.Parallel()
+
+	pemText, _ := testReceiverPublicKeyPEM(t)
+
+	receivers, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a"}}, nil, "primary-backup-host")
+	if err != nil {
+		t.Fatalf("buildReceivers() unexpected error: %v", err)
+	}
+
+	if got := receivers["a"].ServerName; got != "primary-backup-host" {
+		t.Errorf("ServerName = %q, want %q", got, "primary-backup-host")
 	}
 }
 

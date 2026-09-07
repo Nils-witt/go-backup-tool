@@ -7,17 +7,16 @@
 package receiver
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -125,10 +124,6 @@ func anyReceiverHasRetention(receivers map[string]config.ResolvedReceiver) bool 
 // every receiver with stale-after: set.
 const staleReceiverCheckInterval = time.Minute
 
-// webhookTimeout bounds a single receiver webhook POST — stale-receiver or
-// download — since neither runs under a run's -timeout.
-const webhookTimeout = 10 * time.Second
-
 // staleReceiverMonitor tracks, per receiver id, whether its stale webhook has
 // already fired for the receiver's current gap in incoming files, so
 // MonitorStaleReceivers fires it once per gap instead of on every check —
@@ -174,115 +169,147 @@ func (m *staleReceiverMonitor) check(recv config.ResolvedReceiver, log *slog.Log
 		return
 	}
 
-	notifyStaleReceiverWebhook(recv, lastSeen, log)
+	notifyStaleReceiver(recv, lastSeen, log)
 }
 
-// staleReceiverPayload is the default JSON body POSTed to a receiver's
-// webhook:, used unless the receiver's webhook-payload: overrides it (see
+// staleReceiverPayload is the default JSON body POSTed to a stale
+// notification's webhook:, used unless its body: overrides it (see
 // renderStaleWebhookPayload).
 type staleReceiverPayload struct {
 	ReceiverID   string    `json:"receiver_id"`
 	Path         string    `json:"path"`
 	StaleAfter   string    `json:"stale_after"`
 	LastReceived time.Time `json:"last_received"`
+	ServerName   string    `json:"server_name,omitempty"`
 }
 
 // defaultStaleWebhookContentType is the Content-Type sent with a stale
-// receiver webhook request whose receiver doesn't set a Content-Type among
+// notification's webhook request when it doesn't set a Content-Type among
 // webhook.headers:.
 const defaultStaleWebhookContentType = "application/json"
 
-// staleWebhookBody builds the request body sent to recv.Webhook: recv's
-// webhook.body: template (see renderStaleWebhookPayload), if set, otherwise
-// the default JSON staleReceiverPayload.
-func staleWebhookBody(recv config.ResolvedReceiver, lastSeen time.Time) ([]byte, error) {
-	if recv.Webhook.Body != "" {
-		return []byte(renderStaleWebhookPayload(recv.Webhook.Body, recv, lastSeen)), nil
+// defaultStaleSubject is a stale notification's email.subject default when
+// left unset.
+const defaultStaleSubject = "[{server_name}] receiver {receiver_id} is stale"
+
+// defaultStaleBody is a stale notification's email.body default when left
+// unset.
+const defaultStaleBody = "Receiver {receiver_id} ({path}) has not received a file in over {stale_after}. Last received: {last_received}."
+
+// staleWebhookBody builds the request body sent to wh: wh.Body: (see
+// renderStaleWebhookPayload), if set, otherwise the default JSON
+// staleReceiverPayload.
+func staleWebhookBody(wh notify.Webhook, recv config.ResolvedReceiver, lastSeen time.Time) ([]byte, error) {
+	if wh.Body != "" {
+		return []byte(renderStaleWebhookPayload(wh.Body, recv, lastSeen)), nil
 	}
 
 	payload := staleReceiverPayload{
 		ReceiverID: recv.ID, Path: recv.Path, StaleAfter: recv.StaleAfter.String(), LastReceived: lastSeen,
+		ServerName: recv.ServerName,
 	}
 
 	return json.Marshal(payload)
 }
 
-// renderStaleWebhookPayload substitutes a receiver's webhook.body: template's
-// placeholders with recv's current staleness, mirroring how a job's key:
-// substitutes {time}: {receiver_id}, {path}, and {stale_after} are recv's
-// own fields; {last_received} is lastSeen formatted as RFC 3339. This lets
-// an operator's webhook receiver (Slack, PagerDuty, a custom endpoint
-// expecting its own JSON/form shape, ...) get a body it already understands
-// instead of go-backup-tool's own default shape.
+// renderStaleWebhookPayload substitutes a stale notification's webhook.body:/
+// email.subject:/email.body: template's placeholders with recv's current
+// staleness, mirroring how a job's key: substitutes {time}: {receiver_id},
+// {path}, and {stale_after} are recv's own fields; {last_received} is
+// lastSeen formatted as RFC 3339; {server_name} is the config file's
+// top-level server-name: (see config.ResolvedReceiver.ServerName), "" if
+// unset. This lets an operator's webhook receiver (Slack, PagerDuty, a
+// custom endpoint expecting its own JSON/form shape, ...) or email get a
+// body it already understands instead of go-backup-tool's own default
+// shape.
 func renderStaleWebhookPayload(tmpl string, recv config.ResolvedReceiver, lastSeen time.Time) string {
 	replacer := strings.NewReplacer(
 		"{receiver_id}", recv.ID,
 		"{path}", recv.Path,
 		"{stale_after}", recv.StaleAfter.String(),
 		"{last_received}", lastSeen.UTC().Format(time.RFC3339),
+		"{server_name}", recv.ServerName,
 	)
 
 	return replacer.Replace(tmpl)
 }
 
-// notifyStaleReceiverWebhook sends recv's current staleness to recv.Webhook,
-// logging (rather than returning) any failure: a webhook delivery problem
-// shouldn't affect anything else this process is doing, and there's no
-// caller to report it to — MonitorStaleReceivers already marked this gap as
-// notified before calling this, so a failed delivery isn't retried until the
-// gap clears and reopens.
-func notifyStaleReceiverWebhook(recv config.ResolvedReceiver, lastSeen time.Time, log *slog.Logger) {
-	body, err := staleWebhookBody(recv, lastSeen)
+// notifyStaleReceiver sends recv's current staleness to every one of
+// recv.StaleNotifications, logging (rather than returning) any failure: a
+// notification delivery problem shouldn't affect anything else this process
+// is doing, and there's no caller to report it to — MonitorStaleReceivers
+// already marked this gap as notified before calling this, so a failed
+// delivery isn't retried until the gap clears and reopens.
+func notifyStaleReceiver(recv config.ResolvedReceiver, lastSeen time.Time, log *slog.Logger) {
+	for _, n := range recv.StaleNotifications {
+		if n.Webhook != nil {
+			notifyStaleReceiverWebhook(recv, *n.Webhook, lastSeen, log)
+		}
+
+		if n.Email != nil {
+			notifyStaleReceiverEmail(recv, *n.Email, lastSeen, log)
+		}
+	}
+}
+
+// notifyStaleReceiverWebhook POSTs recv's current staleness to wh.
+func notifyStaleReceiverWebhook(recv config.ResolvedReceiver, wh notify.Webhook, lastSeen time.Time, log *slog.Logger) {
+	body, err := staleWebhookBody(wh, recv, lastSeen)
 	if err != nil {
 		log.Warn("stale receiver webhook: encoding payload failed", "id", recv.ID, "err", err)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), webhookTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, recv.Webhook.Method, recv.Webhook.URL, bytes.NewReader(body))
+	resp, err := notify.PostWebhook(context.Background(), wh, body, defaultStaleWebhookContentType)
 	if err != nil {
-		log.Warn("stale receiver webhook: building request failed", "id", recv.ID, "err", err)
-		return
-	}
-
-	for k, v := range recv.Webhook.Headers {
-		req.Header.Set(k, v)
-	}
-
-	if req.Header.Get("Content-Type") == "" {
-		req.Header.Set("Content-Type", defaultStaleWebhookContentType)
-	}
-
-	resp, err := webhookHTTPClient.Do(req)
-	if err != nil {
-		log.Warn("stale receiver webhook: request failed", "id", recv.ID, "webhook", recv.Webhook.URL, "err", err)
+		log.Warn("stale receiver webhook: request failed", "id", recv.ID, "webhook", wh.URL, "err", err)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Warn("stale receiver webhook: non-2xx response", "id", recv.ID, "webhook", recv.Webhook.URL, "status", resp.StatusCode)
+		log.Warn("stale receiver webhook: non-2xx response", "id", recv.ID, "webhook", wh.URL, "status", resp.StatusCode)
 		return
 	}
 
-	log.Info("stale receiver webhook fired", "id", recv.ID, "webhook", recv.Webhook.URL, "stale_after", recv.StaleAfter, "last_received", lastSeen)
+	log.Info("stale receiver webhook fired", "id", recv.ID, "webhook", wh.URL, "stale_after", recv.StaleAfter, "last_received", lastSeen)
 }
 
-// webhookHTTPClient is shared by every receiver webhook POST — stale-receiver
-// or download; webhookTimeout bounds each request.
-var webhookHTTPClient = &http.Client{Timeout: webhookTimeout}
+// notifyStaleReceiverEmail emails recv's current staleness via email.
+func notifyStaleReceiverEmail(recv config.ResolvedReceiver, email notify.Email, lastSeen time.Time, log *slog.Logger) {
+	subjectTmpl := email.Subject
+	if subjectTmpl == "" {
+		subjectTmpl = defaultStaleSubject
+	}
+
+	bodyTmpl := email.Body
+	if bodyTmpl == "" {
+		bodyTmpl = defaultStaleBody
+	}
+
+	subject := renderStaleWebhookPayload(subjectTmpl, recv, lastSeen)
+	body := renderStaleWebhookPayload(bodyTmpl, recv, lastSeen)
+
+	ctx, cancel := context.WithTimeout(context.Background(), notify.Timeout)
+	defer cancel()
+
+	if err := notify.SendMail(ctx, email.SMTP, email.From, email.To, subject, body); err != nil {
+		log.Warn("stale receiver email: sending failed", "id", recv.ID, "to", email.To, "err", err)
+		return
+	}
+
+	log.Info("stale receiver email sent", "id", recv.ID, "to", email.To, "stale_after", recv.StaleAfter, "last_received", lastSeen)
+}
 
 // MonitorStaleReceivers periodically checks every receiver with stale-after:
-// set, POSTing to its webhook: whenever the most recent file under its path
-// (see backup.LastReceivedAt) is older than stale-after. A receiver that has
-// never received anything at all never fires — there's no file to be stale
-// — so this only alerts on a sender that stopped showing up, not one that
-// never started. It checks once immediately, then every
-// staleReceiverCheckInterval, until ctx is done; a receiver's webhook fires
-// once per gap (see staleReceiverMonitor), not on every check, so a sender
-// that stays down doesn't spam the webhook indefinitely. A no-op if no
+// set, notifying its stale-notifications: whenever the most recent file
+// under its path (see backup.LastReceivedAt) is older than stale-after. A
+// receiver that has never received anything at all never fires — there's no
+// file to be stale — so this only alerts on a sender that stopped showing
+// up, not one that never started. It checks once immediately, then every
+// staleReceiverCheckInterval, until ctx is done; a receiver's notifications
+// fire once per gap (see staleReceiverMonitor), not on every check, so a
+// sender that stays down doesn't spam them indefinitely. A no-op if no
 // receiver has stale-after: set.
 func MonitorStaleReceivers(ctx context.Context, receivers map[string]config.ResolvedReceiver, log *slog.Logger) {
 	if !anyReceiverHasStaleAfter(receivers) {

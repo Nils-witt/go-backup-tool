@@ -10,7 +10,14 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 )
+
+// downloadWebhookNotifications wraps wh as the single download-notifications:
+// entry a test's config.ResolvedReceiver fixture needs.
+func downloadWebhookNotifications(wh notify.Webhook) []notify.Notification {
+	return []notify.Notification{{ID: "test", Webhook: &wh}}
+}
 
 func TestRenderDownloadWebhookPayload(t *testing.T) {
 	t.Parallel()
@@ -22,6 +29,20 @@ func TestRenderDownloadWebhookPayload(t *testing.T) {
 	got := renderDownloadWebhookPayload(tmpl, recv, ev)
 	want := "alice downloaded daily/backup.gpg from a at 2026-01-02T03:04:05Z"
 
+	if got != want {
+		t.Errorf("renderDownloadWebhookPayload() = %q, want %q", got, want)
+	}
+}
+
+func TestRenderDownloadWebhookPayloadServerName(t *testing.T) {
+	t.Parallel()
+
+	recv := config.ResolvedReceiver{ID: "a", Path: "/mnt/a", ServerName: "primary-backup-host"}
+	ev := DownloadWebhookEvent{Username: "alice", Key: "k", At: time.Now()}
+
+	got := renderDownloadWebhookPayload("[{server_name}] {user} downloaded {file}", recv, ev)
+
+	want := "[primary-backup-host] alice downloaded k"
 	if got != want {
 		t.Errorf("renderDownloadWebhookPayload() = %q, want %q", got, want)
 	}
@@ -44,13 +65,13 @@ func TestNotifyDownloadWebhookNoopWhenUnconfigured(t *testing.T) {
 
 	recv := config.ResolvedReceiver{ID: "a", Path: "/mnt/a"} // no DownloadWebhook configured
 
-	NotifyDownloadWebhook(recv, DownloadWebhookEvent{Username: "alice", Key: "k", At: time.Now()}, discardLogger)
+	NotifyDownload(recv, DownloadWebhookEvent{Username: "alice", Key: "k", At: time.Now()}, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
 
 	if requestSeen {
-		t.Error("NotifyDownloadWebhook() sent a request, want none when download-webhook is unconfigured")
+		t.Error("NotifyDownload() sent a request, want none when download-webhook is unconfigured")
 	}
 }
 
@@ -83,9 +104,9 @@ func TestNotifyDownloadWebhookDefaultJSONPayload(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	recv := config.ResolvedReceiver{ID: "recv-a", Path: "/mnt/a", DownloadWebhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}}
+	recv := config.ResolvedReceiver{ID: "recv-a", Path: "/mnt/a", DownloadNotifications: downloadWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
-	NotifyDownloadWebhook(recv, DownloadWebhookEvent{Username: "alice", Key: "daily/backup.gpg", At: time.Now()}, discardLogger)
+	NotifyDownload(recv, DownloadWebhookEvent{Username: "alice", Key: "daily/backup.gpg", At: time.Now()}, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -131,15 +152,15 @@ func TestNotifyDownloadWebhookUsesCustomMethodHeadersAndBody(t *testing.T) {
 
 	recv := config.ResolvedReceiver{
 		ID: "recv-a", Path: "/mnt/a",
-		DownloadWebhook: config.ResolvedWebhook{
+		DownloadNotifications: downloadWebhookNotifications(notify.Webhook{
 			URL:     srv.URL,
 			Method:  http.MethodPut,
 			Headers: map[string]string{"Authorization": "Bearer tok"},
 			Body:    `{"text":"{user} downloaded {file}"}`,
-		},
+		}),
 	}
 
-	NotifyDownloadWebhook(recv, DownloadWebhookEvent{Username: "alice", Key: "daily/backup.gpg", At: time.Now()}, discardLogger)
+	NotifyDownload(recv, DownloadWebhookEvent{Username: "alice", Key: "daily/backup.gpg", At: time.Now()}, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -170,9 +191,9 @@ func TestNotifyDownloadWebhookNonSuccessStatusIsLoggedNotReturned(t *testing.T) 
 	}))
 	t.Cleanup(srv.Close)
 
-	recv := config.ResolvedReceiver{ID: "a", Path: "/mnt/a", DownloadWebhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}}
+	recv := config.ResolvedReceiver{ID: "a", Path: "/mnt/a", DownloadNotifications: downloadWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
 	// NotifyDownloadWebhook returns nothing to assert on failure; this just
 	// exercises the non-2xx path without panicking.
-	NotifyDownloadWebhook(recv, DownloadWebhookEvent{Username: "alice", Key: "k", At: time.Now()}, discardLogger)
+	NotifyDownload(recv, DownloadWebhookEvent{Username: "alice", Key: "k", At: time.Now()}, discardLogger)
 }

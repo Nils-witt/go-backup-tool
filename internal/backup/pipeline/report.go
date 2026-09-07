@@ -2,11 +2,9 @@ package pipeline
 
 import (
 	"context"
-	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/smtp"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,7 +12,7 @@ import (
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
-	"nilswitt.dev/go-backup-tool/internal/backup/report"
+	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -87,6 +85,11 @@ type reportContent struct {
 	stale      []staleReceiverLine
 	jobs       []jobReportLine
 	jobErrors  []store.JobRunErrorEvent
+
+	// serverName is rc.ServerName (see config.RunConfig.ServerName), copied
+	// in by buildReport so renderReportSubject/reportWebhookBody can
+	// substitute it into a report notification's {server_name} placeholder.
+	serverName string
 }
 
 // buildReport summarizes rc's configured receivers' and jobs' activity in
@@ -98,7 +101,7 @@ type reportContent struct {
 // the whole report — a partial report is better than none, matching this
 // codebase's usual failure handling.
 func buildReport(ctx context.Context, rc *config.RunConfig, db *store.Store, start, end time.Time, log *slog.Logger) reportContent {
-	report := reportContent{start: start, end: end}
+	report := reportContent{start: start, end: end, serverName: rc.ServerName}
 
 	report.receivers, report.stale, report.errors = buildReceiverReport(ctx, rc, db, start, end, log)
 	report.jobs, report.jobErrors = buildJobReport(ctx, rc, db, start, end, log)
@@ -292,16 +295,23 @@ func renderReportBody(report reportContent) string {
 	return b.String()
 }
 
-// reportTimeFormat is how {start}/{end} render in a report.subject: template
-// (see renderReportSubject), matching this feature's original hardcoded
-// subject line.
+// reportTimeFormat is how {start}/{end} render in a notification's
+// subject:/body: template (see renderReportSubject), matching this
+// feature's original hardcoded subject line.
 const reportTimeFormat = "2006-01-02 15:04"
 
-// renderReportSubject substitutes a report.subject: template's placeholders
-// with report's computed content: {start} and {end} are report's window
-// bounds; {receivers}, {errors}, {stale}, {jobs}, and {job-errors} are counts
-// of each of report's sections. Mirrors
-// receiver.renderDownloadWebhookPayload's {placeholder} substitution style.
+// defaultReportSubject is a report notification's email.subject default
+// when left unset, reproducing this feature's original hardcoded subject
+// line.
+const defaultReportSubject = "[{server_name}] report - {end}"
+
+// renderReportSubject substitutes a report notification's subject:/body:
+// template's placeholders with report's computed content: {start} and {end}
+// are report's window bounds; {receivers}, {errors}, {stale}, {jobs}, and
+// {job-errors} are counts of each of report's sections; {server_name} is the
+// config file's top-level server-name: (see config.RunConfig.ServerName),
+// "" if unset. Mirrors receiver.renderDownloadWebhookPayload's
+// {placeholder} substitution style.
 func renderReportSubject(tmpl string, report reportContent) string {
 	replacer := strings.NewReplacer(
 		"{start}", report.start.Format(reportTimeFormat),
@@ -311,6 +321,7 @@ func renderReportSubject(tmpl string, report reportContent) string {
 		"{stale}", strconv.Itoa(len(report.stale)),
 		"{jobs}", strconv.Itoa(len(report.jobs)),
 		"{job-errors}", strconv.Itoa(len(report.jobErrors)),
+		"{server_name}", report.serverName,
 	)
 
 	return replacer.Replace(tmpl)
@@ -323,145 +334,113 @@ func formatReportBytes(n int64) string {
 	return backup.FormatSize(n, 1000, "kMGTPE", false)
 }
 
-// reportSMTPTimeout bounds the whole report email send (connect,
-// authenticate, and deliver), since sendReport runs on its own background
-// schedule rather than under a run's -timeout.
-const reportSMTPTimeout = 30 * time.Second
+// reportNotifyTimeout bounds a single report notification delivery (one
+// email send or one webhook POST), since sendReport runs on its own
+// background schedule rather than under a run's -timeout.
+const reportNotifyTimeout = 30 * time.Second
 
-// sendReport builds and emails rc's receiver report for the window from
-// start to end, logging (rather than returning) any failure: like the
-// stale-receiver webhook, a delivery problem here shouldn't affect anything
+// reportWebhookPayload is the default JSON body POSTed to a report
+// notification's webhook:, used unless its body: overrides it (rendered the
+// same way as its subject:, via renderReportSubject).
+type reportWebhookPayload struct {
+	Start      string `json:"start"`
+	End        string `json:"end"`
+	Receivers  int    `json:"receivers"`
+	Errors     int    `json:"errors"`
+	Stale      int    `json:"stale"`
+	Jobs       int    `json:"jobs"`
+	JobErrors  int    `json:"job_errors"`
+	ServerName string `json:"server_name,omitempty"`
+}
+
+// defaultReportWebhookContentType is the Content-Type sent with a report
+// webhook request whose notification doesn't set a Content-Type among
+// webhook.headers:.
+const defaultReportWebhookContentType = "application/json"
+
+// reportWebhookBody builds the request body sent to a report notification's
+// webhook: wh.Body: (rendered via renderReportSubject), if set, otherwise
+// the default JSON reportWebhookPayload.
+func reportWebhookBody(wh notify.Webhook, report reportContent) ([]byte, error) {
+	if wh.Body != "" {
+		return []byte(renderReportSubject(wh.Body, report)), nil
+	}
+
+	payload := reportWebhookPayload{
+		Start: report.start.Format(reportTimeFormat), End: report.end.Format(reportTimeFormat),
+		Receivers: len(report.receivers), Errors: len(report.errors), Stale: len(report.stale),
+		Jobs: len(report.jobs), JobErrors: len(report.jobErrors),
+		ServerName: report.serverName,
+	}
+
+	return json.Marshal(payload)
+}
+
+// sendReport builds rc's receiver/job report for the window from start to
+// end and sends it to every notification in rc.Report.Notifications,
+// logging (rather than returning) any failure: like a receiver's stale/
+// download notifications, a delivery problem here shouldn't affect anything
 // else this process is doing, and there's no caller to report it to — the
 // next scheduled report gets another chance.
 func sendReport(ctx context.Context, rc *config.RunConfig, db *store.Store, start, end time.Time, log *slog.Logger) {
 	report := buildReport(ctx, rc, db, start, end, log)
-
-	subject := renderReportSubject(rc.Report.Subject, report)
 	body := renderReportBody(report)
 
-	sendCtx, cancel := context.WithTimeout(ctx, reportSMTPTimeout)
+	for _, n := range rc.Report.Notifications {
+		if n.Email != nil {
+			sendReportEmail(ctx, n.Email, report, body, log)
+		}
+
+		if n.Webhook != nil {
+			sendReportWebhook(ctx, n.Webhook, report, log)
+		}
+	}
+}
+
+// sendReportEmail sends report's rendered body (subject via
+// renderReportSubject, defaulting to defaultReportSubject) to email.
+func sendReportEmail(ctx context.Context, email *notify.Email, report reportContent, body string, log *slog.Logger) {
+	subjectTmpl := email.Subject
+	if subjectTmpl == "" {
+		subjectTmpl = defaultReportSubject
+	}
+
+	subject := renderReportSubject(subjectTmpl, report)
+
+	sendCtx, cancel := context.WithTimeout(ctx, reportNotifyTimeout)
 	defer cancel()
 
-	if err := sendMail(sendCtx, rc.Report.SMTP, rc.Report.From, rc.Report.To, subject, body); err != nil {
-		log.Warn("report: sending email failed", "err", err)
+	if err := notify.SendMail(sendCtx, email.SMTP, email.From, email.To, subject, body); err != nil {
+		log.Warn("report: sending email failed", "to", email.To, "err", err)
 		return
 	}
 
-	log.Info("report sent", "to", rc.Report.To,
+	log.Info("report email sent", "to", email.To,
 		"receivers", len(report.receivers), "errors", len(report.errors), "stale", len(report.stale),
 		"jobs", len(report.jobs), "jobErrors", len(report.jobErrors))
 }
 
-// dialSMTP connects to cfg's mail server and returns a ready-to-use
-// *smtp.Client: already TLS-wrapped for backup.SMTPSecurityTLS, or with
-// STARTTLS already negotiated for backup.SMTPSecurityStartTLS. ctx's
-// deadline (see reportSMTPTimeout) is applied directly to the underlying
-// connection, since net/smtp's own operations aren't otherwise
-// context-aware.
-func dialSMTP(ctx context.Context, cfg report.SMTPSettings) (*smtp.Client, error) {
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-
-	rawConn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+// sendReportWebhook POSTs report to wh.
+func sendReportWebhook(ctx context.Context, wh *notify.Webhook, report reportContent, log *slog.Logger) {
+	body, err := reportWebhookBody(*wh, report)
 	if err != nil {
-		return nil, fmt.Errorf("connecting to %q: %w", addr, err)
+		log.Warn("report: encoding webhook payload failed", "webhook", wh.URL, "err", err)
+		return
 	}
 
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = rawConn.SetDeadline(deadline)
-	}
-
-	var conn net.Conn
-
-	if cfg.Security == report.SMTPSecurityTLS {
-		conn = tls.Client(rawConn, &tls.Config{ServerName: cfg.Host})
-	} else {
-		conn = rawConn
-	}
-
-	client, err := smtp.NewClient(conn, cfg.Host)
+	resp, err := notify.PostWebhook(ctx, *wh, body, defaultReportWebhookContentType)
 	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("initializing smtp client: %w", err)
+		log.Warn("report: webhook request failed", "webhook", wh.URL, "err", err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Warn("report: webhook non-2xx response", "webhook", wh.URL, "status", resp.StatusCode)
+		return
 	}
 
-	if cfg.Security != report.SMTPSecurityStartTLS {
-		return client, nil
-	}
-
-	if ok, _ := client.Extension("STARTTLS"); ok {
-		if err := client.StartTLS(&tls.Config{ServerName: cfg.Host}); err != nil {
-			_ = client.Close()
-			return nil, fmt.Errorf("starting tls: %w", err)
-		}
-	}
-
-	return client, nil
-}
-
-// sendMail sends a plain-text email from sender to every address in
-// recipients, via cfg.
-func sendMail(ctx context.Context, cfg report.SMTPSettings, sender string, recipients []string, subject, body string) error {
-	client, err := dialSMTP(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = client.Close() }()
-
-	if cfg.Username != "" {
-		if err := client.Auth(smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)); err != nil {
-			return fmt.Errorf("authenticating: %w", err)
-		}
-	}
-
-	if err := client.Mail(sender); err != nil {
-		return fmt.Errorf("MAIL FROM: %w", err)
-	}
-
-	for _, addr := range recipients {
-		if err := client.Rcpt(addr); err != nil {
-			return fmt.Errorf("RCPT TO %q: %w", addr, err)
-		}
-	}
-
-	w, err := client.Data()
-	if err != nil {
-		return fmt.Errorf("DATA: %w", err)
-	}
-
-	if _, err := w.Write([]byte(renderMailMessage(sender, recipients, subject, body))); err != nil {
-		_ = w.Close()
-		return fmt.Errorf("writing message: %w", err)
-	}
-
-	if err := w.Close(); err != nil {
-		return fmt.Errorf("closing message: %w", err)
-	}
-
-	return client.Quit()
-}
-
-// renderMailMessage builds an RFC 5322 message (headers plus body) for
-// sendMail's DATA command. Header values are config-file-controlled, not
-// network input, but CRLF is still stripped defensively so a stray newline
-// in report.from/to/subject can never inject an extra header or start of
-// body.
-func renderMailMessage(from string, to []string, subject, body string) string {
-	var b strings.Builder
-
-	fmt.Fprintf(&b, "From: %s\r\n", stripCRLF(from))
-	fmt.Fprintf(&b, "To: %s\r\n", stripCRLF(strings.Join(to, ", ")))
-	fmt.Fprintf(&b, "Subject: %s\r\n", stripCRLF(subject))
-	fmt.Fprintf(&b, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
-	b.WriteString("MIME-Version: 1.0\r\n")
-	b.WriteString("Content-Type: text/plain; charset=\"utf-8\"\r\n")
-	b.WriteString("\r\n")
-	b.WriteString(strings.ReplaceAll(body, "\n", "\r\n"))
-
-	return b.String()
-}
-
-// stripCRLF removes CR and LF from s, for a value about to be written into
-// an email header (see renderMailMessage).
-func stripCRLF(s string) string {
-	return strings.NewReplacer("\r", "", "\n", "").Replace(s)
+	log.Info("report webhook fired", "webhook", wh.URL,
+		"receivers", len(report.receivers), "errors", len(report.errors), "stale", len(report.stale),
+		"jobs", len(report.jobs), "jobErrors", len(report.jobErrors))
 }

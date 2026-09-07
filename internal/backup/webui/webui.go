@@ -2114,7 +2114,7 @@ func handleDownloadFile(receivers map[string]config.ResolvedReceiver, log *slog.
 
 		record(true, "")
 
-		go receiver.NotifyDownloadWebhook(recv, receiver.DownloadWebhookEvent{Username: username, Key: key, At: time.Now()}, log)
+		go receiver.NotifyDownload(recv, receiver.DownloadWebhookEvent{Username: username, Key: key, At: time.Now()}, log)
 
 		if _, err := io.Copy(w, f); err != nil {
 			log.Warn("download: streaming file failed", "id", recv.ID, "key", key, "err", err)

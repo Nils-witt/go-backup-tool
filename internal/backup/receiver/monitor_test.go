@@ -19,8 +19,15 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
+
+// staleWebhookNotifications wraps wh as the single stale-notifications:
+// entry a test's config.ResolvedReceiver fixture needs.
+func staleWebhookNotifications(wh notify.Webhook) []notify.Notification {
+	return []notify.Notification{{ID: "test", Webhook: &wh}}
+}
 
 // testServerIdentity builds a *backup.ServerIdentity backed by a freshly
 // generated RSA key, for tests that need one to exercise signing without
@@ -96,6 +103,19 @@ func TestRenderStaleWebhookPayload(t *testing.T) {
 	}
 }
 
+func TestRenderStaleWebhookPayloadServerName(t *testing.T) {
+	t.Parallel()
+
+	recv := config.ResolvedReceiver{ID: "a", Path: "/mnt/a", StaleAfter: time.Hour, ServerName: "primary-backup-host"}
+
+	got := renderStaleWebhookPayload("[{server_name}] {receiver_id} is stale", recv, time.Now())
+
+	want := "[primary-backup-host] a is stale"
+	if got != want {
+		t.Errorf("renderStaleWebhookPayload() = %q, want %q", got, want)
+	}
+}
+
 // webhookCall is one request captured by a test webhook server (see
 // newTestWebhookServer).
 type webhookCall struct {
@@ -140,7 +160,7 @@ func TestStaleReceiverMonitorCheckFreshFileDoesNotFire(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "recent.gpg"), "a")
 
-	recv := config.ResolvedReceiver{ID: "a", Path: root, StaleAfter: time.Hour, Webhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}}
+	recv := config.ResolvedReceiver{ID: "a", Path: root, StaleAfter: time.Hour, StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
 	newStaleReceiverMonitor().check(recv, discardLogger)
 
@@ -171,7 +191,7 @@ func TestStaleReceiverMonitorCheckStaleFileFires(t *testing.T) {
 		t.Fatalf("Chtimes(%q): %v", stale, err)
 	}
 
-	recv := config.ResolvedReceiver{ID: "recv-a", Path: root, StaleAfter: time.Hour, Webhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}}
+	recv := config.ResolvedReceiver{ID: "recv-a", Path: root, StaleAfter: time.Hour, StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
 	monitor := newStaleReceiverMonitor()
 	monitor.check(recv, discardLogger)
@@ -210,7 +230,7 @@ func TestStaleReceiverMonitorCheckNeverReceivedDoesNotFire(t *testing.T) {
 
 	srv := newTestWebhookServer(t, &mu, &calls)
 
-	recv := config.ResolvedReceiver{ID: "a", Path: t.TempDir(), StaleAfter: time.Hour, Webhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}}
+	recv := config.ResolvedReceiver{ID: "a", Path: t.TempDir(), StaleAfter: time.Hour, StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
 	newStaleReceiverMonitor().check(recv, discardLogger)
 
@@ -241,7 +261,7 @@ func TestStaleReceiverMonitorCheckRefiresAfterGapReopens(t *testing.T) {
 		t.Fatalf("Chtimes(%q): %v", f, err)
 	}
 
-	recv := config.ResolvedReceiver{ID: "a", Path: root, StaleAfter: time.Hour, Webhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}}
+	recv := config.ResolvedReceiver{ID: "a", Path: root, StaleAfter: time.Hour, StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
 	monitor := newStaleReceiverMonitor()
 	monitor.check(recv, discardLogger)
@@ -275,7 +295,7 @@ func TestStaleReceiverMonitorCheckDisabledIsNoop(t *testing.T) {
 
 	srv := newTestWebhookServer(t, &mu, &calls)
 
-	recv := config.ResolvedReceiver{ID: "a", Path: t.TempDir(), Webhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost}} // staleAfter left at zero
+	recv := config.ResolvedReceiver{ID: "a", Path: t.TempDir(), StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})} // staleAfter left at zero
 
 	newStaleReceiverMonitor().check(recv, discardLogger)
 
@@ -329,12 +349,12 @@ func TestStaleReceiverMonitorCheckUsesCustomMethodHeadersAndBody(t *testing.T) {
 
 	recv := config.ResolvedReceiver{
 		ID: "recv-a", Path: root, StaleAfter: time.Hour,
-		Webhook: config.ResolvedWebhook{
+		StaleNotifications: staleWebhookNotifications(notify.Webhook{
 			URL:     srv.URL,
 			Method:  http.MethodPut,
 			Headers: map[string]string{"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer tok"},
 			Body:    `{"text":"receiver {receiver_id} has been quiet since {last_received}"}`,
-		},
+		}),
 	}
 
 	newStaleReceiverMonitor().check(recv, discardLogger)
@@ -392,7 +412,7 @@ func TestStaleReceiverMonitorCheckDefaultContentTypeWhenNoHeadersSet(t *testing.
 
 	recv := config.ResolvedReceiver{
 		ID: "a", Path: root, StaleAfter: time.Hour,
-		Webhook: config.ResolvedWebhook{URL: srv.URL, Method: http.MethodPost},
+		StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost}),
 	}
 
 	newStaleReceiverMonitor().check(recv, discardLogger)

@@ -6,10 +6,10 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"maps"
-	"net/http"
 	"strings"
 	"time"
+
+	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 )
 
 // FileReceiver is one top-level receivers: entry, defining a path this
@@ -28,57 +28,59 @@ type FileReceiver struct {
 	// private key (see signRemoteAuthToken/verifyRemoteAuthToken and
 	// authorizeReceiver in webui.go); unlike the token: field this replaces,
 	// nothing here is itself a secret; it just names who's allowed to send.
-	PublicKey       string      `yaml:"public-key"`
-	Path            string      `yaml:"path"`             // root directory incoming objects for this id are written under
-	Retention       string      `yaml:"retention"`        // optional, same syntax as a local server's retention: e.g. "30d"
-	StaleAfter      string      `yaml:"stale-after"`      // optional, same duration syntax as retention: e.g. "6h" or "1d"; requires webhook.url: and enables the stale-receiver webhook monitor (see MonitorStaleReceivers)
-	Webhook         fileWebhook `yaml:"webhook"`          // the request sent once this receiver's most recent file turns older than stale-after: (a receiver that has never received anything never fires); webhook.url requires stale-after:
-	DownloadWebhook fileWebhook `yaml:"download-webhook"` // optional; the request sent every time a file is successfully downloaded from this receiver (see handleDownloadFile/receiver.NotifyDownloadWebhook); independent of webhook:/stale-after:
-}
+	PublicKey  string `yaml:"public-key"`
+	Path       string `yaml:"path"`        // root directory incoming objects for this id are written under
+	Retention  string `yaml:"retention"`   // optional, same syntax as a local server's retention: e.g. "30d"
+	StaleAfter string `yaml:"stale-after"` // optional, same duration syntax as retention: e.g. "6h" or "1d"; requires stale-notifications: and enables the stale-receiver monitor (see MonitorStaleReceivers)
 
-// fileWebhook is one of a receiver's webhook: or download-webhook: blocks:
-// the HTTP request either the stale-receiver monitor (see
-// MonitorStaleReceivers/notifyStaleReceiverWebhook) or a successful file
-// download (see receiver.NotifyDownloadWebhook) sends. Only url is required;
-// method defaults to POST, headers is optional (e.g. Content-Type), and
-// body, if unset, defaults to a JSON summary — set it to send a body your
-// own webhook receiver (PagerDuty, Slack, ...) already understands, using
-// the {placeholder} syntax documented on renderStaleWebhookPayload/
-// renderDownloadWebhookPayload.
-type fileWebhook struct {
-	URL     string            `yaml:"url"`
-	Method  string            `yaml:"method"`
-	Headers map[string]string `yaml:"headers"`
-	Body    string            `yaml:"body"`
-}
+	// StaleNotifications names top-level notifications: entries (see
+	// notify.Build) to fire once this receiver's most recent file turns
+	// older than stale-after: (a receiver that has never received anything
+	// never fires) — see MonitorStaleReceivers. Required together with
+	// stale-after: (both, or neither).
+	StaleNotifications []string `yaml:"stale-notifications"`
 
-// ResolvedWebhook is one fileWebhook after validation, ready to be sent by
-// the receiver package (either the stale-receiver monitor or a download
-// notification). A zero value (URL == "") means the receiver it belongs to
-// has no webhook configured for that trigger.
-type ResolvedWebhook struct {
-	URL     string
-	Method  string            // resolved: defaults to http.MethodPost when unset in the config file
-	Headers map[string]string // may be nil; Content-Type falls back to a default if not among these
-	Body    string            // "" means the default JSON body
+	// DownloadNotifications names top-level notifications: entries to fire
+	// every time a file is successfully downloaded from this receiver (see
+	// handleDownloadFile/receiver.NotifyDownload); independent of
+	// stale-after:/stale-notifications:. Optional.
+	DownloadNotifications []string `yaml:"download-notifications"`
 }
 
 // ResolvedReceiver is one fileReceiver after validation, ready to be used by
 // the receiver API's handlers.
 type ResolvedReceiver struct {
-	ID              string
-	PublicKey       *rsa.PublicKey
-	Path            string
-	Retention       time.Duration
-	StaleAfter      time.Duration   // 0 disables the stale-receiver webhook monitor for this receiver
-	Webhook         ResolvedWebhook // set together with StaleAfter; zero value means unset
-	DownloadWebhook ResolvedWebhook // independent of StaleAfter/Webhook; zero value means unset
+	ID         string
+	PublicKey  *rsa.PublicKey
+	Path       string
+	Retention  time.Duration
+	StaleAfter time.Duration // 0 disables the stale-receiver monitor for this receiver
+
+	// StaleNotifications/DownloadNotifications are this receiver's
+	// StaleNotifications/DownloadNotifications ids resolved against the
+	// config file's top-level notifications: (see notify.Build). An empty
+	// StaleNotifications means the stale-receiver monitor is unset for this
+	// receiver (paired with StaleAfter == 0); DownloadNotifications may be
+	// empty independent of the other fields.
+	StaleNotifications    []notify.Notification
+	DownloadNotifications []notify.Notification
+
+	// ServerName is the config file's top-level server-name: (see
+	// fileConfig.ServerName), copied onto every receiver so
+	// renderStaleWebhookPayload/renderDownloadWebhookPayload can substitute
+	// it into a notification's {server_name} placeholder without a separate
+	// parameter. "" when server-name: is unset.
+	ServerName string
 }
 
 // buildReceivers validates fileReceivers and builds an id -> resolvedReceiver
 // map, requiring every entry to have a unique, non-empty id, a valid RSA
-// public-key:, and a non-empty path.
-func buildReceivers(fileReceivers []FileReceiver) (map[string]ResolvedReceiver, error) {
+// public-key:, and a non-empty path. notifications is the config file's
+// already-resolved top-level notifications: map (see notify.Build), used to
+// resolve stale-notifications:/download-notifications: ids. serverName is
+// the config file's top-level server-name:, copied onto every resolved
+// receiver (see ResolvedReceiver.ServerName).
+func buildReceivers(fileReceivers []FileReceiver, notifications map[string]notify.Notification, serverName string) (map[string]ResolvedReceiver, error) {
 	receivers := make(map[string]ResolvedReceiver, len(fileReceivers))
 
 	for i, fr := range fileReceivers {
@@ -110,28 +112,56 @@ func buildReceivers(fileReceivers []FileReceiver) (map[string]ResolvedReceiver, 
 			return nil, fmt.Errorf("receiver %q: %w", id, err)
 		}
 
-		webhook, err := buildWebhook(&fr.Webhook, staleAfter)
+		staleNotifications, err := resolveNotificationRefs(fr.StaleNotifications, notifications)
 		if err != nil {
-			return nil, fmt.Errorf("receiver %q: %w", id, err)
+			return nil, fmt.Errorf("receiver %q: stale-notifications: %w", id, err)
 		}
 
-		downloadWebhook, err := resolveWebhook(&fr.DownloadWebhook)
+		if (staleAfter > 0) != (len(staleNotifications) > 0) {
+			return nil, fmt.Errorf("receiver %q: stale-after and stale-notifications must be set together", id)
+		}
+
+		downloadNotifications, err := resolveNotificationRefs(fr.DownloadNotifications, notifications)
 		if err != nil {
-			return nil, fmt.Errorf("receiver %q: download-webhook: %w", id, err)
+			return nil, fmt.Errorf("receiver %q: download-notifications: %w", id, err)
 		}
 
 		receivers[id] = ResolvedReceiver{
-			ID:              id,
-			PublicKey:       publicKey,
-			Path:            fr.Path,
-			Retention:       retention,
-			StaleAfter:      staleAfter,
-			Webhook:         webhook,
-			DownloadWebhook: downloadWebhook,
+			ID:                    id,
+			PublicKey:             publicKey,
+			Path:                  fr.Path,
+			Retention:             retention,
+			StaleAfter:            staleAfter,
+			StaleNotifications:    staleNotifications,
+			DownloadNotifications: downloadNotifications,
+			ServerName:            serverName,
 		}
 	}
 
 	return receivers, nil
+}
+
+// resolveNotificationRefs resolves ids (a receiver's stale-notifications: or
+// download-notifications: list) against notifications (the config file's
+// top-level notifications: map, see notify.Build), erroring on any id with
+// no matching entry. A nil/empty ids returns nil.
+func resolveNotificationRefs(ids []string, notifications map[string]notify.Notification) ([]notify.Notification, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	resolved := make([]notify.Notification, len(ids))
+
+	for i, id := range ids {
+		n, ok := notifications[id]
+		if !ok {
+			return nil, fmt.Errorf("[%d]: unknown notification id %q", i, id)
+		}
+
+		resolved[i] = n
+	}
+
+	return resolved, nil
 }
 
 // parseReceiverPublicKey parses raw (a receiver's public-key: value) as a
@@ -157,54 +187,11 @@ func parseReceiverPublicKey(raw string) (*rsa.PublicKey, error) {
 	return rsaKey, nil
 }
 
-// buildWebhook validates fw (a receiver's webhook: block) against that
-// receiver's already-parsed staleAfter: url must be set together with
-// staleAfter (both, or neither); everything else is resolveWebhook's rule.
-func buildWebhook(fw *fileWebhook, staleAfter time.Duration) (ResolvedWebhook, error) {
-	if (staleAfter > 0) != (strings.TrimSpace(fw.URL) != "") {
-		return ResolvedWebhook{}, errors.New("stale-after and webhook.url must be set together")
-	}
-
-	return resolveWebhook(fw)
-}
-
-// resolveWebhook validates and resolves fw (one of a receiver's webhook: or
-// download-webhook: blocks) on its own, with no pairing requirement: method
-// defaults to http.MethodPost; headers, if any, are copied so the
-// ResolvedWebhook doesn't alias the config file's own map. A block with no
-// url: (fw's zero value, or one with only url: unset) resolves to a zero
-// ResolvedWebhook, unless method/headers/body are set without a url, which
-// is rejected as meaningless.
-func resolveWebhook(fw *fileWebhook) (ResolvedWebhook, error) {
-	url := strings.TrimSpace(fw.URL)
-
-	if url == "" {
-		if fw.Method != "" || len(fw.Headers) > 0 || fw.Body != "" {
-			return ResolvedWebhook{}, errors.New("webhook.method/headers/body require webhook.url")
-		}
-
-		return ResolvedWebhook{}, nil
-	}
-
-	method := strings.ToUpper(strings.TrimSpace(fw.Method))
-	if method == "" {
-		method = http.MethodPost
-	}
-
-	var headers map[string]string
-	if len(fw.Headers) > 0 {
-		headers = make(map[string]string, len(fw.Headers))
-		maps.Copy(headers, fw.Headers)
-	}
-
-	return ResolvedWebhook{URL: url, Method: method, Headers: headers, Body: fw.Body}, nil
-}
-
 // parseStaleAfter parses a receiver's stale-after: string into a
 // time.Duration, using the same "d for days" syntax as retention:
-// (parseDayDuration). An empty string means the stale-receiver webhook
-// monitor is disabled for this receiver (the zero value); anything else must
-// be positive, since "stale after zero (or a negative) time" is always true
+// (parseDayDuration). An empty string means the stale-receiver monitor is
+// disabled for this receiver (the zero value); anything else must be
+// positive, since "stale after zero (or a negative) time" is always true
 // and so isn't a meaningful setting.
 func parseStaleAfter(s string) (time.Duration, error) {
 	return parseOptionalDayDuration("stale-after", s, false)

@@ -16,6 +16,7 @@ import (
 
 	"github.com/robfig/cron/v3"
 
+	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
 )
@@ -1725,7 +1726,7 @@ jobs:
 	}
 }
 
-func TestParseFlagsReceiverStaleAfterAndWebhook(t *testing.T) {
+func TestParseFlagsReceiverStaleAfterAndNotifications(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -1736,18 +1737,22 @@ servers:
     type: local
     path: /mnt/backups
 
-receivers:
-  - id: from-primary
-    public-key: |
-`+indentYAMLBlock(testConfigRSAPublicKeyPEM, "      ")+`
-    path: `+dir+`
-    stale-after: 6h
+notifications:
+  - id: alerts
     webhook:
       url: "https://alerts.example.com/hook"
       method: put
       headers:
         Authorization: "Bearer webhook-token"
       body: '{"text":"{receiver_id} is stale"}'
+
+receivers:
+  - id: from-primary
+    public-key: |
+`+indentYAMLBlock(testConfigRSAPublicKeyPEM, "      ")+`
+    path: `+dir+`
+    stale-after: 6h
+    stale-notifications: [alerts]
 
 jobs:
   - name: test
@@ -1769,19 +1774,22 @@ jobs:
 	want := ResolvedReceiver{
 		ID: "from-primary", PublicKey: testConfigRSAPublicKey(t), Path: dir,
 		StaleAfter: 6 * time.Hour,
-		Webhook: ResolvedWebhook{
-			URL:     "https://alerts.example.com/hook",
-			Method:  http.MethodPut,
-			Headers: map[string]string{"Authorization": "Bearer webhook-token"},
-			Body:    `{"text":"{receiver_id} is stale"}`,
-		},
+		StaleNotifications: []notify.Notification{{
+			ID: "alerts",
+			Webhook: &notify.Webhook{
+				URL:     "https://alerts.example.com/hook",
+				Method:  http.MethodPut,
+				Headers: map[string]string{"Authorization": "Bearer webhook-token"},
+				Body:    `{"text":"{receiver_id} is stale"}`,
+			},
+		}},
 	}
 	if !reflect.DeepEqual(recv, want) {
 		t.Errorf("rc.Receivers[%q] = %+v, want %+v", "from-primary", recv, want)
 	}
 }
 
-func TestParseFlagsReceiverStaleAfterRequiresWebhook(t *testing.T) {
+func TestParseFlagsReceiverStaleAfterRequiresNotifications(t *testing.T) {
 	t.Parallel()
 
 	path := writeConfigFile(t, `
@@ -1805,8 +1813,8 @@ jobs:
 `)
 
 	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "stale-after and webhook.url must be set together") {
-		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "stale-after and webhook.url must be set together")
+	if err == nil || !strings.Contains(err.Error(), "stale-after and stale-notifications must be set together") {
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "stale-after and stale-notifications must be set together")
 	}
 }
 
@@ -2201,16 +2209,22 @@ func TestParseFlagsReportSettings(t *testing.T) {
 	t.Setenv("TEST_SMTP_PASSWORD", "s3cr3t")
 
 	path := writeConfigFile(t, `
+smtp:
+  host: smtp.example.com
+  port: 2525
+  username: backups@example.com
+  password-env: TEST_SMTP_PASSWORD
+  security: none
+
+notifications:
+  - id: ops-email
+    email:
+      to: ["ops@example.com"]
+
 report:
   enabled: true
-  to: ["ops@example.com"]
   schedule: "30 6 * * *"
-  smtp:
-    host: smtp.example.com
-    port: 2525
-    username: backups@example.com
-    password-env: TEST_SMTP_PASSWORD
-    security: none
+  notifications: [ops-email]
 
 servers:
   - name: s
@@ -2236,17 +2250,21 @@ jobs:
 
 	want := report.Settings{
 		Enabled:  true,
-		To:       []string{"ops@example.com"},
-		From:     "backups@example.com",
 		Schedule: schedule,
-		Subject:  "go-backup-tool report - {end}",
-		SMTP: report.SMTPSettings{
-			Host:     "smtp.example.com",
-			Port:     2525,
-			Username: "backups@example.com",
-			Password: "s3cr3t",
-			Security: report.SMTPSecurityNone,
-		},
+		Notifications: []notify.Notification{{
+			ID: "ops-email",
+			Email: &notify.Email{
+				To:   []string{"ops@example.com"},
+				From: "backups@example.com",
+				SMTP: notify.SMTPSettings{
+					Host:     "smtp.example.com",
+					Port:     2525,
+					Username: "backups@example.com",
+					Password: "s3cr3t",
+					Security: notify.SMTPSecurityNone,
+				},
+			},
+		}},
 	}
 
 	if !reflect.DeepEqual(rc.Report, want) {
@@ -2280,14 +2298,12 @@ jobs:
 	}
 }
 
-func TestParseFlagsReportEnabledRequiresTo(t *testing.T) {
+func TestParseFlagsReportEnabledRequiresNotifications(t *testing.T) {
 	t.Parallel()
 
 	path := writeConfigFile(t, `
 report:
   enabled: true
-  smtp:
-    host: smtp.example.com
 
 servers:
   - name: s
@@ -2302,7 +2318,153 @@ jobs:
 `)
 
 	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "report.to") {
-		t.Fatalf("ParseFlags() error = %v, want it to mention report.to", err)
+	if err == nil || !strings.Contains(err.Error(), "report.notifications") {
+		t.Fatalf("ParseFlags() error = %v, want it to mention report.notifications", err)
+	}
+}
+
+// TestParseFlagsNotificationSharedAcrossTriggers exercises the reusable
+// notifications: design end to end: one notification combining both a
+// webhook: and an email: channel, referenced by id from both a receiver's
+// stale-notifications: and report.notifications:, confirming the same
+// resolved notify.Notification is reused rather than re-parsed per
+// reference.
+func TestParseFlagsNotificationSharedAcrossTriggers(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	path := writeConfigFile(t, `
+smtp:
+  host: smtp.example.com
+  username: backups@example.com
+  password: hunter2
+
+notifications:
+  - id: ops
+    webhook:
+      url: "https://example.com/hook"
+    email:
+      to: ["ops@example.com"]
+
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+receivers:
+  - id: from-primary
+    public-key: |
+`+indentYAMLBlock(testConfigRSAPublicKeyPEM, "      ")+`
+    path: `+dir+`
+    stale-after: 6h
+    stale-notifications: [ops]
+
+report:
+  enabled: true
+  notifications: [ops]
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
+	}
+
+	recv, ok := rc.Receivers["from-primary"]
+	if !ok {
+		t.Fatalf("rc.Receivers = %+v, want an entry for %q", rc.Receivers, "from-primary")
+	}
+
+	want := notify.Notification{
+		ID:      "ops",
+		Webhook: &notify.Webhook{URL: "https://example.com/hook", Method: http.MethodPost},
+		Email: &notify.Email{
+			To:   []string{"ops@example.com"},
+			From: "backups@example.com",
+			SMTP: notify.SMTPSettings{Host: "smtp.example.com", Port: 587, Username: "backups@example.com", Password: "hunter2", Security: notify.SMTPSecurityStartTLS},
+		},
+	}
+
+	if !reflect.DeepEqual(recv.StaleNotifications, []notify.Notification{want}) {
+		t.Errorf("recv.StaleNotifications = %+v, want [%+v]", recv.StaleNotifications, want)
+	}
+
+	if !reflect.DeepEqual(rc.Report.Notifications, []notify.Notification{want}) {
+		t.Errorf("rc.Report.Notifications = %+v, want [%+v]", rc.Report.Notifications, want)
+	}
+}
+
+// TestParseFlagsServerName exercises the top-level server-name: option:
+// it lands on RunConfig.ServerName and is copied onto every receiver (see
+// ResolvedReceiver.ServerName), ready for renderStaleWebhookPayload/
+// renderDownloadWebhookPayload/pipeline.renderReportSubject to substitute
+// into a notification's {server_name} placeholder.
+func TestParseFlagsServerName(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+server-name: primary-backup-host
+
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+receivers:
+  - id: from-primary
+    public-key: |
+`+indentYAMLBlock(testConfigRSAPublicKeyPEM, "      ")+`
+    path: /mnt/remote
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
+	}
+
+	if rc.ServerName != "primary-backup-host" {
+		t.Errorf("rc.ServerName = %q, want %q", rc.ServerName, "primary-backup-host")
+	}
+
+	if got := rc.Receivers["from-primary"].ServerName; got != "primary-backup-host" {
+		t.Errorf("rc.Receivers[from-primary].ServerName = %q, want %q", got, "primary-backup-host")
+	}
+}
+
+func TestParseFlagsServerNameDefaultsEmpty(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
+	}
+
+	if rc.ServerName != "" {
+		t.Errorf("rc.ServerName = %q, want empty when server-name: is unset", rc.ServerName)
 	}
 }

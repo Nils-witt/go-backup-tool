@@ -20,6 +20,7 @@ import (
 
 	appconfig "nilswitt.dev/go-backup-tool/internal/backup/app/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
+	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
@@ -157,6 +158,10 @@ type RunConfig struct {
 	ConfigPath string // where the config file was loaded from; state db lives alongside it
 	LogLevel   slog.Level
 	Receivers  map[string]ResolvedReceiver // this instance's receiver API entries, keyed by id; see receivers.go
+
+	// ServerName is fileConfig.ServerName, this instance's own {server_name}
+	// notification placeholder (see fileConfig.ServerName).
+	ServerName string
 
 	// KeysDir is where this instance's persistent identity (its RSA key pair
 	// and UUID — see loadServerIdentity) is stored. Defaults to
@@ -306,11 +311,32 @@ type fileServer struct {
 type fileConfig struct {
 	fileJob `yaml:",inline"`
 
-	Timeout   string            `yaml:"timeout"`
-	LogLevel  string            `yaml:"log-level"` // debug, info, warn, or error; overridden by -log-level when that flag is explicitly given
-	KeysDir   string            `yaml:"keys-dir"`  // where this instance's persistent identity (RSA key pair + UUID) is stored; defaults to defaultServerKeyDir
-	Servers   []fileServer      `yaml:"servers"`
-	Jobs      []fileJob         `yaml:"jobs"`
+	Timeout  string       `yaml:"timeout"`
+	LogLevel string       `yaml:"log-level"` // debug, info, warn, or error; overridden by -log-level when that flag is explicitly given
+	KeysDir  string       `yaml:"keys-dir"`  // where this instance's persistent identity (RSA key pair + UUID) is stored; defaults to defaultServerKeyDir
+	Servers  []fileServer `yaml:"servers"`
+	Jobs     []fileJob    `yaml:"jobs"`
+
+	// ServerName identifies this instance in notifications: a {server_name}
+	// placeholder, substituted the same way as a stale/download
+	// notification's other placeholders (see renderStaleWebhookPayload/
+	// renderDownloadWebhookPayload) or a report notification's (see
+	// pipeline.renderReportSubject), is available in every notification
+	// webhook.body/email.subject/email.body — handy for telling which
+	// go-backup-tool instance a notification came from when several share
+	// the same webhook/inbox. Unset (the default) substitutes as "".
+	ServerName string `yaml:"server-name"`
+
+	// SMTP is the outgoing mail server used by any notifications: entry with
+	// an email: block (see notify.ResolveSMTP). Unset unless at least one
+	// notification uses email.
+	SMTP notify.FileSMTP `yaml:"smtp"`
+
+	// Notifications are the named webhook/email destinations referenced by
+	// id from Report.Notifications and a receiver's
+	// StaleNotifications/DownloadNotifications (see notify.Build).
+	Notifications []notify.FileNotification `yaml:"notifications"`
+
 	Receivers []FileReceiver    `yaml:"receivers"`
 	WebUI     fileWebUI         `yaml:"webui"`
 	Report    report.FileReport `yaml:"report"`
@@ -491,7 +517,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		return nil, err
 	}
 
-	receivers, err := buildReceivers(fileCfg.Receivers)
+	notifications, receivers, err := resolveNotificationsAndReceivers(fileCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -506,7 +532,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		keysDir = identity.DefaultServerKeyDir
 	}
 
-	report, err := report.ResolveSettings(fileCfg.Report)
+	report, err := report.ResolveSettings(fileCfg.Report, notifications)
 	if err != nil {
 		return nil, err
 	}
@@ -526,7 +552,32 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		DevMode:           fileCfg.WebUI.DevMode,
 		OIDC:              oidc,
 		Report:            report,
+		ServerName:        fileCfg.ServerName,
 	}, nil
+}
+
+// resolveNotificationsAndReceivers resolves fileCfg's top-level smtp:/
+// notifications: entries (see notify.ResolveSMTP/notify.Build) and, against
+// that, its receivers: entries' stale-notifications:/download-notifications:
+// references (see buildReceivers) — split out of ParseFlags to keep its own
+// cyclomatic complexity down.
+func resolveNotificationsAndReceivers(fileCfg *fileConfig) (map[string]notify.Notification, map[string]ResolvedReceiver, error) {
+	smtp, err := notify.ResolveSMTP(fileCfg.SMTP)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	notifications, err := notify.Build(fileCfg.Notifications, smtp)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	receivers, err := buildReceivers(fileCfg.Receivers, notifications, fileCfg.ServerName)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return notifications, receivers, nil
 }
 
 // resolveWebUISettings resolves cfg (the config file's webui: entry) into
