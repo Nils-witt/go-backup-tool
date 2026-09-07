@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -194,7 +196,7 @@ func TestSendMailPlainNoAuth(t *testing.T) {
 
 	cfg := SMTPSettings{Host: host, Port: port, Security: SMTPSecurityNone}
 
-	err := SendMail(context.Background(), cfg, "from@example.com", []string{"to@example.com"}, "Test subject", "line one\nline two")
+	err := SendMail(context.Background(), cfg, "from@example.com", []string{"to@example.com"}, "Test subject", "line one\nline two", nil)
 	if err != nil {
 		t.Fatalf("SendMail() error: %v", err)
 	}
@@ -233,7 +235,7 @@ func TestSendMailWithAuth(t *testing.T) {
 
 	cfg := SMTPSettings{Host: host, Port: port, Security: SMTPSecurityNone, Username: "user@example.com", Password: "hunter2"}
 
-	if err := SendMail(context.Background(), cfg, "from@example.com", []string{"a@example.com", "b@example.com"}, "Subj", "body"); err != nil {
+	if err := SendMail(context.Background(), cfg, "from@example.com", []string{"a@example.com", "b@example.com"}, "Subj", "body", nil); err != nil {
 		t.Fatalf("SendMail() error: %v", err)
 	}
 
@@ -281,7 +283,7 @@ func TestSendMailConnectionRefused(t *testing.T) {
 
 	cfg := SMTPSettings{Host: host, Port: port, Security: SMTPSecurityNone}
 
-	if err := SendMail(context.Background(), cfg, "from@example.com", []string{"to@example.com"}, "s", "b"); err == nil {
+	if err := SendMail(context.Background(), cfg, "from@example.com", []string{"to@example.com"}, "s", "b", nil); err == nil {
 		t.Fatal("SendMail() error = nil, want a connection error")
 	}
 }
@@ -345,5 +347,166 @@ func TestPostWebhookCustomHeaders(t *testing.T) {
 
 	if gotContentType != "text/plain" {
 		t.Errorf("content-type = %q, want the header override to win over the default", gotContentType)
+	}
+}
+
+// gpgTestUID is the identity every newTestGPGHomedir key is generated for,
+// and so the recipient encryptGPGBody/SendMail are given in these tests.
+const gpgTestUID = "gpg-notify-test@example.com"
+
+// newTestGPGHomedir generates a fresh, passphrase-less OpenPGP key for
+// gpgTestUID in a new GNUPGHOME, returning that homedir. It skips the test
+// entirely if gpg isn't in PATH.
+//
+// The homedir is deliberately created directly under /tmp (not t.TempDir(),
+// which nests several directories deep under the OS temp dir) because
+// gpg-agent communicates over a Unix domain socket whose path is derived
+// from the homedir; a long enough homedir path makes gpg-agent refuse to
+// start ("File name too long"), which a shallow /tmp dir avoids.
+func newTestGPGHomedir(t *testing.T) string {
+	t.Helper()
+
+	if _, err := exec.LookPath("gpg"); err != nil {
+		t.Skip("gpg not found in PATH, skipping")
+	}
+
+	homedir, err := os.MkdirTemp("/tmp", "gbt-gpg-test-") //nolint:usetesting // t.TempDir() nests too deep for gpg-agent's socket path, see doc comment
+	if err != nil {
+		t.Fatalf("MkdirTemp() error: %v", err)
+	}
+
+	t.Cleanup(func() {
+		_ = exec.CommandContext(context.Background(), "gpgconf", "--homedir", homedir, "--kill", "gpg-agent").Run() //nolint:gosec // homedir is this test's own MkdirTemp result, not untrusted input
+		_ = os.RemoveAll(homedir)
+	})
+
+	if err := os.Chmod(homedir, 0o700); err != nil { //nolint:gosec // gpg itself requires a homedir mode no wider than 0700
+		t.Fatalf("Chmod() error: %v", err)
+	}
+
+	gen := exec.CommandContext(t.Context(), "gpg", "--homedir", homedir, "--batch", "--passphrase", "", //nolint:gosec // homedir is this test's own MkdirTemp result, not untrusted input
+		"--pinentry-mode", "loopback", "--quick-generate-key", gpgTestUID, "default", "default", "never")
+
+	var stderr strings.Builder
+
+	gen.Stderr = &stderr
+
+	if err := gen.Run(); err != nil {
+		t.Fatalf("generating test gpg key: %v (stderr: %s)", err, stderr.String())
+	}
+
+	return homedir
+}
+
+// gpgDecrypt decrypts armored via gpg using homedir's keyring, for a test to
+// check what encryptGPGBody/SendMail actually produced.
+func gpgDecrypt(t *testing.T, homedir, armored string) string {
+	t.Helper()
+
+	cmd := exec.CommandContext(t.Context(), "gpg", "--homedir", homedir, "--batch", "--yes", //nolint:gosec // homedir is this test's own MkdirTemp result, not untrusted input
+		"--pinentry-mode", "loopback", "--decrypt")
+	cmd.Stdin = strings.NewReader(armored)
+
+	var stderr strings.Builder
+
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("gpg --decrypt: %v (stderr: %s)", err, stderr.String())
+	}
+
+	return string(out)
+}
+
+func TestEncryptGPGBodyRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	homedir := newTestGPGHomedir(t)
+
+	const plaintext = "this notification body should stay confidential\n"
+
+	enc := EmailEncrypt{Recipients: []string{gpgTestUID}, GPGBin: "gpg", GPGHomedir: homedir}
+
+	armored, err := encryptGPGBody(t.Context(), enc, plaintext)
+	if err != nil {
+		t.Fatalf("encryptGPGBody() error: %v", err)
+	}
+
+	if !strings.Contains(armored, "BEGIN PGP MESSAGE") {
+		t.Fatalf("encryptGPGBody() = %q, want an armored PGP message", armored)
+	}
+
+	if got := gpgDecrypt(t, homedir, armored); got != plaintext {
+		t.Errorf("decrypted round-trip = %q, want %q", got, plaintext)
+	}
+}
+
+func TestEncryptGPGBodyUnknownRecipient(t *testing.T) {
+	t.Parallel()
+
+	homedir := newTestGPGHomedir(t)
+
+	enc := EmailEncrypt{Recipients: []string{"nobody@example.com"}, GPGBin: "gpg", GPGHomedir: homedir}
+
+	if _, err := encryptGPGBody(t.Context(), enc, "body"); err == nil {
+		t.Fatal("encryptGPGBody() error = nil, want an error for an unknown recipient")
+	}
+}
+
+// TestSendMailEncrypted exercises SendMail end-to-end with an EmailEncrypt
+// set: the fake SMTP server should receive an OpenPGP/MIME message (RFC
+// 3156) whose encrypted part decrypts back to the original body, with the
+// subject still sent in the clear.
+func TestSendMailEncrypted(t *testing.T) {
+	t.Parallel()
+
+	homedir := newTestGPGHomedir(t)
+
+	srv := startFakeSMTPServer(t)
+	host, port := srv.hostPort(t)
+
+	cfg := SMTPSettings{Host: host, Port: port, Security: SMTPSecurityNone}
+	enc := &EmailEncrypt{Recipients: []string{gpgTestUID}, GPGBin: "gpg", GPGHomedir: homedir}
+
+	const plaintext = "sensitive report contents\n"
+
+	err := SendMail(context.Background(), cfg, "from@example.com", []string{"to@example.com"}, "Secret subject", plaintext, enc)
+	if err != nil {
+		t.Fatalf("SendMail() error: %v", err)
+	}
+
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	if len(srv.messages) != 1 {
+		t.Fatalf("server received %d messages, want 1", len(srv.messages))
+	}
+
+	data := srv.messages[0].data
+
+	if !strings.Contains(data, "Subject: Secret subject") {
+		t.Errorf("message data = %q, want the Subject header in the clear", data)
+	}
+
+	if !strings.Contains(data, `Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"`) {
+		t.Errorf("message data = %q, want a multipart/encrypted Content-Type", data)
+	}
+
+	if strings.Contains(data, plaintext) {
+		t.Error("message data contains the plaintext body, want it GPG-encrypted")
+	}
+
+	begin := strings.Index(data, "-----BEGIN PGP MESSAGE-----")
+	end := strings.Index(data, "-----END PGP MESSAGE-----")
+
+	if begin == -1 || end == -1 {
+		t.Fatalf("message data = %q, want an armored PGP message part", data)
+	}
+
+	armored := data[begin : end+len("-----END PGP MESSAGE-----")]
+
+	if got := gpgDecrypt(t, homedir, armored); got != plaintext {
+		t.Errorf("decrypted message body = %q, want %q", got, plaintext)
 	}
 }

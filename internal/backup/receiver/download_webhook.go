@@ -136,7 +136,7 @@ func notifyDownloadEmail(recv config.ResolvedReceiver, email notify.Email, ev Do
 	ctx, cancel := context.WithTimeout(context.Background(), notify.Timeout)
 	defer cancel()
 
-	if err := notify.SendMail(ctx, email.SMTP, email.From, email.To, subject, body); err != nil {
+	if err := notify.SendMail(ctx, email.SMTP, email.From, email.To, subject, body, email.Encrypt); err != nil {
 		log.Warn("download email: sending failed", "id", recv.ID, "to", email.To, "err", err)
 		return
 	}

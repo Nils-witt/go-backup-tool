@@ -162,6 +162,55 @@ func TestBuildNotifications(t *testing.T) {
 	}
 }
 
+func TestBuildNotificationsEmailEncrypt(t *testing.T) {
+	t.Parallel()
+
+	smtp := SMTPSettings{Host: "smtp.example.com", Username: "backups@example.com"}
+
+	fileNotifications := []FileNotification{
+		{
+			ID: "encrypted",
+			Email: &FileEmail{
+				To:      []string{"ops@example.com"},
+				Encrypt: &FileEmailEncrypt{Recipients: []string{"ops@example.com", " sibling@example.com "}},
+			},
+		},
+		{
+			ID: "encrypted-custom-bin",
+			Email: &FileEmail{
+				To:      []string{"ops@example.com"},
+				Encrypt: &FileEmailEncrypt{Recipients: []string{"ops@example.com"}, GPGBin: "/usr/local/bin/gpg", GPGHomedir: "/etc/gbt/gnupg"},
+			},
+		},
+	}
+
+	got, err := Build(fileNotifications, smtp)
+	if err != nil {
+		t.Fatalf("Build() error: %v", err)
+	}
+
+	want := map[string]Notification{
+		"encrypted": {
+			ID: "encrypted",
+			Email: &Email{
+				To: []string{"ops@example.com"}, From: "backups@example.com", SMTP: smtp,
+				Encrypt: &EmailEncrypt{Recipients: []string{"ops@example.com", "sibling@example.com"}, GPGBin: "gpg"},
+			},
+		},
+		"encrypted-custom-bin": {
+			ID: "encrypted-custom-bin",
+			Email: &Email{
+				To: []string{"ops@example.com"}, From: "backups@example.com", SMTP: smtp,
+				Encrypt: &EmailEncrypt{Recipients: []string{"ops@example.com"}, GPGBin: "/usr/local/bin/gpg", GPGHomedir: "/etc/gbt/gnupg"},
+			},
+		},
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Build() = %+v, want %+v", got, want)
+	}
+}
+
 func TestBuildNotificationsErrors(t *testing.T) {
 	t.Parallel()
 
@@ -212,6 +261,25 @@ func TestBuildNotificationsErrors(t *testing.T) {
 			fns:        []FileNotification{{ID: "bad-email", Email: &FileEmail{To: []string{"a@example.com"}}}},
 			smtp:       smtpConfigured,
 			wantErrHas: "neither from nor smtp.username",
+		},
+		{
+			name: "email encrypt without recipients",
+			fns: []FileNotification{
+				{ID: "bad-encrypt", Email: &FileEmail{To: []string{"a@example.com"}, From: "f@example.com", Encrypt: &FileEmailEncrypt{}}},
+			},
+			smtp:       smtpConfigured,
+			wantErrHas: "recipients is required",
+		},
+		{
+			name: "email encrypt with empty recipient",
+			fns: []FileNotification{
+				{
+					ID:    "bad-encrypt",
+					Email: &FileEmail{To: []string{"a@example.com"}, From: "f@example.com", Encrypt: &FileEmailEncrypt{Recipients: []string{" "}}},
+				},
+			},
+			smtp:       smtpConfigured,
+			wantErrHas: "recipients[0] is empty",
 		},
 	}
 

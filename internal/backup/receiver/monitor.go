@@ -293,7 +293,7 @@ func notifyStaleReceiverEmail(recv config.ResolvedReceiver, email notify.Email, 
 	ctx, cancel := context.WithTimeout(context.Background(), notify.Timeout)
 	defer cancel()
 
-	if err := notify.SendMail(ctx, email.SMTP, email.From, email.To, subject, body); err != nil {
+	if err := notify.SendMail(ctx, email.SMTP, email.From, email.To, subject, body, email.Encrypt); err != nil {
 		log.Warn("stale receiver email: sending failed", "id", recv.ID, "to", email.To, "err", err)
 		return
 	}

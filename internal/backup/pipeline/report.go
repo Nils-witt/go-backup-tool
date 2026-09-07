@@ -410,7 +410,7 @@ func sendReportEmail(ctx context.Context, email *notify.Email, report reportCont
 	sendCtx, cancel := context.WithTimeout(ctx, reportNotifyTimeout)
 	defer cancel()
 
-	if err := notify.SendMail(sendCtx, email.SMTP, email.From, email.To, subject, body); err != nil {
+	if err := notify.SendMail(sendCtx, email.SMTP, email.From, email.To, subject, body, email.Encrypt); err != nil {
 		log.Warn("report: sending email failed", "to", email.To, "err", err)
 		return
 	}

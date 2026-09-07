@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/smtp"
+	"os/exec"
 	"strings"
 	"time"
 )
@@ -52,11 +53,18 @@ func PostWebhook(ctx context.Context, wh Webhook, body []byte, defaultContentTyp
 	return resp, nil
 }
 
-// SendMail sends a plain-text email from sender to every address in
-// recipients, via cfg.
-func SendMail(ctx context.Context, cfg SMTPSettings, sender string, recipients []string, subject, body string) error {
+// SendMail sends an email from sender to every address in recipients, via
+// cfg. encrypt, if non-nil (see EmailEncrypt), GPG-encrypts body as an
+// OpenPGP/MIME message (RFC 3156) before sending; subject is always sent in
+// the clear, since SMTP/MIME headers aren't covered by that encryption.
+func SendMail(ctx context.Context, cfg SMTPSettings, sender string, recipients []string, subject, body string, encrypt *EmailEncrypt) error {
 	ctx, cancel := context.WithTimeout(ctx, Timeout)
 	defer cancel()
+
+	message, err := buildMailMessage(ctx, sender, recipients, subject, body, encrypt)
+	if err != nil {
+		return err
+	}
 
 	client, err := dialSMTP(ctx, cfg)
 	if err != nil {
@@ -85,7 +93,7 @@ func SendMail(ctx context.Context, cfg SMTPSettings, sender string, recipients [
 		return fmt.Errorf("DATA: %w", err)
 	}
 
-	if _, err := w.Write([]byte(renderMailMessage(sender, recipients, subject, body))); err != nil {
+	if _, err := w.Write([]byte(message)); err != nil {
 		_ = w.Close()
 		return fmt.Errorf("writing message: %w", err)
 	}
@@ -95,6 +103,56 @@ func SendMail(ctx context.Context, cfg SMTPSettings, sender string, recipients [
 	}
 
 	return client.Quit()
+}
+
+// buildMailMessage renders the full RFC 5322 message SendMail hands to the
+// DATA command: plain text via renderMailMessage, or — when encrypt is set —
+// body GPG-encrypted (see encryptGPGBody) and wrapped as OpenPGP/MIME via
+// renderEncryptedMailMessage.
+func buildMailMessage(ctx context.Context, sender string, recipients []string, subject, body string, encrypt *EmailEncrypt) (string, error) {
+	if encrypt == nil {
+		return renderMailMessage(sender, recipients, subject, body), nil
+	}
+
+	encrypted, err := encryptGPGBody(ctx, *encrypt, body)
+	if err != nil {
+		return "", fmt.Errorf("gpg-encrypting body: %w", err)
+	}
+
+	return renderEncryptedMailMessage(sender, recipients, subject, encrypted), nil
+}
+
+// encryptGPGBody GPG-encrypts body (armored) to every one of enc.Recipients,
+// which must already have their public key in the keyring enc.GPGBin/
+// enc.GPGHomedir resolve to. Mirrors pipeline.buildGPGCommand's recipient
+// mode, but runs synchronously since an email body is small enough to hold
+// entirely in memory.
+func encryptGPGBody(ctx context.Context, enc EmailEncrypt, body string) (string, error) {
+	args := []string{"--batch", "--yes"}
+
+	if enc.GPGHomedir != "" {
+		args = append(args, "--homedir", enc.GPGHomedir)
+	}
+
+	args = append(args, "--trust-model", "always", "--armor", "--encrypt")
+
+	for _, r := range enc.Recipients {
+		args = append(args, "--recipient", r)
+	}
+
+	cmd := exec.CommandContext(ctx, enc.GPGBin, args...) //nolint:gosec // enc.GPGBin/args are operator-supplied CLI config, not untrusted input
+	cmd.Stdin = strings.NewReader(body)
+
+	var stderr bytes.Buffer
+
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("running %s: %w (stderr: %s)", enc.GPGBin, err, strings.TrimSpace(stderr.String()))
+	}
+
+	return string(out), nil
 }
 
 // dialSMTP connects to cfg's mail server and returns a ready-to-use
@@ -163,7 +221,50 @@ func renderMailMessage(from string, to []string, subject, body string) string {
 }
 
 // stripCRLF removes CR and LF from s, for a value about to be written into
-// an email header (see renderMailMessage).
+// an email header (see renderMailMessage/renderEncryptedMailMessage).
 func stripCRLF(s string) string {
 	return strings.NewReplacer("\r", "", "\n", "").Replace(s)
+}
+
+// pgpMIMEBoundary separates renderEncryptedMailMessage's two MIME parts. A
+// fixed value is fine: the armored PGP block it wraps is base64-like text,
+// which will never itself contain a line starting with "--" followed by this
+// exact string.
+const pgpMIMEBoundary = "gpg-backup-tool-pgp-mime-boundary"
+
+// renderEncryptedMailMessage builds an RFC 5322 message whose body is
+// encryptedBody (an ASCII-armored PGP message from encryptGPGBody) wrapped
+// as OpenPGP/MIME (RFC 3156): a multipart/encrypted message a compliant mail
+// client (Thunderbird, Apple Mail with GPGMail, Outlook with Gpg4win, ...)
+// decrypts automatically. Headers are built the same way renderMailMessage
+// builds them; only the body/Content-Type differ.
+func renderEncryptedMailMessage(from string, to []string, subject, encryptedBody string) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "From: %s\r\n", stripCRLF(from))
+	fmt.Fprintf(&b, "To: %s\r\n", stripCRLF(strings.Join(to, ", ")))
+	fmt.Fprintf(&b, "Subject: %s\r\n", stripCRLF(subject))
+	fmt.Fprintf(&b, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
+	b.WriteString("MIME-Version: 1.0\r\n")
+	fmt.Fprintf(&b, "Content-Type: multipart/encrypted; protocol=\"application/pgp-encrypted\"; boundary=\"%s\"\r\n", pgpMIMEBoundary)
+	b.WriteString("\r\n")
+	b.WriteString("This is an OpenPGP/MIME encrypted message (RFC 3156).\r\n")
+
+	fmt.Fprintf(&b, "--%s\r\n", pgpMIMEBoundary)
+	b.WriteString("Content-Type: application/pgp-encrypted\r\n")
+	b.WriteString("Content-Description: PGP/MIME version identification\r\n")
+	b.WriteString("\r\n")
+	b.WriteString("Version: 1\r\n")
+
+	fmt.Fprintf(&b, "--%s\r\n", pgpMIMEBoundary)
+	b.WriteString("Content-Type: application/octet-stream; name=\"encrypted.asc\"\r\n")
+	b.WriteString("Content-Description: OpenPGP encrypted message\r\n")
+	b.WriteString("Content-Disposition: inline; filename=\"encrypted.asc\"\r\n")
+	b.WriteString("\r\n")
+	b.WriteString(strings.ReplaceAll(strings.TrimRight(encryptedBody, "\n"), "\n", "\r\n"))
+	b.WriteString("\r\n")
+
+	fmt.Fprintf(&b, "--%s--\r\n", pgpMIMEBoundary)
+
+	return b.String()
 }

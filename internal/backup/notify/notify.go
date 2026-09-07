@@ -35,6 +35,25 @@ type FileEmail struct {
 	From    string   `yaml:"from"`
 	Subject string   `yaml:"subject"`
 	Body    string   `yaml:"body"`
+
+	// Encrypt, if set, GPG-encrypts this email's body (as OpenPGP/MIME, RFC
+	// 3156) before it's sent, so the notification's contents aren't readable
+	// in transit or at rest in a mail provider's inbox. The subject line
+	// itself is never encrypted (SMTP headers are always plaintext).
+	Encrypt *FileEmailEncrypt `yaml:"encrypt"`
+}
+
+// FileEmailEncrypt is a notification's email.encrypt: block. Recipients
+// names the GPG identities (fingerprint or email address) to encrypt to;
+// each must already have its public key in the keyring gpg-bin/gpg-homedir
+// resolve to (import it once with `gpg --import`, the same prerequisite as
+// a job's own recipients: for backups). GPGBin/GPGHomedir mirror a job's
+// gpg-bin/gpg-homedir, defaulting to "gpg" and gpg's own default homedir
+// respectively.
+type FileEmailEncrypt struct {
+	Recipients []string `yaml:"recipients"`
+	GPGBin     string   `yaml:"gpg-bin"`
+	GPGHomedir string   `yaml:"gpg-homedir"`
 }
 
 // FileNotification is one top-level notifications: entry: a named
@@ -114,7 +133,25 @@ type Email struct {
 	Subject string       // "" means the firing trigger's default subject
 	Body    string       // "" means the firing trigger's default body
 	SMTP    SMTPSettings // the top-level smtp: entry this email sends through
+
+	// Encrypt is a FileEmailEncrypt after validation; nil means this email
+	// sends its body in plain text.
+	Encrypt *EmailEncrypt
 }
+
+// EmailEncrypt is a FileEmailEncrypt after validation, ready to be passed to
+// SendMail. GPGBin defaults to "gpg" when unset in the config file.
+type EmailEncrypt struct {
+	Recipients []string
+	GPGBin     string
+	GPGHomedir string
+}
+
+// defaultGPGBin is used for a notification's email.encrypt.gpg-bin when
+// unset, matching the built-in default a job's own gpg-bin: falls back to
+// (see appconfig.DefaultGPGBin) — duplicated here rather than imported, since
+// notify is a leaf package (see the package doc comment).
+const defaultGPGBin = "gpg"
 
 // Notification is one FileNotification after validation, ready to be
 // referenced by report.notifications:/a receiver's
@@ -316,5 +353,41 @@ func resolveEmail(fe *FileEmail, smtp SMTPSettings) (Email, error) {
 		return Email{}, errors.New("neither from nor smtp.username is set")
 	}
 
-	return Email{To: to, From: from, Subject: fe.Subject, Body: fe.Body, SMTP: smtp}, nil
+	encrypt, err := resolveEmailEncrypt(fe.Encrypt)
+	if err != nil {
+		return Email{}, fmt.Errorf("encrypt: %w", err)
+	}
+
+	return Email{To: to, From: from, Subject: fe.Subject, Body: fe.Body, SMTP: smtp, Encrypt: encrypt}, nil
+}
+
+// resolveEmailEncrypt validates and resolves fe (a notification's
+// email.encrypt: block), returning nil when fe itself is nil (no
+// encryption). GPGBin defaults to defaultGPGBin when unset.
+func resolveEmailEncrypt(fe *FileEmailEncrypt) (*EmailEncrypt, error) {
+	if fe == nil {
+		return nil, nil
+	}
+
+	if len(fe.Recipients) == 0 {
+		return nil, errors.New("recipients is required")
+	}
+
+	recipients := make([]string, len(fe.Recipients))
+
+	for i, r := range fe.Recipients {
+		r = strings.TrimSpace(r)
+		if r == "" {
+			return nil, fmt.Errorf("recipients[%d] is empty", i)
+		}
+
+		recipients[i] = r
+	}
+
+	gpgBin := strings.TrimSpace(fe.GPGBin)
+	if gpgBin == "" {
+		gpgBin = defaultGPGBin
+	}
+
+	return &EmailEncrypt{Recipients: recipients, GPGBin: gpgBin, GPGHomedir: strings.TrimSpace(fe.GPGHomedir)}, nil
 }

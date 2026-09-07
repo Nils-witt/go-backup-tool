@@ -342,10 +342,28 @@ jobs:
 # trigger's placeholders (stale/download/report, see receivers: and report:
 # below) also include {server_name}, this instance's top-level server-name:
 # (see above), "" if unset.
+#
+# email.encrypt (optional) GPG-encrypts that email's body as OpenPGP/MIME
+# (RFC 3156) before sending, so a notification's contents (which may include
+# receiver/download detail) aren't readable in transit or sitting in an
+# inbox provider — only the subject line stays in the clear, since SMTP/MIME
+# headers are never covered by this. encrypt.recipients names the GPG
+# identities (fingerprint or email address) to encrypt to; each must already
+# have its public key imported into the keyring gpg-bin/gpg-homedir resolve
+# to (`gpg --import their-key.asc`), the same prerequisite as a job's own
+# recipients: above for backups. gpg-bin/gpg-homedir default to "gpg" and
+# gpg's own default homedir, respectively.
 # notifications:
 #   - id: ops-email
 #     email:
 #       to: ["ops@example.com"]
+#   - id: ops-email-encrypted
+#     email:
+#       to: ["ops@example.com"]
+#       encrypt:
+#         recipients: ["ops@example.com"]
+#         # gpg-bin: gpg
+#         # gpg-homedir: /etc/go-backup-tool/gnupg
 #   - id: pagerduty
 #     webhook:
 #       url: "https://events.eu.pagerduty.com/v2/enqueue"
