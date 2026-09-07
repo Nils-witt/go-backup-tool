@@ -58,6 +58,7 @@ func TestResolveSettingsDefaults(t *testing.T) {
 		To:       []string{"ops@example.com"},
 		From:     "backups@example.com", // defaults to smtp.username
 		Schedule: wantSchedule(t, defaultReportSchedule),
+		Subject:  defaultReportSubject,
 		SMTP: SMTPSettings{
 			Host:     "smtp.example.com",
 			Port:     587, // default for starttls
@@ -80,6 +81,7 @@ func TestResolveSettingsExplicitFields(t *testing.T) {
 		To:       []string{"a@example.com", "b@example.com"},
 		From:     "reports@example.com",
 		Schedule: "45 23 * * *",
+		Subject:  "custom subject {end}",
 		SMTP: fileSMTP{
 			Host:     "smtp.example.com",
 			Port:     2525,
@@ -94,6 +96,10 @@ func TestResolveSettingsExplicitFields(t *testing.T) {
 
 	if got.From != "reports@example.com" {
 		t.Errorf("from = %q, want explicit report.from", got.From)
+	}
+
+	if got.Subject != "custom subject {end}" {
+		t.Errorf("subject = %q, want explicit report.subject", got.Subject)
 	}
 
 	wantNext := time.Date(2026, 8, 28, 23, 45, 0, 0, time.Local)

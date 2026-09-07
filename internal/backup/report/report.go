@@ -33,8 +33,16 @@ type FileReport struct {
 	// time zone, e.g. "0 7 * * *" for once a day at 07:00, or "0 */6 * * *"
 	// for every 6h. Also accepts cron's descriptor shorthands (e.g.
 	// "@daily", "@every 6h"). Default "0 7 * * *" (once a day at 07:00).
-	Schedule string   `yaml:"schedule"`
-	SMTP     fileSMTP `yaml:"smtp"`
+	Schedule string `yaml:"schedule"`
+
+	// Subject is the email's Subject: header, with {placeholder} values
+	// substituted in (see pipeline.renderReportSubject): {start} and {end}
+	// are the report window's bounds ("2006-01-02 15:04"); {receivers},
+	// {errors}, {stale}, {jobs}, and {job-errors} are counts of each
+	// section. Default "go-backup-tool report - {end}".
+	Subject string `yaml:"subject"`
+
+	SMTP fileSMTP `yaml:"smtp"`
 }
 
 // fileSMTP is the report.smtp: block, describing how to reach the outgoing
@@ -94,12 +102,20 @@ type Settings struct {
 	// re-parsed on every scheduling loop iteration.
 	Schedule cron.Schedule
 
+	// Subject is fileReport.Subject, defaulted (see defaultReportSubject)
+	// when unset.
+	Subject string
+
 	SMTP SMTPSettings
 }
 
 // defaultReportSchedule is fileReport.Schedule's default when left unset:
 // once a day at 07:00.
 const defaultReportSchedule = "0 7 * * *"
+
+// defaultReportSubject is fileReport.Subject's default when left unset,
+// reproducing this feature's original hardcoded subject line.
+const defaultReportSubject = "go-backup-tool report - {end}"
 
 // ResolveSettings validates cfg (the config file's report: entry) and
 // resolves it into a Settings, reading report.smtp.password-env from
@@ -149,11 +165,17 @@ func ResolveSettings(cfg FileReport) (Settings, error) {
 		return Settings{}, errors.New("report.enabled is true but neither report.from nor report.smtp.username is set")
 	}
 
+	subject := strings.TrimSpace(cfg.Subject)
+	if subject == "" {
+		subject = defaultReportSubject
+	}
+
 	return Settings{
 		Enabled:  true,
 		To:       to,
 		From:     from,
 		Schedule: sched,
+		Subject:  subject,
 		SMTP:     smtpCfg,
 	}, nil
 }

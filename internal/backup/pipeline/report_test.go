@@ -297,6 +297,42 @@ func TestRenderReportBodyIncludesJobs(t *testing.T) {
 	}
 }
 
+func TestRenderReportSubject(t *testing.T) {
+	t.Parallel()
+
+	report := reportContent{
+		start:     time.Date(2026, 8, 27, 7, 0, 0, 0, time.UTC),
+		end:       time.Date(2026, 8, 28, 7, 0, 0, 0, time.UTC),
+		receivers: []receiverReportLine{{id: "recv-a"}},
+		errors:    []store.ReceiverErrorEvent{{}, {}},
+		stale:     []staleReceiverLine{{id: "recv-b"}},
+		jobs:      []jobReportLine{{id: "job-a"}},
+		jobErrors: []store.JobRunErrorEvent{{}},
+	}
+
+	got := renderReportSubject("{start} to {end}: {receivers} receiver(s), {errors} error(s), {stale} stale, {jobs} job(s), {job-errors} job error(s)", report)
+
+	want := "2026-08-27 07:00 to 2026-08-28 07:00: 1 receiver(s), 2 error(s), 1 stale, 1 job(s), 1 job error(s)"
+	if got != want {
+		t.Errorf("renderReportSubject() = %q, want %q", got, want)
+	}
+}
+
+func TestRenderReportSubjectDefaultTemplate(t *testing.T) {
+	t.Parallel()
+
+	report := reportContent{end: time.Date(2026, 8, 28, 7, 0, 0, 0, time.UTC)}
+
+	// Mirrors report.defaultReportSubject: reproduces this feature's
+	// original hardcoded subject line when report.subject: is unset.
+	got := renderReportSubject("go-backup-tool report - {end}", report)
+
+	want := "go-backup-tool report - 2026-08-28 07:00"
+	if got != want {
+		t.Errorf("renderReportSubject() = %q, want %q", got, want)
+	}
+}
+
 // fakeSMTPMessage is one message a fakeSMTPServer accepted, captured for a
 // test to assert against.
 type fakeSMTPMessage struct {

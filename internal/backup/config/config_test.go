@@ -2239,6 +2239,7 @@ jobs:
 		To:       []string{"ops@example.com"},
 		From:     "backups@example.com",
 		Schedule: schedule,
+		Subject:  "go-backup-tool report - {end}",
 		SMTP: report.SMTPSettings{
 			Host:     "smtp.example.com",
 			Port:     2525,

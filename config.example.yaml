@@ -331,6 +331,11 @@ jobs:
 #   # time zone; also accepts cron's descriptor shorthands (e.g. "@daily",
 #   # "@every 6h"). Default "0 7 * * *" (once a day at 07:00).
 #   schedule: "0 7 * * *"
+#   # subject is the email's Subject: header. {start} and {end} are the
+#   # report window's bounds, formatted "2006-01-02 15:04"; {receivers},
+#   # {errors}, {stale}, {jobs}, and {job-errors} are counts of each
+#   # section. Default "go-backup-tool report - {end}".
+#   subject: "go-backup-tool report - {end} ({errors} error(s))"
 #   smtp:
 #     host: "smtp.example.com"
 #     # port: 587 # default 587, or 465 if security: tls

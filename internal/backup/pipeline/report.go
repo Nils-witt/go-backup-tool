@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/smtp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -291,6 +292,30 @@ func renderReportBody(report reportContent) string {
 	return b.String()
 }
 
+// reportTimeFormat is how {start}/{end} render in a report.subject: template
+// (see renderReportSubject), matching this feature's original hardcoded
+// subject line.
+const reportTimeFormat = "2006-01-02 15:04"
+
+// renderReportSubject substitutes a report.subject: template's placeholders
+// with report's computed content: {start} and {end} are report's window
+// bounds; {receivers}, {errors}, {stale}, {jobs}, and {job-errors} are counts
+// of each of report's sections. Mirrors
+// receiver.renderDownloadWebhookPayload's {placeholder} substitution style.
+func renderReportSubject(tmpl string, report reportContent) string {
+	replacer := strings.NewReplacer(
+		"{start}", report.start.Format(reportTimeFormat),
+		"{end}", report.end.Format(reportTimeFormat),
+		"{receivers}", strconv.Itoa(len(report.receivers)),
+		"{errors}", strconv.Itoa(len(report.errors)),
+		"{stale}", strconv.Itoa(len(report.stale)),
+		"{jobs}", strconv.Itoa(len(report.jobs)),
+		"{job-errors}", strconv.Itoa(len(report.jobErrors)),
+	)
+
+	return replacer.Replace(tmpl)
+}
+
 // formatReportBytes formats n bytes as a short human-readable size (e.g.
 // "1.2 GB") for the report body. Unlike a general-purpose humanize package,
 // this only needs to read reasonably in an email, not be exact.
@@ -311,7 +336,7 @@ const reportSMTPTimeout = 30 * time.Second
 func sendReport(ctx context.Context, rc *config.RunConfig, db *store.Store, start, end time.Time, log *slog.Logger) {
 	report := buildReport(ctx, rc, db, start, end, log)
 
-	subject := "go-backup-tool report - " + end.Format("2006-01-02 15:04")
+	subject := renderReportSubject(rc.Report.Subject, report)
 	body := renderReportBody(report)
 
 	sendCtx, cancel := context.WithTimeout(ctx, reportSMTPTimeout)
