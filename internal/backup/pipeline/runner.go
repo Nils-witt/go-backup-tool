@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -383,6 +384,124 @@ func (r *Runner) persistTargetRun(ctx context.Context, jobName string, success b
 	if err := r.stateDB.SaveTargetRun(ctx, jobName, success, target, string(state), errText, time.Now()); err != nil {
 		r.log.Warn("recording target run to state db", "job", jobName, "target", target, "err", err)
 	}
+}
+
+// RunOutstandingUploadRetries retries every target upload recorded as
+// outstanding (see uploadStagedToTargets) every TargetUploadRetryInterval,
+// until ctx is done. It's meant to run for the process's lifetime in its own
+// goroutine, mirroring notify.Queue.Run, started once by app.Run. jobs is
+// the static, top-level job configuration (rc.Jobs) — used to look up each
+// outstanding row's job and target definition by name, since a row can
+// outlive the run that recorded it. A nil r.stateDB (no persistence
+// available, so nothing could have been recorded in the first place) makes
+// this a no-op.
+func (r *Runner) RunOutstandingUploadRetries(ctx context.Context, jobs []*config.Config) {
+	if r.stateDB == nil {
+		return
+	}
+
+	log := r.log.With("component", "upload-retry-queue")
+
+	byName := make(map[string]*config.Config, len(jobs))
+	for _, j := range jobs {
+		byName[j.Name] = j
+	}
+
+	ticker := time.NewTicker(TargetUploadRetryInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.retryOutstandingUploads(ctx, byName, log)
+		}
+	}
+}
+
+// retryOutstandingUploads attempts every outstanding target upload whose
+// retry time has come due.
+func (r *Runner) retryOutstandingUploads(ctx context.Context, byName map[string]*config.Config, log *slog.Logger) {
+	due, err := r.stateDB.ListDueOutstandingTargetUploads(ctx, time.Now())
+	if err != nil {
+		log.Warn("listing due outstanding target uploads", "err", err)
+		return
+	}
+
+	for _, row := range due {
+		r.retryOutstandingUpload(ctx, byName, row, log)
+	}
+}
+
+// retryOutstandingUpload attempts a single outstanding target upload. On
+// success, it updates the target's live status and target-run history the
+// same way a normal run's own onTargetDone would, then forgets row. It also
+// gives up (forgetting row without ever succeeding) if row's job or target
+// no longer exists in the current config, or if its staged file is gone —
+// none of those are things a later retry could ever fix.
+func (r *Runner) retryOutstandingUpload(ctx context.Context, byName map[string]*config.Config, row store.OutstandingTargetUpload, log *slog.Logger) {
+	log = log.With("job", row.JobName, "target", row.Target, "file", row.FileName)
+
+	job, ok := byName[row.JobName]
+	if !ok {
+		log.Warn("outstanding target upload references unknown job; giving up")
+		r.forgetOutstandingUpload(ctx, row, log)
+
+		return
+	}
+
+	index := slices.IndexFunc(job.Targets, func(t config.Target) bool { return t.ServerName == row.Target })
+	if index < 0 {
+		log.Warn("outstanding target upload references unknown target; giving up")
+		r.forgetOutstandingUpload(ctx, row, log)
+
+		return
+	}
+
+	if _, err := os.Stat(row.FileName); err != nil {
+		log.Warn("staged backup no longer available for retry; giving up", "err", err)
+		r.forgetOutstandingUpload(ctx, row, log)
+
+		return
+	}
+
+	run := *job
+	run.Key = row.Key
+	run.CreatedAt = row.CreatedAt
+	run.StateDB = r.stateDB
+	run.Identity = r.identity
+
+	if err := uploadTargetAttempt(ctx, &run, &run.Targets[index], row.FileName, log); err != nil {
+		log.Warn("outstanding target upload retry failed", "err", err)
+
+		if err1 := r.stateDB.RescheduleOutstandingTargetUpload(ctx, row.ID, time.Now().Add(TargetUploadRetryInterval)); err1 != nil {
+			log.Warn("rescheduling outstanding target upload", "err", err1)
+		}
+
+		return
+	}
+
+	log.Info("outstanding target upload retry succeeded")
+
+	r.store.TargetDone(job.Name, index, nil)
+	r.store.RefreshJobState(job.Name)
+	r.persistTargetRun(ctx, job.Name, true, row.Target, nil)
+
+	r.forgetOutstandingUpload(ctx, row, log)
+}
+
+// forgetOutstandingUpload removes row from the state db and, if no other
+// outstanding upload still references its staged file, removes that file
+// too — the cleanup runPipeline itself would have done immediately had the
+// upload succeeded on its first attempt (see removeStagingFileIfUnreferenced).
+func (r *Runner) forgetOutstandingUpload(ctx context.Context, row store.OutstandingTargetUpload, log *slog.Logger) {
+	if err := r.stateDB.DeleteOutstandingTargetUpload(ctx, row.ID); err != nil {
+		log.Warn("deleting outstanding target upload", "err", err)
+		return
+	}
+
+	removeStagingFileIfUnreferenced(ctx, r.stateDB, row.FileName, log)
 }
 
 // substituteKeyTime replaces the {time} placeholder in key, if present,

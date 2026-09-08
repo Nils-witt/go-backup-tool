@@ -345,3 +345,110 @@ func TestListTargetRunsReturnsMostRecentPerTarget(t *testing.T) {
 		t.Errorf("ListTargetRuns() = %+v, want a single failed entry (most recent run should win)", got)
 	}
 }
+
+func TestListDueOutstandingTargetUploadsOnlyReturnsDueRows(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := context.Background()
+
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	createdAt := now.Add(-time.Minute)
+
+	if err := db.AddOutstandingTargetUpload(ctx, "job-a", "server-a", "/tmp/a.staged", "backup-a.gpg", createdAt, now.Add(-time.Second)); err != nil {
+		t.Fatalf("AddOutstandingTargetUpload() due error: %v", err)
+	}
+
+	if err := db.AddOutstandingTargetUpload(ctx, "job-a", "server-b", "/tmp/b.staged", "backup-b.gpg", createdAt, now.Add(time.Hour)); err != nil {
+		t.Fatalf("AddOutstandingTargetUpload() not-yet-due error: %v", err)
+	}
+
+	due, err := db.ListDueOutstandingTargetUploads(ctx, now)
+	if err != nil {
+		t.Fatalf("ListDueOutstandingTargetUploads() error: %v", err)
+	}
+
+	if len(due) != 1 {
+		t.Fatalf("ListDueOutstandingTargetUploads() = %+v, want exactly the one due row", due)
+	}
+
+	row := due[0]
+	if row.JobName != "job-a" || row.Target != "server-a" || row.FileName != "/tmp/a.staged" || row.Key != "backup-a.gpg" || !row.CreatedAt.Equal(createdAt) {
+		t.Errorf("ListDueOutstandingTargetUploads() row = %+v, want job-a/server-a for /tmp/a.staged", row)
+	}
+}
+
+func TestRescheduleOutstandingTargetUpload(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := context.Background()
+
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	if err := db.AddOutstandingTargetUpload(ctx, "job-a", "server-a", "/tmp/a.staged", "backup-a.gpg", now, now); err != nil {
+		t.Fatalf("AddOutstandingTargetUpload() error: %v", err)
+	}
+
+	due, err := db.ListDueOutstandingTargetUploads(ctx, now)
+	if err != nil || len(due) != 1 {
+		t.Fatalf("ListDueOutstandingTargetUploads() before reschedule = %+v, %v", due, err)
+	}
+
+	later := now.Add(time.Hour)
+	if err := db.RescheduleOutstandingTargetUpload(ctx, due[0].ID, later); err != nil {
+		t.Fatalf("RescheduleOutstandingTargetUpload() error: %v", err)
+	}
+
+	if stillDue, err := db.ListDueOutstandingTargetUploads(ctx, now); err != nil || len(stillDue) != 0 {
+		t.Fatalf("ListDueOutstandingTargetUploads() at original time after reschedule = %+v, %v, want none", stillDue, err)
+	}
+
+	if nowDue, err := db.ListDueOutstandingTargetUploads(ctx, later); err != nil || len(nowDue) != 1 {
+		t.Fatalf("ListDueOutstandingTargetUploads() at rescheduled time = %+v, %v, want the one row", nowDue, err)
+	}
+}
+
+func TestDeleteOutstandingTargetUploadAndFileReferenceCount(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := context.Background()
+
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	const file = "/tmp/shared.staged"
+
+	if err := db.AddOutstandingTargetUpload(ctx, "job-a", "server-a", file, "backup.gpg", now, now); err != nil {
+		t.Fatalf("AddOutstandingTargetUpload() server-a error: %v", err)
+	}
+
+	if err := db.AddOutstandingTargetUpload(ctx, "job-a", "server-b", file, "backup.gpg", now, now); err != nil {
+		t.Fatalf("AddOutstandingTargetUpload() server-b error: %v", err)
+	}
+
+	if n, err := db.CountOutstandingTargetUploadsForFile(ctx, file); err != nil || n != 2 {
+		t.Fatalf("CountOutstandingTargetUploadsForFile() = %d, %v, want 2", n, err)
+	}
+
+	due, err := db.ListDueOutstandingTargetUploads(ctx, now)
+	if err != nil || len(due) != 2 {
+		t.Fatalf("ListDueOutstandingTargetUploads() = %+v, %v, want 2 rows", due, err)
+	}
+
+	if err := db.DeleteOutstandingTargetUpload(ctx, due[0].ID); err != nil {
+		t.Fatalf("DeleteOutstandingTargetUpload() error: %v", err)
+	}
+
+	if n, err := db.CountOutstandingTargetUploadsForFile(ctx, file); err != nil || n != 1 {
+		t.Fatalf("CountOutstandingTargetUploadsForFile() after one delete = %d, %v, want 1 (the other target still references the file)", n, err)
+	}
+
+	if err := db.DeleteOutstandingTargetUpload(ctx, due[1].ID); err != nil {
+		t.Fatalf("DeleteOutstandingTargetUpload() second error: %v", err)
+	}
+
+	if n, err := db.CountOutstandingTargetUploadsForFile(ctx, file); err != nil || n != 0 {
+		t.Fatalf("CountOutstandingTargetUploadsForFile() after both deletes = %d, %v, want 0", n, err)
+	}
+}

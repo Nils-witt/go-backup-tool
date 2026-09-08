@@ -23,6 +23,7 @@ import (
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 // remoteHTTPClient is shared by every remote target's upload/delete
@@ -30,6 +31,33 @@ import (
 // from the run's overall -timeout, if any) governs cancellation instead,
 // consistent with how local filesystem writes are bounded only by ctx.
 var remoteHTTPClient = &http.Client{}
+
+// TargetUploadRetryInterval is how long a failed target upload waits before
+// Runner.RunOutstandingUploadRetries attempts it again.
+const TargetUploadRetryInterval = 60 * time.Second
+
+// removeStagingFileIfUnreferenced removes path (a staged backup file — see
+// stageBackup) unless a still-outstanding target upload (see
+// uploadStagedToTargets, Runner.RunOutstandingUploadRetries) still needs it
+// for a future retry, in which case whichever caller eventually resolves
+// that last reference removes it instead. A nil db (no persistence
+// available, so no retry can happen either) always removes the file, same
+// as before this function existed.
+func removeStagingFileIfUnreferenced(ctx context.Context, db *store.Store, path string, log *slog.Logger) {
+	if db != nil {
+		n, err := db.CountOutstandingTargetUploadsForFile(ctx, path)
+		if err != nil {
+			log.Warn("checking outstanding target uploads before removing staging file", "path", path, "err", err)
+			return
+		}
+
+		if n > 0 {
+			return
+		}
+	}
+
+	_ = os.Remove(path)
+}
 
 // runPipeline runs the backup in two phases:
 //
@@ -46,8 +74,10 @@ var remoteHTTPClient = &http.Client{}
 // complete-but-truncated object by the time the failure is noticed), and
 // each target then uploads from that same stable file independently, so one
 // target's failure never affects any other target's own attempt. Each
-// target gets exactly one attempt (see uploadStagedToTargets); a failed
-// target is not retried.
+// target gets exactly one attempt within a run (see uploadStagedToTargets);
+// a failed target's staged file is instead handed off to
+// Runner.RunOutstandingUploadRetries, which retries it in the background
+// every TargetUploadRetryInterval until it succeeds.
 //
 // cfg.Cmd is run through the platform shell ("sh -c" on every OS but
 // Windows, "cmd /C" there — see newSourceCommand) deliberately: it lets an
@@ -105,7 +135,7 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger, onTa
 	sourceErr := sourceCmd.Wait()
 
 	if stageErr == nil {
-		defer func() { _ = os.Remove(stagingPath) }()
+		defer removeStagingFileIfUnreferenced(ctx, cfg.StateDB, stagingPath, log)
 	}
 
 	// Only upload if every earlier stage genuinely succeeded: staging a
@@ -299,12 +329,15 @@ func buildGPGCommand(ctx context.Context, cfg *config.Config) *exec.Cmd {
 // target being slow or blocked doesn't affect any other's progress the way
 // funneling them all through a single shared reader would.
 //
-// Each target gets exactly one attempt; a target whose attempt fails is not
-// retried, and its failure is permanent for this run. onTargetDone (see its
-// doc on runPipeline) is called for target i the moment this attempt's
-// outcome is known, independently of every other target still in progress;
-// onTargetDone must be safe for concurrent use, since every target's
-// goroutine calls it on its own.
+// Each target gets exactly one attempt here; a target whose attempt fails
+// has its failure reported for this run same as any other (see
+// onTargetDone), but — when cfg.StateDB is set — is also recorded as an
+// outstanding upload for Runner.RunOutstandingUploadRetries to keep retrying
+// in the background every TargetUploadRetryInterval until it eventually
+// succeeds. onTargetDone (see its doc on runPipeline) is called for target i
+// the moment this attempt's outcome is known, independently of every other
+// target still in progress; onTargetDone must be safe for concurrent use,
+// since every target's goroutine calls it on its own.
 //
 // It returns the combined error via errors.Join, for callers that just want
 // to know whether anything failed.
@@ -332,7 +365,8 @@ func uploadStagedToTargets(ctx context.Context, cfg *config.Config, stagingPath 
 			log.Warn("target upload failed", "target", targetLabel(t), "duration", time.Since(start), "err", err)
 
 			if cfg.StateDB != nil {
-				if err1 := cfg.StateDB.AddOutstandingTargetUpload(ctx, cfg.Name, cfg.Targets[i].ServerName, stagingPath, time.Now().Add(5*time.Minute)); err1 != nil {
+				retryAt := time.Now().Add(TargetUploadRetryInterval)
+				if err1 := cfg.StateDB.AddOutstandingTargetUpload(ctx, cfg.Name, cfg.Targets[i].ServerName, stagingPath, cfg.Key, cfg.CreatedAt, retryAt); err1 != nil {
 					log.Warn("recording outstanding target upload failed", "target", targetLabel(t), "err", err1)
 				}
 			}

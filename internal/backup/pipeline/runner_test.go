@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -370,11 +371,12 @@ func TestRunOnceNoFailureNotificationOnSuccess(t *testing.T) {
 	}
 }
 
-// TestRunOnceDeletesStagedFileEvenWhenTargetFails is an end-to-end check
-// (real gpg, real runOnce) that a job's staged file is removed once runOnce
-// returns even when a target fails: a failed target is never retried, so
-// nothing keeps the staged file around afterward.
-func TestRunOnceDeletesStagedFileEvenWhenTargetFails(t *testing.T) {
+// TestRunOnceKeepsStagedFileForRetryWhenTargetFails is an end-to-end check
+// (real gpg, real runOnce) that a job's staged file is kept, and an
+// outstanding target upload is recorded for it, when a target fails: the
+// file is still needed for RunOutstandingUploadRetries to retry that target
+// from later (see uploadStagedToTargets/removeStagingFileIfUnreferenced).
+func TestRunOnceKeepsStagedFileForRetryWhenTargetFails(t *testing.T) {
 	homedir := testGPGKeyring(t)
 
 	t.Parallel()
@@ -419,8 +421,17 @@ func TestRunOnceDeletesStagedFileEvenWhenTargetFails(t *testing.T) {
 		t.Fatalf("globbing staging dir: %v", err)
 	}
 
-	if len(staged) != 0 {
-		t.Errorf("staged files in %q = %v, want none (a failed target is never retried)", stagingDir, staged)
+	if len(staged) != 1 {
+		t.Fatalf("staged files in %q = %v, want exactly one (kept for the outstanding retry)", stagingDir, staged)
+	}
+
+	due, err := stateDB.ListDueOutstandingTargetUploads(context.Background(), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListDueOutstandingTargetUploads() error: %v", err)
+	}
+
+	if len(due) != 1 || due[0].FileName != staged[0] || due[0].JobName != job.Name || due[0].Target != "bad" {
+		t.Errorf("ListDueOutstandingTargetUploads() = %+v, want one row for job %q target %q file %q", due, job.Name, "bad", staged[0])
 	}
 }
 
@@ -899,5 +910,171 @@ func TestScheduleStartTimeSkipsCatchUpWhenAlreadyRecorded(t *testing.T) { //noli
 
 	if got := countMarkerRuns(t, marker); got != 0 {
 		t.Errorf("marker recorded %d runs, want 0 (already-covered slot must not trigger a catch-up run)", got)
+	}
+}
+
+// TestRetryOutstandingUploadSucceedsAfterTargetRecovers is an end-to-end
+// check that a target upload recorded as outstanding by a failed runOnce
+// (see uploadStagedToTargets) is later retried successfully by
+// retryOutstandingUpload once the target recovers, updating the live status
+// store, the target-run history, and cleaning up both the outstanding row
+// and its staged file — exactly what runOnce itself would have done had the
+// upload succeeded on the first attempt.
+func TestRetryOutstandingUploadSucceedsAfterTargetRecovers(t *testing.T) {
+	homedir := testGPGKeyring(t)
+
+	t.Parallel()
+
+	var requests atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			http.Error(w, "temporarily down", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	identity := testServerIdentity(t)
+	stagingDir := t.TempDir()
+
+	job := &config.Config{
+		Name:       "test",
+		Cmd:        "echo hi",
+		Key:        "backup-{time}.gpg",
+		Recipients: []string{testGPGRecipient},
+		GPGBin:     "gpg",
+		GPGHomedir: homedir,
+		StagingDir: stagingDir,
+		Identity:   identity,
+		Targets: []config.Target{
+			{ServerName: "flaky", Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"},
+		},
+	}
+
+	stateDB, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("store.Open() error: %v", err)
+	}
+
+	t.Cleanup(func() { _ = stateDB.Close() })
+
+	statusStore := backup.NewStatusStore([]*config.Config{job})
+	r := &Runner{log: discardLogger, store: statusStore, stateDB: stateDB, identity: identity}
+
+	r.runOnce(context.Background(), job)
+
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("requests after runOnce = %d, want 1 (the first attempt should have failed)", got)
+	}
+
+	staged, err := filepath.Glob(filepath.Join(stagingDir, "go-backup-tool-*.staged"))
+	if err != nil || len(staged) != 1 {
+		t.Fatalf("staged files = %v, %v, want exactly one kept for retry", staged, err)
+	}
+
+	due, err := stateDB.ListDueOutstandingTargetUploads(context.Background(), time.Now().Add(time.Hour))
+	if err != nil || len(due) != 1 {
+		t.Fatalf("ListDueOutstandingTargetUploads() = %+v, %v, want one outstanding row", due, err)
+	}
+
+	byName := map[string]*config.Config{job.Name: job}
+	r.retryOutstandingUpload(context.Background(), byName, due[0], discardLogger)
+
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("requests after retry = %d, want 2 (the retry should have succeeded)", got)
+	}
+
+	assertOutstandingUploadResolved(t, stateDB, statusStore, job.Name, staged[0])
+}
+
+// assertOutstandingUploadResolved is
+// TestRetryOutstandingUploadSucceedsAfterTargetRecovers's post-retry
+// verification, split out to keep that test's cyclomatic complexity down:
+// once a retry succeeds, the outstanding row and its staged file must both
+// be gone, and the target/job's live and persisted state must show success.
+func assertOutstandingUploadResolved(t *testing.T, stateDB *store.Store, statusStore *backup.StatusStore, jobName, stagedPath string) {
+	t.Helper()
+
+	stillDue, err := stateDB.ListDueOutstandingTargetUploads(context.Background(), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListDueOutstandingTargetUploads() after retry error: %v", err)
+	}
+
+	if len(stillDue) != 0 {
+		t.Errorf("ListDueOutstandingTargetUploads() after retry = %+v, want none (the outstanding row should be forgotten)", stillDue)
+	}
+
+	if _, err := os.Stat(stagedPath); !os.IsNotExist(err) {
+		t.Errorf("staged file %q still exists after the last reference resolved, want removed", stagedPath)
+	}
+
+	targetRuns, err := stateDB.ListTargetRuns(context.Background(), jobName)
+	if err != nil {
+		t.Fatalf("ListTargetRuns() error: %v", err)
+	}
+
+	if len(targetRuns) != 1 || targetRuns[0].State != string(backup.StateOK) {
+		t.Errorf("ListTargetRuns() = %+v, want a single ok entry recording the retry's success", targetRuns)
+	}
+
+	snapshot := statusStore.Snapshot()
+	if len(snapshot) != 1 || len(snapshot[0].Targets) != 1 {
+		t.Fatalf("statusStore.Snapshot() = %+v, want one job with one target", snapshot)
+	}
+
+	if got := snapshot[0].Targets[0].State; got != backup.StateOK {
+		t.Errorf("snapshot target state = %q, want %q (retry succeeded)", got, backup.StateOK)
+	}
+
+	if got := snapshot[0].State; got != backup.StateOK {
+		t.Errorf("snapshot job state = %q, want %q (the only target's retry succeeded)", got, backup.StateOK)
+	}
+}
+
+// TestRetryOutstandingUploadGivesUpWhenStagedFileIsGone verifies that
+// retryOutstandingUpload forgets an outstanding upload rather than retrying
+// it forever when its staged file is no longer on disk (e.g. the process
+// restarted after StagingDir was cleaned).
+func TestRetryOutstandingUploadGivesUpWhenStagedFileIsGone(t *testing.T) {
+	t.Parallel()
+
+	stateDB, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("store.Open() error: %v", err)
+	}
+
+	t.Cleanup(func() { _ = stateDB.Close() })
+
+	missing := filepath.Join(t.TempDir(), "no-such-file.staged")
+
+	if err := stateDB.AddOutstandingTargetUpload(context.Background(), "test", "flaky", missing, "backup.gpg", time.Now(), time.Now()); err != nil {
+		t.Fatalf("AddOutstandingTargetUpload() error: %v", err)
+	}
+
+	due, err := stateDB.ListDueOutstandingTargetUploads(context.Background(), time.Now())
+	if err != nil || len(due) != 1 {
+		t.Fatalf("ListDueOutstandingTargetUploads() = %+v, %v, want one row", due, err)
+	}
+
+	job := &config.Config{
+		Name:    "test",
+		Targets: []config.Target{{ServerName: "flaky", Kind: config.ServerKindRemote, Endpoint: "http://127.0.0.1:0", Bucket: "instance-a"}},
+	}
+
+	statusStore := backup.NewStatusStore([]*config.Config{job})
+	r := &Runner{log: discardLogger, store: statusStore, stateDB: stateDB}
+
+	r.retryOutstandingUpload(context.Background(), map[string]*config.Config{job.Name: job}, due[0], discardLogger)
+
+	stillDue, err := stateDB.ListDueOutstandingTargetUploads(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("ListDueOutstandingTargetUploads() after giving up error: %v", err)
+	}
+
+	if len(stillDue) != 0 {
+		t.Errorf("ListDueOutstandingTargetUploads() after giving up = %+v, want none (a missing staged file can never be retried)", stillDue)
 	}
 }

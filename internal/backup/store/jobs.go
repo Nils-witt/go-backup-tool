@@ -45,15 +45,22 @@ type targetRunModel struct {
 
 func (targetRunModel) TableName() string { return "target_runs" }
 
-// outstandingTargetUploadModel is outstanding_target_uploads: an
-// append-only record of a target upload that needs to be retried at a
-// later time.
+// outstandingTargetUploadModel is outstanding_target_uploads: a record of a
+// target upload that failed and needs to be retried at a later time (see
+// pipeline.Runner.RunOutstandingUploadRetries). Key and CreatedAt capture
+// the failed run's own resolved values (config.Config.Key, once its {time}
+// placeholder has been substituted, and CreatedAt) rather than the job's
+// static config, since a retry must upload to the exact same object key the
+// run's other targets already succeeded against — recomputing them fresh at
+// retry time would send the retry to a different key.
 type outstandingTargetUploadModel struct {
-	ID       uint      `gorm:"column:id;primaryKey;autoIncrement"`
-	JobName  string    `gorm:"column:job_name;not null"`
-	Target   string    `gorm:"column:target;not null"`
-	RunAt    time.Time `gorm:"column:run_at;not null"`
-	FileName string    `gorm:"column:fileName;not null"`
+	ID        uint      `gorm:"column:id;primaryKey;autoIncrement"`
+	JobName   string    `gorm:"column:job_name;not null"`
+	Target    string    `gorm:"column:target;not null"`
+	RunAt     time.Time `gorm:"column:run_at;not null"`
+	FileName  string    `gorm:"column:fileName;not null"`
+	Key       string    `gorm:"column:key;not null"`
+	CreatedAt time.Time `gorm:"column:createdAt"`
 }
 
 func (outstandingTargetUploadModel) TableName() string { return "outstanding_target_uploads" }
@@ -342,13 +349,87 @@ func (s *Store) ListTargetRunEvents(ctx context.Context, limit int) ([]TargetRun
 	return events, nil
 }
 
-// AddOutstandingTargetUpload records a target upload that needs to be retried at a later time.
-func (s *Store) AddOutstandingTargetUpload(ctx context.Context, jobName, targetName, fileName string, retryAt time.Time) error {
-	m := outstandingTargetUploadModel{JobName: jobName, Target: targetName, RunAt: retryAt, FileName: fileName}
+// AddOutstandingTargetUpload records a target upload that needs to be
+// retried at retryAt. key and createdAt are the failed run's own resolved
+// config.Config.Key/CreatedAt (see outstandingTargetUploadModel's doc
+// comment), not the job's static config.
+func (s *Store) AddOutstandingTargetUpload(ctx context.Context, jobName, targetName, fileName, key string, createdAt, retryAt time.Time) error {
+	m := outstandingTargetUploadModel{JobName: jobName, Target: targetName, RunAt: retryAt.UTC(), FileName: fileName, Key: key, CreatedAt: createdAt.UTC()}
 
 	if err := s.db.WithContext(ctx).Create(&m).Error; err != nil {
 		return fmt.Errorf("recording outstanding target upload for job %q target %q: %w", jobName, targetName, err)
 	}
 
 	return nil
+}
+
+// OutstandingTargetUpload is one target upload AddOutstandingTargetUpload
+// recorded as failed and still needing a retry, as returned by
+// ListDueOutstandingTargetUploads.
+type OutstandingTargetUpload struct {
+	ID        uint
+	JobName   string
+	Target    string
+	FileName  string
+	Key       string
+	CreatedAt time.Time
+	RetryAt   time.Time
+}
+
+// ListDueOutstandingTargetUploads returns every outstanding target upload
+// whose retry time is at or before now, oldest first, for
+// pipeline.Runner.RunOutstandingUploadRetries's retry loop to attempt.
+func (s *Store) ListDueOutstandingTargetUploads(ctx context.Context, now time.Time) ([]OutstandingTargetUpload, error) {
+	var rows []outstandingTargetUploadModel
+
+	if err := s.db.WithContext(ctx).Where("run_at <= ?", now.UTC()).Order("id").Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("reading due outstanding target uploads: %w", err)
+	}
+
+	out := make([]OutstandingTargetUpload, len(rows))
+	for i, m := range rows {
+		out[i] = OutstandingTargetUpload{
+			ID: m.ID, JobName: m.JobName, Target: m.Target, FileName: m.FileName,
+			Key: m.Key, CreatedAt: m.CreatedAt, RetryAt: m.RunAt,
+		}
+	}
+
+	return out, nil
+}
+
+// RescheduleOutstandingTargetUpload bumps id's retry time to retryAt, once
+// another retry attempt has failed.
+func (s *Store) RescheduleOutstandingTargetUpload(ctx context.Context, id uint, retryAt time.Time) error {
+	err := s.db.WithContext(ctx).Model(&outstandingTargetUploadModel{}).Where("id = ?", id).
+		Update("run_at", retryAt.UTC()).Error
+	if err != nil {
+		return fmt.Errorf("rescheduling outstanding target upload %d: %w", id, err)
+	}
+
+	return nil
+}
+
+// DeleteOutstandingTargetUpload removes id, once its upload has finally
+// succeeded or it can no longer be retried (e.g. its staged file, job, or
+// target no longer exists).
+func (s *Store) DeleteOutstandingTargetUpload(ctx context.Context, id uint) error {
+	if err := s.db.WithContext(ctx).Delete(&outstandingTargetUploadModel{}, id).Error; err != nil {
+		return fmt.Errorf("deleting outstanding target upload %d: %w", id, err)
+	}
+
+	return nil
+}
+
+// CountOutstandingTargetUploadsForFile reports how many outstanding target
+// uploads still reference fileName, so its staged file (see stageBackup) can
+// be safely removed once none do.
+func (s *Store) CountOutstandingTargetUploadsForFile(ctx context.Context, fileName string) (int64, error) {
+	var n int64
+
+	err := s.db.WithContext(ctx).Model(&outstandingTargetUploadModel{}).Where("fileName = ?", fileName).Count(&n).Error
+	if err != nil {
+		return 0, fmt.Errorf("counting outstanding target uploads for %q: %w", fileName, err)
+	}
+
+	return n, nil
 }

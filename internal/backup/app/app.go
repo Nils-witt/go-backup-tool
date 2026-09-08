@@ -172,6 +172,11 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 
 	r := pipeline.NewRunner(log, statusStore, stateDB, serverIdentity, mailQueue)
 
+	// Keeps retrying any target upload that failed during a run, every
+	// pipeline.TargetUploadRetryInterval, until it succeeds — see
+	// pipeline.Runner.RunOutstandingUploadRetries.
+	go r.RunOutstandingUploadRetries(ctx, rc.Jobs)
+
 	// Independent of the web UI: a daily report is useful for anyone
 	// monitoring receivers by inbox, not just those watching the dashboard.
 	// RunReportLoop itself no-ops when report.enabled isn't set.

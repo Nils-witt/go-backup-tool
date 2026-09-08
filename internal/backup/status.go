@@ -260,6 +260,29 @@ func overallState(targets []TargetSnapshot) RunState {
 	}
 }
 
+// RefreshJobState recomputes job name's overall state from its targets'
+// current outcomes (see overallState), for a caller that updates a single
+// target's outcome outside the normal Starting/Finished run bracket — namely
+// pipeline.Runner.RunOutstandingUploadRetries, once a target upload that
+// failed during a run finally succeeds on a later background retry. Clears
+// the job's recorded error once every target is now OK, matching Finished's
+// own success handling.
+func (s *StatusStore) RefreshJobState(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	j, ok := s.jobs[name]
+	if !ok {
+		return
+	}
+
+	j.State = overallState(j.Targets)
+
+	if j.State == StateOK {
+		j.Error = ""
+	}
+}
+
 // SeedLastRun initializes job name's snapshot from a previously persisted
 // run (see the store package's GetLastRun), so a restart's web UI can still
 // show when the job last ran instead of reverting to "never" until it next
