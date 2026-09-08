@@ -18,6 +18,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
@@ -71,8 +72,9 @@ func Run(args []string, stderr io.Writer) int {
 // with the stale-receiver webhook monitor (see
 // receiver.MonitorStaleReceivers) and the per-receiver retention sweep (see
 // receiver.MonitorReceiverRetention). It returns nil, doing nothing else,
-// when rc.Listen is unset.
-func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, statusStore *backup.StatusStore, stateDB *store.Store, logs *webui.LogRingBuffer, serverIdentity *identity.ServerIdentity, runner *pipeline.Runner, log *slog.Logger) *webui.Server {
+// when rc.Listen is unset. queue lets a download/stale notification email
+// that fails to send be retried later (see notify.Queue).
+func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, statusStore *backup.StatusStore, stateDB *store.Store, logs *webui.LogRingBuffer, serverIdentity *identity.ServerIdentity, runner *pipeline.Runner, queue *notify.Queue, log *slog.Logger) *webui.Server {
 	if rc.Listen == "" {
 		return nil
 	}
@@ -91,9 +93,9 @@ func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, statusSto
 	oAuth := webui.SetupOIDCAuth(ctx, rc.OIDC, log)
 	srv := webui.StartWebUI(rc.Listen, statusStore, rc.Jobs, runner, rc.Receivers, receiverStore, log, stateDB, logs, rc.WebUIUsername, rc.WebUIPassword, oAuth, serverIdentity, rc.TrustProxyHeaders, rc.DevMode, func(mux *http.ServeMux) {
 		receiver.RegisterRoutes(mux, rc.Receivers, receiverStore, log, stateDB)
-	})
+	}, queue)
 
-	go receiver.MonitorStaleReceivers(ctx, rc.Receivers, log)
+	go receiver.MonitorStaleReceivers(ctx, rc.Receivers, queue, log)
 
 	return srv
 }
@@ -162,14 +164,20 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		pipeline.SeedStatusFromState(ctx, stateDB, rc.Jobs, statusStore, log)
 	}
 
-	r := pipeline.NewRunner(log, statusStore, stateDB, serverIdentity)
+	// Holds any notification email SendMailQueued couldn't deliver, retrying
+	// it every notify.RetryInterval instead of losing it; shared by every
+	// email-sending notification below.
+	mailQueue := notify.NewQueue()
+	go mailQueue.Run(ctx, log)
+
+	r := pipeline.NewRunner(log, statusStore, stateDB, serverIdentity, mailQueue)
 
 	// Independent of the web UI: a daily report is useful for anyone
 	// monitoring receivers by inbox, not just those watching the dashboard.
 	// RunReportLoop itself no-ops when report.enabled isn't set.
-	go pipeline.RunReportLoop(ctx, rc, stateDB, log)
+	go pipeline.RunReportLoop(ctx, rc, stateDB, mailQueue, log)
 
-	srv := startWebUIIfConfigured(ctx, rc, statusStore, stateDB, logs, serverIdentity, r, log)
+	srv := startWebUIIfConfigured(ctx, rc, statusStore, stateDB, logs, serverIdentity, r, mailQueue, log)
 
 	var wg sync.WaitGroup
 

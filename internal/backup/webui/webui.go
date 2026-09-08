@@ -35,6 +35,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
@@ -53,7 +54,7 @@ type Server struct {
 // StartWebUI starts the -listen web UI dashboard and returns a Server the
 // caller can shut down with Server.Shutdown. Returns nil if the server
 // fails to start.
-func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Config, runner *pipeline.Runner, receivers map[string]config.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store, logs *LogRingBuffer, webUIUsername, webUIPassword string, oidcAuth *OIDCAuth, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, registerExtraRoutes func(*http.ServeMux)) *Server {
+func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Config, runner *pipeline.Runner, receivers map[string]config.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store, logs *LogRingBuffer, webUIUsername, webUIPassword string, oidcAuth *OIDCAuth, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, registerExtraRoutes func(*http.ServeMux), queue *notify.Queue) *Server {
 	jobsByName := make(map[string]*config.Config, len(jobs))
 	for _, j := range jobs {
 		jobsByName[j.Name] = j
@@ -152,7 +153,7 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 	mux.HandleFunc("POST /api/jobs/{name}/retry", admin(handleRetryFailedTargets(jobsByName, statusStore, runner, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/files", api(handleReceiverFiles(receivers, log)))
 	mux.HandleFunc("POST /api/receivers/{id}/download/{key...}", apiDownload(handleMintDownloadTicket(receivers, downloadTickets, uiSessions)))
-	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", handleDownloadFile(receivers, log, db, downloadTickets, trustProxyHeaders))
+	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", handleDownloadFile(receivers, log, db, downloadTickets, trustProxyHeaders, queue))
 	mux.HandleFunc("GET /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions, db, log, trustProxyHeaders))
 	mux.HandleFunc("POST /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions, db, log, trustProxyHeaders))
 	mux.HandleFunc("POST /api/logout", handleAPILogout(uiSessions, db, log))
@@ -2062,7 +2063,7 @@ func handleMintDownloadTicket(receivers map[string]config.ResolvedReceiver, tick
 // section (see handleDownloadEvents); a write failure there is only logged,
 // not surfaced to the browser, mirroring handleWebUILogin's own tolerance
 // for a login log write failure.
-func handleDownloadFile(receivers map[string]config.ResolvedReceiver, log *slog.Logger, db *store.Store, tickets *downloadTicketStore, trustProxyHeaders bool) http.HandlerFunc {
+func handleDownloadFile(receivers map[string]config.ResolvedReceiver, log *slog.Logger, db *store.Store, tickets *downloadTicketStore, trustProxyHeaders bool, queue *notify.Queue) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := lookupReceiver(w, r, receivers)
 		if !ok {
@@ -2114,7 +2115,7 @@ func handleDownloadFile(receivers map[string]config.ResolvedReceiver, log *slog.
 
 		record(true, "")
 
-		go receiver.NotifyDownload(recv, receiver.DownloadWebhookEvent{Username: username, Key: key, At: time.Now()}, log)
+		go receiver.NotifyDownload(recv, receiver.DownloadWebhookEvent{Username: username, Key: key, At: time.Now()}, queue, log)
 
 		if _, err := io.Copy(w, f); err != nil {
 			log.Warn("download: streaming file failed", "id", recv.ID, "key", key, "err", err)

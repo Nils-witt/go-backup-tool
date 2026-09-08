@@ -147,7 +147,7 @@ func newStaleReceiverMonitor() *staleReceiverMonitor {
 // alerting already watches for a receiver that should have received its
 // first file by now. A recv.StaleAfter <= 0 (the monitor disabled for this
 // receiver) is also a no-op.
-func (m *staleReceiverMonitor) check(recv config.ResolvedReceiver, log *slog.Logger) {
+func (m *staleReceiverMonitor) check(recv config.ResolvedReceiver, queue *notify.Queue, log *slog.Logger) {
 	if recv.StaleAfter <= 0 {
 		return
 	}
@@ -169,7 +169,7 @@ func (m *staleReceiverMonitor) check(recv config.ResolvedReceiver, log *slog.Log
 		return
 	}
 
-	notifyStaleReceiver(recv, lastSeen, log)
+	notifyStaleReceiver(recv, lastSeen, queue, log)
 }
 
 // staleReceiverPayload is the default JSON body POSTed to a stale
@@ -240,14 +240,14 @@ func renderStaleWebhookPayload(tmpl string, recv config.ResolvedReceiver, lastSe
 // is doing, and there's no caller to report it to — MonitorStaleReceivers
 // already marked this gap as notified before calling this, so a failed
 // delivery isn't retried until the gap clears and reopens.
-func notifyStaleReceiver(recv config.ResolvedReceiver, lastSeen time.Time, log *slog.Logger) {
+func notifyStaleReceiver(recv config.ResolvedReceiver, lastSeen time.Time, queue *notify.Queue, log *slog.Logger) {
 	for _, n := range recv.StaleNotifications {
 		if n.Webhook != nil {
 			notifyStaleReceiverWebhook(recv, *n.Webhook, lastSeen, log)
 		}
 
 		if n.Email != nil {
-			notifyStaleReceiverEmail(recv, *n.Email, lastSeen, log)
+			notifyStaleReceiverEmail(recv, *n.Email, lastSeen, queue, log)
 		}
 	}
 }
@@ -275,8 +275,9 @@ func notifyStaleReceiverWebhook(recv config.ResolvedReceiver, wh notify.Webhook,
 	log.Info("stale receiver webhook fired", "id", recv.ID, "webhook", wh.URL, "stale_after", recv.StaleAfter, "last_received", lastSeen)
 }
 
-// notifyStaleReceiverEmail emails recv's current staleness via email.
-func notifyStaleReceiverEmail(recv config.ResolvedReceiver, email notify.Email, lastSeen time.Time, log *slog.Logger) {
+// notifyStaleReceiverEmail emails recv's current staleness via email. queue,
+// if non-nil, retries delivery later on failure instead of losing it.
+func notifyStaleReceiverEmail(recv config.ResolvedReceiver, email notify.Email, lastSeen time.Time, queue *notify.Queue, log *slog.Logger) {
 	subjectTmpl := email.Subject
 	if subjectTmpl == "" {
 		subjectTmpl = defaultStaleSubject
@@ -293,8 +294,8 @@ func notifyStaleReceiverEmail(recv config.ResolvedReceiver, email notify.Email, 
 	ctx, cancel := context.WithTimeout(context.Background(), notify.Timeout)
 	defer cancel()
 
-	if err := notify.SendMail(ctx, email.SMTP, email.From, email.To, subject, body, email.Encrypt); err != nil {
-		log.Warn("stale receiver email: sending failed", "id", recv.ID, "to", email.To, "err", err)
+	if err := notify.SendMailQueued(ctx, queue, email.SMTP, email.From, email.To, subject, body, email.Encrypt); err != nil {
+		log.Warn("stale receiver email: sending failed, queued for retry", "id", recv.ID, "to", email.To, "err", err)
 		return
 	}
 
@@ -311,7 +312,7 @@ func notifyStaleReceiverEmail(recv config.ResolvedReceiver, email notify.Email, 
 // fire once per gap (see staleReceiverMonitor), not on every check, so a
 // sender that stays down doesn't spam them indefinitely. A no-op if no
 // receiver has stale-after: set.
-func MonitorStaleReceivers(ctx context.Context, receivers map[string]config.ResolvedReceiver, log *slog.Logger) {
+func MonitorStaleReceivers(ctx context.Context, receivers map[string]config.ResolvedReceiver, queue *notify.Queue, log *slog.Logger) {
 	if !anyReceiverHasStaleAfter(receivers) {
 		return
 	}
@@ -320,7 +321,7 @@ func MonitorStaleReceivers(ctx context.Context, receivers map[string]config.Reso
 
 	checkAll := func() {
 		for _, recv := range receivers {
-			monitor.check(recv, log)
+			monitor.check(recv, queue, log)
 		}
 	}
 

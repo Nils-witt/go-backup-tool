@@ -82,15 +82,16 @@ func renderDownloadWebhookPayload(tmpl string, recv config.ResolvedReceiver, ev 
 // notification delivery problem shouldn't affect anything else this process
 // is doing, and there's no caller waiting on the result — handleDownloadFile
 // calls this from its own goroutine so a slow or unreachable destination
-// never delays the file already being streamed to the browser.
-func NotifyDownload(recv config.ResolvedReceiver, ev DownloadWebhookEvent, log *slog.Logger) {
+// never delays the file already being streamed to the browser. queue, if
+// non-nil, retries a failed email later instead of losing it.
+func NotifyDownload(recv config.ResolvedReceiver, ev DownloadWebhookEvent, queue *notify.Queue, log *slog.Logger) {
 	for _, n := range recv.DownloadNotifications {
 		if n.Webhook != nil {
 			notifyDownloadWebhook(recv, *n.Webhook, ev, log)
 		}
 
 		if n.Email != nil {
-			notifyDownloadEmail(recv, *n.Email, ev, log)
+			notifyDownloadEmail(recv, *n.Email, ev, queue, log)
 		}
 	}
 }
@@ -118,8 +119,9 @@ func notifyDownloadWebhook(recv config.ResolvedReceiver, wh notify.Webhook, ev D
 	log.Info("download webhook fired", "id", recv.ID, "webhook", wh.URL, "user", ev.Username, "file", ev.Key)
 }
 
-// notifyDownloadEmail emails ev via email.
-func notifyDownloadEmail(recv config.ResolvedReceiver, email notify.Email, ev DownloadWebhookEvent, log *slog.Logger) {
+// notifyDownloadEmail emails ev via email. queue, if non-nil, retries
+// delivery later on failure instead of losing it.
+func notifyDownloadEmail(recv config.ResolvedReceiver, email notify.Email, ev DownloadWebhookEvent, queue *notify.Queue, log *slog.Logger) {
 	subjectTmpl := email.Subject
 	if subjectTmpl == "" {
 		subjectTmpl = defaultDownloadSubject
@@ -136,8 +138,8 @@ func notifyDownloadEmail(recv config.ResolvedReceiver, email notify.Email, ev Do
 	ctx, cancel := context.WithTimeout(context.Background(), notify.Timeout)
 	defer cancel()
 
-	if err := notify.SendMail(ctx, email.SMTP, email.From, email.To, subject, body, email.Encrypt); err != nil {
-		log.Warn("download email: sending failed", "id", recv.ID, "to", email.To, "err", err)
+	if err := notify.SendMailQueued(ctx, queue, email.SMTP, email.From, email.To, subject, body, email.Encrypt); err != nil {
+		log.Warn("download email: sending failed, queued for retry", "id", recv.ID, "to", email.To, "err", err)
 		return
 	}
 

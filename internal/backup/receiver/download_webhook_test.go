@@ -65,7 +65,7 @@ func TestNotifyDownloadWebhookNoopWhenUnconfigured(t *testing.T) {
 
 	recv := config.ResolvedReceiver{ID: "a", Path: "/mnt/a"} // no DownloadWebhook configured
 
-	NotifyDownload(recv, DownloadWebhookEvent{Username: "alice", Key: "k", At: time.Now()}, discardLogger)
+	NotifyDownload(recv, DownloadWebhookEvent{Username: "alice", Key: "k", At: time.Now()}, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -106,7 +106,7 @@ func TestNotifyDownloadWebhookDefaultJSONPayload(t *testing.T) {
 
 	recv := config.ResolvedReceiver{ID: "recv-a", Path: "/mnt/a", DownloadNotifications: downloadWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
-	NotifyDownload(recv, DownloadWebhookEvent{Username: "alice", Key: "daily/backup.gpg", At: time.Now()}, discardLogger)
+	NotifyDownload(recv, DownloadWebhookEvent{Username: "alice", Key: "daily/backup.gpg", At: time.Now()}, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -160,7 +160,7 @@ func TestNotifyDownloadWebhookUsesCustomMethodHeadersAndBody(t *testing.T) {
 		}),
 	}
 
-	NotifyDownload(recv, DownloadWebhookEvent{Username: "alice", Key: "daily/backup.gpg", At: time.Now()}, discardLogger)
+	NotifyDownload(recv, DownloadWebhookEvent{Username: "alice", Key: "daily/backup.gpg", At: time.Now()}, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -195,5 +195,5 @@ func TestNotifyDownloadWebhookNonSuccessStatusIsLoggedNotReturned(t *testing.T) 
 
 	// NotifyDownloadWebhook returns nothing to assert on failure; this just
 	// exercises the non-2xx path without panicking.
-	NotifyDownload(recv, DownloadWebhookEvent{Username: "alice", Key: "k", At: time.Now()}, discardLogger)
+	NotifyDownload(recv, DownloadWebhookEvent{Username: "alice", Key: "k", At: time.Now()}, nil, discardLogger)
 }

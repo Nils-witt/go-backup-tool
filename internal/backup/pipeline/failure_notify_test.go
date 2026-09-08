@@ -55,7 +55,7 @@ func TestNotifyJobFailureWebhookNoopWhenUnconfigured(t *testing.T) {
 
 	job := &config.Config{Name: "test"} // no FailureNotifications configured
 
-	notifyJobFailure(job, errors.New("boom"), backup.StateFailed, time.Now(), time.Second, discardLogger)
+	notifyJobFailure(job, errors.New("boom"), backup.StateFailed, time.Now(), time.Second, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -94,7 +94,7 @@ func TestNotifyJobFailureWebhookDefaultJSONPayload(t *testing.T) {
 		FailureNotifications: jobFailureWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost}),
 	}
 
-	notifyJobFailure(job, errors.New("boom"), backup.StateIncomplete, time.Now(), time.Second, discardLogger)
+	notifyJobFailure(job, errors.New("boom"), backup.StateIncomplete, time.Now(), time.Second, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -142,7 +142,7 @@ func TestNotifyJobFailureWebhookUsesCustomBody(t *testing.T) {
 		}),
 	}
 
-	notifyJobFailure(job, errors.New("boom"), backup.StateFailed, time.Now(), time.Second, discardLogger)
+	notifyJobFailure(job, errors.New("boom"), backup.StateFailed, time.Now(), time.Second, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -170,5 +170,5 @@ func TestNotifyJobFailureEmailUsesDefaultSubjectAndBody(t *testing.T) {
 
 	// Should not panic even though SMTP isn't configured; the resulting
 	// send failure is logged, not returned.
-	notifyJobFailureEmail(job, email, errors.New("boom"), backup.StateFailed, time.Now(), time.Second, discardLogger)
+	notifyJobFailureEmail(job, email, errors.New("boom"), backup.StateFailed, time.Now(), time.Second, nil, discardLogger)
 }

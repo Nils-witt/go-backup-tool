@@ -162,7 +162,7 @@ func TestStaleReceiverMonitorCheckFreshFileDoesNotFire(t *testing.T) {
 
 	recv := config.ResolvedReceiver{ID: "a", Path: root, StaleAfter: time.Hour, StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
-	newStaleReceiverMonitor().check(recv, discardLogger)
+	newStaleReceiverMonitor().check(recv, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -194,7 +194,7 @@ func TestStaleReceiverMonitorCheckStaleFileFires(t *testing.T) {
 	recv := config.ResolvedReceiver{ID: "recv-a", Path: root, StaleAfter: time.Hour, StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
 	monitor := newStaleReceiverMonitor()
-	monitor.check(recv, discardLogger)
+	monitor.check(recv, nil, discardLogger)
 
 	mu.Lock()
 	if len(calls) != 1 {
@@ -210,7 +210,7 @@ func TestStaleReceiverMonitorCheckStaleFileFires(t *testing.T) {
 	}
 
 	// A second check of the same still-stale gap must not fire again.
-	monitor.check(recv, discardLogger)
+	monitor.check(recv, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -232,7 +232,7 @@ func TestStaleReceiverMonitorCheckNeverReceivedDoesNotFire(t *testing.T) {
 
 	recv := config.ResolvedReceiver{ID: "a", Path: t.TempDir(), StaleAfter: time.Hour, StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
-	newStaleReceiverMonitor().check(recv, discardLogger)
+	newStaleReceiverMonitor().check(recv, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -264,18 +264,18 @@ func TestStaleReceiverMonitorCheckRefiresAfterGapReopens(t *testing.T) {
 	recv := config.ResolvedReceiver{ID: "a", Path: root, StaleAfter: time.Hour, StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
 	monitor := newStaleReceiverMonitor()
-	monitor.check(recv, discardLogger)
+	monitor.check(recv, nil, discardLogger)
 
 	// A fresh file arrives, clearing the gap.
 	writeFile(t, f, "b")
-	monitor.check(recv, discardLogger)
+	monitor.check(recv, nil, discardLogger)
 
 	// Stale again.
 	if err := os.Chtimes(f, staleTime, staleTime); err != nil {
 		t.Fatalf("Chtimes(%q): %v", f, err)
 	}
 
-	monitor.check(recv, discardLogger)
+	monitor.check(recv, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -297,7 +297,7 @@ func TestStaleReceiverMonitorCheckDisabledIsNoop(t *testing.T) {
 
 	recv := config.ResolvedReceiver{ID: "a", Path: t.TempDir(), StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})} // staleAfter left at zero
 
-	newStaleReceiverMonitor().check(recv, discardLogger)
+	newStaleReceiverMonitor().check(recv, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -357,7 +357,7 @@ func TestStaleReceiverMonitorCheckUsesCustomMethodHeadersAndBody(t *testing.T) {
 		}),
 	}
 
-	newStaleReceiverMonitor().check(recv, discardLogger)
+	newStaleReceiverMonitor().check(recv, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -415,7 +415,7 @@ func TestStaleReceiverMonitorCheckDefaultContentTypeWhenNoHeadersSet(t *testing.
 		StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost}),
 	}
 
-	newStaleReceiverMonitor().check(recv, discardLogger)
+	newStaleReceiverMonitor().check(recv, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()

@@ -21,7 +21,7 @@ import (
 // no-op if the report isn't enabled. db may be nil (the state db couldn't be
 // opened at startup); the report is still sent, just without any
 // receiver_events/job_runs history (see buildReport).
-func RunReportLoop(ctx context.Context, rc *config.RunConfig, db *store.Store, log *slog.Logger) {
+func RunReportLoop(ctx context.Context, rc *config.RunConfig, db *store.Store, queue *notify.Queue, log *slog.Logger) {
 	if !rc.Report.Enabled {
 		return
 	}
@@ -43,7 +43,7 @@ func RunReportLoop(ctx context.Context, rc *config.RunConfig, db *store.Store, l
 			start = next.Add(-24 * time.Hour)
 		}
 
-		sendReport(ctx, rc, db, start, next, log)
+		sendReport(ctx, rc, db, start, next, queue, log)
 		prev = next
 	}
 }
@@ -382,13 +382,13 @@ func reportWebhookBody(wh notify.Webhook, report reportContent) ([]byte, error) 
 // download notifications, a delivery problem here shouldn't affect anything
 // else this process is doing, and there's no caller to report it to — the
 // next scheduled report gets another chance.
-func sendReport(ctx context.Context, rc *config.RunConfig, db *store.Store, start, end time.Time, log *slog.Logger) {
+func sendReport(ctx context.Context, rc *config.RunConfig, db *store.Store, start, end time.Time, queue *notify.Queue, log *slog.Logger) {
 	report := buildReport(ctx, rc, db, start, end, log)
 	body := renderReportBody(report)
 
 	for _, n := range rc.Report.Notifications {
 		if n.Email != nil {
-			sendReportEmail(ctx, n.Email, report, body, log)
+			sendReportEmail(ctx, n.Email, report, body, queue, log)
 		}
 
 		if n.Webhook != nil {
@@ -398,8 +398,9 @@ func sendReport(ctx context.Context, rc *config.RunConfig, db *store.Store, star
 }
 
 // sendReportEmail sends report's rendered body (subject via
-// renderReportSubject, defaulting to defaultReportSubject) to email.
-func sendReportEmail(ctx context.Context, email *notify.Email, report reportContent, body string, log *slog.Logger) {
+// renderReportSubject, defaulting to defaultReportSubject) to email. queue,
+// if non-nil, retries delivery later on failure instead of losing it.
+func sendReportEmail(ctx context.Context, email *notify.Email, report reportContent, body string, queue *notify.Queue, log *slog.Logger) {
 	subjectTmpl := email.Subject
 	if subjectTmpl == "" {
 		subjectTmpl = defaultReportSubject
@@ -410,8 +411,8 @@ func sendReportEmail(ctx context.Context, email *notify.Email, report reportCont
 	sendCtx, cancel := context.WithTimeout(ctx, reportNotifyTimeout)
 	defer cancel()
 
-	if err := notify.SendMail(sendCtx, email.SMTP, email.From, email.To, subject, body, email.Encrypt); err != nil {
-		log.Warn("report: sending email failed", "to", email.To, "err", err)
+	if err := notify.SendMailQueued(sendCtx, queue, email.SMTP, email.From, email.To, subject, body, email.Encrypt); err != nil {
+		log.Warn("report: sending email failed, queued for retry", "to", email.To, "err", err)
 		return
 	}
 

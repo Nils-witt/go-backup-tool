@@ -12,6 +12,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -22,13 +23,14 @@ type Runner struct {
 	store    *backup.StatusStore
 	stateDB  *store.Store             // nil only if the db couldn't be opened
 	identity *identity.ServerIdentity // nil if loadServerIdentity failed at startup; see Config.Identity
+	queue    *notify.Queue            // retries a failed job-failure email later; see notify.SendMailQueued
 	failed   atomic.Bool
 }
 
-// NewRunner builds a Runner sharing store/stateDB/identity across every job
-// scheduled through it in this run.
-func NewRunner(log *slog.Logger, statusStore *backup.StatusStore, stateDB *store.Store, identity *identity.ServerIdentity) *Runner {
-	return &Runner{log: log, store: statusStore, stateDB: stateDB, identity: identity}
+// NewRunner builds a Runner sharing store/stateDB/identity/queue across
+// every job scheduled through it in this run.
+func NewRunner(log *slog.Logger, statusStore *backup.StatusStore, stateDB *store.Store, identity *identity.ServerIdentity, queue *notify.Queue) *Runner {
+	return &Runner{log: log, store: statusStore, stateDB: stateDB, identity: identity, queue: queue}
 }
 
 // Failed reports whether any job run has failed so far.
@@ -252,7 +254,7 @@ func (r *Runner) runOnce(ctx context.Context, job *config.Config) {
 			log.Error("job failed", "duration", duration, "err", config.JobError(job, err))
 		}
 
-		notifyJobFailure(job, err, state, start, duration, log)
+		notifyJobFailure(job, err, state, start, duration, r.queue, log)
 		r.recordJobRun(ctx, job.Name, state, false, start, bytesWritten, config.JobError(job, err).Error())
 
 		return
@@ -336,7 +338,7 @@ func (r *Runner) RetryFailedTargets(ctx context.Context, job *config.Config, tar
 			log.Error("retry failed", "duration", duration, "err", config.JobError(job, err))
 		}
 
-		notifyJobFailure(job, err, state, start, duration, log)
+		notifyJobFailure(job, err, state, start, duration, r.queue, log)
 		r.recordJobRun(ctx, job.Name, state, false, start, bytesWritten, config.JobError(job, err).Error())
 
 		return err

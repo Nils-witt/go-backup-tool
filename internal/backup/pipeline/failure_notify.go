@@ -80,15 +80,16 @@ func renderJobFailurePayload(tmpl string, job *config.Config, jobErr error, stat
 // returns, any delivery failure: a notification delivery problem shouldn't
 // affect the run that already finished, and there's no caller waiting on
 // the result — mirrors receiver.notifyStaleReceiver/NotifyDownload's
-// fire-and-forget style.
-func notifyJobFailure(job *config.Config, jobErr error, state backup.RunState, start time.Time, duration time.Duration, log *slog.Logger) {
+// fire-and-forget style. queue, if non-nil, retries a failed email later
+// instead of losing it (see notify.SendMailQueued).
+func notifyJobFailure(job *config.Config, jobErr error, state backup.RunState, start time.Time, duration time.Duration, queue *notify.Queue, log *slog.Logger) {
 	for _, n := range job.FailureNotifications {
 		if n.Webhook != nil {
 			notifyJobFailureWebhook(job, *n.Webhook, jobErr, state, start, duration, log)
 		}
 
 		if n.Email != nil {
-			notifyJobFailureEmail(job, *n.Email, jobErr, state, start, duration, log)
+			notifyJobFailureEmail(job, *n.Email, jobErr, state, start, duration, queue, log)
 		}
 	}
 }
@@ -116,8 +117,9 @@ func notifyJobFailureWebhook(job *config.Config, wh notify.Webhook, jobErr error
 	log.Info("job failure webhook fired", "job", job.Name, "webhook", wh.URL, "state", state)
 }
 
-// notifyJobFailureEmail emails job's just-finished failure via email.
-func notifyJobFailureEmail(job *config.Config, email notify.Email, jobErr error, state backup.RunState, start time.Time, duration time.Duration, log *slog.Logger) {
+// notifyJobFailureEmail emails job's just-finished failure via email. queue,
+// if non-nil, retries delivery later on failure instead of losing it.
+func notifyJobFailureEmail(job *config.Config, email notify.Email, jobErr error, state backup.RunState, start time.Time, duration time.Duration, queue *notify.Queue, log *slog.Logger) {
 	subjectTmpl := email.Subject
 	if subjectTmpl == "" {
 		subjectTmpl = defaultJobFailureSubject
@@ -134,8 +136,8 @@ func notifyJobFailureEmail(job *config.Config, email notify.Email, jobErr error,
 	ctx, cancel := context.WithTimeout(context.Background(), notify.Timeout)
 	defer cancel()
 
-	if err := notify.SendMail(ctx, email.SMTP, email.From, email.To, subject, body, email.Encrypt); err != nil {
-		log.Warn("job failure email: sending failed", "job", job.Name, "to", email.To, "err", err)
+	if err := notify.SendMailQueued(ctx, queue, email.SMTP, email.From, email.To, subject, body, email.Encrypt); err != nil {
+		log.Warn("job failure email: sending failed, queued for retry", "job", job.Name, "to", email.To, "err", err)
 		return
 	}
 
