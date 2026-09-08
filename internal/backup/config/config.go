@@ -50,13 +50,11 @@ type Config struct {
 	targetRefs []jobTargetRef // raw targets: entries, resolved against servers by resolveJobTargets
 	Targets    []Target       // resolved destinations; empty until resolveJobTargets runs
 	Recipients stringSlice
-	Symmetric  bool
 	Armor      bool
 	GPGBin     string
 	GPGHomedir string
 	Interval   time.Duration // repeat every interval; 0 runs the job once
 	StartTime  time.Time     // anchors the interval grid; zero means "run immediately, then every interval"
-	Passphrase string        // resolved from GPG_PASSPHRASE when symmetric
 
 	// StagingDir is the directory the encrypted backup is written to before
 	// any target upload starts (see stageBackup); empty means the OS default
@@ -257,7 +255,6 @@ type fileJob struct {
 	Key        string          `yaml:"key"`
 	Targets    []fileJobTarget `yaml:"targets"`
 	Recipients []string        `yaml:"recipients"`
-	Symmetric  bool            `yaml:"symmetric"`
 	Armor      bool            `yaml:"armor"`
 	GPGBin     string          `yaml:"gpg-bin"`
 	GPGHomedir string          `yaml:"gpg-homedir"`
@@ -1033,8 +1030,8 @@ func newConfigDefaults() *Config {
 	}
 }
 
-// prepareJobs narrows jobs to the one named by jobFilter (if any), validates
-// them, and resolves their passphrases.
+// prepareJobs narrows jobs to the one named by jobFilter (if any) and
+// validates them.
 func prepareJobs(jobs []*Config, jobFilter string) ([]*Config, error) {
 	jobs, err := applyJobFilter(jobs, jobFilter)
 	if err != nil {
@@ -1042,10 +1039,6 @@ func prepareJobs(jobs []*Config, jobFilter string) ([]*Config, error) {
 	}
 
 	if err := validateJobs(jobs); err != nil {
-		return nil, err
-	}
-
-	if err := resolvePassphrases(jobs); err != nil {
 		return nil, err
 	}
 
@@ -1087,10 +1080,8 @@ func validateJob(cfg *Config) error {
 		return JobError(cfg, errors.New("cmd is required"))
 	case len(cfg.Targets) == 0:
 		return JobError(cfg, errors.New("at least one target is required (see targets: and servers:)"))
-	case cfg.Symmetric && len(cfg.Recipients) > 0:
-		return JobError(cfg, errors.New("symmetric cannot be combined with recipients"))
-	case !cfg.Symmetric && len(cfg.Recipients) == 0:
-		return JobError(cfg, errors.New("specify at least one recipient, or set symmetric: true"))
+	case len(cfg.Recipients) == 0:
+		return JobError(cfg, errors.New("specify at least one recipient"))
 	case cfg.Interval < 0:
 		return JobError(cfg, errors.New("interval must not be negative"))
 	case !cfg.StartTime.IsZero() && cfg.Interval <= 0:
@@ -1100,48 +1091,10 @@ func validateJob(cfg *Config) error {
 	return nil
 }
 
-// JobError prefixes err with cfg's job name, so validation and passphrase
-// errors are attributable to the job that caused them.
+// JobError prefixes err with cfg's job name, so validation errors are
+// attributable to the job that caused them.
 func JobError(cfg *Config, err error) error {
 	return fmt.Errorf("job %q: %w", cfg.Name, err)
-}
-
-// resolvePassphrases reads GPG_PASSPHRASE once (if any job needs it) and
-// assigns it to every symmetric job, then clears it from the environment.
-// All symmetric jobs in a run share the same passphrase; per-job passphrases
-// aren't supported.
-func resolvePassphrases(jobs []*Config) error {
-	needsPassphrase := false
-
-	for _, j := range jobs {
-		if j.Symmetric {
-			needsPassphrase = true
-
-			break
-		}
-	}
-
-	if !needsPassphrase {
-		return nil
-	}
-
-	passphrase := os.Getenv("GPG_PASSPHRASE")
-	if passphrase == "" {
-		return errors.New("symmetric: true requires the GPG_PASSPHRASE environment variable to be set")
-	}
-	// Cleared once captured so it doesn't linger in this process's own
-	// environment any longer than necessary; runPipeline also strips it
-	// explicitly from every child process's environment. Unsetenv only
-	// fails for an invalid (empty) name, which this literal isn't.
-	_ = os.Unsetenv("GPG_PASSPHRASE")
-
-	for _, j := range jobs {
-		if j.Symmetric {
-			j.Passphrase = passphrase
-		}
-	}
-
-	return nil
 }
 
 // loadFileConfig reads and parses the YAML config file at path. If explicit
@@ -1190,7 +1143,6 @@ func applyFileJob(cfg *Config, fj *fileJob) error {
 	applyString(&cfg.GPGHomedir, fj.GPGHomedir)
 	applyString(&cfg.StagingDir, fj.StagingDir)
 
-	applyBool(&cfg.Symmetric, fj.Symmetric)
 	applyBool(&cfg.Armor, fj.Armor)
 
 	if len(fj.Targets) > 0 {

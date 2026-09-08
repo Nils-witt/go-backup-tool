@@ -17,7 +17,6 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -31,23 +30,6 @@ import (
 // from the run's overall -timeout, if any) governs cancellation instead,
 // consistent with how local filesystem writes are bounded only by ctx.
 var remoteHTTPClient = &http.Client{}
-
-// environWithout returns the current process environment with the given
-// variable names removed, for handing to a child process that must not
-// inherit them.
-func environWithout(names ...string) []string {
-	environ := os.Environ()
-
-	filtered := make([]string, 0, len(environ))
-	for _, kv := range environ {
-		key, _, _ := strings.Cut(kv, "=")
-		if !slices.Contains(names, key) {
-			filtered = append(filtered, kv)
-		}
-	}
-
-	return filtered
-}
 
 // runPipeline runs the backup in two phases:
 //
@@ -168,25 +150,15 @@ func newSourceCommand(ctx context.Context, cmd string) *exec.Cmd {
 func startEncryptingPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (sourceCmd, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
 	sourceCmd = newSourceCommand(ctx, cfg.Cmd)
 	sourceCmd.Stderr = &logWriter{log: log, msg: "command stderr"}
-	// The backup command may be arbitrary and its output/behavior is
-	// outside our control; make sure it can't read the encryption
-	// passphrase out of its environment.
-	sourceCmd.Env = environWithout("GPG_PASSPHRASE")
 
 	sourceOut, err := sourceCmd.StdoutPipe()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("wiring command output: %w", err)
 	}
 
-	gpgCmd, passphraseWriter, passphraseReadEnd, err := buildGPGCommand(ctx, cfg)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("building gpg command: %w", err)
-	}
-
+	gpgCmd = buildGPGCommand(ctx, cfg)
 	gpgCmd.Stdin = sourceOut
 	gpgCmd.Stderr = &logWriter{log: log, msg: "gpg stderr"}
-	// gpg itself gets the passphrase via --passphrase-fd, never via env.
-	gpgCmd.Env = environWithout("GPG_PASSPHRASE")
 
 	gpgOut, err = gpgCmd.StdoutPipe()
 	if err != nil {
@@ -203,20 +175,6 @@ func startEncryptingPipeline(ctx context.Context, cfg *config.Config, log *slog.
 
 	if err := gpgCmd.Start(); err != nil {
 		return nil, nil, nil, fmt.Errorf("starting gpg: %w", err)
-	}
-
-	if passphraseReadEnd != nil {
-		// gpg (the child) has its own duplicated copy of this fd; the
-		// parent's copy must be closed explicitly or it leaks for the
-		// life of the process (exec.Cmd only auto-closes pipes it created
-		// itself via StdoutPipe/StdinPipe/StderrPipe, not ExtraFiles).
-		_ = passphraseReadEnd.Close()
-	}
-
-	if passphraseWriter != nil {
-		if err := writePassphrase(passphraseWriter, cfg.Passphrase); err != nil {
-			return nil, nil, nil, err
-		}
 	}
 
 	return sourceCmd, gpgCmd, gpgOut, nil
@@ -286,22 +244,6 @@ func stageBackup(cfg *config.Config, r io.Reader) (path string, bytesWritten int
 	return f.Name(), n, nil
 }
 
-// writePassphrase writes the gpg symmetric-encryption passphrase into w and
-// closes it, as gpg (given --passphrase-fd) expects: a single write followed
-// by EOF.
-func writePassphrase(w io.WriteCloser, passphrase string) error {
-	if _, err := io.WriteString(w, passphrase); err != nil {
-		_ = w.Close()
-		return fmt.Errorf("writing gpg passphrase: %w", err)
-	}
-
-	if err := w.Close(); err != nil {
-		return fmt.Errorf("closing gpg passphrase pipe: %w", err)
-	}
-
-	return nil
-}
-
 // targetLabel identifies t in log/error messages, naming both the server it
 // came from and its bucket, so multi-server setups are easy to debug.
 func targetLabel(t *config.Target) string {
@@ -330,13 +272,9 @@ func firstPipelineError(cmd string, sourceErr, gpgErr, stageErr, uploadErr error
 	return nil
 }
 
-// buildGPGCommand constructs the gpg invocation for the configured mode.
-// For symmetric mode it returns an io.WriteCloser that the caller must write
-// the passphrase into (and close) after starting the command, plus the read
-// end of that same pipe, which the caller must close in the parent process
-// once the command has started (see the comment at its call site in
-// runPipeline).
-func buildGPGCommand(ctx context.Context, cfg *config.Config) (cmd *exec.Cmd, passphraseWriter io.WriteCloser, passphraseReadEnd *os.File, err error) {
+// buildGPGCommand constructs the gpg invocation that encrypts a backup to
+// cfg.Recipients.
+func buildGPGCommand(ctx context.Context, cfg *config.Config) *exec.Cmd {
 	args := []string{"--batch", "--yes"}
 
 	if cfg.GPGHomedir != "" {
@@ -347,30 +285,12 @@ func buildGPGCommand(ctx context.Context, cfg *config.Config) (cmd *exec.Cmd, pa
 		args = append(args, "--armor")
 	}
 
-	if cfg.Symmetric {
-		pr, pw, pipeErr := os.Pipe()
-		if pipeErr != nil {
-			return nil, nil, nil, fmt.Errorf("creating passphrase pipe: %w", pipeErr)
-		}
-
-		passphraseReadEnd = pr
-		passphraseWriter = pw
-		// fd 0,1,2 are stdin/stdout/stderr; the first ExtraFiles entry
-		// becomes fd 3 in the child process.
-		args = append(args, "--pinentry-mode", "loopback", "--passphrase-fd", "3", "--symmetric")
-	} else {
-		args = append(args, "--trust-model", "always", "--encrypt")
-		for _, r := range cfg.Recipients {
-			args = append(args, "--recipient", r)
-		}
+	args = append(args, "--trust-model", "always", "--encrypt")
+	for _, r := range cfg.Recipients {
+		args = append(args, "--recipient", r)
 	}
 
-	cmd = exec.CommandContext(ctx, cfg.GPGBin, args...) //nolint:gosec // cfg.GPGBin/args are operator-supplied CLI config, not untrusted input
-	if passphraseReadEnd != nil {
-		cmd.ExtraFiles = []*os.File{passphraseReadEnd}
-	}
-
-	return cmd, passphraseWriter, passphraseReadEnd, nil
+	return exec.CommandContext(ctx, cfg.GPGBin, args...) //nolint:gosec // cfg.GPGBin/args are operator-supplied CLI config, not untrusted input
 }
 
 // uploadStagedToTargets uploads the already-staged backup at stagingPath

@@ -73,9 +73,8 @@ servers:
 # order) with no -job flag, or one with -job <name>. Every key below is
 # optional and falls back to a built-in default. Any key may also be set at
 # the top level, alongside jobs:, to act as a shared default every job
-# inherits and can override. GPG_PASSPHRASE for symmetric: true is still
-# read from the environment only, never from this file. timeout applies to
-# the whole run (every job), not per job.
+# inherits and can override. timeout applies to the whole run (every job),
+# not per job.
 #
 # A job's backup is encrypted and written to a local staging file (see
 # staging-dir below) before any target upload starts, so a failed source
@@ -223,7 +222,6 @@ jobs:
         bucket: my-backup-bucket
     recipients:
       - me@example.com
-    # symmetric: false
     # armor: false
     # gpg-bin: gpg
     # gpg-homedir: ""
@@ -319,7 +317,7 @@ jobs:
 #   # together with username; omit all three to send unauthenticated (e.g.
 #   # a trusted local relay). password writes the credential directly in
 #   # this file; password-env instead names an environment variable to
-#   # read it from, same as GPG_PASSPHRASE above.
+#   # read it from instead.
 #   password: "app-password-here"
 #   # password-env: SMTP_PASSWORD
 #   # security selects the connection's encryption: "starttls" (the

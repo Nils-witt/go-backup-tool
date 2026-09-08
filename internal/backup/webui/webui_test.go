@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -217,9 +216,7 @@ func TestHandleRetryFailedTargetsNoFailedTargetsReturns409(t *testing.T) {
 // verified by polling /api/status until it turns ok, the same way
 // TestRunOnceRefreshesEachTargetIndependently does for a live run.
 func TestHandleRetryFailedTargetsKicksOffRetry(t *testing.T) {
-	if _, err := exec.LookPath("gpg"); err != nil {
-		t.Skip("gpg not found in PATH, skipping")
-	}
+	homedir := testGPGKeyring(t)
 
 	t.Parallel()
 
@@ -229,9 +226,9 @@ func TestHandleRetryFailedTargetsKicksOffRetry(t *testing.T) {
 		Name:       "test",
 		Cmd:        "echo hi",
 		Key:        "backup-{time}.gpg",
-		Symmetric:  true,
-		Passphrase: "unit-test-passphrase",
+		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
+		GPGHomedir: homedir,
 		Targets: []config.Target{
 			{ServerName: "good", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir},
 		},

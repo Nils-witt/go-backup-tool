@@ -118,28 +118,13 @@ func TestParseFlags(t *testing.T) {
 			wantErr: `no server named "nope"`,
 		},
 		{
-			name:    "symmetric and recipient conflict",
-			yaml:    "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\njobs:\n  - name: test\n    cmd: echo hi\n    targets: [{server: s, bucket: b}]\n    symmetric: true\n    recipients: [me@example.com]\n",
-			wantErr: "cannot be combined",
-		},
-		{
-			name:    "neither recipient nor symmetric",
+			name:    "no recipients",
 			yaml:    "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\njobs:\n  - name: test\n    cmd: echo hi\n    targets: [{server: s, bucket: b}]\n",
 			wantErr: "specify at least one recipient",
 		},
 		{
-			name:    "symmetric without passphrase env",
-			yaml:    "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\njobs:\n  - name: test\n    cmd: echo hi\n    targets: [{server: s, bucket: b}]\n    symmetric: true\n",
-			wantErr: "GPG_PASSPHRASE",
-		},
-		{
 			name: "valid recipient config",
 			yaml: "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\njobs:\n  - name: test\n    cmd: echo hi\n    targets: [{server: s, bucket: b}]\n    recipients: [me@example.com]\n",
-		},
-		{
-			name: "valid symmetric config",
-			yaml: "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\njobs:\n  - name: test\n    cmd: echo hi\n    targets: [{server: s, bucket: b}]\n    symmetric: true\n",
-			env:  map[string]string{"GPG_PASSPHRASE": "secret"},
 		},
 	}
 
@@ -1244,42 +1229,6 @@ jobs:
 	_, err := ParseFlags([]string{"-config", path, "-job", "nope"}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "no such job") {
 		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "no such job")
-	}
-}
-
-func TestParseFlagsMultiJobSharedPassphrase(t *testing.T) {
-	t.Setenv("GPG_PASSPHRASE", "secret")
-
-	path := writeConfigFile(t, `
-symmetric: true
-
-servers:
-  - name: s
-    type: local
-    path: /mnt/backups
-
-jobs:
-  - name: a
-    cmd: "echo hi"
-    targets: [{server: s, bucket: b1}]
-  - name: b
-    cmd: "echo bye"
-    targets: [{server: s, bucket: b2}]
-`)
-
-	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("ParseFlags() unexpected error: %v", err)
-	}
-
-	for _, j := range rc.Jobs {
-		if j.Passphrase != "secret" {
-			t.Errorf("job %q passphrase = %q, want %q", j.Name, j.Passphrase, "secret")
-		}
-	}
-
-	if os.Getenv("GPG_PASSPHRASE") != "" {
-		t.Error("GPG_PASSPHRASE should have been cleared from the environment")
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,9 +22,7 @@ import (
 func plainTestJob(t *testing.T, marker string) *config.Config {
 	t.Helper()
 
-	if _, err := exec.LookPath("gpg"); err != nil {
-		t.Skip("gpg not found in PATH, skipping")
-	}
+	homedir := testGPGKeyring(t)
 
 	t.Setenv("MARKER_FILE", marker)
 
@@ -33,9 +30,9 @@ func plainTestJob(t *testing.T, marker string) *config.Config {
 		Name:       "test",
 		Cmd:        `echo run >> "$MARKER_FILE"`,
 		Key:        "backup-{time}.gpg",
-		Symmetric:  true,
-		Passphrase: "unit-test-passphrase",
+		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
+		GPGHomedir: homedir,
 		Targets: []config.Target{
 			{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: t.TempDir()},
 		},
@@ -91,9 +88,7 @@ func TestRunOnceRecordsLastRunToStateDB(t *testing.T) { //nolint:paralleltest //
 // together only once the whole job completes. See runPipeline's
 // onTargetDone and runOnce's wiring of it to store.TargetDone.
 func TestRunOnceRefreshesEachTargetIndependently(t *testing.T) {
-	if _, err := exec.LookPath("gpg"); err != nil {
-		t.Skip("gpg not found in PATH, skipping")
-	}
+	homedir := testGPGKeyring(t)
 
 	t.Parallel()
 
@@ -114,9 +109,9 @@ func TestRunOnceRefreshesEachTargetIndependently(t *testing.T) {
 		Name:       "test",
 		Cmd:        "echo hi",
 		Key:        "backup-{time}.gpg",
-		Symmetric:  true,
-		Passphrase: "unit-test-passphrase",
+		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
+		GPGHomedir: homedir,
 		Targets: []config.Target{
 			{ServerName: "slow-remote", Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"},
 			{ServerName: "fast-local", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir},
@@ -182,9 +177,7 @@ func TestRunOnceRefreshesEachTargetIndependently(t *testing.T) {
 // toward the process's overall exit code, since a partial backup still
 // warrants attention.
 func TestRunOnceReportsIncompleteWhenSomeTargetsFail(t *testing.T) {
-	if _, err := exec.LookPath("gpg"); err != nil {
-		t.Skip("gpg not found in PATH, skipping")
-	}
+	homedir := testGPGKeyring(t)
 
 	t.Parallel()
 
@@ -201,9 +194,9 @@ func TestRunOnceReportsIncompleteWhenSomeTargetsFail(t *testing.T) {
 		Name:       "test",
 		Cmd:        "echo hi",
 		Key:        "backup-{time}.gpg",
-		Symmetric:  true,
-		Passphrase: "unit-test-passphrase",
+		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
+		GPGHomedir: homedir,
 		Targets: []config.Target{
 			{ServerName: "bad", Kind: config.ServerKindLocal, Bucket: "blocked/sub", LocalPath: dir},
 			{ServerName: "good", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir},
@@ -266,9 +259,7 @@ func TestRunOnceReportsIncompleteWhenSomeTargetsFail(t *testing.T) {
 // returns even when a target fails: a failed target is never retried, so
 // nothing keeps the staged file around afterward.
 func TestRunOnceDeletesStagedFileEvenWhenTargetFails(t *testing.T) {
-	if _, err := exec.LookPath("gpg"); err != nil {
-		t.Skip("gpg not found in PATH, skipping")
-	}
+	homedir := testGPGKeyring(t)
 
 	t.Parallel()
 
@@ -286,9 +277,9 @@ func TestRunOnceDeletesStagedFileEvenWhenTargetFails(t *testing.T) {
 		Name:       "test",
 		Cmd:        "echo hi",
 		Key:        "backup-{time}.gpg",
-		Symmetric:  true,
-		Passphrase: "unit-test-passphrase",
+		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
+		GPGHomedir: homedir,
 		StagingDir: stagingDir,
 		Targets: []config.Target{
 			{ServerName: "bad", Kind: config.ServerKindLocal, Bucket: "blocked/sub", LocalPath: dir},
@@ -321,9 +312,7 @@ func TestRunOnceDeletesStagedFileEvenWhenTargetFails(t *testing.T) {
 // TestRunOnceDeletesStagedFileEvenWhenTargetFails: the staged file is
 // removed once every target has succeeded.
 func TestRunOnceDeletesStagedFileOnSuccess(t *testing.T) {
-	if _, err := exec.LookPath("gpg"); err != nil {
-		t.Skip("gpg not found in PATH, skipping")
-	}
+	homedir := testGPGKeyring(t)
 
 	t.Parallel()
 
@@ -334,9 +323,9 @@ func TestRunOnceDeletesStagedFileOnSuccess(t *testing.T) {
 		Name:       "test",
 		Cmd:        "echo hi",
 		Key:        "backup-{time}.gpg",
-		Symmetric:  true,
-		Passphrase: "unit-test-passphrase",
+		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
+		GPGHomedir: homedir,
 		StagingDir: stagingDir,
 		Targets: []config.Target{
 			{ServerName: "good", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir},
@@ -372,9 +361,7 @@ func TestRunOnceDeletesStagedFileOnSuccess(t *testing.T) {
 // other target's already-recorded outcome untouched, and that a fixed
 // target which failed on the first run can succeed on retry.
 func TestRetryFailedTargetsRetriesOnlyNamedTargets(t *testing.T) {
-	if _, err := exec.LookPath("gpg"); err != nil {
-		t.Skip("gpg not found in PATH, skipping")
-	}
+	homedir := testGPGKeyring(t)
 
 	t.Parallel()
 
@@ -395,9 +382,9 @@ func TestRetryFailedTargetsRetriesOnlyNamedTargets(t *testing.T) {
 		Name:       "test",
 		Cmd:        "echo hi",
 		Key:        "backup-{time}.gpg",
-		Symmetric:  true,
-		Passphrase: "unit-test-passphrase",
+		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
+		GPGHomedir: homedir,
 		Targets: []config.Target{
 			{ServerName: "bad", Kind: config.ServerKindLocal, Bucket: "blocked/sub", LocalPath: badDir},
 			{ServerName: "good", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: goodDir},
@@ -647,9 +634,7 @@ func TestWaitUntilContextCanceled(t *testing.T) {
 func startTimeTestJob(t *testing.T, marker string, startTime time.Time, interval time.Duration) *config.Config {
 	t.Helper()
 
-	if _, err := exec.LookPath("gpg"); err != nil {
-		t.Skip("gpg not found in PATH, skipping")
-	}
+	homedir := testGPGKeyring(t)
 
 	t.Setenv("MARKER_FILE", marker)
 
@@ -657,9 +642,9 @@ func startTimeTestJob(t *testing.T, marker string, startTime time.Time, interval
 		Name:       "test",
 		Cmd:        `echo run >> "$MARKER_FILE"`,
 		Key:        "backup-{time}.gpg",
-		Symmetric:  true,
-		Passphrase: "unit-test-passphrase",
+		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
+		GPGHomedir: homedir,
 		Interval:   interval,
 		StartTime:  startTime,
 		Targets: []config.Target{
