@@ -77,6 +77,22 @@ type Config struct {
 	// its own doc comment); any job with a remote target then fails that
 	// target's uploads until a later run's Identity loads successfully.
 	Identity *identity.ServerIdentity
+
+	// ServerName is fileConfig.ServerName, this instance's own {server_name}
+	// notification placeholder, copied onto every job at build time (see
+	// buildJobsFromFile) the same way it's copied onto every
+	// ResolvedReceiver (see ResolvedReceiver.ServerName), so
+	// pipeline.notifyJobFailure can substitute it without a separate
+	// parameter. "" when server-name: is unset.
+	ServerName string
+
+	// FailureNotifications names top-level notifications: entries (see
+	// notify.Build) to fire whenever this job's run ends in an error on any
+	// target — whether every target failed or just some (see
+	// pipeline.notifyJobFailure). Empty means no live notification on
+	// failure; the periodic report (see report.go) still aggregates job
+	// errors regardless of this field.
+	FailureNotifications []notify.Notification
 }
 
 // jobTargetRef is one targets: entry as written in a job: a server name
@@ -261,6 +277,11 @@ type fileJob struct {
 	Interval   string          `yaml:"interval"`
 	StartTime  string          `yaml:"start-time"`
 	StagingDir string          `yaml:"staging-dir"`
+
+	// FailureNotifications names top-level notifications: entries (see
+	// notify.Build) to fire whenever this job's run ends in an error on any
+	// target — whether every target failed or just some. Optional.
+	FailureNotifications []string `yaml:"failure-notifications"`
 }
 
 // fileJobTarget mirrors jobTargetRef for YAML unmarshaling. Retention (local
@@ -504,7 +525,12 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		return nil, err
 	}
 
-	jobs, err := resolveJobs(fileCfg, listen)
+	notifications, err := resolveNotifications(fileCfg)
+	if err != nil {
+		return nil, err
+	}
+
+	jobs, err := resolveJobs(fileCfg, listen, notifications)
 	if err != nil {
 		return nil, err
 	}
@@ -514,7 +540,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		return nil, err
 	}
 
-	notifications, receivers, err := resolveNotificationsAndReceivers(fileCfg)
+	receivers, err := buildReceivers(fileCfg.Receivers, notifications, fileCfg.ServerName)
 	if err != nil {
 		return nil, err
 	}
@@ -553,28 +579,18 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 	}, nil
 }
 
-// resolveNotificationsAndReceivers resolves fileCfg's top-level smtp:/
-// notifications: entries (see notify.ResolveSMTP/notify.Build) and, against
-// that, its receivers: entries' stale-notifications:/download-notifications:
-// references (see buildReceivers) — split out of ParseFlags to keep its own
-// cyclomatic complexity down.
-func resolveNotificationsAndReceivers(fileCfg *fileConfig) (map[string]notify.Notification, map[string]ResolvedReceiver, error) {
+// resolveNotifications resolves fileCfg's top-level smtp:/notifications:
+// entries (see notify.ResolveSMTP/notify.Build) into the id -> Notification
+// map used to resolve any of a job's failure-notifications: or a receiver's
+// stale-notifications:/download-notifications: — split out of ParseFlags to
+// keep its own cyclomatic complexity down.
+func resolveNotifications(fileCfg *fileConfig) (map[string]notify.Notification, error) {
 	smtp, err := notify.ResolveSMTP(fileCfg.SMTP)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	notifications, err := notify.Build(fileCfg.Notifications, smtp)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	receivers, err := buildReceivers(fileCfg.Receivers, notifications, fileCfg.ServerName)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return notifications, receivers, nil
+	return notify.Build(fileCfg.Notifications, smtp)
 }
 
 // resolveWebUISettings resolves cfg (the config file's webui: entry) into
@@ -733,23 +749,25 @@ func parseLogLevel(s string) (slog.Level, error) {
 // layering fileCfg's top-level fields as shared defaults under each entry's
 // own fields, and resolving each job's targets: against fileCfg's servers:.
 // listen is the web UI's resolved effective listen address (see
-// resolveWebUIListen).
+// resolveWebUIListen). notifications is the config file's already-resolved
+// top-level notifications: map (see notify.Build), used to resolve a job's
+// failure-notifications:.
 //
 // An empty jobs: list is only allowed when the web UI is enabled, since that
 // still leaves the web UI (and receiver API) as a reason to run; otherwise
 // the process would start and immediately have nothing to do.
-func resolveJobs(fileCfg *fileConfig, listen string) ([]*Config, error) {
+func resolveJobs(fileCfg *fileConfig, listen string, notifications map[string]notify.Notification) ([]*Config, error) {
 	if len(fileCfg.Jobs) == 0 && listen == "" {
 		return nil, errors.New("config file must define at least one job under a jobs list, or set webui.enabled: true to run without any")
 	}
 
-	return buildJobsFromFile(fileCfg)
+	return buildJobsFromFile(fileCfg, notifications)
 }
 
 // buildJobsFromFile builds one *config per entry in fileCfg.Jobs, layering
 // fileCfg's top-level fields as defaults under each entry's own fields and
 // resolving each job's targets: against fileCfg.Servers.
-func buildJobsFromFile(fileCfg *fileConfig) ([]*Config, error) {
+func buildJobsFromFile(fileCfg *fileConfig, notifications map[string]notify.Notification) ([]*Config, error) {
 	servers, err := buildServers(fileCfg.Servers)
 	if err != nil {
 		return nil, err
@@ -772,12 +790,13 @@ func buildJobsFromFile(fileCfg *fileConfig) ([]*Config, error) {
 
 		cfg := newConfigDefaults()
 		cfg.Name = name
+		cfg.ServerName = fileCfg.ServerName
 
-		if err := applyFileJob(cfg, &fileCfg.fileJob); err != nil {
+		if err := applyFileJob(cfg, &fileCfg.fileJob, notifications); err != nil {
 			return nil, fmt.Errorf("job %q: %w", name, err)
 		}
 
-		if err := applyFileJob(cfg, &fj); err != nil {
+		if err := applyFileJob(cfg, &fj, notifications); err != nil {
 			return nil, fmt.Errorf("job %q: %w", name, err)
 		}
 
@@ -1135,8 +1154,10 @@ func applyBool(dst *bool, val bool) {
 
 // applyFileJob fills any field of cfg that fj sets, leaving the rest (its
 // current value, typically a built-in default or a shared top-level
-// default already applied) untouched.
-func applyFileJob(cfg *Config, fj *fileJob) error {
+// default already applied) untouched. notifications is the config file's
+// already-resolved top-level notifications: map (see notify.Build), used to
+// resolve fj.FailureNotifications.
+func applyFileJob(cfg *Config, fj *fileJob, notifications map[string]notify.Notification) error {
 	applyString(&cfg.Cmd, fj.Cmd)
 	applyString(&cfg.Key, fj.Key)
 	applyString(&cfg.GPGBin, fj.GPGBin)
@@ -1160,6 +1181,15 @@ func applyFileJob(cfg *Config, fj *fileJob) error {
 
 	if len(fj.Recipients) > 0 {
 		cfg.Recipients = append(stringSlice(nil), fj.Recipients...)
+	}
+
+	if len(fj.FailureNotifications) > 0 {
+		resolved, err := resolveNotificationRefs(fj.FailureNotifications, notifications)
+		if err != nil {
+			return fmt.Errorf("failure-notifications: %w", err)
+		}
+
+		cfg.FailureNotifications = resolved
 	}
 
 	if fj.Interval != "" {

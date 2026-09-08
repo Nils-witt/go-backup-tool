@@ -2417,3 +2417,121 @@ jobs:
 		t.Errorf("rc.ServerName = %q, want empty when server-name: is unset", rc.ServerName)
 	}
 }
+
+func TestParseFlagsJobFailureNotifications(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+server-name: primary-backup-host
+
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+notifications:
+  - id: ops-email
+    webhook:
+      url: "https://alerts.example.com/hook"
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+    failure-notifications: [ops-email]
+`)
+
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
+	}
+
+	job := singleJob(t, rc)
+
+	want := []notify.Notification{{
+		ID:      "ops-email",
+		Webhook: &notify.Webhook{URL: "https://alerts.example.com/hook", Method: http.MethodPost},
+	}}
+	if !reflect.DeepEqual(job.FailureNotifications, want) {
+		t.Errorf("job.FailureNotifications = %+v, want %+v", job.FailureNotifications, want)
+	}
+
+	if job.ServerName != "primary-backup-host" {
+		t.Errorf("job.ServerName = %q, want %q", job.ServerName, "primary-backup-host")
+	}
+}
+
+func TestParseFlagsJobFailureNotificationsSharedDefaultOverridden(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+failure-notifications: [shared]
+
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+notifications:
+  - id: shared
+    webhook:
+      url: "https://shared.example.com/hook"
+  - id: override
+    webhook:
+      url: "https://override.example.com/hook"
+
+jobs:
+  - name: inherits
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+  - name: overrides
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+    failure-notifications: [override]
+`)
+
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
+	}
+
+	if len(rc.Jobs) != 2 {
+		t.Fatalf("ParseFlags() jobs = %d, want 2", len(rc.Jobs))
+	}
+
+	inherits, overrides := rc.Jobs[0], rc.Jobs[1]
+
+	if len(inherits.FailureNotifications) != 1 || inherits.FailureNotifications[0].ID != "shared" {
+		t.Errorf("inherits.FailureNotifications = %+v, want the shared default [shared]", inherits.FailureNotifications)
+	}
+
+	if len(overrides.FailureNotifications) != 1 || overrides.FailureNotifications[0].ID != "override" {
+		t.Errorf("overrides.FailureNotifications = %+v, want the per-job override [override]", overrides.FailureNotifications)
+	}
+}
+
+func TestParseFlagsJobUnknownFailureNotificationID(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+    failure-notifications: [nope]
+`)
+
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "unknown notification id") {
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "unknown notification id")
+	}
+}

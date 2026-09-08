@@ -8,11 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -254,6 +256,120 @@ func TestRunOnceReportsIncompleteWhenSomeTargetsFail(t *testing.T) {
 	}
 }
 
+// TestRunOnceFiresFailureNotificationOnFailure verifies runOnce fires a
+// job's failure-notifications: when its run ends incomplete (some targets
+// failed), mirroring TestRunOnceReportsIncompleteWhenSomeTargetsFail's setup.
+func TestRunOnceFiresFailureNotificationOnFailure(t *testing.T) {
+	homedir := testGPGKeyring(t)
+
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	badParent := filepath.Join(dir, "blocked")
+	if err := os.WriteFile(badParent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("setting up blocked path: %v", err)
+	}
+
+	var (
+		mu          sync.Mutex
+		gotBody     string
+		requestSeen bool
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("webhook server: reading request body: %v", err)
+		}
+
+		mu.Lock()
+		gotBody = string(body)
+		requestSeen = true
+		mu.Unlock()
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	job := &config.Config{
+		Name:                 "test",
+		Cmd:                  "echo hi",
+		Key:                  "backup-{time}.gpg",
+		Recipients:           []string{testGPGRecipient},
+		GPGBin:               "gpg",
+		GPGHomedir:           homedir,
+		FailureNotifications: jobFailureWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost}),
+		Targets: []config.Target{
+			{ServerName: "bad", Kind: config.ServerKindLocal, Bucket: "blocked/sub", LocalPath: dir},
+		},
+	}
+
+	statusStore := backup.NewStatusStore([]*config.Config{job})
+	r := &Runner{log: discardLogger, store: statusStore}
+
+	r.runOnce(context.Background(), job)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if !requestSeen {
+		t.Fatal("failure-notifications webhook: no request received on job failure")
+	}
+
+	if !strings.Contains(gotBody, `"job":"test"`) {
+		t.Errorf("webhook body = %q, want it to name the job", gotBody)
+	}
+}
+
+// TestRunOnceNoFailureNotificationOnSuccess is the success-path counterpart
+// to TestRunOnceFiresFailureNotificationOnFailure: a job that finishes
+// without error never fires its failure-notifications:.
+func TestRunOnceNoFailureNotificationOnSuccess(t *testing.T) {
+	homedir := testGPGKeyring(t)
+
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	var (
+		mu          sync.Mutex
+		requestSeen bool
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		requestSeen = true
+		mu.Unlock()
+	}))
+	t.Cleanup(srv.Close)
+
+	job := &config.Config{
+		Name:                 "test",
+		Cmd:                  "echo hi",
+		Key:                  "backup-{time}.gpg",
+		Recipients:           []string{testGPGRecipient},
+		GPGBin:               "gpg",
+		GPGHomedir:           homedir,
+		FailureNotifications: jobFailureWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost}),
+		Targets: []config.Target{
+			{ServerName: "good", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir},
+		},
+	}
+
+	statusStore := backup.NewStatusStore([]*config.Config{job})
+	r := &Runner{log: discardLogger, store: statusStore}
+
+	r.runOnce(context.Background(), job)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if requestSeen {
+		t.Error("failure-notifications webhook: request received, want none on a successful run")
+	}
+}
+
 // TestRunOnceDeletesStagedFileEvenWhenTargetFails is an end-to-end check
 // (real gpg, real runOnce) that a job's staged file is removed once runOnce
 // returns even when a target fails: a failed target is never retried, so
@@ -435,6 +551,57 @@ func TestRetryFailedTargetsRetriesOnlyNamedTargets(t *testing.T) {
 
 	if snap.State != backup.StateOK {
 		t.Errorf("job State after retry = %q, want ok", snap.State)
+	}
+}
+
+// TestRetryFailedTargetsFiresFailureNotificationOnFailure verifies
+// RetryFailedTargets fires a job's failure-notifications: when the retry
+// itself still fails, mirroring TestRunOnceFiresFailureNotificationOnFailure
+// for the manual "retry failed targets" web UI action.
+func TestRetryFailedTargetsFiresFailureNotificationOnFailure(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu          sync.Mutex
+		requestSeen bool
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		requestSeen = true
+		mu.Unlock()
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	job := &config.Config{
+		Name:                 "test",
+		FailureNotifications: jobFailureWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost}),
+		Targets: []config.Target{
+			{ServerName: "good", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: t.TempDir()},
+		},
+	}
+
+	statusStore := backup.NewStatusStore([]*config.Config{job})
+	r := &Runner{log: discardLogger, store: statusStore}
+
+	// RetryFailedTargets itself returns an error before running the
+	// pipeline when no named target matches the job — this doesn't
+	// exercise notifyJobFailure (there's no run to fail), so instead retry
+	// the job's own "good" target, but with a job Cmd that fails, forcing
+	// the retried run itself to fail.
+	job.Cmd = "false"
+
+	if err := r.RetryFailedTargets(context.Background(), job, []string{"good"}); err == nil {
+		t.Fatal("RetryFailedTargets() error = nil, want an error since the retried run's cmd always fails")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if !requestSeen {
+		t.Error("failure-notifications webhook: no request received on retry failure")
 	}
 }
 

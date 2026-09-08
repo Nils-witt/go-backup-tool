@@ -252,6 +252,7 @@ func (r *Runner) runOnce(ctx context.Context, job *config.Config) {
 			log.Error("job failed", "duration", duration, "err", config.JobError(job, err))
 		}
 
+		notifyJobFailure(job, err, state, start, duration, log)
 		r.recordJobRun(ctx, job.Name, state, false, start, bytesWritten, config.JobError(job, err).Error())
 
 		return
@@ -335,6 +336,7 @@ func (r *Runner) RetryFailedTargets(ctx context.Context, job *config.Config, tar
 			log.Error("retry failed", "duration", duration, "err", config.JobError(job, err))
 		}
 
+		notifyJobFailure(job, err, state, start, duration, log)
 		r.recordJobRun(ctx, job.Name, state, false, start, bytesWritten, config.JobError(job, err).Error())
 
 		return err

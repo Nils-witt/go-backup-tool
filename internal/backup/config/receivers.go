@@ -141,10 +141,11 @@ func buildReceivers(fileReceivers []FileReceiver, notifications map[string]notif
 	return receivers, nil
 }
 
-// resolveNotificationRefs resolves ids (a receiver's stale-notifications: or
-// download-notifications: list) against notifications (the config file's
-// top-level notifications: map, see notify.Build), erroring on any id with
-// no matching entry. A nil/empty ids returns nil.
+// resolveNotificationRefs resolves ids (a job's failure-notifications: or a
+// receiver's stale-notifications:/download-notifications: list) against
+// notifications (the config file's top-level notifications: map, see
+// notify.Build), erroring on any id with no matching entry. A nil/empty ids
+// returns nil.
 func resolveNotificationRefs(ids []string, notifications map[string]notify.Notification) ([]notify.Notification, error) {
 	if len(ids) == 0 {
 		return nil, nil
