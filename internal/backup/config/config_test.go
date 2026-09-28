@@ -2535,3 +2535,245 @@ jobs:
 		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "unknown notification id")
 	}
 }
+
+func TestParseFlagsCommandsDuplicateID(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+commands:
+  - id: dup
+    cmd: "echo one"
+  - id: dup
+    cmd: "echo two"
+
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "duplicate command id") {
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "duplicate command id")
+	}
+}
+
+func TestParseFlagsCommandsMissingCmd(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+commands:
+  - id: empty
+
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "cmd is required") {
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "cmd is required")
+	}
+}
+
+func TestParseFlagsCommandsTimeoutDefault(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+commands:
+  - id: alert
+    cmd: "echo hi"
+
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets:
+      - server: s
+        bucket: b
+        on-error: {command: alert, after: 3}
+    recipients: [me@example.com]
+`)
+
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
+	}
+
+	job := singleJob(t, rc)
+
+	cmd := job.Targets[0].OnErrorCommand
+	if cmd == nil {
+		t.Fatalf("Targets[0].OnErrorCommand = nil, want resolved command")
+	}
+
+	if cmd.Timeout != defaultOnErrorCommandTimeout {
+		t.Errorf("cmd.Timeout = %v, want default %v", cmd.Timeout, defaultOnErrorCommandTimeout)
+	}
+}
+
+func TestParseFlagsCommandsTimeoutRejectsNonPositive(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+commands:
+  - id: alert
+    cmd: "echo hi"
+    timeout: "0s"
+
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "timeout must be positive") {
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "timeout must be positive")
+	}
+}
+
+func TestParseFlagsTargetOnErrorResolves(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+commands:
+  - id: restart-nas
+    cmd: "systemctl restart nas"
+    timeout: 10s
+
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets:
+      - server: s
+        bucket: b
+        on-error:
+          command: restart-nas
+          after: 3
+    recipients: [me@example.com]
+`)
+
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
+	}
+
+	job := singleJob(t, rc)
+
+	want := &Command{ID: "restart-nas", Cmd: "systemctl restart nas", Timeout: 10 * time.Second}
+	if !reflect.DeepEqual(job.Targets[0].OnErrorCommand, want) {
+		t.Errorf("Targets[0].OnErrorCommand = %+v, want %+v", job.Targets[0].OnErrorCommand, want)
+	}
+
+	if job.Targets[0].OnErrorAfter != 3 {
+		t.Errorf("Targets[0].OnErrorAfter = %d, want 3", job.Targets[0].OnErrorAfter)
+	}
+}
+
+func TestParseFlagsTargetOnErrorUnknownCommand(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets:
+      - server: s
+        bucket: b
+        on-error: {command: nope, after: 3}
+    recipients: [me@example.com]
+`)
+
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "no command named") {
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "no command named")
+	}
+}
+
+func TestParseFlagsTargetOnErrorAfterMustBePositive(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+commands:
+  - id: alert
+    cmd: "echo hi"
+
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets:
+      - server: s
+        bucket: b
+        on-error: {command: alert, after: 0}
+    recipients: [me@example.com]
+`)
+
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "on-error.after must be a positive integer") {
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "on-error.after must be a positive integer")
+	}
+}
+
+func TestParseFlagsTargetOnErrorCommandRequired(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets:
+      - server: s
+        bucket: b
+        on-error: {after: 3}
+    recipients: [me@example.com]
+`)
+
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "on-error.command is required") {
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "on-error.command is required")
+	}
+}

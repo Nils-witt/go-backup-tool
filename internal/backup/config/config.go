@@ -108,6 +108,13 @@ type jobTargetRef struct {
 	// to "keep forever" for one job while the server keeps a retention: of
 	// its own; that's not expected to be a common need.
 	retention time.Duration
+
+	// onErrorCommandID/onErrorAfter carry a targets: entry's on-error: block
+	// through to resolveJobTargets, which resolves onErrorCommandID against
+	// the top-level commands: map into Target.OnErrorCommand. An empty
+	// onErrorCommandID means no on-error: was configured for this target.
+	onErrorCommandID string
+	onErrorAfter     int
 }
 
 // ServerKind distinguishes a servers: entry's destination type. There is no
@@ -161,6 +168,23 @@ type Target struct {
 	// resolved value is what RecordLocalWrite stamps on each write. See
 	// Retention.go.
 	Retention time.Duration
+
+	// OnErrorCommand, if non-nil, is fired (see pipeline.runOnErrorCommand)
+	// once this target's in-memory consecutive-failure streak reaches
+	// OnErrorAfter, and again on every consecutive failure after that — see
+	// Runner.handleTargetOutcome in the pipeline package. nil (the common
+	// case) means no on-error: was configured for this target.
+	OnErrorCommand *Command
+	OnErrorAfter   int
+}
+
+// Command is one top-level commands: entry after validation, ready to be
+// run by the pipeline package (see pipeline.runOnErrorCommand) once a
+// target's consecutive-failure streak reaches its on-error.after threshold.
+type Command struct {
+	ID      string
+	Cmd     string
+	Timeout time.Duration
 }
 
 // RunConfig is the result of ParseFlags: one or more jobs to run, plus the
@@ -291,9 +315,23 @@ type fileJob struct {
 // retention: unchanged; it's an error to set it against a target whose
 // server isn't type: local.
 type fileJobTarget struct {
-	Server    string `yaml:"server"`
-	Bucket    string `yaml:"bucket"`
-	Retention string `yaml:"retention"`
+	Server    string             `yaml:"server"`
+	Bucket    string             `yaml:"bucket"`
+	Retention string             `yaml:"retention"`
+	OnError   *fileTargetOnError `yaml:"on-error"`
+}
+
+// fileTargetOnError mirrors a targets: entry's on-error: block for YAML
+// unmarshaling. Command references a top-level commands: entry's id
+// (required whenever on-error: is present at all — see applyFileJob).
+// After is how many consecutive times this target must fail, in a row,
+// before Command first fires — it then fires again on every subsequent
+// consecutive failure (see pipeline.Runner.handleTargetOutcome), not just
+// once per streak. Must be a positive integer — validated in
+// resolveJobTargets, once the target has been resolved against servers:.
+type fileTargetOnError struct {
+	Command string `yaml:"command"`
+	After   int    `yaml:"after"`
 }
 
 // fileServer is one top-level servers: entry, defined once and referenced by
@@ -321,6 +359,18 @@ type fileServer struct {
 	Endpoint  string `yaml:"endpoint"`
 	Path      string `yaml:"path"`      // local only: root directory backups are written under
 	Retention string `yaml:"retention"` // local only: e.g. "7d" or "168h"; unset/"0" keeps objects forever
+}
+
+// fileCommand is one top-level commands: entry, defined once and referenced
+// by id from a target's on-error.command — the same "define once, reference
+// by id" shape as notify.FileNotification. Cmd is run through the platform
+// shell, the same way a job's own cmd: is (see pipeline.newSourceCommand).
+// Timeout (optional) bounds how long one firing may run; defaults to
+// defaultOnErrorCommandTimeout when unset.
+type fileCommand struct {
+	ID      string `yaml:"id"`
+	Cmd     string `yaml:"cmd"`
+	Timeout string `yaml:"timeout"`
 }
 
 // fileConfig is the top-level shape of the YAML config file. Its embedded
@@ -354,6 +404,11 @@ type fileConfig struct {
 	// id from Report.Notifications and a receiver's
 	// StaleNotifications/DownloadNotifications (see notify.Build).
 	Notifications []notify.FileNotification `yaml:"notifications"`
+
+	// Commands are named, reusable shell commands, referenced by id from a
+	// target's on-error.command (see buildCommands) — the same "define
+	// once, reference by id" shape as Notifications.
+	Commands []fileCommand `yaml:"commands"`
 
 	Receivers []FileReceiver    `yaml:"receivers"`
 	WebUI     fileWebUI         `yaml:"webui"`
@@ -525,12 +580,12 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		return nil, err
 	}
 
-	notifications, err := resolveNotifications(fileCfg)
+	notifications, commands, err := resolveNotificationsAndCommands(fileCfg)
 	if err != nil {
 		return nil, err
 	}
 
-	jobs, err := resolveJobs(fileCfg, listen, notifications)
+	jobs, err := resolveJobs(fileCfg, listen, notifications, commands)
 	if err != nil {
 		return nil, err
 	}
@@ -591,6 +646,82 @@ func resolveNotifications(fileCfg *fileConfig) (map[string]notify.Notification, 
 	}
 
 	return notify.Build(fileCfg.Notifications, smtp)
+}
+
+// resolveNotificationsAndCommands resolves fileCfg's top-level
+// notifications: and commands: entries together, so ParseFlags only needs
+// one error check for both (keeping its own cyclomatic complexity down)
+// instead of one each.
+func resolveNotificationsAndCommands(fileCfg *fileConfig) (map[string]notify.Notification, map[string]Command, error) {
+	notifications, err := resolveNotifications(fileCfg)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	commands, err := buildCommands(fileCfg.Commands)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return notifications, commands, nil
+}
+
+// defaultOnErrorCommandTimeout bounds how long firing a commands: entry may
+// take when it sets no timeout: of its own.
+const defaultOnErrorCommandTimeout = 30 * time.Second
+
+// buildCommands resolves fileCfg's top-level commands: entries into an
+// id -> Command map, used to resolve a target's on-error.command. Validates
+// that every entry has a non-empty, unique id and a non-empty cmd — the
+// same validation shape as notify.Build for notifications:.
+func buildCommands(fileCommands []fileCommand) (map[string]Command, error) {
+	commands := make(map[string]Command, len(fileCommands))
+
+	for i, fc := range fileCommands {
+		id := strings.TrimSpace(fc.ID)
+		if id == "" {
+			return nil, fmt.Errorf("commands[%d]: id is required", i)
+		}
+
+		if _, exists := commands[id]; exists {
+			return nil, fmt.Errorf("commands[%d]: duplicate command id %q", i, id)
+		}
+
+		cmd := strings.TrimSpace(fc.Cmd)
+		if cmd == "" {
+			return nil, fmt.Errorf("command %q: cmd is required", id)
+		}
+
+		timeout, err := parseOnErrorCommandTimeout(fc.Timeout)
+		if err != nil {
+			return nil, fmt.Errorf("command %q: %w", id, err)
+		}
+
+		commands[id] = Command{ID: id, Cmd: cmd, Timeout: timeout}
+	}
+
+	return commands, nil
+}
+
+// parseOnErrorCommandTimeout parses a commands: entry's timeout: string,
+// defaulting to defaultOnErrorCommandTimeout when unset. A non-positive
+// timeout is rejected: it would leave no time to actually run the command.
+func parseOnErrorCommandTimeout(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return defaultOnErrorCommandTimeout, nil
+	}
+
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("parsing timeout %q: %w", s, err)
+	}
+
+	if d <= 0 {
+		return 0, fmt.Errorf("timeout must be positive, got %q", s)
+	}
+
+	return d, nil
 }
 
 // resolveWebUISettings resolves cfg (the config file's webui: entry) into
@@ -751,23 +882,25 @@ func parseLogLevel(s string) (slog.Level, error) {
 // listen is the web UI's resolved effective listen address (see
 // resolveWebUIListen). notifications is the config file's already-resolved
 // top-level notifications: map (see notify.Build), used to resolve a job's
-// failure-notifications:.
+// failure-notifications:. commands is the config file's already-resolved
+// top-level commands: map (see buildCommands), used to resolve a target's
+// on-error.command.
 //
 // An empty jobs: list is only allowed when the web UI is enabled, since that
 // still leaves the web UI (and receiver API) as a reason to run; otherwise
 // the process would start and immediately have nothing to do.
-func resolveJobs(fileCfg *fileConfig, listen string, notifications map[string]notify.Notification) ([]*Config, error) {
+func resolveJobs(fileCfg *fileConfig, listen string, notifications map[string]notify.Notification, commands map[string]Command) ([]*Config, error) {
 	if len(fileCfg.Jobs) == 0 && listen == "" {
 		return nil, errors.New("config file must define at least one job under a jobs list, or set webui.enabled: true to run without any")
 	}
 
-	return buildJobsFromFile(fileCfg, notifications)
+	return buildJobsFromFile(fileCfg, notifications, commands)
 }
 
 // buildJobsFromFile builds one *config per entry in fileCfg.Jobs, layering
 // fileCfg's top-level fields as defaults under each entry's own fields and
-// resolving each job's targets: against fileCfg.Servers.
-func buildJobsFromFile(fileCfg *fileConfig, notifications map[string]notify.Notification) ([]*Config, error) {
+// resolving each job's targets: against fileCfg.Servers/commands.
+func buildJobsFromFile(fileCfg *fileConfig, notifications map[string]notify.Notification, commands map[string]Command) ([]*Config, error) {
 	servers, err := buildServers(fileCfg.Servers)
 	if err != nil {
 		return nil, err
@@ -800,7 +933,7 @@ func buildJobsFromFile(fileCfg *fileConfig, notifications map[string]notify.Noti
 			return nil, fmt.Errorf("job %q: %w", name, err)
 		}
 
-		if err := resolveJobTargets(cfg, servers); err != nil {
+		if err := resolveJobTargets(cfg, servers, commands); err != nil {
 			return nil, fmt.Errorf("job %q: %w", name, err)
 		}
 
@@ -993,10 +1126,11 @@ type resolvedServer struct {
 }
 
 // resolveJobTargets resolves cfg's raw target references (targetRefs, from
-// targets:) against servers, building cfg.targets. A job with no target
-// references at all is left with an empty cfg.targets; validateJob reports
-// that as an error.
-func resolveJobTargets(cfg *Config, servers map[string]resolvedServer) error {
+// targets:) against servers, building cfg.targets, and resolves each ref's
+// on-error.command (if any) against commands (see buildCommands) into that
+// target's OnErrorCommand. A job with no target references at all is left
+// with an empty cfg.targets; validateJob reports that as an error.
+func resolveJobTargets(cfg *Config, servers map[string]resolvedServer, commands map[string]Command) error {
 	if len(cfg.targetRefs) == 0 {
 		return nil
 	}
@@ -1034,6 +1168,20 @@ func resolveJobTargets(cfg *Config, servers map[string]resolvedServer) error {
 			Endpoint:   server.endpoint,
 			LocalPath:  server.path,
 			Retention:  retention,
+		}
+
+		if ref.onErrorCommandID != "" {
+			command, ok := commands[ref.onErrorCommandID]
+			if !ok {
+				return fmt.Errorf("targets[%d]: no command named %q defined under commands", i, ref.onErrorCommandID)
+			}
+
+			if ref.onErrorAfter <= 0 {
+				return fmt.Errorf("targets[%d]: on-error.after must be a positive integer, got %d", i, ref.onErrorAfter)
+			}
+
+			cfg.Targets[i].OnErrorCommand = &command
+			cfg.Targets[i].OnErrorAfter = ref.onErrorAfter
 		}
 	}
 
@@ -1175,7 +1323,19 @@ func applyFileJob(cfg *Config, fj *fileJob, notifications map[string]notify.Noti
 				return fmt.Errorf("targets[%d]: %w", i, err)
 			}
 
-			cfg.targetRefs[i] = jobTargetRef{server: t.Server, bucket: t.Bucket, retention: retention}
+			ref := jobTargetRef{server: t.Server, bucket: t.Bucket, retention: retention}
+
+			if t.OnError != nil {
+				commandID := strings.TrimSpace(t.OnError.Command)
+				if commandID == "" {
+					return fmt.Errorf("targets[%d]: on-error.command is required", i)
+				}
+
+				ref.onErrorCommandID = commandID
+				ref.onErrorAfter = t.OnError.After
+			}
+
+			cfg.targetRefs[i] = ref
 		}
 	}
 

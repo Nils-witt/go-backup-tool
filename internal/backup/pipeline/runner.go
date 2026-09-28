@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,12 +27,32 @@ type Runner struct {
 	identity *identity.ServerIdentity // nil if loadServerIdentity failed at startup; see Config.Identity
 	queue    *notify.Queue            // retries a failed job-failure email later; see notify.SendMailQueued
 	failed   atomic.Bool
+
+	// targetFailureMu guards targetFailures, the in-memory (not persisted)
+	// consecutive-failure streak per (job, target) — reset to 0 on any
+	// success, incremented on any failure, both via handleTargetOutcome.
+	// Deliberately in-memory only and not backed by the state db: a
+	// consecutive-failure streak is only meaningful within one process's
+	// uptime, and resetting it across a restart is an accepted tradeoff for
+	// simplicity (see the on-error feature's design notes).
+	targetFailureMu sync.Mutex
+	targetFailures  map[targetKey]int
+}
+
+// targetKey identifies one (job, target) pair for Runner.targetFailures.
+// bucket is included alongside server because a job may list the same
+// server twice with different buckets (distinct targets); job+server alone
+// would conflate them.
+type targetKey struct {
+	job    string
+	server string
+	bucket string
 }
 
 // NewRunner builds a Runner sharing store/stateDB/identity/queue across
 // every job scheduled through it in this run.
 func NewRunner(log *slog.Logger, statusStore *backup.StatusStore, stateDB *store.Store, identity *identity.ServerIdentity, queue *notify.Queue) *Runner {
-	return &Runner{log: log, store: statusStore, stateDB: stateDB, identity: identity, queue: queue}
+	return &Runner{log: log, store: statusStore, stateDB: stateDB, identity: identity, queue: queue, targetFailures: make(map[targetKey]int)}
 }
 
 // Failed reports whether any job run has failed so far.
@@ -239,6 +260,7 @@ func (r *Runner) runOnce(ctx context.Context, job *config.Config) {
 		}
 
 		r.persistTargetRun(ctx, job.Name, terr == nil, job.Targets[index].ServerName, terr)
+		r.handleTargetOutcome(ctx, job.Name, &job.Targets[index], terr, log)
 	}
 
 	bytesWritten, err := runPipeline(ctx, &run, log, onTargetDone)
@@ -323,6 +345,7 @@ func (r *Runner) RetryFailedTargets(ctx context.Context, job *config.Config, tar
 
 		r.store.TargetDone(job.Name, origIndex, terr)
 		r.persistTargetRun(ctx, job.Name, terr == nil, job.Targets[origIndex].ServerName, terr)
+		r.handleTargetOutcome(ctx, job.Name, &job.Targets[origIndex], terr, log)
 	}
 
 	bytesWritten, err := runPipeline(ctx, &run, log, onTargetDone)
@@ -384,6 +407,45 @@ func (r *Runner) persistTargetRun(ctx context.Context, jobName string, success b
 	if err := r.stateDB.SaveTargetRun(ctx, jobName, success, target, string(state), errText, time.Now()); err != nil {
 		r.log.Warn("recording target run to state db", "job", jobName, "target", target, "err", err)
 	}
+}
+
+// handleTargetOutcome updates t's in-memory consecutive-failure streak for
+// jobName (see Runner.targetFailures) and, once that streak reaches
+// t.OnErrorAfter, fires t.OnErrorCommand — and again on every subsequent
+// consecutive failure, until a success resets the streak. Called by both
+// runOnce's and RetryFailedTargets's own onTargetDone closures, so the two
+// entry points share identical on-error semantics. A nil t.OnErrorCommand
+// (the common case: no on-error: configured for this target) is a fast
+// no-op.
+func (r *Runner) handleTargetOutcome(ctx context.Context, jobName string, t *config.Target, terr error, log *slog.Logger) {
+	if t.OnErrorCommand == nil {
+		return
+	}
+
+	key := targetKey{job: jobName, server: t.ServerName, bucket: t.Bucket}
+
+	r.targetFailureMu.Lock()
+
+	if terr == nil {
+		delete(r.targetFailures, key)
+		r.targetFailureMu.Unlock()
+
+		return
+	}
+
+	r.targetFailures[key]++
+	streak := r.targetFailures[key]
+
+	r.targetFailureMu.Unlock()
+
+	if streak < t.OnErrorAfter {
+		return
+	}
+
+	cmdCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), t.OnErrorCommand.Timeout)
+	defer cancel()
+
+	runOnErrorCommand(cmdCtx, jobName, t, *t.OnErrorCommand, streak, terr, log)
 }
 
 // RunOutstandingUploadRetries retries every target upload recorded as
