@@ -15,7 +15,7 @@ import LogoutIcon from "@mui/icons-material/Logout";
 import Toolbar from "@mui/material/Toolbar";
 import Typography from "@mui/material/Typography";
 import Button from "@mui/material/Button";
-import { useAuth } from "./auth/AuthContext";
+import { useAuth } from "./auth/useAuth";
 import { Footer } from "./components/Footer";
 import { NAV_GROUPS } from "./nav";
 

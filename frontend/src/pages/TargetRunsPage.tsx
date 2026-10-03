@@ -1,6 +1,6 @@
 import type { TargetRunEventJSON } from "../api/types";
 import { usePermissionPoll } from "../hooks/usePermissionPoll";
-import { useAuth } from "../auth/AuthContext";
+import { useAuth } from "../auth/useAuth";
 import { TargetRunLogSection } from "../components/TargetRunLogSection";
 import { PageHeader } from "../components/PageHeader";
 import { RequirePermission } from "../components/RequirePermission";

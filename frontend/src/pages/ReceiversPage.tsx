@@ -1,6 +1,6 @@
 import type { ReceiverSnapshot } from "../api/types";
 import { usePoll } from "../hooks/usePoll";
-import { useAuth } from "../auth/AuthContext";
+import { useAuth } from "../auth/useAuth";
 import { ReceiversSection } from "../components/ReceiversSection";
 import { PageHeader } from "../components/PageHeader";
 

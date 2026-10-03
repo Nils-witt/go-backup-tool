@@ -1,6 +1,6 @@
 import type { JobSnapshot } from "../api/types";
 import { usePoll } from "../hooks/usePoll";
-import { useAuth } from "../auth/AuthContext";
+import { useAuth } from "../auth/useAuth";
 import { JobsGrid } from "../components/JobsGrid";
 import { PageHeader } from "../components/PageHeader";
 

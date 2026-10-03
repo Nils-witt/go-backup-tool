@@ -13,10 +13,7 @@ export function usePermissionPoll<T>(url: string, enabled: boolean, intervalMs =
   const [data, setData] = useState<T[]>([]);
 
   useEffect(() => {
-    if (!enabled) {
-      setData([]);
-      return;
-    }
+    if (!enabled) return;
 
     let cancelled = false;
 
@@ -37,5 +34,7 @@ export function usePermissionPoll<T>(url: string, enabled: boolean, intervalMs =
     };
   }, [url, enabled, intervalMs]);
 
-  return data;
+  // Derived rather than reset inside the effect: a disabled poll reports an
+  // empty list without an extra render.
+  return enabled ? data : [];
 }

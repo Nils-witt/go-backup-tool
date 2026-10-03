@@ -1,6 +1,6 @@
 import type { JobRunEventJSON } from "../api/types";
 import { usePermissionPoll } from "../hooks/usePermissionPoll";
-import { useAuth } from "../auth/AuthContext";
+import { useAuth } from "../auth/useAuth";
 import { JobRunLogSection } from "../components/JobRunLogSection";
 import { PageHeader } from "../components/PageHeader";
 import { RequirePermission } from "../components/RequirePermission";

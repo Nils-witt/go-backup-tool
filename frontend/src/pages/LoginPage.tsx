@@ -4,7 +4,7 @@ import Alert from "@mui/material/Alert";
 import Button from "@mui/material/Button";
 import Typography from "@mui/material/Typography";
 import LoginIcon from "@mui/icons-material/Login";
-import { useAuth } from "../auth/AuthContext";
+import { useAuth } from "../auth/useAuth";
 import { startLogin } from "../auth/oidc";
 import { AuthCard } from "../components/AuthCard";
 

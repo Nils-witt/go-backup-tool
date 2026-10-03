@@ -50,20 +50,23 @@ function FileListDialog({
   onClose: () => void;
   onDownload: (id: string, key: string) => void;
 }) {
-  const [files, setFiles] = useState<ReceiverFile[] | null>(null);
+  // The listing is stored with the receiver id it belongs to, so switching
+  // to another receiver shows "loading…" (files === null) until its own
+  // listing arrives, without resetting state inside the effect.
+  const [loaded, setLoaded] = useState<{ id: string; files: ReceiverFile[] } | null>(null);
+  const files = loaded && loaded.id === id ? loaded.files : null;
 
   useEffect(() => {
     if (!id) return;
 
     let cancelled = false;
-    setFiles(null);
 
     apiFetchJSON<ReceiverFile[]>("/api/receivers/" + encodeURIComponent(id) + "/files")
       .then((f) => {
-        if (!cancelled) setFiles(f || []);
+        if (!cancelled) setLoaded({ id, files: f || [] });
       })
       .catch(() => {
-        if (!cancelled) setFiles([]);
+        if (!cancelled) setLoaded({ id, files: [] });
       });
 
     return () => {

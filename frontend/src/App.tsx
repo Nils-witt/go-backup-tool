@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { AuthProvider, useAuth } from "./auth/AuthContext";
+import { AuthProvider } from "./auth/AuthContext";
+import { useAuth } from "./auth/useAuth";
 import { SSO_CALLBACK_PATH } from "./auth/oidc";
 import { Layout } from "./Layout";
 import { LoginPage } from "./pages/LoginPage";

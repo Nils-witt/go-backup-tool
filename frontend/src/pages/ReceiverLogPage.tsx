@@ -1,6 +1,6 @@
 import type { ReceiverEventJSON } from "../api/types";
 import { usePermissionPoll } from "../hooks/usePermissionPoll";
-import { useAuth } from "../auth/AuthContext";
+import { useAuth } from "../auth/useAuth";
 import { ReceiverLogSection } from "../components/ReceiverLogSection";
 import { PageHeader } from "../components/PageHeader";
 import { RequirePermission } from "../components/RequirePermission";

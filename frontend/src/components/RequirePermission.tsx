@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import Alert from "@mui/material/Alert";
-import { useAuth, type AuthState } from "../auth/AuthContext";
+import { useAuth, type AuthState } from "../auth/useAuth";
 
 // RequirePermission renders its children only once the account has loaded
 // and `test` passes; otherwise it shows nothing (still loading) or an

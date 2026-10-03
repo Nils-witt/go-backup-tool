@@ -8,7 +8,7 @@ import HistoryIcon from "@mui/icons-material/History";
 import PlaylistAddCheckIcon from "@mui/icons-material/PlaylistAddCheck";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import VpnKeyIcon from "@mui/icons-material/VpnKey";
-import type { AuthState } from "./auth/AuthContext";
+import type { AuthState } from "./auth/useAuth";
 
 export interface NavItem {
   to: string;

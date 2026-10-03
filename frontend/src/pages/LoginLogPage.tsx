@@ -1,6 +1,6 @@
 import type { LoginEventJSON } from "../api/types";
 import { usePermissionPoll } from "../hooks/usePermissionPoll";
-import { useAuth } from "../auth/AuthContext";
+import { useAuth } from "../auth/useAuth";
 import { LoginLogSection } from "../components/LoginLogSection";
 import { PageHeader } from "../components/PageHeader";
 import { RequirePermission } from "../components/RequirePermission";
