@@ -11,14 +11,18 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 )
 
-// wantSchedule parses spec the same way ResolveSettings does, for a
-// test to compare a resolved Settings.Schedule against.
+// wantSchedule parses spec the same way ResolveSettings does (pinned to
+// UTC), for a test to compare a resolved Settings.Schedule against.
 func wantSchedule(t *testing.T, spec string) cron.Schedule {
 	t.Helper()
 
 	sched, err := cron.ParseStandard(spec)
 	if err != nil {
 		t.Fatalf("cron.ParseStandard(%q) error: %v", spec, err)
+	}
+
+	if s, ok := sched.(*cron.SpecSchedule); ok {
+		s.Location = time.UTC
 	}
 
 	return sched
@@ -81,9 +85,32 @@ func TestResolveSettingsExplicitSchedule(t *testing.T) {
 		t.Fatalf("ResolveSettings() error: %v", err)
 	}
 
-	wantNext := time.Date(2026, 8, 28, 23, 45, 0, 0, time.Local)
-	if next := got.Schedule.Next(time.Date(2026, 8, 28, 0, 0, 0, 0, time.Local)); !next.Equal(wantNext) {
-		t.Errorf("schedule.Next() = %v, want %v (report.schedule 23:45 parsed as 45 23 * * *)", next, wantNext)
+	// The schedule is evaluated in UTC whatever zone the reference time is
+	// in: from 00:00 at UTC+2 (22:00 UTC the day before), the next 23:45 is
+	// 23:45 UTC that same previous day, not 23:45 at UTC+2.
+	plus2 := time.FixedZone("UTC+2", 2*60*60)
+
+	wantNext := time.Date(2026, 8, 27, 23, 45, 0, 0, time.UTC)
+	if next := got.Schedule.Next(time.Date(2026, 8, 28, 0, 0, 0, 0, plus2)); !next.Equal(wantNext) {
+		t.Errorf("schedule.Next() = %v, want %v (45 23 * * * evaluated in UTC)", next, wantNext)
+	}
+}
+
+func TestResolveSettingsDescriptorScheduleIsUTC(t *testing.T) {
+	t.Parallel()
+
+	notifications := map[string]notify.Notification{"ops-email": {ID: "ops-email", Email: &notify.Email{To: []string{"a@example.com"}}}}
+
+	got, err := ResolveSettings(FileReport{Enabled: true, Schedule: "@daily", Notifications: []string{"ops-email"}}, notifications)
+	if err != nil {
+		t.Fatalf("ResolveSettings() error: %v", err)
+	}
+
+	from := time.Date(2026, 8, 28, 12, 0, 0, 0, time.FixedZone("UTC-5", -5*60*60))
+
+	wantNext := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	if next := got.Schedule.Next(from); !next.Equal(wantNext) {
+		t.Errorf("@daily Next() = %v, want UTC midnight %v", next, wantNext)
 	}
 }
 
@@ -135,6 +162,12 @@ func TestResolveSettingsErrors(t *testing.T) {
 			cfg:           FileReport{Enabled: true, Notifications: []string{"ops-email"}, Schedule: "not-a-cron-expr"},
 			notifications: notifications,
 			wantErrHas:    "report.schedule",
+		},
+		{
+			name:          "time zone prefix",
+			cfg:           FileReport{Enabled: true, Notifications: []string{"ops-email"}, Schedule: "CRON_TZ=Europe/Berlin 0 7 * * *"},
+			notifications: notifications,
+			wantErrHas:    "always evaluated in UTC",
 		},
 	}
 

@@ -1509,6 +1509,37 @@ jobs:
 	}
 }
 
+func TestParseFlagsStartTimeNormalizedToUTC(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+    interval: 1h
+    start-time: "2026-01-01T05:00:00+02:00"
+`)
+
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
+	}
+
+	cfg := singleJob(t, rc)
+
+	want := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+	if !cfg.StartTime.Equal(want) || cfg.StartTime.Location() != time.UTC {
+		t.Errorf("cfg.startTime = %v, want %v in UTC", cfg.StartTime, want)
+	}
+}
+
 func TestParseFlagsStartTimeDefaultsToZero(t *testing.T) {
 	t.Parallel()
 
@@ -2251,6 +2282,14 @@ jobs:
 	if err != nil {
 		t.Fatalf("cron.ParseStandard() unexpected error: %v", err)
 	}
+
+	// report.ResolveSettings pins every schedule to UTC.
+	spec, ok := schedule.(*cron.SpecSchedule)
+	if !ok {
+		t.Fatalf("cron.ParseStandard() = %T, want *cron.SpecSchedule", schedule)
+	}
+
+	spec.Location = time.UTC
 
 	want := report.Settings{
 		Enabled:  true,

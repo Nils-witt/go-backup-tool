@@ -226,7 +226,9 @@ jobs:
     # start-time: "2026-01-01T03:00:00Z" # anchors the repeat grid: with
     # interval: 6h set, runs land at 03:00, 09:00, 15:00, 21:00 UTC every
     # day, not just "whenever 6h have passed since the process started".
-    # Requires interval: to also be set. Each job's last successful run is
+    # Requires interval: to also be set. Every schedule is UTC-based: an
+    # RFC 3339 time with another offset is accepted but converted to UTC.
+    # Each job's last successful run is
     # tracked in a small sqlite database next to this config file
     # (.go-backup-tool-state.db), so if go-backup-tool was down through one
     # or more of these times, it catches up with a single run on the next
@@ -411,15 +413,16 @@ jobs:
 # report:
 #   enabled: true
 #   # schedule: a standard 5-field cron expression (minute hour
-#   # day-of-month month day-of-week), evaluated in this process's local
-#   # time zone; also accepts cron's descriptor shorthands (e.g. "@daily",
-#   # "@every 6h"). Default "0 7 * * *" (once a day at 07:00).
+#   # day-of-month month day-of-week), always evaluated in UTC regardless
+#   # of this machine's time zone (a CRON_TZ=/TZ= prefix is rejected); also
+#   # accepts cron's descriptor shorthands (e.g. "@daily", "@every 6h").
+#   # Default "0 7 * * *" (once a day at 07:00 UTC).
 #   schedule: "0 7 * * *"
 #   # notifications: names notifications: entries (see above) to send this
 #   # report to. An email: channel receives the full report as its body,
 #   # with its subject: (default "go-backup-tool report - {end}")
 #   # substituted the same way a stale/download notification's placeholders
-#   # are — {start}/{end} are the report window's bounds, formatted
+#   # are — {start}/{end} are the report window's bounds in UTC, formatted
 #   # "2006-01-02 15:04"; {receivers}, {errors}, {stale}, {jobs}, and
 #   # {job-errors} are counts of each section. A webhook: channel receives a
 #   # JSON summary of the same counts, or its own body: template.

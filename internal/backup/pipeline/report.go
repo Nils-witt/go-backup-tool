@@ -17,7 +17,8 @@ import (
 )
 
 // RunReportLoop sends rc's receiver/job report on rc.Report's configured
-// cron schedule, in this process's local time zone, until ctx is done. A
+// cron schedule, evaluated in UTC (see report.ResolveSettings), until ctx is
+// done. A
 // no-op if the report isn't enabled. db may be nil (the state db couldn't be
 // opened at startup); the report is still sent, just without any
 // receiver_events/job_runs history (see buildReport).
@@ -31,7 +32,7 @@ func RunReportLoop(ctx context.Context, rc *config.RunConfig, db *store.Store, q
 	var prev time.Time // zero until the first report in this process has been sent
 
 	for {
-		next := rc.Report.Schedule.Next(time.Now())
+		next := rc.Report.Schedule.Next(time.Now().UTC())
 		log.Debug("scheduled next report", "at", next)
 
 		if !waitUntil(ctx, next) {
@@ -295,7 +296,7 @@ func renderReportBody(report reportContent) string {
 	return b.String()
 }
 
-// reportTimeFormat is how {start}/{end} render in a notification's
+// reportTimeFormat is how {start}/{end} render (in UTC) in a notification's
 // subject:/body: template (see renderReportSubject), matching this
 // feature's original hardcoded subject line.
 const reportTimeFormat = "2006-01-02 15:04"
@@ -314,8 +315,8 @@ const defaultReportSubject = "[{server_name}] report - {end}"
 // {placeholder} substitution style.
 func renderReportSubject(tmpl string, report reportContent) string {
 	replacer := strings.NewReplacer(
-		"{start}", report.start.Format(reportTimeFormat),
-		"{end}", report.end.Format(reportTimeFormat),
+		"{start}", report.start.UTC().Format(reportTimeFormat),
+		"{end}", report.end.UTC().Format(reportTimeFormat),
 		"{receivers}", strconv.Itoa(len(report.receivers)),
 		"{errors}", strconv.Itoa(len(report.errors)),
 		"{stale}", strconv.Itoa(len(report.stale)),
@@ -367,7 +368,7 @@ func reportWebhookBody(wh notify.Webhook, report reportContent) ([]byte, error) 
 	}
 
 	payload := reportWebhookPayload{
-		Start: report.start.Format(reportTimeFormat), End: report.end.Format(reportTimeFormat),
+		Start: report.start.UTC().Format(reportTimeFormat), End: report.end.UTC().Format(reportTimeFormat),
 		Receivers: len(report.receivers), Errors: len(report.errors), Stale: len(report.stale),
 		Jobs: len(report.jobs), JobErrors: len(report.jobErrors),
 		ServerName: report.serverName,

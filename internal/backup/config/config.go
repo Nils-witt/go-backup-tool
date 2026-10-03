@@ -1400,7 +1400,9 @@ func applyFileJob(cfg *Config, fj *fileJob, notifications map[string]notify.Noti
 			return fmt.Errorf("parsing start-time %q: %w", fj.StartTime, err)
 		}
 
-		cfg.StartTime = t
+		// Normalized to UTC: the grid is the same instant either way, but
+		// every schedule (and every next-run time it reports) is UTC-based.
+		cfg.StartTime = t.UTC()
 	}
 
 	return nil

@@ -144,18 +144,20 @@ func (r *Runner) Schedule(ctx context.Context, job *config.Config) {
 			return
 		}
 
-		r.store.SetNextRun(job.Name, time.Now().Add(job.Interval))
+		r.store.SetNextRun(job.Name, time.Now().UTC().Add(job.Interval))
 		log.Debug("scheduled next run", "interval", job.Interval)
 
 		backup.RunPeriodically(ctx, job.Interval, false, func() {
 			r.runOnce(ctx, job)
-			r.store.SetNextRun(job.Name, time.Now().Add(job.Interval))
+			r.store.SetNextRun(job.Name, time.Now().UTC().Add(job.Interval))
 			log.Debug("scheduled next run", "interval", job.Interval)
 		})
 
 		return
 	}
 
+	// job.StartTime is already UTC (see config's parsing of start-time), so
+	// every grid slot computed from it is too.
 	next := job.StartTime
 
 	if due, ok := lastDueSlot(job.StartTime, job.Interval, time.Now()); ok &&

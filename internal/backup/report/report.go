@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/robfig/cron/v3"
 
@@ -27,10 +28,11 @@ type FileReport struct {
 	Enabled bool `yaml:"enabled"`
 
 	// Schedule is a standard 5-field cron expression (minute hour
-	// day-of-month month day-of-week), evaluated in this process's local
-	// time zone, e.g. "0 7 * * *" for once a day at 07:00, or "0 */6 * * *"
-	// for every 6h. Also accepts cron's descriptor shorthands (e.g.
-	// "@daily", "@every 6h"). Default "0 7 * * *" (once a day at 07:00).
+	// day-of-month month day-of-week), always evaluated in UTC regardless
+	// of this process's local time zone, e.g. "0 7 * * *" for once a day at
+	// 07:00 UTC, or "0 */6 * * *" for every 6h. Also accepts cron's
+	// descriptor shorthands (e.g. "@daily", "@every 6h"). A CRON_TZ=/TZ=
+	// prefix is rejected. Default "0 7 * * *" (once a day at 07:00 UTC).
 	Schedule string `yaml:"schedule"`
 
 	// Notifications names top-level notifications: entries (see
@@ -59,8 +61,31 @@ type Settings struct {
 	Notifications []notify.Notification
 }
 
+// parseUTCSchedule parses schedule as a standard cron expression (or
+// descriptor) evaluated in UTC, regardless of this process's local time
+// zone. A CRON_TZ=/TZ= prefix is rejected rather than honored: every
+// schedule go-backup-tool runs is UTC-based.
+func parseUTCSchedule(schedule string) (cron.Schedule, error) {
+	if strings.HasPrefix(schedule, "CRON_TZ=") || strings.HasPrefix(schedule, "TZ=") {
+		return nil, fmt.Errorf("report.schedule %q: time zone prefixes are not supported, schedules are always evaluated in UTC", schedule)
+	}
+
+	sched, err := cron.ParseStandard(schedule)
+	if err != nil {
+		return nil, fmt.Errorf("parsing report.schedule %q: %w (want a standard 5-field cron expression, e.g. \"0 7 * * *\")", schedule, err)
+	}
+
+	// ParseStandard leaves a spec schedule in time.Local; pin it to UTC.
+	// An "@every" ConstantDelaySchedule has no time zone to pin.
+	if spec, ok := sched.(*cron.SpecSchedule); ok {
+		spec.Location = time.UTC
+	}
+
+	return sched, nil
+}
+
 // defaultReportSchedule is fileReport.Schedule's default when left unset:
-// once a day at 07:00.
+// once a day at 07:00 UTC.
 const defaultReportSchedule = "0 7 * * *"
 
 // ResolveSettings validates cfg (the config file's report: entry) against
@@ -93,9 +118,9 @@ func ResolveSettings(cfg FileReport, notifications map[string]notify.Notificatio
 		schedule = defaultReportSchedule
 	}
 
-	sched, err := cron.ParseStandard(schedule)
+	sched, err := parseUTCSchedule(schedule)
 	if err != nil {
-		return Settings{}, fmt.Errorf("parsing report.schedule %q: %w (want a standard 5-field cron expression, e.g. \"0 7 * * *\")", schedule, err)
+		return Settings{}, err
 	}
 
 	return Settings{
