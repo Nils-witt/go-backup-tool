@@ -4,64 +4,51 @@ on:
   push:
     branches: [main]
   pull_request:
+  # New advisories appear without any code change: re-scan weekly.
+  schedule:
+    - cron: "17 6 * * 1"
 
 permissions:
   contents: read
-  security-events: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   govulncheck:
     name: Vulnerability Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version: stable
+      - uses: ./.github/actions/stub-frontend
 
-      - name: Set up Node
-        uses: actions/setup-node@v5
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      # internal/backup/webui embeds frontend/'s build output via go:embed,
-      # which fails to compile without it (dist/ isn't committed, see
-      # .gitignore) — govulncheck needs a buildable module to analyze.
-      - name: Build dashboard frontend
-        run: |
-          cd frontend
-          npm ci
-          npm run build
-
+      # The action sets up Go itself (latest stable by default, so stdlib
+      # advisories for the toolchain releases are built with are reported).
+      # repo-checkout: false keeps its own checkout from discarding the stub.
       - name: Run govulncheck
         uses: golang/govulncheck-action@v1
+        with:
+          repo-checkout: false
 
   gosec:
     name: gosec
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # golangci-lint already fails the build on gosec findings; this job only
+    # publishes them to the Security tab, which fork PRs can't write to.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      security-events: write
 
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Node
-        uses: actions/setup-node@v5
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      # gosec's go/analysis-based checks need the module to compile, same
-      # as govulncheck above.
-      - name: Build dashboard frontend
-        run: |
-          cd frontend
-          npm ci
-          npm run build
+      - uses: ./.github/actions/stub-frontend
 
       - name: Run gosec
         uses: securego/gosec@v2.28.0

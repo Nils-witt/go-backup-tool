@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same PR/branch supersedes the running checks.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      # `build` is `tsc -b && vite build`: type-checks and bundles.
+      - run: npm run build
+
+      - run: npx oxlint
+
+  test:
+    name: Test (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # go.mod's minimum, and the latest release.
+        go: ["1.27", "stable"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+
+      - uses: ./.github/actions/stub-frontend
+
+      # Module hygiene doesn't depend on the Go version: check it once.
+      - name: Check go.mod/go.sum
+        if: matrix.go == 'stable'
+        run: |
+          go mod verify
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Run tests
+        run: go test -race -shuffle=on -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        if: matrix.go == 'stable'
+        uses: codecov/codecov-action@v7
+        with:
+          files: ./coverage.out
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      - uses: ./.github/actions/stub-frontend
+
+      # govet and gosec both run as part of golangci-lint (see .golangci.yml),
+      # so there's no separate go vet step.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          # Pinned so a new linter release can't break CI unannounced;
+          # bump deliberately (matches the version the pre-commit hook uses).
+          version: v2.14.0
+          args: --timeout 5m

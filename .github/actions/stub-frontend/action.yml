@@ -1,0 +1,15 @@
+name: Stub dashboard build
+description: >
+  Writes a minimal placeholder for internal/backup/webui/dist so Go jobs can
+  compile (go:embed needs at least dist/index.html) without installing Node
+  and building the real SPA. The real frontend build is checked once, in
+  ci.yml's frontend job (and by the Docker/GoReleaser builds that ship it).
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        mkdir -p internal/backup/webui/dist/assets
+        # TestHandleDashboardServesHTML looks for the SPA's root element.
+        echo '<!doctype html><html><body><div id="root"></div></body></html>' \
+          > internal/backup/webui/dist/index.html

@@ -12,6 +12,25 @@ updates:
       go-minor-patch:
         update-types: [minor, patch]
 
+  # Dashboard SPA (frontend/, its own npm project)
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    labels: ["dependencies", "frontend"]
+    open-pull-requests-limit: 10
+    groups:
+      frontend-minor-patch:
+        update-types: [minor, patch]
+
+  # Root npm project: Husky git hooks only
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    labels: ["dependencies"]
+
   # GitHub Actions
   - package-ecosystem: github-actions
     directory: /
