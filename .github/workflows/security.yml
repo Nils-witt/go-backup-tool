@@ -51,7 +51,7 @@ jobs:
       - uses: ./.github/actions/stub-frontend
 
       - name: Run gosec
-        uses: securego/gosec@v2.28.0
+        uses: securego/gosec@v2.29.0
         with:
           args: -no-fail -fmt sarif -out gosec-results.sarif ./...
 
