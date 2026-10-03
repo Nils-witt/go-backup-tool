@@ -3,7 +3,7 @@
 # Builds the dashboard SPA (see frontend/) into internal/backup/webui/dist,
 # which the Go builder stage below embeds via go:embed — that directive
 # fails to compile without it, since dist/ isn't committed (see .gitignore).
-FROM node:22-alpine AS frontend-builder
+FROM node:26-alpine AS frontend-builder
 
 WORKDIR /src/frontend
 
