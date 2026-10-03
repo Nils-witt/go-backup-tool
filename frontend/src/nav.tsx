@@ -8,17 +8,16 @@ import HistoryIcon from "@mui/icons-material/History";
 import PlaylistAddCheckIcon from "@mui/icons-material/PlaylistAddCheck";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import VpnKeyIcon from "@mui/icons-material/VpnKey";
-import GroupIcon from "@mui/icons-material/Group";
-import type { SessionInfoState } from "./hooks/useSessionInfo";
+import type { AuthState } from "./auth/AuthContext";
 
 export interface NavItem {
   to: string;
   label: string;
   icon: ReactNode;
-  // visible defaults to "always shown while the session has loaded" when
+  // visible defaults to "always shown once the account has loaded" when
   // omitted — most pages have no permission gate of their own beyond "you're
   // logged in at all".
-  visible?: (session: SessionInfoState) => boolean;
+  visible?: (auth: AuthState) => boolean;
 }
 
 export interface NavGroup {
@@ -68,12 +67,6 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: <CloudUploadIcon />,
         visible: (s) => s.canViewReceiverLog,
       },
-    ],
-  },
-  {
-    label: "Administration",
-    items: [
-      { to: "/admin/users", label: "Users", icon: <GroupIcon />, visible: (s) => !!s.info?.admin },
     ],
   },
 ];

@@ -16,7 +16,6 @@ export default defineConfig({
       // 127.0.0.1:8080` backend with no CORS handling needed — the browser
       // only ever talks to the Vite dev server's own origin.
       "/api": "http://localhost:8080",
-      "/login": "http://localhost:8080",
     },
   },
 });

@@ -22,17 +22,3 @@ func openTestStore(t *testing.T) *Store {
 
 	return db
 }
-
-// mustGetUser fetches username via db.GetUser, failing the test if it
-// errors or doesn't exist — the repeated "GetUser, then assert ok" shape
-// several group/membership tests need after every mutation.
-func mustGetUser(ctx context.Context, t *testing.T, db *Store, username string) User {
-	t.Helper()
-
-	user, ok, err := db.GetUser(ctx, username)
-	if err != nil || !ok {
-		t.Fatalf("GetUser(%q) = (ok=%v, err=%v), want (true, nil)", username, ok, err)
-	}
-
-	return user
-}

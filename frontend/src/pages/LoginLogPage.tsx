@@ -1,12 +1,12 @@
 import type { LoginEventJSON } from "../api/types";
 import { usePermissionPoll } from "../hooks/usePermissionPoll";
-import { useSession } from "../context/SessionContext";
+import { useAuth } from "../auth/AuthContext";
 import { LoginLogSection } from "../components/LoginLogSection";
 import { PageHeader } from "../components/PageHeader";
 import { RequirePermission } from "../components/RequirePermission";
 
 export function LoginLogPage() {
-  const session = useSession();
+  const session = useAuth();
   const events = usePermissionPoll<LoginEventJSON>("/api/login-events", session.canViewLoginLog);
 
   return (

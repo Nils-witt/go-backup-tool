@@ -32,17 +32,15 @@ cd frontend
 npm run dev
 ```
 
-`vite.config.ts` proxies `/api` and `/login` to `127.0.0.1:8080`, so the
-dev server (typically `http://localhost:5173`) can call the real backend
-with no CORS handling needed.
+`vite.config.ts` proxies `/api` to `127.0.0.1:8080`, so the dev server
+(typically `http://localhost:5173`) can call the real backend with no CORS
+handling needed.
 
-One exception: OIDC's `/login/oidc/callback` uses an absolute,
-provider-configured redirect URI, so that leg of SSO login won't loop back
-through the Vite dev server. Test OIDC against the full built binary
-(`npm run build`, then run the Go binary directly and open its own
-`-listen` address) instead.
-
-The login page itself (`internal/backup/webui/login.html`) and the OIDC
-callback bridge page (`oidc_complete.html`) are intentionally **not** part
-of this SPA — they're small, server-rendered pages handling
-auth/session token handoff, kept outside `frontend/` on purpose.
+Login is SSO only, run entirely in the browser: the SPA is a public OpenID
+Connect client (`src/auth/oidc.ts`, authorization code + PKCE via
+`oidc-client-ts`) and sends the provider's access token as a bearer token on
+every `/api/...` call (`src/api/client.ts`). The redirect URI is
+`<origin>/login/sso/callback`, a client-side route
+(`src/pages/SsoCallbackPage.tsx`), so SSO works against the dev server too
+as long as the provider also allows `http://localhost:5173/login/sso/callback`
+as a redirect URI and that origin for CORS.

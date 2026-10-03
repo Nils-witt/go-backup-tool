@@ -1,7 +1,6 @@
-// Package permission defines the web UI dashboard's session permission
-// bitmask (view/download/admin/login-log/download-log/job-run-log/
-// target-run-log/receiver-log) and its config-file and admin-API name
-// parsing.
+// Package permission defines the web UI dashboard's permission bitmask
+// (view/download/admin/login-log/download-log/job-run-log/target-run-log/
+// receiver-log) and its config-file name parsing.
 package permission
 
 import (
@@ -9,13 +8,12 @@ import (
 	"strings"
 )
 
-// Permission is a dashboard session's granted capabilities, on top of
-// having merely authenticated: what a logged-in user is allowed to see and
-// do. Stored as a bitmask — on disk in users.permissions (see users.go) for
-// an account managed through the web UI's "Users" admin section, and
-// embedded directly in that session's own bearer token at login time (see
-// sessionStore.create in webui.go) so every request can check it without a
-// server-side lookup, the same way the rest of that token's claims work.
+// Permission is a signed-in user's granted capabilities, on top of having
+// merely authenticated: what they're allowed to see and do. Never stored:
+// it's worked out on every request from the SSO access token, as the config
+// file's webui.oidc.default-permissions ORed with whatever the token's
+// groups are mapped to in webui.oidc.group-permissions (see
+// internal/backup/webui/auth.go).
 type Permission int
 
 const (
@@ -37,20 +35,14 @@ const (
 	// the file listing it comes from.
 	PermissionDownload
 
-	// PermissionAdmin lets a session manage the web UI's "Users" admin
-	// section itself — create/update/delete other web UI accounts and OIDC
-	// permission overrides, and issue long-lived API tokens (see
-	// requireAdmin in webui.go) — access that used to require being the
-	// single config-file admin (webui.username/webui.password), now
-	// assignable to a "Users" admin-managed account or an OIDC identity
-	// instead. It implies PermissionView, PermissionDownload,
+	// PermissionAdmin lets a session retry a job's failed targets (see
+	// handleRetryFailedTargets in webui.go). It implies PermissionView, PermissionDownload,
 	// PermissionViewLoginLog, PermissionViewDownloadLog,
 	// PermissionViewJobRunLog, PermissionViewTargetRunLog, and
 	// PermissionViewReceiverLog (see
 	// CanView/CanDownload/CanViewLoginLog/CanViewDownloadLog/
 	// CanViewJobRunLog/CanViewTargetRunLog/CanViewReceiverLog) — there'd be
-	// no way to administer the dashboard's users without also being able to
-	// use the dashboard itself.
+	// reason to grant admin without also granting the rest of the dashboard.
 	PermissionAdmin
 
 	// PermissionViewLoginLog lets a session see the dashboard's login
@@ -92,10 +84,9 @@ const (
 )
 
 // permissionNames maps each individual bit to its wire/config name, in
-// canonical order. Shared by Names (bitmask -> names, for the "Users" admin
-// API and /api/session) and ParsePermissions (names -> bitmask, for the
-// config file's webui.oidc.default-permissions: and the admin API's
-// request bodies).
+// canonical order. Shared by Names (bitmask -> names, for /api/me) and
+// ParsePermissions (names -> bitmask, for the config file's
+// webui.oidc.default-permissions: and webui.oidc.group-permissions:).
 var permissionNames = []struct {
 	bit  Permission
 	name string
@@ -123,8 +114,7 @@ func (p Permission) CanDownload() bool {
 	return p&(PermissionDownload|PermissionAdmin) != 0
 }
 
-// CanAdmin reports whether p includes the ability to manage the web UI's
-// "Users" admin section (see PermissionAdmin).
+// CanAdmin reports whether p includes admin access (see PermissionAdmin).
 func (p Permission) CanAdmin() bool {
 	return p&PermissionAdmin != 0
 }
@@ -181,9 +171,9 @@ func (p Permission) Names() []string {
 	return names
 }
 
-// ParsePermissions parses names (e.g. from the config file's
-// webui.oidc.default-permissions: list, or the web UI's user-management
-// API) into a Permission bitmask, rejecting any name not in permissionNames.
+// ParsePermissions parses names (from the config file's
+// webui.oidc.default-permissions: list or a webui.oidc.group-permissions:
+// entry) into a Permission bitmask, rejecting any name not in permissionNames.
 func ParsePermissions(names []string) (Permission, error) {
 	var p Permission
 

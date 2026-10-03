@@ -1,12 +1,12 @@
 import type { DownloadEventJSON } from "../api/types";
 import { usePermissionPoll } from "../hooks/usePermissionPoll";
-import { useSession } from "../context/SessionContext";
+import { useAuth } from "../auth/AuthContext";
 import { DownloadLogSection } from "../components/DownloadLogSection";
 import { PageHeader } from "../components/PageHeader";
 import { RequirePermission } from "../components/RequirePermission";
 
 export function DownloadLogPage() {
-  const session = useSession();
+  const session = useAuth();
   const events = usePermissionPoll<DownloadEventJSON>(
     "/api/download-events",
     session.canViewDownloadLog,

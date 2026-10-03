@@ -5,7 +5,6 @@ import Box from "@mui/material/Box";
 import Container from "@mui/material/Container";
 import Drawer from "@mui/material/Drawer";
 import IconButton from "@mui/material/IconButton";
-import Link from "@mui/material/Link";
 import List from "@mui/material/List";
 import ListItemButton from "@mui/material/ListItemButton";
 import ListItemIcon from "@mui/material/ListItemIcon";
@@ -16,23 +15,21 @@ import LogoutIcon from "@mui/icons-material/Logout";
 import Toolbar from "@mui/material/Toolbar";
 import Typography from "@mui/material/Typography";
 import Button from "@mui/material/Button";
-import { logout } from "./api/client";
-import { useMeta } from "./hooks/useMeta";
-import { useSession } from "./context/SessionContext";
+import { useAuth } from "./auth/AuthContext";
+import { Footer } from "./components/Footer";
 import { NAV_GROUPS } from "./nav";
 
 const DRAWER_WIDTH = 240;
 
 export function Layout() {
-  const meta = useMeta();
-  const session = useSession();
+  const auth = useAuth();
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const drawerContent = (
     <div>
       <Toolbar />
       {NAV_GROUPS.map((group, i) => {
-        const items = group.items.filter((item) => !item.visible || item.visible(session));
+        const items = group.items.filter((item) => !item.visible || item.visible(auth));
         if (!items.length) return null;
 
         return (
@@ -82,11 +79,14 @@ export function Layout() {
           <Typography variant="h6" noWrap component="div" sx={{ flexGrow: 1 }}>
             go-backup-tool
           </Typography>
-          {meta?.auth_enabled ? (
-            <Button color="inherit" startIcon={<LogoutIcon />} onClick={() => logout()}>
-              Log out
-            </Button>
+          {auth.me ? (
+            <Typography variant="body2" noWrap sx={{ display: { xs: "none", sm: "block" } }}>
+              {auth.me.username}
+            </Typography>
           ) : null}
+          <Button color="inherit" startIcon={<LogoutIcon />} onClick={() => void auth.logout()}>
+            Log out
+          </Button>
         </Toolbar>
       </AppBar>
 
@@ -120,16 +120,7 @@ export function Layout() {
         <Container sx={{ py: 3 }}>
           <Outlet />
         </Container>
-        <Box
-          component="footer"
-          sx={{ py: 2, textAlign: "center", color: "text.secondary", fontSize: ".78rem" }}
-        >
-          &copy; {new Date().getFullYear()} Witt, Nils · Backup-Tool ·{" "}
-          <Link href="https://github.com/Nils-witt/go-backup-tool" color="inherit">
-            GitHub
-          </Link>{" "}
-          · {meta?.version ?? ""} · {meta?.commit ?? ""}
-        </Box>
+        <Footer />
       </Box>
     </Box>
   );

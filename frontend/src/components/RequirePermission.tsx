@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
 import Alert from "@mui/material/Alert";
-import { useSession } from "../context/SessionContext";
+import { useAuth, type AuthState } from "../auth/AuthContext";
 
-// RequirePermission renders its children only once the session has loaded
+// RequirePermission renders its children only once the account has loaded
 // and `test` passes; otherwise it shows nothing (still loading) or an
 // access-denied notice. The server enforces the same rule on every actual
 // request behind each page — this is purely a display-time gate so a user
@@ -11,13 +11,13 @@ export function RequirePermission({
   test,
   children,
 }: {
-  test: (session: ReturnType<typeof useSession>) => boolean;
+  test: (auth: AuthState) => boolean;
   children: ReactNode;
 }) {
-  const session = useSession();
+  const auth = useAuth();
 
-  if (!session.loaded) return null;
-  if (!test(session)) {
+  if (!auth.me) return null;
+  if (!test(auth)) {
     return <Alert severity="warning">You don't have permission to view this page.</Alert>;
   }
 

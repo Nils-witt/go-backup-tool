@@ -207,21 +207,11 @@ type RunConfig struct {
 	// unset.
 	KeysDir string
 
-	// WebUIUsername/WebUIPassword, when both set, gate the web UI's
-	// /api/... endpoints (including minting a per-receiver file download
-	// ticket; not the receiver API, which keeps its own per-receiver
-	// public-key-verified JWT auth) behind a login page and a bearer token
-	// — see requireWebUISession/handleWebUILogin in webui.go. Empty
-	// WebUIUsername disables the check, leaving the web UI open as before.
-	WebUIUsername string
-	WebUIPassword string
-
 	// LogViewer enables the web UI's live log viewer (served over
-	// /api/logs, see handleLogs/newRunLogger). Off by default: unless
-	// WebUIUsername/WebUIPassword above are set, the dashboard has no login
-	// of its own, so anyone who can reach it would otherwise see this
-	// process's raw log output, which may include operator detail (paths,
-	// error text) an operator might not want exposed that widely.
+	// /api/logs, see handleLogs/newRunLogger). Off by default: this
+	// process's raw log output may include operator detail (paths, error
+	// text) an operator might not want shown to every signed-in user with
+	// the "view" permission.
 	LogViewer bool
 
 	// TrustProxyHeaders, when set, makes the web UI derive the client
@@ -235,14 +225,11 @@ type RunConfig struct {
 	// origin can call this instance's API directly — see fileWebUI.DevMode.
 	DevMode bool
 
-	// OIDC, when its Enabled field is set, lets a browser log into the web
-	// UI via an OpenID Connect provider instead of (or alongside, if
-	// WebUIUsername/WebUIPassword are also set) the dashboard's own
-	// username/password form — see newOIDCAuth/handleOIDCLogin/
-	// handleOIDCCallback in oidc.go. Any account the provider itself
-	// authenticates is let in: this doesn't further restrict who's allowed
-	// by email or domain, so scoping who can authenticate is left to the
-	// provider (e.g. a dedicated app registration or realm).
+	// OIDC is the web UI's only login method: the SPA runs the OpenID
+	// Connect login itself as a public client, and every /api/... request
+	// carries the provider's access token — see auth.go in
+	// internal/backup/webui. Disabled leaves the dashboard locked (see
+	// resolveOIDCSettings).
 	OIDC OIDCSettings
 
 	// Report, when its enabled field is set, sends a daily email summarizing
@@ -254,29 +241,39 @@ type RunConfig struct {
 }
 
 // OIDCSettings is runConfig's resolved form of the config file's
-// webui.oidc: entry (see fileWebUIOIDC), used to build an *oidcAuth (see
-// newOIDCAuth in oidc.go) once the web UI starts.
+// webui.oidc: entry (see fileWebUIOIDC). The web UI's SPA logs in as the
+// public client ClientID (authorization code + PKCE, no client secret), and
+// the backend verifies every request's access token against Issuer (see
+// internal/backup/webui/auth.go). Nothing about users is stored: a
+// request's permissions are DefaultPermissions plus whatever its token's
+// groups (read from GroupsClaim) are mapped to in GroupPermissions, worked
+// out afresh on every request.
 type OIDCSettings struct {
-	Enabled      bool
-	Issuer       string
-	ClientID     string
-	ClientSecret string
-	RedirectURL  string
-	Scopes       []string
+	Enabled     bool
+	Issuer      string
+	ClientID    string
+	Scopes      []string
+	ButtonLabel string
+	GroupsClaim string
 
-	// DefaultPermissions is granted at an identity's very first SSO login
-	// (see handleOIDCCallback in oidc.go), which auto-provisions a users row
-	// for it (see store.GetOrProvisionOIDCUser/store.User) the same way a
-	// web UI "Users" admin-managed account is stored — so an admin can
-	// still override an individual identity's permissions afterward the
-	// same way they would any other account's; this default only seeds
-	// what a brand new identity starts with. Defaults to
-	// permission.PermissionView|permission.PermissionDownload (see
-	// resolveOIDCSettings) when webui.oidc.default-permissions: is unset,
-	// preserving the full access every SSO login had before per-user
-	// permissions existed.
+	// DefaultPermissions is granted to every signed-in user, on top of
+	// whatever their groups grant. Defaults to
+	// permission.PermissionView|permission.PermissionDownload when
+	// webui.oidc.default-permissions: is unset.
 	DefaultPermissions permission.Permission
+
+	// GroupPermissions maps a group name (as it appears in the token's
+	// GroupsClaim claim) to the permissions its members get on top of
+	// DefaultPermissions.
+	GroupPermissions map[string]permission.Permission
 }
+
+const (
+	// defaultOIDCButtonLabel is used when webui.oidc.button-label is unset.
+	defaultOIDCButtonLabel = "Sign in with SSO"
+	// defaultOIDCGroupsClaim is used when webui.oidc.groups-claim is unset.
+	defaultOIDCGroupsClaim = "groups"
+)
 
 // fileJob mirrors config's per-job fields for YAML unmarshaling, used both
 // for the top-level shared defaults and for each entry under jobs:. Any
@@ -429,19 +426,16 @@ type fileWebUI struct {
 	Enabled bool   `yaml:"enabled"`
 	Listen  string `yaml:"listen"`
 
-	// Username/Password, when both set, require a browser to log in (at
-	// /login, with a session remembered via a bearer token) before the web
-	// UI's /api/... endpoints (including minting a per-receiver file
-	// download ticket) serve anything — see
-	// requireWebUISession/handleWebUILogin in webui.go. Unset (the default)
-	// leaves the web UI open, as before.
+	// Username/Password are no longer supported (SSO is the only login
+	// method, see fileWebUIOIDC). They're still decoded only so
+	// resolveWebUISettings can reject a config that sets them, rather than
+	// silently ignoring what used to be its login.
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
 
 	// LogViewer turns on the web UI's live log viewer (a "Logs" section on
 	// the dashboard, polling /api/logs). Unset/false (the default) keeps it
-	// off, since the dashboard has no login guarding it on its own unless
-	// Username/Password above are also set.
+	// off.
 	LogViewer bool `yaml:"log-viewer"`
 
 	// TrustProxyHeaders makes the web UI take the client address recorded
@@ -455,9 +449,8 @@ type fileWebUI struct {
 	// the TCP connection's own address.
 	TrustProxyHeaders bool `yaml:"trust-proxy-headers"`
 
-	// OIDC configures Single Sign-On via an OpenID Connect provider,
-	// alongside (or instead of) Username/Password above — see
-	// fileWebUIOIDC.
+	// OIDC configures Single Sign-On via an OpenID Connect provider, the
+	// web UI's only login method — see fileWebUIOIDC.
 	OIDC fileWebUIOIDC `yaml:"oidc"`
 
 	// DevMode adds permissive CORS response headers (Access-Control-Allow-
@@ -474,54 +467,53 @@ type fileWebUI struct {
 }
 
 // fileWebUIOIDC is the webui.oidc: entry, configuring Single Sign-On for the
-// web UI dashboard via an OpenID Connect provider (Google, Okta, Keycloak, a
-// generic OIDC-compliant IdP, ...). When Enabled, the dashboard's login page
-// (see renderLoginPage) shows a "Log in with SSO" link alongside its
-// username/password form (if Username/Password are also set), taking the
-// browser through the provider's own login before starting the same kind of
-// dashboard session a password login would (see handleOIDCLogin/
-// handleOIDCCallback in oidc.go). Any account the provider itself
-// authenticates is let in.
+// web UI dashboard via an OpenID Connect provider (Keycloak, Authentik,
+// Okta, ...) — the dashboard's only login method. The SPA itself is the OIDC client: a public client
+// running authorization code + PKCE in the browser, with
+// <origin>/login/sso/callback as its redirect URI, so the provider must
+// register it as a public/SPA client and allow this origin for CORS. There
+// is no client secret. Left disabled, nobody can sign in to the dashboard,
+// though the receiver API (same HTTP server) is unaffected.
 type fileWebUIOIDC struct {
 	Enabled bool `yaml:"enabled"`
 
 	// Issuer is the provider's issuer URL (e.g.
-	// "https://accounts.google.com"), used to discover its authorization,
-	// token, and JWKS endpoints via OpenID Connect Discovery
-	// (/.well-known/openid-configuration).
+	// "https://auth.example.com/realms/main") — the base for OpenID Connect
+	// Discovery, and what every access token's "iss" must match.
 	Issuer string `yaml:"issuer"`
 
-	// ClientID/ClientSecret identify this application to the provider, as
-	// issued when registering it there. ClientSecret is written directly in
-	// this file rather than read from the environment, so protect this
-	// file's permissions accordingly.
-	ClientID     string `yaml:"client-id"`
+	// ClientID is the public client the SPA logs in as; an access token
+	// must name it as its "azp" or in its "aud".
+	ClientID string `yaml:"client-id"`
+
+	// ClientSecret/RedirectURL belonged to the old server-side login flow
+	// and are no longer supported; decoded only so resolveOIDCSettings can
+	// reject a config that still sets them.
 	ClientSecret string `yaml:"client-secret"`
+	RedirectURL  string `yaml:"redirect-url"`
 
-	// RedirectURL is the callback URL registered with the provider that it
-	// redirects back to after a login — this instance's own address plus
-	// /login/oidc/callback (e.g.
-	// "https://backups.example.com/login/oidc/callback").
-	RedirectURL string `yaml:"redirect-url"`
-
-	// Scopes are the OpenID Connect scopes requested at login, in addition
-	// to "openid" (always requested, and required by the protocol). Unset
-	// defaults to {"profile", "email"}, enough for most providers to return
-	// a usable display name. Group sync (see store.SyncOIDCGroups and a
-	// group's oidcGroupName mapping in the "Users" admin section) reads a
-	// "groups" claim off the ID token; most providers only populate it when
-	// a "groups" scope (or an equivalent claim mapper) is requested here too.
+	// Scopes are the OAuth2 scopes the SPA requests. Unset defaults to
+	// {"openid", "profile", "email"}. Add "offline_access" to get a refresh
+	// token: without one, a session ends when its access token expires.
 	Scopes []string `yaml:"scopes"`
+
+	// ButtonLabel is the login page's SSO button text. Defaults to
+	// defaultOIDCButtonLabel.
+	ButtonLabel string `yaml:"button-label"`
+
+	// GroupsClaim names the access-token claim listing the user's groups (a
+	// string array, or a single string). Defaults to defaultOIDCGroupsClaim.
+	GroupsClaim string `yaml:"groups-claim"`
 
 	// DefaultPermissions lists the dashboard permissions ("view", "download",
 	// "admin", "login-log", "download-log", "job-run-log",
-	// "target-run-log", and/or "receiver-log") granted to every session an
-	// SSO login starts — see OIDCSettings.DefaultPermissions. Unset defaults
-	// to "view" and "download", matching the full access every SSO login
-	// had before per-user permissions existed; "admin", "login-log",
-	// "download-log", "job-run-log", "target-run-log", and "receiver-log"
-	// are never defaulted in.
+	// "target-run-log", and/or "receiver-log") granted to every signed-in
+	// user. Unset defaults to "view" and "download".
 	DefaultPermissions []string `yaml:"default-permissions"`
+
+	// GroupPermissions maps a group name (as it appears in GroupsClaim) to
+	// the permission names its members get on top of DefaultPermissions.
+	GroupPermissions map[string][]string `yaml:"group-permissions"`
 }
 
 // ParseFlags parses args (typically os.Args[1:]) into a runConfig, writing
@@ -623,8 +615,6 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		LogLevel:          level,
 		Receivers:         receivers,
 		KeysDir:           keysDir,
-		WebUIUsername:     strings.TrimSpace(fileCfg.WebUI.Username),
-		WebUIPassword:     fileCfg.WebUI.Password,
 		LogViewer:         fileCfg.WebUI.LogViewer,
 		TrustProxyHeaders: fileCfg.WebUI.TrustProxyHeaders,
 		DevMode:           fileCfg.WebUI.DevMode,
@@ -734,6 +724,10 @@ func resolveWebUISettings(cfg fileWebUI) (listen string, oidc OIDCSettings, err 
 		return "", OIDCSettings{}, err
 	}
 
+	if cfg.Username != "" || cfg.Password != "" {
+		return "", OIDCSettings{}, errors.New("webui.username/webui.password are no longer supported: the web UI only supports SSO login, configure webui.oidc instead")
+	}
+
 	oidc, err = resolveOIDCSettings(cfg.OIDC, listen)
 	if err != nil {
 		return "", OIDCSettings{}, err
@@ -745,12 +739,16 @@ func resolveWebUISettings(cfg fileWebUI) (listen string, oidc OIDCSettings, err 
 // resolveOIDCSettings validates cfg (the config file's webui.oidc: entry)
 // against listen (the web UI's resolved listen address, empty if the web UI
 // itself is disabled — see resolveWebUIListen) and returns runConfig's
-// resolved oidcSettings. An unset/false cfg.Enabled returns the zero value,
-// leaving SSO disabled. It's an error to enable OIDC without the web UI
-// itself enabled (there'd be no dashboard to log into), or without every one
-// of issuer/client-id/client-secret/redirect-url set, since newOIDCAuth
-// needs all four to talk to the provider.
+// resolved OIDCSettings. An unset/false cfg.Enabled returns the zero value:
+// since SSO is the web UI's only login method, that leaves the dashboard
+// locked (nobody can sign in) while the receiver API, served by the same
+// HTTP server, keeps working. It's an error to enable OIDC without the web
+// UI itself, or without issuer and client-id set.
 func resolveOIDCSettings(cfg fileWebUIOIDC, listen string) (OIDCSettings, error) {
+	if cfg.ClientSecret != "" || cfg.RedirectURL != "" {
+		return OIDCSettings{}, errors.New("webui.oidc.client-secret/webui.oidc.redirect-url are no longer supported: the web UI logs in as a public client (redirect URI <origin>/login/sso/callback), remove them")
+	}
+
 	if !cfg.Enabled {
 		return OIDCSettings{}, nil
 	}
@@ -761,13 +759,10 @@ func resolveOIDCSettings(cfg fileWebUIOIDC, listen string) (OIDCSettings, error)
 
 	issuer := strings.TrimSpace(cfg.Issuer)
 	clientID := strings.TrimSpace(cfg.ClientID)
-	redirectURL := strings.TrimSpace(cfg.RedirectURL)
 
 	required := []struct{ name, val string }{
 		{"issuer", issuer},
 		{"client-id", clientID},
-		{"client-secret", cfg.ClientSecret},
-		{"redirect-url", redirectURL},
 	}
 
 	for _, r := range required {
@@ -778,7 +773,7 @@ func resolveOIDCSettings(cfg fileWebUIOIDC, listen string) (OIDCSettings, error)
 
 	scopes := cfg.Scopes
 	if len(scopes) == 0 {
-		scopes = []string{"profile", "email"}
+		scopes = []string{"openid", "profile", "email"}
 	}
 
 	defaultPerm := permission.PermissionView | permission.PermissionDownload
@@ -792,15 +787,53 @@ func resolveOIDCSettings(cfg fileWebUIOIDC, listen string) (OIDCSettings, error)
 		defaultPerm = parsed
 	}
 
+	groupPerms, err := parseOIDCGroupPermissions(cfg.GroupPermissions)
+	if err != nil {
+		return OIDCSettings{}, err
+	}
+
+	buttonLabel := strings.TrimSpace(cfg.ButtonLabel)
+	if buttonLabel == "" {
+		buttonLabel = defaultOIDCButtonLabel
+	}
+
+	groupsClaim := strings.TrimSpace(cfg.GroupsClaim)
+	if groupsClaim == "" {
+		groupsClaim = defaultOIDCGroupsClaim
+	}
+
 	return OIDCSettings{
 		Enabled:            true,
 		Issuer:             issuer,
 		ClientID:           clientID,
-		ClientSecret:       cfg.ClientSecret,
-		RedirectURL:        redirectURL,
 		Scopes:             scopes,
+		ButtonLabel:        buttonLabel,
+		GroupsClaim:        groupsClaim,
 		DefaultPermissions: defaultPerm,
+		GroupPermissions:   groupPerms,
 	}, nil
+}
+
+// parseOIDCGroupPermissions parses webui.oidc.group-permissions: (group
+// name -> permission names) into group name -> permission bitmask,
+// rejecting an empty group name or an unknown permission name.
+func parseOIDCGroupPermissions(cfg map[string][]string) (map[string]permission.Permission, error) {
+	groupPerms := make(map[string]permission.Permission, len(cfg))
+
+	for group, names := range cfg {
+		if strings.TrimSpace(group) == "" {
+			return nil, errors.New("webui.oidc.group-permissions: group name must not be empty")
+		}
+
+		parsed, err := permission.ParsePermissions(names)
+		if err != nil {
+			return nil, fmt.Errorf("webui.oidc.group-permissions[%q]: %w", group, err)
+		}
+
+		groupPerms[group] = parsed
+	}
+
+	return groupPerms, nil
 }
 
 // resolveWebUIListen returns the effective web UI listen address from the

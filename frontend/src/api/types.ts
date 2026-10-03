@@ -98,85 +98,29 @@ export interface ReceiverEventJSON {
   error: string;
 }
 
-export interface SessionInfoJSON {
+// MeJSON is GET /api/me's (and POST /api/sso/login's) response: the
+// signed-in user's name and the permissions their SSO token grants.
+export interface MeJSON {
   username: string;
   permissions: string[];
   admin: boolean;
-  oidc_enabled: boolean;
+}
+
+// SSOStatusJSON is the public GET /api/sso/status response: what the SPA
+// needs to run the OIDC login itself as a public client.
+export interface SSOStatusJSON {
+  enabled: boolean;
+  buttonLabel: string;
+  issuerUrl?: string;
+  clientId?: string;
+  scopes?: string;
 }
 
 export interface MetaJSON {
   version: string;
   commit: string;
-  auth_enabled: boolean;
-  oidc_enabled: boolean;
-}
-
-export interface WebUIUserJSON {
-  username: string;
-  oidc_username: string;
-  permissions: string[];
-  groups: string[];
-  effective_permissions: string[];
-  created_at: string;
-}
-
-export interface WebUIUserRequestJSON {
-  username: string;
-  password: string;
-  oidc_username: string;
-  permissions: string[];
-  groups: string[];
-}
-
-export interface WebUIUserUpdateRequestJSON {
-  oidc_username: string;
-  permissions: string[];
-  groups: string[];
-}
-
-export interface WebUIGroupJSON {
-  name: string;
-  permissions: string[];
-  oidc_group_name: string;
-  created_at: string;
-}
-
-export interface WebUIGroupRequestJSON {
-  name: string;
-  permissions: string[];
-  oidc_group_name: string;
-}
-
-export interface ApiTokenJSON {
-  jti: string;
-  created_at: string;
-  expires_at: string;
-  revoked: boolean;
-  revoked_at?: string;
-}
-
-export interface ApiTokenRequestJSON {
-  days: number;
-}
-
-export interface LoginResponseJSON {
-  token: string;
-  expires_at: string;
 }
 
 export interface DownloadTicketJSON {
   ticket: string;
 }
-
-export const PERMISSIONS = [
-  "view",
-  "download",
-  "login-log",
-  "download-log",
-  "job-run-log",
-  "target-run-log",
-  "receiver-log",
-  "admin",
-] as const;
-export type Permission = (typeof PERMISSIONS)[number];

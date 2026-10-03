@@ -1,110 +1,81 @@
-// Direct port of dashboard.js's token/fetch helpers (lines 1-56) — the
-// sessionStorage key and the 401-redirects-to-login contract must stay
-// byte-for-byte identical to what login.html/oidc_complete.html (both
-// untouched, server-rendered pages outside this SPA) write and expect.
+import { getAccessToken, renewAccessToken } from "../auth/oidc";
+import type { MeJSON, MetaJSON, SSOStatusJSON } from "./types";
 
-export const TOKEN_KEY = "gbt_webui_token";
+/** Thrown on a non-2xx response; message is the server's own (plain-text) error body. */
+export class ApiError extends Error {
+  status: number;
 
-export function getToken(): string {
-    try {
-        return sessionStorage.getItem(TOKEN_KEY) || "";
-    } catch {
-        return "";
-    }
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
 }
 
-export function setToken(token: string): void {
-    try {
-        sessionStorage.setItem(TOKEN_KEY, token);
-    } catch {
-        // sessionStorage unavailable (e.g. private browsing) — nothing to do.
-    }
+function send(url: string, opts: RequestInit, token: string | null): Promise<Response> {
+  const headers = new Headers(opts.headers);
+  if (token) headers.set("Authorization", "Bearer " + token);
+
+  return fetch(url, { ...opts, headers });
 }
 
-export function clearToken(): void {
-    try {
-        if (import.meta.env.DEV){
-            console.log("clearing token");
-        } else{
-            sessionStorage.removeItem(TOKEN_KEY);
-
-        }
-    } catch {
-        // ignore
-    }
-}
-
-// goToLogin clears the stored token and sends the browser to the login
-// page, remembering the current path so a successful login returns here.
-export function goToLogin(): void {
-
-    if (import.meta.env.DEV) {
-        clearToken();
-        console.log("redirecting to /login?next=" + window.location.pathname);
-        return;
-    }
-    window.location.href = "/login?next=" + encodeURIComponent(window.location.pathname);
-}
-
-// apiFetch wraps fetch(), attaching the stored bearer token (if any) as an
-// Authorization header. A 401 means the token is missing/invalid/expired —
-// there's no server-side redirect to fall back on — so this sends the
-// browser to /login itself instead of letting the caller deal with it.
+// apiFetch wraps fetch(), attaching the SSO access token (if any) as an
+// Authorization header. A rejected token (expired, or revoked at the
+// provider) gets one silent renewal attempt; a 401 that persists throws an
+// ApiError rather than navigating anywhere — when the session can't be
+// renewed, oidc.ts drops it and AuthContext/AuthGate send the browser to
+// /login. Any other status is returned for the caller to inspect.
 export async function apiFetch(url: string, opts: RequestInit = {}): Promise<Response> {
-    const headers = new Headers(opts.headers);
-    const token = getToken();
-    if (token) headers.set("Authorization", "Bearer " + token);
-    if (import.meta.env.DEV) {
-        url = url.startsWith("/") ? "http://localhost:8082" + url : url;
-    }
+  let token = await getAccessToken();
+  let res = await send(url, opts, token);
 
-    const res = await fetch(url, {...opts, headers});
-    if (res.status === 401) {
-        goToLogin();
-        throw new Error("unauthorized");
-    }
+  if (res.status === 401 && token) {
+    token = await renewAccessToken();
+    if (token) res = await send(url, opts, token);
+  }
 
-    return res;
+  if (res.status === 401) {
+    throw new ApiError(401, "unauthorized");
+  }
+
+  return res;
+}
+
+async function errorFrom(res: Response, fallback: string): Promise<ApiError> {
+  const msg = (await res.text().catch(() => "")).trim();
+  return new ApiError(res.status, msg || fallback);
 }
 
 export async function apiFetchJSON<T>(url: string, opts?: RequestInit): Promise<T> {
-    const res = await apiFetch(url, opts);
-    return (await res.json()) as T;
+  const res = await apiFetch(url, opts);
+  if (!res.ok) throw await errorFrom(res, `request failed: ${res.status}`);
+
+  return (await res.json()) as T;
 }
 
 // apiFetchOK performs a mutating request and throws with the response body
-// (or a fallback message) when it didn't succeed — matching the
-// r.ok/r.text()-then-throw pattern dashboard.js uses for form submissions
-// (add user, issue token, set OIDC permissions).
+// (or a fallback message) when it didn't succeed.
 export async function apiFetchOK(
-    url: string,
-    opts: RequestInit,
-    fallbackError: string,
+  url: string,
+  opts: RequestInit,
+  fallbackError: string,
 ): Promise<Response> {
-    const res = await apiFetch(url, opts);
-    if (!res.ok) {
-        const msg = await res.text().catch(() => "");
-        throw new Error(msg || fallbackError);
-    }
+  const res = await apiFetch(url, opts);
+  if (!res.ok) throw await errorFrom(res, fallbackError);
 
-    return res;
+  return res;
 }
 
-// logout best-effort revokes the token server-side, then always clears it
-// locally and sends the browser to /login — there's no cookie for the
-// server to clean up. Uses plain fetch (not apiFetch): a logout call is
-// itself sometimes made with an already-expired token, and shouldn't be
-// bounced through apiFetch's own 401 handling first.
-export async function logout(): Promise<void> {
-    const token = getToken();
-    const headers: HeadersInit = token ? {Authorization: "Bearer " + token} : {};
+// publicJSON fetches one of the unauthenticated endpoints, which must work
+// before any SSO session exists.
+async function publicJSON<T>(url: string): Promise<T> {
+  const res = await fetch(url);
+  if (!res.ok) throw await errorFrom(res, `request failed: ${res.status}`);
 
-    try {
-        await fetch("/api/logout", {method: "POST", headers});
-    } catch {
-        // best effort
-    } finally {
-        //clearToken();
-        window.location.href = "/login";
-    }
+  return (await res.json()) as T;
 }
+
+export const fetchMeta = () => publicJSON<MetaJSON>("/api/meta");
+export const fetchSSOStatus = () => publicJSON<SSOStatusJSON>("/api/sso/status");
+export const fetchMe = () => apiFetchJSON<MeJSON>("/api/me");
+/** Records the just-completed SSO login in the login log; returns the account like fetchMe(). */
+export const ssoLogin = () => apiFetchJSON<MeJSON>("/api/sso/login", { method: "POST" });

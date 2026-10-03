@@ -128,38 +128,18 @@ servers:
 #   enabled: true
 #   listen: ":8080" # required when enabled: true
 #
-#   # username/password, when both set, require a browser to log in (at
-#   # /login) before the dashboard or any of its /api/... endpoints —
-#   # including per-receiver file downloads — serve anything. A successful
-#   # login is remembered for 12h via a session cookie. Unset (the default)
-#   # leaves the web UI open to anyone who can reach it; the receiver API
-#   # (used by other go-backup-tool instances, not browsers) is unaffected
-#   # either way, since it authenticates each request with its own
-#   # per-receiver public-key-verified JSON Web Token.
-#   username: "admin"
-#   password: "replace-with-a-long-random-password"
-#
-#   # This username/password account always has full access (view, download,
-#   # admin, login-log, and download-log) and can manage the dashboard's
-#   # "Users" section: additional accounts, each with their own password and
-#   # any combination of "view" (see job/target/receiver status, file
-#   # listings, and application logs), "download" (also pull a file's actual
-#   # content; implies "view"), "login-log" (see the dashboard's login
-#   # history — granted independently of "view"), "download-log" (see the
-#   # dashboard's file download history — granted independently of "view"/
-#   # "download"), and "admin" (also manage the "Users" section itself —
-#   # create/edit/delete other accounts, set OIDC permission overrides, and
-#   # issue long-lived API tokens; implies all of the above) — stored in the
-#   # job state db kept alongside this config file, not here. Skipping
-#   # username/password above but still wanting additional accounts isn't
-#   # supported: there'd be no admin to create them from the "Users" section
-#   # in the first place, unless oidc's own default-permissions below grants
-#   # every SSO login "admin" instead.
+#   # The dashboard's only login method is SSO (see oidc below): every
+#   # /api/... endpoint — including minting a per-receiver file download
+#   # ticket — needs a signed-in SSO user. Without oidc enabled, nobody can
+#   # sign in and the dashboard stays locked; the receiver API (used by
+#   # other go-backup-tool instances, not browsers) is unaffected either
+#   # way, since it authenticates each request with its own per-receiver
+#   # public-key-verified JSON Web Token.
 #
 #   # log-viewer adds a "Logs" section to the dashboard, showing this
-#   # process's own recent log output (polled from /api/logs). Unset (the
-#   # default) leaves it off, since the dashboard has no login guarding it
-#   # on its own unless username/password above are also set.
+#   # process's own recent log output (polled from /api/logs) to every user
+#   # with "view". Unset (the default) leaves it off, since raw log output
+#   # may include detail (paths, error text) not meant for every viewer.
 #   log-viewer: true
 #
 #   # trust-proxy-headers makes the dashboard's login/download logs and
@@ -181,37 +161,47 @@ servers:
 #   # holds a valid bearer token for this instance.
 #   dev-mode: true
 #
-#   # oidc adds a "Log in with SSO" link to the login page, alongside
-#   # username/password above if that's also configured — either one starts
-#   # the same kind of dashboard session. Any account the provider itself
-#   # authenticates is let in: this doesn't further restrict who's allowed by
-#   # email or domain, so scope who can log in on the provider's side (e.g. a
-#   # dedicated app registration or realm) if that matters for your provider.
+#   # oidc configures single sign-on via an OpenID Connect provider
+#   # (Keycloak, Authentik, Okta, ...). The dashboard itself is the OIDC
+#   # client: a public client running authorization code + PKCE in the
+#   # browser, with no client secret. Register it with the provider as a
+#   # public/SPA client, with this instance's own address plus
+#   # /login/sso/callback as its redirect URI (e.g.
+#   # https://backups.example.com/login/sso/callback) and that origin
+#   # allowed for CORS. Every API request then carries the provider's access
+#   # token, which this instance verifies against the issuer's keys.
+#   # Changing anything here needs a restart.
 #   oidc:
 #     enabled: true
-#     issuer: "https://accounts.google.com" # or your own IdP's issuer URL
-#     client-id: "replace-with-your-oidc-client-id"
-#     # client-secret is written directly here, like password above, rather
-#     # than read from the environment — protect this file's permissions
-#     # accordingly.
-#     client-secret: "replace-with-your-oidc-client-secret"
-#     # redirect-url must exactly match what's registered with the provider:
-#     # this instance's own address plus /login/oidc/callback.
-#     redirect-url: "https://backups.example.com/login/oidc/callback"
-#     # scopes requested in addition to "openid" (always requested). Unset
-#     # defaults to {profile, email}.
-#     # scopes: [profile, email]
-#     # default-permissions is granted to every SSO login that has no
-#     # per-identity override set from the dashboard's "OIDC users" admin
-#     # listing — every other account the provider lets in gets this same
-#     # fixed set. Unset defaults to both "view" and
-#     # "download", the full access every SSO login had before per-user
-#     # permissions existed; "admin", "login-log", and "download-log" are
-#     # never defaulted in. Including "admin" here grants every SSO login
-#     # the dashboard's own admin access — normally overkill; prefer setting
-#     # an "admin" override on specific identities from the "Users" section
-#     # instead once at least one admin account exists to set it.
+#     issuer: "https://auth.example.com/realms/main"
+#     client-id: "go-backup-tool"
+#     # scopes the browser requests. Unset defaults to [openid, profile,
+#     # email]. Add offline_access to get a refresh token: without one, a
+#     # session ends as soon as its access token expires.
+#     scopes: [openid, profile, email, offline_access]
+#     # button-label: "Sign in with SSO"
+#     # groups-claim names the access-token claim listing the user's groups
+#     # (a string array or a single string). Default "groups".
+#     # groups-claim: groups
+#     #
+#     # Permissions are never stored: they're worked out from the access
+#     # token on every request, so changing someone's groups at the provider
+#     # applies on their next request. Available permissions: "view" (see
+#     # job/target/receiver status, file listings, and application logs),
+#     # "download" (also pull a file's actual content; implies "view"),
+#     # "login-log", "download-log", "job-run-log", "target-run-log",
+#     # "receiver-log" (each one history view, granted independently of
+#     # "view"), and "admin" (also retry a job's failed targets; implies all
+#     # of the above).
+#     #
+#     # default-permissions is granted to every signed-in user. Unset
+#     # defaults to [view, download].
 #     # default-permissions: [view, download]
+#     # group-permissions maps a group name (as it appears in groups-claim)
+#     # to what its members get on top of default-permissions.
+#     group-permissions:
+#       backup-admins: [admin]
+#       auditors: [login-log, download-log]
 
 jobs:
   - name: database

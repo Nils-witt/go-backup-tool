@@ -1,12 +1,12 @@
 import type { ReceiverEventJSON } from "../api/types";
 import { usePermissionPoll } from "../hooks/usePermissionPoll";
-import { useSession } from "../context/SessionContext";
+import { useAuth } from "../auth/AuthContext";
 import { ReceiverLogSection } from "../components/ReceiverLogSection";
 import { PageHeader } from "../components/PageHeader";
 import { RequirePermission } from "../components/RequirePermission";
 
 export function ReceiverLogPage() {
-  const session = useSession();
+  const session = useAuth();
   const events = usePermissionPoll<ReceiverEventJSON>(
     "/api/receiver-events",
     session.canViewReceiverLog,

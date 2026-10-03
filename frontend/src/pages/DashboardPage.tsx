@@ -1,11 +1,11 @@
 import type { JobSnapshot } from "../api/types";
 import { usePoll } from "../hooks/usePoll";
-import { useSession } from "../context/SessionContext";
+import { useAuth } from "../auth/AuthContext";
 import { JobsGrid } from "../components/JobsGrid";
 import { PageHeader } from "../components/PageHeader";
 
 export function DashboardPage() {
-  const session = useSession();
+  const session = useAuth();
   const { data: jobs, refreshNow } = usePoll<JobSnapshot>("/api/status");
 
   return (

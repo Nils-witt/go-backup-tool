@@ -7,10 +7,8 @@ import { apiFetchJSON } from "../api/client";
 // 597-625), each gated on its own permission rather than the main
 // Promise.all poll's permission.PermissionView. The effect depends on
 // `enabled` directly (not just a ref) so that a permission becoming known
-// after /api/session resolves triggers an immediate fetch, matching
-// loadSessionInfo's own callback re-invoking loadLoginEvents/
-// loadDownloadEvents right away rather than waiting for the next
-// scheduled poll (dashboard.js:582-595).
+// after /api/me resolves triggers an immediate fetch rather than waiting
+// for the next scheduled poll.
 export function usePermissionPoll<T>(url: string, enabled: boolean, intervalMs = 2000): T[] {
   const [data, setData] = useState<T[]>([]);
 

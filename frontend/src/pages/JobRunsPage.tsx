@@ -1,12 +1,12 @@
 import type { JobRunEventJSON } from "../api/types";
 import { usePermissionPoll } from "../hooks/usePermissionPoll";
-import { useSession } from "../context/SessionContext";
+import { useAuth } from "../auth/AuthContext";
 import { JobRunLogSection } from "../components/JobRunLogSection";
 import { PageHeader } from "../components/PageHeader";
 import { RequirePermission } from "../components/RequirePermission";
 
 export function JobRunsPage() {
-  const session = useSession();
+  const session = useAuth();
   const events = usePermissionPoll<JobRunEventJSON>("/api/job-runs", session.canViewJobRunLog);
 
   return (

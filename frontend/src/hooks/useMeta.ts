@@ -1,22 +1,18 @@
 import { useEffect, useState } from "react";
+import { fetchMeta } from "../api/client";
 import type { MetaJSON } from "../api/types";
 
-// useMeta fetches GET /api/meta once: build/version info and whether auth
-// is enabled at all, for the footer and the "Log out" link's visibility.
-// Always-public/unauthenticated — fetched with plain fetch(), not
-// apiFetch(), since it must render before a session exists.
+// useMeta fetches GET /api/meta once: build/version info for the footer.
+// Always public/unauthenticated, since the footer is shown on the login
+// page too.
 export function useMeta(): MetaJSON | null {
   const [meta, setMeta] = useState<MetaJSON | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    let url = "/api/meta";
-    if (import.meta.env.DEV) {
-      url = url.startsWith("/") ? "http://localhost:8082" + url : url;
-    }
-    fetch(url)
-      .then((r) => r.json())
-      .then((data: MetaJSON) => {
+
+    fetchMeta()
+      .then((data) => {
         if (!cancelled) setMeta(data);
       })
       .catch(() => {});

@@ -1,12 +1,12 @@
 import type { TargetRunEventJSON } from "../api/types";
 import { usePermissionPoll } from "../hooks/usePermissionPoll";
-import { useSession } from "../context/SessionContext";
+import { useAuth } from "../auth/AuthContext";
 import { TargetRunLogSection } from "../components/TargetRunLogSection";
 import { PageHeader } from "../components/PageHeader";
 import { RequirePermission } from "../components/RequirePermission";
 
 export function TargetRunsPage() {
-  const session = useSession();
+  const session = useAuth();
   const events = usePermissionPoll<TargetRunEventJSON>(
     "/api/target-runs",
     session.canViewTargetRunLog,

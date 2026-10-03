@@ -1,6 +1,5 @@
 // Package webui implements go-backup-tool's web UI: the live status
-// dashboard, its login/bearer-token auth (including optional OIDC SSO, see
-// oidc.go), and the read-only views of receiver state and files it shows
+// dashboard, its SSO bearer-token auth (see auth.go), and the read-only views of receiver state and files it shows
 // alongside a job's own status. It shares one HTTP server/mux with the
 // receiver API (internal/backup/receiver) via StartWebUI's
 // registerExtraRoutes hook, so the composition root can mount both on the
@@ -10,14 +9,10 @@ package webui
 import (
 	"context"
 	"crypto/rand"
-	"crypto/rsa"
-	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"html/template"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -28,9 +23,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/go-jose/go-jose/v4"
-	"github.com/go-jose/go-jose/v4/jwt"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
@@ -54,16 +46,10 @@ type Server struct {
 // StartWebUI starts the -listen web UI dashboard and returns a Server the
 // caller can shut down with Server.Shutdown. Returns nil if the server
 // fails to start.
-func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Config, runner *pipeline.Runner, receivers map[string]config.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store, logs *LogRingBuffer, webUIUsername, webUIPassword string, oidcAuth *OIDCAuth, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, registerExtraRoutes func(*http.ServeMux), queue *notify.Queue) *Server {
+func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Config, runner *pipeline.Runner, receivers map[string]config.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store, logs *LogRingBuffer, oidcSettings config.OIDCSettings, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, registerExtraRoutes func(*http.ServeMux), queue *notify.Queue) *Server {
 	jobsByName := make(map[string]*config.Config, len(jobs))
 	for _, j := range jobs {
 		jobsByName[j.Name] = j
-	}
-
-	uiSessions, err := newSessionStore(identity, db)
-	if err != nil {
-		log.Error("web UI: starting session store", "err", err)
-		return nil
 	}
 
 	var lc net.ListenConfig
@@ -78,72 +64,44 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 		logs = NewLogRingBuffer(LogBufferCapacity)
 	}
 
+	if !oidcSettings.Enabled {
+		log.Warn("web UI: webui.oidc is not enabled, so nobody can sign in to the dashboard (the receiver API is unaffected)")
+	}
+
 	downloadTickets := newDownloadTicketStore()
 
-	authEnabled := webUIUsername != "" || oidcAuth != nil
+	auth := newAuthenticator(oidcSettings, db, log, trustProxyHeaders)
 
-	// authOnly gates a JSON endpoint the dashboard's own JavaScript calls
-	// via fetch() behind nothing more than a currently valid session: a
-	// missing/invalid/expired bearer token reports 401 rather than
-	// redirecting, since fetch() (unlike a browser navigation) can't follow
-	// a redirect into a login page and do anything useful with it — see
-	// requireWebUISession. The dashboard shell (GET /) and file downloads
-	// (GET /api/receivers/{id}/download/{key...}) aren't wrapped in this: a
-	// plain browser navigation can never carry a bearer token, so the shell
-	// is always public and downloads are authorized by a one-time ticket
-	// instead (see downloadTicketStore).
-	authOnly := func(h http.HandlerFunc) http.HandlerFunc {
-		return requireWebUISession(authEnabled, uiSessions, h)
+	// perm gates a JSON endpoint the dashboard's own JavaScript calls via
+	// fetch() behind a valid SSO access token (see requireUser) whose
+	// permissions pass check: a missing/invalid token reports 401, a
+	// signed-in user lacking the permission 403. The dashboard shell (GET
+	// /) and file downloads (GET /api/receivers/{id}/download/{key...})
+	// aren't wrapped in this: a plain browser navigation can never carry a
+	// bearer token, so the shell is always public and downloads are
+	// authorized by a one-time ticket instead (see downloadTicketStore).
+	perm := func(check func(permission.Permission) bool) func(http.HandlerFunc) http.HandlerFunc {
+		return func(h http.HandlerFunc) http.HandlerFunc { return requirePermission(auth, check, h) }
 	}
 
-	// apiPerm builds an authOnly gate that additionally requires the
-	// session hold a specific permission (see requirePermission) — shared
-	// by every apiXxx gate below so each only has to name which permission
-	// it requires.
-	apiPerm := func(required permission.Permission) func(http.HandlerFunc) http.HandlerFunc {
-		return func(h http.HandlerFunc) http.HandlerFunc {
-			return authOnly(requirePermission(authEnabled, uiSessions, required, h))
-		}
-	}
-
-	// api requires permission.PermissionView — every endpoint below except
-	// /api/session (any authenticated session, regardless of its
-	// permissions, needs to be able to read its own), the
-	// login/download/job-run/target-run/receiver history endpoints (see
-	// apiLoginLog/apiDownloadLog/apiJobRunLog/apiTargetRunLog/apiReceiverLog
-	// below, their own dedicated permissions instead), and the "Users"
-	// admin endpoints (see admin below, requireAdmin's own gate instead).
-	api := apiPerm(permission.PermissionView)
-
-	// apiDownload requires permission.PermissionDownload instead of View,
-	// gating handleMintDownloadTicket — the one step in the download flow a
-	// bearer token actually authorizes (see downloadTicketStore's own doc
-	// comment for why the second, actual download request can't be gated
-	// the same way).
-	apiDownload := apiPerm(permission.PermissionDownload)
-
-	// apiLoginLog, apiDownloadLog, apiJobRunLog, apiTargetRunLog, and
-	// apiReceiverLog each gate one history/log endpoint on its own
-	// dedicated permission rather than api's permission.PermissionView — a
-	// session can see the rest of the dashboard without being able to see
-	// any one of these logs, and vice versa.
-	apiLoginLog := apiPerm(permission.PermissionViewLoginLog)
-	apiDownloadLog := apiPerm(permission.PermissionViewDownloadLog)
-	apiJobRunLog := apiPerm(permission.PermissionViewJobRunLog)
-	apiTargetRunLog := apiPerm(permission.PermissionViewTargetRunLog)
-	apiReceiverLog := apiPerm(permission.PermissionViewReceiverLog)
-
-	// admin requires the session belong to the config-file admin (see
-	// requireAdmin), gating the "Users" admin section's own endpoints.
-	admin := func(h http.HandlerFunc) http.HandlerFunc {
-		return authOnly(requireAdmin(authEnabled, uiSessions, webUIUsername, h))
-	}
+	// api requires view access — every dashboard data endpoint except the
+	// download/log/admin ones below, which each name their own permission.
+	api := perm(permission.Permission.CanView)
+	apiDownload := perm(permission.Permission.CanDownload)
+	apiLoginLog := perm(permission.Permission.CanViewLoginLog)
+	apiDownloadLog := perm(permission.Permission.CanViewDownloadLog)
+	apiJobRunLog := perm(permission.Permission.CanViewJobRunLog)
+	apiTargetRunLog := perm(permission.Permission.CanViewTargetRunLog)
+	apiReceiverLog := perm(permission.Permission.CanViewReceiverLog)
+	admin := perm(permission.Permission.CanAdmin)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", handleDashboard(dashboardIndexHTML))
 	mux.Handle("GET /assets/", http.StripPrefix("/assets/", cacheForever(http.FileServerFS(dashboardAssetsFS))))
-	mux.HandleFunc("GET /api/meta", handleMeta(authEnabled, oidcAuth != nil))
-	mux.HandleFunc("GET /api/session", authOnly(handleSessionInfo(uiSessions, authEnabled, webUIUsername, oidcAuth != nil)))
+	mux.HandleFunc("GET /api/meta", handleMeta())
+	mux.HandleFunc("GET /api/sso/status", handleSSOStatus(oidcSettings))
+	mux.HandleFunc("GET /api/me", requireUser(auth, handleMe()))
+	mux.HandleFunc("POST /api/sso/login", requireUser(auth, handleSSOLogin(auth)))
 	mux.HandleFunc("GET /api/status", api(handleStatus(statusStore)))
 	mux.HandleFunc("GET /api/logs", api(handleLogs(logs)))
 	mux.HandleFunc("GET /api/identity", api(handleIdentity(identity)))
@@ -152,34 +110,14 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 	mux.HandleFunc("GET /api/target-runs", apiTargetRunLog(handleTargetRunEvents(db, log)))
 	mux.HandleFunc("POST /api/jobs/{name}/retry", admin(handleRetryFailedTargets(jobsByName, statusStore, runner, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/files", api(handleReceiverFiles(receivers, log)))
-	mux.HandleFunc("POST /api/receivers/{id}/download/{key...}", apiDownload(handleMintDownloadTicket(receivers, downloadTickets, uiSessions)))
+	mux.HandleFunc("POST /api/receivers/{id}/download/{key...}", apiDownload(handleMintDownloadTicket(receivers, downloadTickets)))
 	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", handleDownloadFile(receivers, log, db, downloadTickets, trustProxyHeaders, queue))
-	mux.HandleFunc("GET /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions, db, log, trustProxyHeaders))
-	mux.HandleFunc("POST /login", handleWebUILogin(webUIUsername, webUIPassword, oidcAuth != nil, uiSessions, db, log, trustProxyHeaders))
-	mux.HandleFunc("POST /api/logout", handleAPILogout(uiSessions, db, log))
 	mux.HandleFunc("GET /api/login-events", apiLoginLog(handleLoginEvents(db, log)))
 	mux.HandleFunc("GET /api/download-events", apiDownloadLog(handleDownloadEvents(db, log)))
 	mux.HandleFunc("GET /api/receiver-events", apiReceiverLog(handleReceiverEvents(db, log)))
-	mux.HandleFunc("GET /api/users", admin(handleListUsers(db, log)))
-	mux.HandleFunc("POST /api/users", admin(handleCreateUser(db, webUIUsername, log)))
-	mux.HandleFunc("PUT /api/users/{username}", admin(handleUpdateUser(db, log)))
-	mux.HandleFunc("DELETE /api/users/{username}", admin(handleDeleteUser(db, log)))
-	mux.HandleFunc("POST /api/users/{username}/tokens", admin(handleIssueWebUIUserToken(uiSessions, db, log)))
-	mux.HandleFunc("GET /api/users/{username}/tokens", admin(handleListWebUIUserTokens(db, log)))
-	mux.HandleFunc("DELETE /api/users/{username}/tokens/{jti}", admin(handleRevokeWebUIUserToken(uiSessions, db, log)))
-	mux.HandleFunc("GET /api/groups", admin(handleListGroups(db, log)))
-	mux.HandleFunc("POST /api/groups", admin(handleCreateGroup(db, log)))
-	mux.HandleFunc("PUT /api/groups/{name}", admin(handleUpdateGroup(db, log)))
-	mux.HandleFunc("DELETE /api/groups/{name}", admin(handleDeleteGroup(db, log)))
 
 	if registerExtraRoutes != nil {
 		registerExtraRoutes(mux)
-	}
-
-	if oidcAuth != nil {
-		pending := newOIDCPendingStore()
-		mux.HandleFunc("GET /login/oidc", handleOIDCLogin(oidcAuth, pending))
-		mux.HandleFunc("GET /login/oidc/callback", handleOIDCCallback(oidcAuth, pending, uiSessions, log, db, trustProxyHeaders))
 	}
 
 	var handler http.Handler = mux
@@ -352,7 +290,7 @@ func handleStatus(store *backup.StatusStore) http.HandlerFunc {
 // /api/status currently reports as failed (see
 // pipeline.Runner.RetryFailedTargets's doc comment for why that means
 // re-running the whole pipeline, not just re-uploading). Gated on admin
-// like the "Users" section rather than plain view/download, since it
+// rather than plain view/download, since it
 // re-executes the job's configured backup command — a broader capability
 // than anything else those two permissions grant.
 //
@@ -445,26 +383,21 @@ func handleIdentity(identity *identity.ServerIdentity) http.HandlerFunc {
 	}
 }
 
-// metaJSON is this instance's build/auth metadata, as served by GET
-// /api/meta, for the dashboard's footer and its "Log out" link's visibility
-// — the SPA's index.html is a static build artifact with no server-side
+// metaJSON is this instance's build metadata, as served by GET /api/meta,
+// for the dashboard's footer — the SPA's index.html is a static build artifact with no server-side
 // templating, so this replaces what dashboardHTML's now-removed
-// {{VERSION}}/{{COMMIT}}/{{LOGOUT_HIDDEN}} placeholder substitutions did.
+// {{VERSION}}/{{COMMIT}} placeholder substitutions did.
 type metaJSON struct {
-	Version     string `json:"version"`
-	Commit      string `json:"commit"`
-	AuthEnabled bool   `json:"auth_enabled"`
-	OIDCEnabled bool   `json:"oidc_enabled"`
+	Version string `json:"version"`
+	Commit  string `json:"commit"`
 }
 
 // handleMeta serves GET /api/meta: always public/unauthenticated, since the
-// dashboard shell itself (GET /) is public and needs this before any
-// session exists. Leaks nothing a viewer of GET /login couldn't already
-// see (authEnabled/oidcEnabled) or the binary's own --version already
-// reports (version/commit).
-func handleMeta(authEnabled, oidcEnabled bool) http.HandlerFunc {
+// footer it feeds is shown on the login page too. Leaks nothing the
+// binary's own --version doesn't already report.
+func handleMeta() http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, metaJSON{Version: version.Version, Commit: version.Commit, AuthEnabled: authEnabled, OIDCEnabled: oidcEnabled})
+		writeJSON(w, metaJSON{Version: version.Version, Commit: version.Commit})
 	}
 }
 
@@ -592,450 +525,13 @@ func handleLogs(buf *LogRingBuffer) http.HandlerFunc {
 	}
 }
 
-// bearerToken extracts the token from r's "Authorization: Bearer <token>"
-// header, reporting false if it's missing or malformed. Mirrors the
-// receiver API's own helper of the same name
-// (internal/backup/receiver/receiver.go); duplicated here rather than
-// shared, since it's five lines and pulling in a dependency between these
-// packages for it isn't worth it.
-func bearerToken(r *http.Request) (string, bool) {
-	const prefix = "Bearer "
-
-	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, prefix) {
-		return "", false
-	}
-
-	return strings.TrimPrefix(auth, prefix), true
-}
-
-// sessionTTL is how long a dashboard login remains valid — i.e. how long its
-// bearer token (see sessionStore) is honored — before the browser has to log
-// in again.
-const sessionTTL = 12 * time.Hour
-
-// sessionStore mints and verifies the dashboard's bearer tokens: signed
-// JWTs (RS256, see create) whose claims — Subject (the logged-in username)
-// and ID (a per-token jti) — are trusted once the signature checks out,
-// without needing a server-side record of every currently valid session.
-// Logout (see revoke) still needs some server-side state, since a valid
-// JWT's signature alone can't be un-signed: revoke blocklists the token's
-// jti instead of deleting a whole session record, and a jti past its own
-// token's expiry is pruned lazily the next time isRevoked looks it up
-// (never, if it's never presented again) — bounded by the logout rate over
-// sessionTTL, far smaller than tracking every active session the way the
-// previous opaque-token store did. privateKey is this instance's own
-// persistent RSA key (see newSessionStore) rather than a random key
-// generated fresh per process, so unlike the HS256 scheme this replaced, a
-// restart no longer invalidates every outstanding session. db, when
-// non-nil, backs a long-lived API token's revocation (see revokeJTI and
-// db.RevokeAPIToken) so that, unlike an interactive session's, it
-// survives a restart: newSessionStore preloads the in-memory revoked map
-// below from it, since a long-lived token (up to maxAPITokenDays) can
-// easily outlive the process that revoked it. Safe for concurrent use,
-// since login and other requests can arrive concurrently.
-type sessionStore struct {
-	privateKey *rsa.PrivateKey
-	publicKey  *rsa.PublicKey
-	db         *store.Store
-
-	mu      sync.Mutex
-	revoked map[string]time.Time // jti -> that token's own expiry
-}
-
-// newSessionStore returns a sessionStore that signs/verifies dashboard
-// bearer tokens with id's persistent RSA key pair (the same
-// key — ensured to exist on disk at startup, see
-// identity.LoadServerIdentityAtStartup — that SignRequest uses for
-// outgoing remote-target requests), so sessions survive a process restart.
-// If id is nil (e.g. a caller that doesn't wire up a server identity, such
-// as some tests), a fresh key pair is generated instead, matching this
-// store's previous per-process-random-key behavior. db, when non-nil, is
-// used to preload the in-memory revocation blocklist with every
-// currently-revoked, not-yet-expired long-lived API token (see
-// db.ListRevokedAPITokens) — otherwise a revocation made before a
-// restart would be forgotten, since a JWT's signature alone can't be
-// un-signed and the blocklist itself only lives in memory once loaded.
-func newSessionStore(id *identity.ServerIdentity, db *store.Store) (*sessionStore, error) {
-	var key *rsa.PrivateKey
-
-	if id != nil {
-		key = id.PrivateKey()
-	} else {
-		generated, err := rsa.GenerateKey(rand.Reader, identity.ServerKeyBits)
-		if err != nil {
-			return nil, fmt.Errorf("generating session signing key: %w", err)
-		}
-
-		key = generated
-	}
-
-	revoked := make(map[string]time.Time)
-
-	if db != nil {
-		tokens, err := db.ListRevokedAPITokens(context.Background(), time.Now())
-		if err != nil {
-			return nil, fmt.Errorf("loading revoked API tokens: %w", err)
-		}
-
-		for _, t := range tokens {
-			revoked[t.JTI] = t.ExpiresAt
-		}
-	}
-
-	return &sessionStore{privateKey: key, publicKey: &key.PublicKey, db: db, revoked: revoked}, nil
-}
-
-// sessionClaims is the private claim a bearer token carries alongside the
-// standard jwt.Claims (see create/parse): the permissions granted at login
-// time (see permission.Permission), resolved once from whichever login path
-// authenticated the session (the config-file admin, an OIDC provider's
-// default, or a web UI "Users" admin-managed account — see
-// handleWebUILogin/handleOIDCCallback) and then trusted for the token's
-// whole lifetime, the same way Subject/ID are. A later change to that
-// account's stored permissions (see UpdateUserPermissions) therefore
-// only takes effect on that account's next login, not retroactively —
-// matching how a password change doesn't invalidate already-issued
-// sessions either.
-type sessionClaims struct {
-	Perm permission.Permission `json:"perm"`
-}
-
-// create mints a new bearer token for username granting perm, valid for
-// sessionTTL.
-func (s *sessionStore) create(username string, perm permission.Permission) (string, error) {
-	token, _, err := s.createWithTTL(username, perm, sessionTTL)
-	return token, err
-}
-
-// createWithTTL is create, generalized to a caller-chosen validity period —
-// sessionTTL for a normal interactive login (see create), or an
-// admin-chosen, much longer one for a long-lived API token (see
-// handleIssueWebUIUserToken, which also records the returned jti via
-// db.SaveAPIToken so it can later be looked up and revoked without
-// the raw token itself).
-func (s *sessionStore) createWithTTL(username string, perm permission.Permission, ttl time.Duration) (token, jti string, err error) {
-	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.RS256, Key: s.privateKey},
-		(&jose.SignerOptions{}).WithType("JWT"),
-	)
-	if err != nil {
-		return "", "", fmt.Errorf("building signer: %w", err)
-	}
-
-	jti, err = randomSessionID()
-	if err != nil {
-		return "", "", err
-	}
-
-	now := time.Now()
-	claims := jwt.Claims{
-		Subject:  username,
-		ID:       jti,
-		IssuedAt: jwt.NewNumericDate(now),
-		Expiry:   jwt.NewNumericDate(now.Add(ttl)),
-	}
-
-	token, err = jwt.Signed(signer).Claims(claims).Claims(sessionClaims{Perm: perm}).Serialize()
-	if err != nil {
-		return "", "", fmt.Errorf("serializing token: %w", err)
-	}
-
-	return token, jti, nil
-}
-
-// parse verifies raw's RS256 signature against s.publicKey and that it's
-// currently unexpired, reporting its standard and private claims (see
-// sessionClaims) and ok=true only if both hold. It does not check
-// revocation — see valid/usernameFor/permissionsFor, which do.
-func (s *sessionStore) parse(raw string) (jwt.Claims, sessionClaims, bool) {
-	token, err := jwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.RS256})
-	if err != nil {
-		return jwt.Claims{}, sessionClaims{}, false
-	}
-
-	var (
-		claims jwt.Claims
-		sc     sessionClaims
-	)
-
-	if err := token.Claims(s.publicKey, &claims, &sc); err != nil {
-		return jwt.Claims{}, sessionClaims{}, false
-	}
-
-	if err := claims.Validate(jwt.Expected{Time: time.Now()}); err != nil {
-		return jwt.Claims{}, sessionClaims{}, false
-	}
-
-	return claims, sc, true
-}
-
-// isRevoked reports whether jti was blocklisted by revoke and hasn't yet
-// reached its own token's expiry, evicting it first if it has — at that
-// point the token would fail parse's own expiry check anyway, so there's no
-// need to keep tracking it as revoked.
-func (s *sessionStore) isRevoked(jti string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	expires, ok := s.revoked[jti]
-	if !ok {
-		return false
-	}
-
-	if time.Now().After(expires) {
-		delete(s.revoked, jti)
-		return false
-	}
-
-	return true
-}
-
-// valid reports whether raw is a currently valid, non-revoked bearer token
-// for s.
-func (s *sessionStore) valid(raw string) bool {
-	if raw == "" {
-		return false
-	}
-
-	claims, _, ok := s.parse(raw)
-
-	return ok && !s.isRevoked(claims.ID)
-}
-
-// current looks up r's bearer token and returns its claims, reporting
-// ok=true only if it's present, currently valid (see parse), and not
-// revoked. Shared by every method below that needs a request's currently
-// authenticated session.
-func (s *sessionStore) current(r *http.Request) (jwt.Claims, sessionClaims, bool) {
-	token, ok := bearerToken(r)
-	if !ok {
-		return jwt.Claims{}, sessionClaims{}, false
-	}
-
-	claims, sc, ok := s.parse(token)
-	if !ok || s.isRevoked(claims.ID) {
-		return jwt.Claims{}, sessionClaims{}, false
-	}
-
-	return claims, sc, true
-}
-
-// usernameFor returns the username claimed by r's bearer token, for
-// handlers that want to attribute an action to whoever is currently logged
-// in (e.g. handleMintDownloadTicket's download ticket). It returns ""
-// whenever there's no currently valid, non-revoked token — including when
-// the web UI has no login configured at all, in which case every download
-// is logged with an empty username rather than failing to log it.
-func (s *sessionStore) usernameFor(r *http.Request) string {
-	claims, _, ok := s.current(r)
-	if !ok {
-		return ""
-	}
-
-	return claims.Subject
-}
-
-// permissionsFor returns the permissions granted to r's bearer token at the
-// time it was minted (see sessionClaims), or 0 (no permissions) whenever
-// there's no currently valid, non-revoked token.
-func (s *sessionStore) permissionsFor(r *http.Request) permission.Permission {
-	_, sc, ok := s.current(r)
-	if !ok {
-		return 0
-	}
-
-	return sc.Perm
-}
-
-// revoke ends the session named by bearer token raw, reporting its jti and
-// ok=true — or ok=false, a no-op, if raw doesn't parse as a currently valid
-// token, since there's then nothing to blocklist. Used by handleAPILogout,
-// which — when raw names a recorded long-lived API token (see
-// db.RevokeAPIToken) rather than an ordinary interactive session, which
-// is never recorded — also persists the revocation so it survives a
-// restart (see newSessionStore's own preload of s.revoked).
-func (s *sessionStore) revoke(raw string) (jti string, ok bool) {
-	claims, _, ok := s.parse(raw)
-	if !ok {
-		return "", false
-	}
-
-	s.revokeJTI(claims.ID, claims.Expiry.Time())
-
-	return claims.ID, true
-}
-
-// revokeJTI blocklists jti in s's in-memory revocation map until expires,
-// the token's own expiry — shared by revoke (which parses expires out of a
-// raw token) and handleRevokeWebUIUserToken (which already has it from the
-// recorded store.APIToken row, with no raw token in hand to parse).
-func (s *sessionStore) revokeJTI(jti string, expires time.Time) {
-	s.mu.Lock()
-	s.revoked[jti] = expires
-	s.mu.Unlock()
-}
-
-// authenticated reports whether r carries a currently valid, non-revoked
-// bearer token for s.
-func (s *sessionStore) authenticated(r *http.Request) bool {
-	_, _, ok := s.current(r)
-	return ok
-}
-
-// randomSessionID returns a 256-bit random value hex-encoded, unguessable
-// enough to serve as a bearer token's jti (see sessionStore.create) or an
-// OIDC state/nonce (see oidc.go).
-func randomSessionID() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-
-	return hex.EncodeToString(b), nil
-}
-
-// safeNextPath validates a login redirect target (the next= query/form
-// value the login handlers and handleDownloadFile pass around): it must be
-// a same-site path, never an absolute URL or protocol-relative "//host/..."
-// one, so a crafted link can't use this instance's own login page to
-// redirect a browser off-site after a successful login. Anything else falls
-// back to "/".
-func safeNextPath(next string) string {
-	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
-		return "/"
-	}
-
-	return next
-}
-
-// loginResponseJSON is a successful POST /login's response body: the bearer
-// token the dashboard's own JavaScript should attach to every subsequent
-// request (see dashboard.js) as "Authorization: Bearer <token>", and when it
-// stops being valid.
-type loginResponseJSON struct {
-	Token     string    `json:"token"`
-	ExpiresAt time.Time `json:"expires_at"`
-}
-
-// loginErrorJSON is a failed POST /login's response body.
-type loginErrorJSON struct {
-	Error string `json:"error"`
-}
-
-// handleWebUILogin serves the dashboard's own login form (GET /login) and
-// its submission (POST /login). A submission is checked two ways, in order:
-// first against the single config-file admin (webui.username/webui.password),
-// using subtle.ConstantTimeCompare rather than == so a mismatch can't be
-// timed to learn how many leading bytes were guessed correctly
-// (authorizeReceiver's own auth is a JWT signature check, not a raw
-// comparison, so it needs no such care) — a match grants full access, every
-// permission.Permission bit set explicitly rather than just PermissionAdmin
-// (see the perm assignment below for why); then, if that didn't match and
-// db is non-nil,
-// against the web UI's "Users" admin-managed accounts (see
-// db.VerifyUser/users.go), whose own granted permissions are
-// used instead. Note that in practice a "Users" admin-managed account can
-// only exist once an operator has used the config-file admin to create one
-// (see handleCreateUser) — so this second check only ever matters
-// when the config-file admin is also configured. A successful submission
-// starts a session (see sessionStore) carrying whichever permissions
-// matched and reports its token as JSON (loginResponseJSON) rather than a
-// redirect: login.html's own inline script stores that token (see
-// requireWebUISession) and navigates the browser to next (see
-// safeNextPath) itself, since there's no cookie left for a server-side
-// redirect to rely on. A failed submission likewise reports loginErrorJSON
-// rather than re-rendering the page. showSSO adds a "Log in with SSO" link
-// to the page (see renderLoginPage), pointing at /login/oidc, whenever
-// oidc.enabled is set (see StartWebUI) — independently of whether a
-// username/password is also configured. An empty username with showSSO
-// false (neither kind of login configured) redirects straight to next
-// rather than showing a form there's no way to satisfy; an empty username
-// with showSSO true shows the page with only the SSO link, and POST /login
-// (which only the password form submits) 404s in that case, since there's
-// no username/password to check. db, when non-nil, gets every submitted
-// attempt appended to the login log (see recordLoginEvent), win or lose,
-// for the dashboard's login log view (see handleLoginEvents); a write
-// failure there is only logged, not surfaced to the browser, since it must
-// never block an otherwise-successful login.
-func handleWebUILogin(username, password string, showSSO bool, sessions *sessionStore, db *store.Store, log *slog.Logger, trustProxyHeaders bool) http.HandlerFunc {
-	showPassword := username != ""
-
-	return func(w http.ResponseWriter, r *http.Request) {
-		next := safeNextPath(r.FormValue("next"))
-
-		if !showPassword && !showSSO {
-			http.Redirect(w, r, next, http.StatusSeeOther)
-			return
-		}
-
-		if r.Method == http.MethodGet {
-			writeLoginPage(w, renderLoginPage("", next, showPassword, showSSO))
-			return
-		}
-
-		if !showPassword {
-			http.NotFound(w, r)
-			return
-		}
-
-		submittedUser := r.FormValue("username")
-		submittedPass := r.FormValue("password")
-		userMatch := subtle.ConstantTimeCompare([]byte(submittedUser), []byte(username)) == 1
-		passMatch := subtle.ConstantTimeCompare([]byte(submittedPass), []byte(password)) == 1
-
-		success := userMatch && passMatch
-		// Every bit, not just PermissionAdmin (which alone would already
-		// imply the rest via Can*) — sessionInfoJSON.Permissions only lists
-		// directly-granted names (see Permission.Names), and the
-		// dashboard's own JavaScript checks that list literally (e.g.
-		// canDownload), so a session meant to look and behave like full
-		// access needs every bit set explicitly, matching handleSessionInfo's
-		// own authEnabled-false case below.
-		perm := permission.PermissionView | permission.PermissionDownload | permission.PermissionAdmin | permission.PermissionViewLoginLog | permission.PermissionViewDownloadLog | permission.PermissionViewJobRunLog | permission.PermissionViewTargetRunLog | permission.PermissionViewReceiverLog
-
-		if !success && db != nil {
-			dbPerm, ok, err := db.VerifyUser(r.Context(), submittedUser, submittedPass)
-			if err != nil {
-				log.Warn("web UI: verifying db user failed", "err", err)
-			} else if ok {
-				success, perm = true, dbPerm
-			}
-		}
-
-		detail := ""
-		if !success {
-			detail = "incorrect username or password"
-		}
-
-		recordLogin(r.Context(), db, log, r, trustProxyHeaders, "password", "web UI", submittedUser, detail, success)
-
-		if !success {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(http.StatusUnauthorized)
-			_ = json.NewEncoder(w).Encode(loginErrorJSON{Error: "incorrect username or password"})
-
-			return
-		}
-
-		id, err := sessions.create(submittedUser, perm)
-		if err != nil {
-			http.Error(w, "starting session failed", http.StatusInternalServerError)
-			return
-		}
-
-		writeJSON(w, loginResponseJSON{Token: id, ExpiresAt: time.Now().Add(sessionTTL)})
-	}
-}
-
 // recordLogin appends one dashboard login attempt to db's login log (see
 // db.SaveLoginEvent) with method/username/detail/success, warning via
 // log (tagged with source, e.g. "web UI" or "oidc") rather than failing the
 // caller's request if the write itself fails — a login must never be
 // blocked by an audit-log hiccup. A nil db is a no-op, matching
-// StartWebUI's optional db. Shared by handleWebUILogin and oidc.go's
-// handleOIDCCallback, which otherwise duplicate this event-building/
-// recording/warn-on-failure sequence.
+// StartWebUI's optional db. Used by auth.go for SSO logins (see
+// handleSSOLogin) and rejected bearer tokens (see rejectBearer).
 func recordLogin(ctx context.Context, db *store.Store, log *slog.Logger, r *http.Request, trustProxyHeaders bool, method, source, username, detail string, success bool) {
 	if db == nil {
 		return
@@ -1227,713 +723,6 @@ func handleReceiverEvents(db *store.Store, log *slog.Logger) http.HandlerFunc {
 	}
 }
 
-// handleAPILogout serves POST /api/logout: it revokes the bearer token
-// carried in the request's Authorization header, if any — a missing or
-// already-invalid one is a no-op, since there's nothing to revoke — and
-// always reports success. Unlike the old cookie-based logout, this doesn't
-// redirect anywhere: the dashboard's own JavaScript (see dashboard.js) calls
-// this, then clears its locally stored token and navigates to /login itself.
-// If the revoked token happens to be a recorded long-lived API token (see
-// db.SaveAPIToken) rather than an ordinary interactive session — e.g.
-// a script logging its own token out — its revocation is also persisted
-// (see db.RevokeAPIToken) so the "Users" admin section's token listing
-// reflects it and it survives a restart; db nil, or the token simply not
-// being a recorded one (store.ErrAPITokenNotFound), are both silently
-// ignored, since an ordinary session logging out is the common case.
-func handleAPILogout(sessions *sessionStore, db *store.Store, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if token, ok := bearerToken(r); ok {
-			if jti, ok := sessions.revoke(token); ok && db != nil {
-				if _, err := db.RevokeAPIToken(r.Context(), jti, time.Now()); err != nil && !errors.Is(err, store.ErrAPITokenNotFound) {
-					log.Warn("web UI: persisting token revocation failed", "err", err)
-				}
-			}
-		}
-
-		w.WriteHeader(http.StatusNoContent)
-	}
-}
-
-// sessionInfoJSON is the currently authenticated session's wire shape (see
-// handleSessionInfo), for the dashboard's own JavaScript to decide what to
-// show: a download link/button only when Permissions includes "download",
-// the login history only when Permissions includes "login-log", the
-// download history only when Permissions includes "download-log", the job
-// run log only when Permissions includes "job-run-log", the target run log
-// only when Permissions includes "target-run-log", the receiver log only
-// when Permissions includes "receiver-log", the "Users" admin section only
-// when Admin, and its "OIDC users" listing (permission overrides for SSO
-// logins) only when both Admin and OIDCEnabled.
-type sessionInfoJSON struct {
-	Username    string   `json:"username"`
-	Permissions []string `json:"permissions"`
-	Admin       bool     `json:"admin"`
-	OIDCEnabled bool     `json:"oidc_enabled"`
-}
-
-// handleSessionInfo serves GET /api/session: the currently authenticated
-// session's own username, granted permissions, whether it can reach the
-// "Users" admin section — either as the config-file admin or by holding
-// permission.PermissionAdmin (see requireAdmin) — and whether OIDC SSO is
-// configured at all — everything the dashboard's own JavaScript needs to
-// gate which sections it shows, since the server-side handlers behind those
-// sections already enforce the same rules on every actual request.
-// authEnabled false reports full access, matching every other endpoint's
-// bypass in that case (see requireWebUISession).
-func handleSessionInfo(sessions *sessionStore, authEnabled bool, adminUsername string, oidcEnabled bool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !authEnabled {
-			writeJSON(w, sessionInfoJSON{Permissions: (permission.PermissionView | permission.PermissionDownload | permission.PermissionAdmin | permission.PermissionViewLoginLog | permission.PermissionViewDownloadLog | permission.PermissionViewJobRunLog | permission.PermissionViewTargetRunLog | permission.PermissionViewReceiverLog).Names(), Admin: true, OIDCEnabled: oidcEnabled})
-			return
-		}
-
-		username := sessions.usernameFor(r)
-		perm := sessions.permissionsFor(r)
-
-		writeJSON(w, sessionInfoJSON{
-			Username:    username,
-			Permissions: perm.Names(),
-			Admin:       (username != "" && username == adminUsername) || perm.CanAdmin(),
-			OIDCEnabled: oidcEnabled,
-		})
-	}
-}
-
-// userJSON is one store.User's wire shape for the "Users" admin API
-// (handleListUsers/handleCreateUser), matching the dashboard's own field
-// naming (snake_case, as every other /api/... endpoint here uses). It
-// never carries a password: handleListUsers doesn't have one to serve (see
-// store.User), and handleCreateUser/handleUpdateUser take one only in
-// their own request body, write-only. OIDCUsername is "" for an account
-// with no linked/auto-provisioned OIDC identity. Permissions is this
-// account's own directly-granted set (what userRequestJSON.Permissions
-// edits); EffectivePermissions additionally includes whatever Groups grant
-// — the set a login session for this account actually carries.
-type userJSON struct {
-	Username             string    `json:"username"`
-	OIDCUsername         string    `json:"oidc_username"`
-	Permissions          []string  `json:"permissions"`
-	Groups               []string  `json:"groups"`
-	EffectivePermissions []string  `json:"effective_permissions"`
-	CreatedAt            time.Time `json:"created_at"`
-}
-
-// handleListJSON adapts a store.Store List* method value (e.g.
-// db.ListUsers) into a GET handler: an empty JSON array when db is nil, a
-// 500 on error (logged with errMsg), otherwise each item run through
-// convert and written as JSON. Used by handleListUsers.
-func handleListJSON[T, S any](db *store.Store, log *slog.Logger, errMsg string, list func(context.Context) ([]S, error), convert func(S) T) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if db == nil {
-			writeJSON(w, []T{})
-			return
-		}
-
-		items, err := list(r.Context())
-		if err != nil {
-			log.Warn("web UI: "+errMsg, "err", err)
-			http.Error(w, errMsg, http.StatusInternalServerError)
-
-			return
-		}
-
-		out := make([]T, len(items))
-		for i, it := range items {
-			out[i] = convert(it)
-		}
-
-		writeJSON(w, out)
-	}
-}
-
-// nonNilStrings returns ss, or an empty (non-nil) slice in its place — so a
-// user with no groups serves "groups": [] rather than "groups": null, which
-// the dashboard's Array.prototype.includes-based checkbox state can't
-// handle.
-func nonNilStrings(ss []string) []string {
-	if ss == nil {
-		return []string{}
-	}
-
-	return ss
-}
-
-// toUserJSON converts one store.User into its wire shape (see userJSON).
-func toUserJSON(u store.User) userJSON {
-	return userJSON{
-		Username:             u.Username,
-		OIDCUsername:         u.OIDCUsername,
-		Permissions:          nonNilStrings(u.Permissions.Names()),
-		Groups:               nonNilStrings(u.Groups),
-		EffectivePermissions: nonNilStrings(u.EffectivePermissions.Names()),
-		CreatedAt:            u.CreatedAt,
-	}
-}
-
-// handleListUsers serves GET /api/users: every dashboard account, for the
-// "Users" admin section — requireAdmin (see StartWebUI) restricts this to
-// the config-file admin.
-func handleListUsers(db *store.Store, log *slog.Logger) http.HandlerFunc {
-	return handleListJSON(db, log, "listing users failed", db.ListUsers, toUserJSON)
-}
-
-// userRequestJSON is handleCreateUser/handleUpdateUser's request body.
-// Username is only used (and required) by handleCreateUser, which takes it
-// from the body rather than the path the way handleUpdateUser's PUT
-// /api/users/{username} does, since there's no username in a POST
-// /api/users path to route on yet. Password is required for
-// handleCreateUser but optional for handleUpdateUser, which leaves the
-// stored password unchanged when it's omitted. OIDCUsername, unlike
-// Password, is always a full-replace value for both handlers — blank
-// explicitly means "no link"/"clear the link," since (unlike a password,
-// which is never round-tripped back to the client) the dashboard always has
-// the row's current value on hand to resubmit unchanged or edit. Groups is
-// likewise always a full-replace value — the full membership set to give
-// the account (see db.SetUserGroups) — and, like Permissions, only ever
-// named a group that must already exist (store.ErrGroupNotFound otherwise).
-type userRequestJSON struct {
-	Username     string   `json:"username"`
-	Password     string   `json:"password"`
-	OIDCUsername string   `json:"oidc_username"`
-	Permissions  []string `json:"permissions"`
-	Groups       []string `json:"groups"`
-}
-
-// handleUserErr writes the right response for err — store.ErrUserNotFound
-// as 404, store.ErrOIDCUsernameTaken as 409, store.ErrGroupNotFound as 400
-// (a client-named group that doesn't exist), any other error as a logged
-// 500 — and reports whether it wrote one at all (err == nil), so callers
-// can `if handleUserErr(...) { return }` rather than repeating this switch
-// themselves.
-func handleUserErr(w http.ResponseWriter, log *slog.Logger, verb string, err error) bool {
-	switch {
-	case err == nil:
-		return false
-	case errors.Is(err, store.ErrUserNotFound):
-		http.Error(w, "user not found", http.StatusNotFound)
-	case errors.Is(err, store.ErrOIDCUsernameTaken):
-		http.Error(w, "oidc identity is already linked to another user", http.StatusConflict)
-	case errors.Is(err, store.ErrGroupNotFound):
-		http.Error(w, err.Error(), http.StatusBadRequest)
-	default:
-		log.Warn("web UI: "+verb+" user failed", "err", err)
-		http.Error(w, verb+" user failed", http.StatusInternalServerError)
-	}
-
-	return true
-}
-
-// handleCreateUser serves POST /api/users: it adds a new dashboard account
-// from the request body (see userRequestJSON), rejecting a username that
-// collides with the config-file admin's own (adminUsername) — that
-// account's credentials live in the config file, not this table, so it
-// must never be shadowed here — one that's already taken
-// (store.ErrUserExists), or an OIDCUsername already linked to another row
-// (store.ErrOIDCUsernameTaken).
-func handleCreateUser(db *store.Store, adminUsername string, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if db == nil {
-			http.Error(w, "user management requires the job state db", http.StatusServiceUnavailable)
-			return
-		}
-
-		var req userRequestJSON
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
-			return
-		}
-
-		if req.Username == "" || req.Password == "" {
-			http.Error(w, "username and password are required", http.StatusBadRequest)
-			return
-		}
-
-		if adminUsername != "" && req.Username == adminUsername {
-			http.Error(w, "username is reserved for the configured admin account", http.StatusBadRequest)
-			return
-		}
-
-		perm, err := permission.ParsePermissions(req.Permissions)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		switch err := db.SaveUser(r.Context(), req.Username, req.Password, req.OIDCUsername, perm); {
-		case errors.Is(err, store.ErrUserExists):
-			http.Error(w, "user already exists", http.StatusConflict)
-			return
-		case handleUserErr(w, log, "creating", err):
-			return
-		}
-
-		if err := db.SetUserGroups(r.Context(), req.Username, req.Groups); handleUserErr(w, log, "creating", err) {
-			return
-		}
-
-		w.WriteHeader(http.StatusCreated)
-	}
-}
-
-// handleUpdateUser serves PUT /api/users/{username}: it updates the named
-// account's permissions, group memberships, and OIDC identity link from the
-// request body (see userRequestJSON), and its password too if one was given
-// (a blank Password leaves the stored one unchanged, so the dashboard's edit
-// form doesn't have to re-submit it on every permission change).
-func handleUpdateUser(db *store.Store, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if db == nil {
-			http.Error(w, "user management requires the job state db", http.StatusServiceUnavailable)
-			return
-		}
-
-		username := r.PathValue("username")
-
-		var req userRequestJSON
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
-			return
-		}
-
-		perm, err := permission.ParsePermissions(req.Permissions)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		if err := db.UpdateUserPermissions(r.Context(), username, perm); handleUserErr(w, log, "updating", err) {
-			return
-		}
-
-		if req.Password != "" {
-			if err := db.UpdateUserPassword(r.Context(), username, req.Password); handleUserErr(w, log, "updating", err) {
-				return
-			}
-		}
-
-		if err := db.SetUserGroups(r.Context(), username, req.Groups); handleUserErr(w, log, "updating", err) {
-			return
-		}
-
-		if err := db.SetUserOIDCUsername(r.Context(), username, req.OIDCUsername); handleUserErr(w, log, "updating", err) {
-			return
-		}
-
-		w.WriteHeader(http.StatusNoContent)
-	}
-}
-
-// handleDeleteUser serves DELETE /api/users/{username}: it removes the
-// named account.
-func handleDeleteUser(db *store.Store, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if db == nil {
-			http.Error(w, "user management requires the job state db", http.StatusServiceUnavailable)
-			return
-		}
-
-		if err := db.DeleteUser(r.Context(), r.PathValue("username")); handleUserErr(w, log, "deleting", err) {
-			return
-		}
-
-		w.WriteHeader(http.StatusNoContent)
-	}
-}
-
-// groupJSON is one store.Group's wire shape for the "Users" admin API's
-// group management (handleListGroups/handleCreateGroup/handleUpdateGroup),
-// matching userJSON's own field naming.
-type groupJSON struct {
-	Name          string    `json:"name"`
-	Permissions   []string  `json:"permissions"`
-	OIDCGroupName string    `json:"oidc_group_name"`
-	CreatedAt     time.Time `json:"created_at"`
-}
-
-func toGroupJSON(g store.Group) groupJSON {
-	return groupJSON{
-		Name:          g.Name,
-		Permissions:   nonNilStrings(g.Permissions.Names()),
-		OIDCGroupName: g.OIDCGroupName,
-		CreatedAt:     g.CreatedAt,
-	}
-}
-
-// handleListGroups serves GET /api/groups: every group, for the "Users"
-// admin section's group management panel.
-func handleListGroups(db *store.Store, log *slog.Logger) http.HandlerFunc {
-	return handleListJSON(db, log, "listing groups failed", db.ListGroups, toGroupJSON)
-}
-
-// groupRequestJSON is handleCreateGroup/handleUpdateGroup's request body.
-// Name is only used (and required) by handleCreateGroup, which takes it
-// from the body rather than the path the way handleUpdateGroup's PUT
-// /api/groups/{name} does, mirroring userRequestJSON.Username. OIDCGroupName
-// is always a full-replace value, like userRequestJSON.OIDCUsername — blank
-// explicitly means "no mapping"/"clear the mapping" (see
-// db.SetGroupOIDCGroupName).
-type groupRequestJSON struct {
-	Name          string   `json:"name"`
-	Permissions   []string `json:"permissions"`
-	OIDCGroupName string   `json:"oidc_group_name"`
-}
-
-// handleGroupErr writes the right response for err — store.ErrGroupNotFound
-// as 404, store.ErrOIDCGroupNameTaken as 409, any other error as a logged
-// 500 — and reports whether it wrote one at all (err == nil), mirroring
-// handleUserErr.
-func handleGroupErr(w http.ResponseWriter, log *slog.Logger, verb string, err error) bool {
-	switch {
-	case err == nil:
-		return false
-	case errors.Is(err, store.ErrGroupNotFound):
-		http.Error(w, "group not found", http.StatusNotFound)
-	case errors.Is(err, store.ErrOIDCGroupNameTaken):
-		http.Error(w, "oidc group name is already mapped to another group", http.StatusConflict)
-	default:
-		log.Warn("web UI: "+verb+" group failed", "err", err)
-		http.Error(w, verb+" group failed", http.StatusInternalServerError)
-	}
-
-	return true
-}
-
-// handleCreateGroup serves POST /api/groups: it adds a new group from the
-// request body (see groupRequestJSON), rejecting a name that's already
-// taken (store.ErrGroupExists).
-func handleCreateGroup(db *store.Store, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if db == nil {
-			http.Error(w, "group management requires the job state db", http.StatusServiceUnavailable)
-			return
-		}
-
-		var req groupRequestJSON
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
-			return
-		}
-
-		if req.Name == "" {
-			http.Error(w, "name is required", http.StatusBadRequest)
-			return
-		}
-
-		perm, err := permission.ParsePermissions(req.Permissions)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		switch err := db.SaveGroup(r.Context(), req.Name, perm, req.OIDCGroupName); {
-		case errors.Is(err, store.ErrGroupExists):
-			http.Error(w, "group already exists", http.StatusConflict)
-		case handleGroupErr(w, log, "creating", err):
-		default:
-			w.WriteHeader(http.StatusCreated)
-		}
-	}
-}
-
-// handleUpdateGroup serves PUT /api/groups/{name}: it replaces the named
-// group's granted permissions and OIDC group mapping with the request
-// body's (see groupRequestJSON) — every member's next login picks up the
-// change (see
-// db.VerifyUser/db.GetOrProvisionOIDCUser), though any of its members'
-// already-issued sessions or long-lived API tokens keep whatever they were
-// minted with until they expire or are revoked.
-func handleUpdateGroup(db *store.Store, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if db == nil {
-			http.Error(w, "group management requires the job state db", http.StatusServiceUnavailable)
-			return
-		}
-
-		var req groupRequestJSON
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
-			return
-		}
-
-		perm, err := permission.ParsePermissions(req.Permissions)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		name := r.PathValue("name")
-
-		if err := db.UpdateGroupPermissions(r.Context(), name, perm); handleGroupErr(w, log, "updating", err) {
-			return
-		}
-
-		if err := db.SetGroupOIDCGroupName(r.Context(), name, req.OIDCGroupName); handleGroupErr(w, log, "updating", err) {
-			return
-		}
-
-		w.WriteHeader(http.StatusNoContent)
-	}
-}
-
-// handleDeleteGroup serves DELETE /api/groups/{name}: it removes the named
-// group and every user's membership in it (see db.DeleteGroup).
-func handleDeleteGroup(db *store.Store, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if db == nil {
-			http.Error(w, "group management requires the job state db", http.StatusServiceUnavailable)
-			return
-		}
-
-		if err := db.DeleteGroup(r.Context(), r.PathValue("name")); handleGroupErr(w, log, "deleting", err) {
-			return
-		}
-
-		w.WriteHeader(http.StatusNoContent)
-	}
-}
-
-// minAPITokenDays/maxAPITokenDays bound how many days an admin can request
-// handleIssueWebUIUserToken mint a long-lived API token for: at least a
-// day, so it's meaningfully longer-lived than an interactive session
-// (sessionTTL, 12 hours), and at most ten years, since a token revoked
-// before its expiry still occupies sessionStore's in-memory revocation list
-// for the rest of its claimed lifetime.
-const (
-	minAPITokenDays = 1
-	maxAPITokenDays = 3650
-)
-
-// apiTokenRequestJSON is handleIssueWebUIUserToken's request body: how many
-// days the minted token should stay valid for, clamped to
-// [minAPITokenDays, maxAPITokenDays].
-type apiTokenRequestJSON struct {
-	Days int `json:"days"`
-}
-
-// handleIssueWebUIUserToken serves POST /api/users/{username}/tokens: it
-// mints a long-lived bearer token (see sessionStore.createWithTTL) for the
-// named "Users" admin-managed account, carrying that account's effective
-// permissions — its own directly-granted set plus whatever its groups grant
-// (see db.GetUser/store.User.EffectivePermissions) — the same kind of token a
-// normal login produces, just valid for Days days instead of sessionTTL, for
-// scripts/automation that can't sit through an interactive login. Returned
-// as loginResponseJSON, the same shape POST /login uses, since it's the same
-// kind of token; unlike an interactive session, the minted token's jti is
-// also recorded (see db.SaveAPIToken) so an admin can later revoke it
-// (see handleRevokeWebUIUserToken) without needing to hold the raw token
-// itself — the whole point, since it's shown here once and never again.
-func handleIssueWebUIUserToken(sessions *sessionStore, db *store.Store, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if db == nil {
-			http.Error(w, "user management requires the job state db", http.StatusServiceUnavailable)
-			return
-		}
-
-		username := r.PathValue("username")
-
-		var req apiTokenRequestJSON
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
-			return
-		}
-
-		if req.Days < minAPITokenDays || req.Days > maxAPITokenDays {
-			http.Error(w, fmt.Sprintf("days must be between %d and %d", minAPITokenDays, maxAPITokenDays), http.StatusBadRequest)
-			return
-		}
-
-		user, ok, err := db.GetUser(r.Context(), username)
-		if err != nil {
-			log.Warn("web UI: looking up user failed", "err", err)
-			http.Error(w, "issuing token failed", http.StatusInternalServerError)
-
-			return
-		}
-
-		if !ok {
-			http.Error(w, "user not found", http.StatusNotFound)
-			return
-		}
-
-		ttl := time.Duration(req.Days) * 24 * time.Hour
-		issuedAt := time.Now()
-		expiresAt := issuedAt.Add(ttl)
-
-		token, jti, err := sessions.createWithTTL(user.Username, user.EffectivePermissions, ttl)
-		if err != nil {
-			log.Warn("web UI: issuing token failed", "err", err)
-			http.Error(w, "issuing token failed", http.StatusInternalServerError)
-
-			return
-		}
-
-		if err := db.SaveAPIToken(r.Context(), jti, user.Username, user.EffectivePermissions, issuedAt, expiresAt); err != nil {
-			log.Warn("web UI: recording issued token failed", "err", err)
-			http.Error(w, "issuing token failed", http.StatusInternalServerError)
-
-			return
-		}
-
-		writeJSON(w, loginResponseJSON{Token: token, ExpiresAt: expiresAt})
-	}
-}
-
-// apiTokenJSON is one store.APIToken's wire shape for the "Users" admin
-// section's per-user token listing (handleListWebUIUserTokens) and its
-// revocation (handleRevokeWebUIUserToken), matching the dashboard's own
-// field naming (snake_case, as every other /api/... endpoint here uses). It
-// never carries the token's own signed value — only jti, the identifier
-// needed to revoke it — since the raw token was already shown once, at
-// issuance (see handleIssueWebUIUserToken), and is never stored.
-type apiTokenJSON struct {
-	JTI       string     `json:"jti"`
-	CreatedAt time.Time  `json:"created_at"`
-	ExpiresAt time.Time  `json:"expires_at"`
-	Revoked   bool       `json:"revoked"`
-	RevokedAt *time.Time `json:"revoked_at,omitempty"`
-}
-
-// handleListWebUIUserTokens serves GET /api/users/{username}/tokens: every
-// long-lived API token recorded for the named "Users" admin-managed account
-// (see db.SaveAPIToken), most recently issued first, for the "Users"
-// admin section's per-user token management dialog to show which of them
-// are still outstanding and offer to revoke one.
-func handleListWebUIUserTokens(db *store.Store, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if db == nil {
-			writeJSON(w, []apiTokenJSON{})
-			return
-		}
-
-		tokens, err := db.ListAPITokensForUser(r.Context(), r.PathValue("username"))
-		if err != nil {
-			log.Warn("web UI: listing API tokens failed", "err", err)
-			http.Error(w, "listing tokens failed", http.StatusInternalServerError)
-
-			return
-		}
-
-		out := make([]apiTokenJSON, len(tokens))
-		for i, t := range tokens {
-			out[i] = apiTokenJSON{JTI: t.JTI, CreatedAt: t.CreatedAt, ExpiresAt: t.ExpiresAt, Revoked: t.RevokedAt != nil, RevokedAt: t.RevokedAt}
-		}
-
-		writeJSON(w, out)
-	}
-}
-
-// handleRevokeWebUIUserToken serves DELETE
-// /api/users/{username}/tokens/{jti}: it revokes the named long-lived API
-// token (see db.RevokeAPIToken) — a no-op, not an error, if it was
-// already revoked — and immediately blocklists it in sessions' in-memory
-// revocation check too (see sessionStore.revokeJTI), so it stops working on
-// this instance right away rather than only after a restart reloads it from
-// db (see newSessionStore). {username} is checked against the token's own
-// recorded owner (store.ErrAPITokenNotFound if {jti} doesn't belong to
-// {username}, matching a plain unknown jti) purely so a stale or
-// copy-pasted URL can't revoke a different user's token out from under the
-// "Users" admin section's per-user dialog.
-func handleRevokeWebUIUserToken(sessions *sessionStore, db *store.Store, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if db == nil {
-			http.Error(w, "user management requires the job state db", http.StatusServiceUnavailable)
-			return
-		}
-
-		username := r.PathValue("username")
-		jti := r.PathValue("jti")
-
-		// Checked before revoking, not after: db.RevokeAPIToken takes no
-		// username of its own, so revoking first and only then comparing
-		// owners would still permanently revoke a mismatched {username}'s
-		// token while reporting 404, as if the request had no effect.
-		existing, ok, err := db.GetAPIToken(r.Context(), jti)
-		switch {
-		case err != nil:
-			log.Warn("web UI: looking up API token failed", "err", err)
-			http.Error(w, "revoking token failed", http.StatusInternalServerError)
-
-			return
-		case !ok, existing.Username != username:
-			http.Error(w, "token not found", http.StatusNotFound)
-			return
-		}
-
-		t, err := db.RevokeAPIToken(r.Context(), jti, time.Now())
-		if err != nil {
-			log.Warn("web UI: revoking API token failed", "err", err)
-			http.Error(w, "revoking token failed", http.StatusInternalServerError)
-
-			return
-		}
-
-		sessions.revokeJTI(t.JTI, t.ExpiresAt)
-
-		w.WriteHeader(http.StatusNoContent)
-	}
-}
-
-// writeLoginPage writes a login page (built by renderLoginPage) to w.
-func writeLoginPage(w http.ResponseWriter, page string) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = io.WriteString(w, page)
-}
-
-// loginPageTemplateSrc is the dashboard's login page (see renderLoginPage),
-// kept in its own file so the markup lives alongside dashboardHTMLSrc rather
-// than as a Go string literal.
-//
-//go:embed login.html
-var loginPageTemplateSrc string
-
-// loginPageTemplate is loginPageTemplateSrc parsed once at package init.
-// html/template's contextual autoescaping handles ErrMsg and Next itself
-// (HTML-escaping ErrMsg, and applying the right escaping to Next in both the
-// hidden-input attribute and the /login/oidc?next= query value), so
-// renderLoginPage no longer has to escape either by hand.
-var loginPageTemplate = template.Must(template.New("login.html").Parse(loginPageTemplateSrc))
-
-// loginPageData is loginPageTemplate's input.
-type loginPageData struct {
-	ErrMsg       string
-	Next         string
-	ShowPassword bool
-	ShowSSO      bool
-	Version      string
-	Commit       string
-	Year         int
-}
-
-// renderLoginPage builds the dashboard's login page's HTML: the
-// username/password form (showPassword), a "Log in with SSO" link to
-// /login/oidc (showSSO), or both, stacked with a divider between them.
-// errMsg can echo back a failed login attempt and next comes directly from
-// the request; both are safe to embed as-is since loginPageTemplate escapes
-// them contextually. next is also used for /login/oidc's own next= so SSO
-// redirects to the same place the password form would.
-func renderLoginPage(errMsg, next string, showPassword, showSSO bool) string {
-	var buf strings.Builder
-
-	data := loginPageData{
-		ErrMsg:       errMsg,
-		Next:         next,
-		ShowPassword: showPassword,
-		ShowSSO:      showSSO,
-		Version:      version.Version,
-		Commit:       version.Commit,
-		Year:         time.Now().Year(),
-	}
-	if err := loginPageTemplate.Execute(&buf, data); err != nil {
-		// loginPageTemplate is a fixed, compile-time-checked template
-		// executed against a plain struct of strings/bools, so this can't
-		// fail in practice; panicking here would be worse than a broken
-		// page for a login attempt.
-		return ""
-	}
-
-	return buf.String()
-}
-
 // downloadTicketTTL is how long a minted download ticket (see
 // downloadTicketStore) stays redeemable: long enough for the dashboard's JS
 // to mint one and immediately navigate the browser to it, short enough that
@@ -1976,7 +765,7 @@ func newDownloadTicketStore() *downloadTicketStore {
 // attributed to username (best-effort, may be empty), valid for
 // downloadTicketTTL.
 func (s *downloadTicketStore) create(receiverID, key, username string) (string, error) {
-	id, err := randomSessionID()
+	id, err := randomTicketID()
 	if err != nil {
 		return "", err
 	}
@@ -2011,6 +800,17 @@ func (s *downloadTicketStore) consume(id, receiverID, key string) (username stri
 	return e.username, true
 }
 
+// randomTicketID returns a 256-bit random value hex-encoded, unguessable
+// enough to serve as a download ticket id (see downloadTicketStore.create).
+func randomTicketID() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(b), nil
+}
+
 // downloadTicketJSON is a freshly minted download ticket's wire shape (see
 // handleMintDownloadTicket).
 type downloadTicketJSON struct {
@@ -2020,11 +820,11 @@ type downloadTicketJSON struct {
 // handleMintDownloadTicket serves POST /api/receivers/{id}/download/{key...}:
 // it mints a short-lived, single-use download ticket (see
 // downloadTicketStore) for the receiver/key named by the path, attributed to
-// whoever is currently logged in (see sessionStore.usernameFor). The
+// whoever is currently signed in (see currentUser). The
 // dashboard's JS calls this — with its Authorization: Bearer header — right
 // before navigating the browser to the matching GET, which can't carry that
 // header itself (see handleDownloadFile).
-func handleMintDownloadTicket(receivers map[string]config.ResolvedReceiver, tickets *downloadTicketStore, sessions *sessionStore) http.HandlerFunc {
+func handleMintDownloadTicket(receivers map[string]config.ResolvedReceiver, tickets *downloadTicketStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := lookupReceiver(w, r, receivers)
 		if !ok {
@@ -2037,7 +837,12 @@ func handleMintDownloadTicket(receivers map[string]config.ResolvedReceiver, tick
 			return
 		}
 
-		ticket, err := tickets.create(recv.ID, key, sessions.usernameFor(r))
+		var username string
+		if user, ok := currentUser(r.Context()); ok {
+			username = user.Username
+		}
+
+		ticket, err := tickets.create(recv.ID, key, username)
 		if err != nil {
 			http.Error(w, "minting download ticket failed", http.StatusInternalServerError)
 			return
@@ -2053,7 +858,7 @@ func handleMintDownloadTicket(receivers map[string]config.ResolvedReceiver, tick
 // listReceiverFiles/handleReceiverFiles for the metadata-only listing this
 // complements). Unlike the receiver API's own per-receiver JWT auth (see
 // authorizeReceiver), and unlike every other dashboard endpoint (see
-// requireWebUISession), this is authorized by a one-time download ticket
+// requireUser), this is authorized by a one-time download ticket
 // (see downloadTicketStore) rather than a bearer token: the request behind
 // this is a plain browser navigation, which can't carry an Authorization
 // header the way the dashboard's own fetch() calls can (see
@@ -2061,8 +866,8 @@ func handleMintDownloadTicket(receivers map[string]config.ResolvedReceiver, tick
 // one). db, when non-nil, gets every attempt appended to the download log
 // (see recordDownloadEvent), win or lose, for the dashboard's "Download log"
 // section (see handleDownloadEvents); a write failure there is only logged,
-// not surfaced to the browser, mirroring handleWebUILogin's own tolerance
-// for a login log write failure.
+// not surfaced to the browser, mirroring recordLogin's own tolerance for a
+// login log write failure.
 func handleDownloadFile(receivers map[string]config.ResolvedReceiver, log *slog.Logger, db *store.Store, tickets *downloadTicketStore, trustProxyHeaders bool, queue *notify.Queue) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := lookupReceiver(w, r, receivers)
@@ -2120,108 +925,6 @@ func handleDownloadFile(receivers map[string]config.ResolvedReceiver, log *slog.
 		if _, err := io.Copy(w, f); err != nil {
 			log.Warn("download: streaming file failed", "id", recv.ID, "key", key, "err", err)
 		}
-	}
-}
-
-// requireWebUISession wraps next, requiring a currently valid bearer token
-// (see sessionStore/handleWebUILogin/handleOIDCCallback, and bearerToken for
-// how it's read off the request) before running it. A missing, invalid, or
-// expired token reports 401 — there's no server-side redirect to a login
-// page any more, since every request this gates is a fetch() call from the
-// dashboard's own JavaScript (see dashboard.js), which reads that response
-// itself and sends the browser to /login client-side. authEnabled false
-// (neither a username/password nor an OIDC provider configured) disables
-// the check entirely, leaving the web UI open — this gates the dashboard's
-// /api/... endpoints (see StartWebUI), not the receiver API, which
-// authenticates separately via each receiver's own public-key-verified JWT,
-// nor file downloads, which are authorized by a one-time download ticket
-// instead (see downloadTicketStore) since that request is a plain browser
-// navigation rather than a fetch() call.
-func requireWebUISession(authEnabled bool, sessions *sessionStore, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !authEnabled || sessions.authenticated(r) {
-			next(w, r)
-			return
-		}
-
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-	}
-}
-
-// requirePermission wraps next (itself already wrapped in
-// requireWebUISession, so a request here is already known to carry a
-// currently valid session whenever authEnabled), additionally requiring
-// that session to hold required — reporting 403 rather than
-// requireWebUISession's 401, since the request is authenticated, just not
-// authorized for this endpoint. required must be one of
-// permission.PermissionDownload, permission.PermissionViewLoginLog,
-// permission.PermissionViewDownloadLog, permission.PermissionViewJobRunLog,
-// permission.PermissionViewTargetRunLog, or
-// permission.PermissionViewReceiverLog (checked via the matching
-// CanDownload/CanViewLoginLog/CanViewDownloadLog/CanViewJobRunLog/
-// CanViewTargetRunLog/CanViewReceiverLog method); anything else, including
-// permission.PermissionView, falls back to CanView. authEnabled false skips the
-// check entirely, matching requireWebUISession's own bypass, since there's
-// no session to hold a permission in that case.
-func requirePermission(authEnabled bool, sessions *sessionStore, required permission.Permission, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if authEnabled {
-			perm := sessions.permissionsFor(r)
-
-			var allowed bool
-
-			switch required {
-			case permission.PermissionDownload:
-				allowed = perm.CanDownload()
-			case permission.PermissionViewLoginLog:
-				allowed = perm.CanViewLoginLog()
-			case permission.PermissionViewDownloadLog:
-				allowed = perm.CanViewDownloadLog()
-			case permission.PermissionViewJobRunLog:
-				allowed = perm.CanViewJobRunLog()
-			case permission.PermissionViewTargetRunLog:
-				allowed = perm.CanViewTargetRunLog()
-			case permission.PermissionViewReceiverLog:
-				allowed = perm.CanViewReceiverLog()
-			case permission.PermissionView, permission.PermissionAdmin:
-				allowed = perm.CanView()
-			default:
-				allowed = perm.CanView()
-			}
-
-			if !allowed {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-		}
-
-		next(w, r)
-	}
-}
-
-// requireAdmin wraps next (itself already wrapped in requireWebUISession),
-// additionally requiring the session either belong to the config-file admin
-// (webui.username) or hold permission.PermissionAdmin — the two ways to reach
-// the web UI's "Users" admin section (see handleListUsers and
-// friends): the single config-file admin always could, and a "Users"
-// admin-managed account or an OIDC login can too now, once granted
-// PermissionAdmin (see permission.Permission). adminUsername empty (no
-// config-file admin configured) just falls through to the permission
-// check. authEnabled false skips the check entirely, matching
-// requireWebUISession/requirePermission's own bypass.
-func requireAdmin(authEnabled bool, sessions *sessionStore, adminUsername string, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if authEnabled {
-			claims, sc, ok := sessions.current(r)
-			isConfigAdmin := ok && adminUsername != "" && claims.Subject == adminUsername
-
-			if !isConfigAdmin && !sc.Perm.CanAdmin() {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-		}
-
-		next(w, r)
 	}
 }
 

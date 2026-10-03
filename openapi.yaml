@@ -16,9 +16,9 @@ tags:
   - name: dashboard
     description: Read-only JSON endpoints backing the web UI dashboard
   - name: auth
-    description: Dashboard login/logout (bearer-token based)
+    description: Dashboard SSO (OpenID Connect) — the SPA logs in as a public client and sends the provider's access token as a bearer token
   - name: admin
-    description: "The dashboard's \"Users\" admin section: managing accounts and their long-lived API tokens"
+    description: Actions requiring the `admin` permission
   - name: receiver-api
     description: "Object ingestion API for `type: remote` targets, authenticated per-receiver via a signed JWT bearer token"
 
@@ -26,41 +26,80 @@ paths:
   /api/meta:
     get:
       tags: [dashboard]
-      summary: Build/auth metadata for the dashboard shell
+      summary: Build metadata for the dashboard footer
       operationId: getMeta
       description: >
-        Always public/unauthenticated, since the dashboard shell (GET /)
-        itself is public and needs this before any session exists. Backs the
-        dashboard's footer and its login-link visibility.
+        Always public/unauthenticated, since the footer is shown on the
+        login page too.
       security: []
       responses:
         "200":
-          description: Build/auth metadata
+          description: Build metadata
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Meta"
 
-  /api/session:
+  /api/sso/status:
     get:
-      tags: [dashboard]
-      summary: The currently authenticated session's identity and permissions
-      operationId: getSession
+      tags: [auth]
+      summary: Public SSO settings for the login page
+      operationId: getSSOStatus
+      description: >
+        Always public/unauthenticated: the login page needs this before any
+        credential exists, to run the OIDC authorization-code + PKCE flow
+        itself as a public client. The provider fields are only present
+        while `webui.oidc.enabled` is true; none of them are secret.
+      security: []
+      responses:
+        "200":
+          description: SSO settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SSOStatus"
+
+  /api/me:
+    get:
+      tags: [auth]
+      summary: The signed-in user's identity and permissions
+      operationId: getMe
       description: >
         Everything the dashboard's own JavaScript needs to decide which
         sections to show; the server-side handlers behind those sections
-        enforce the same rules independently on every actual request. Unlike
-        every other `/api/...` endpoint, this only requires a currently
-        valid session, not any specific permission.
+        enforce the same rules independently on every actual request. Only
+        requires a valid access token, not any specific permission. Records
+        nothing — see `POST /api/sso/login`.
       security:
         - webUIBearer: []
       responses:
         "200":
-          description: Session info
+          description: The signed-in user
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SessionInfo"
+                $ref: "#/components/schemas/Me"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/sso/login:
+    post:
+      tags: [auth]
+      summary: Record a completed SSO login
+      operationId: ssoLogin
+      description: >
+        The server takes no part in the login itself, so the SPA calls this
+        exactly once after the provider's redirect back, to record the
+        sign-in in the login log. Returns the same body as `GET /api/me`.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: The signed-in user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -221,8 +260,7 @@ paths:
         targets `/api/status` currently reports as failed (re-running the
         whole pipeline, not just re-uploading). Starts the retry in the
         background and returns immediately; poll `/api/status` for
-        progress. Requires admin access (the config-file admin, or a
-        session holding the `admin` permission).
+        progress. Requires the `admin` permission.
       security:
         - webUIBearer: []
       parameters:
@@ -455,441 +493,6 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
-  /login:
-    get:
-      tags: [auth]
-      summary: Dashboard login page
-      operationId: getLoginPage
-      security: []
-      parameters:
-        - name: next
-          in: query
-          required: false
-          description: Same-site path to redirect to after a successful login.
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Login form (HTML)
-          content:
-            text/html:
-              schema:
-                type: string
-        "303":
-          description: No login configured; redirected straight to next
-    post:
-      tags: [auth]
-      summary: Submit dashboard username/password login
-      operationId: postLogin
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/x-www-form-urlencoded:
-            schema:
-              type: object
-              properties:
-                username:
-                  type: string
-                password:
-                  type: string
-                next:
-                  type: string
-              required: [username, password]
-      responses:
-        "200":
-          description: Successful login; bearer token returned as JSON
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  token:
-                    type: string
-                  expires_at:
-                    type: string
-                    format: date-time
-                required: [token, expires_at]
-        "401":
-          description: Invalid credentials
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: string
-                required: [error]
-        "404":
-          description: No username/password configured on this instance
-
-  /login/oidc:
-    get:
-      tags: [auth]
-      summary: Start an OIDC SSO login
-      operationId: getOIDCLogin
-      description: >
-        Only mounted when `webui.oidc.enabled:` is configured. Starts a new
-        in-flight login (tracked server-side by a `state` value) and
-        redirects the browser to the identity provider to authenticate.
-      security: []
-      parameters:
-        - name: next
-          in: query
-          required: false
-          description: Same-site path to redirect to once the login completes.
-          schema:
-            type: string
-      responses:
-        "303":
-          description: Redirect to the identity provider's authorization endpoint
-
-  /login/oidc/callback:
-    get:
-      tags: [auth]
-      summary: OIDC SSO callback
-      operationId: getOIDCCallback
-      description: >
-        Only mounted when `webui.oidc.enabled:` is configured. The redirect
-        target the identity provider sends the browser back to once
-        authenticated. On success it starts a dashboard session and serves
-        a small bridge page whose inline script stores the token
-        client-side (the way `POST /login`'s JSON response lets the
-        dashboard's own JS do directly) and navigates on to the original
-        `next`.
-      security: []
-      parameters:
-        - name: state
-          in: query
-          required: true
-          description: The in-flight login this callback corresponds to.
-          schema:
-            type: string
-        - name: code
-          in: query
-          required: false
-          description: Authorization code to exchange for tokens.
-          schema:
-            type: string
-        - name: error
-          in: query
-          required: false
-          description: Set by the provider instead of `code` if authentication failed there.
-          schema:
-            type: string
-        - name: error_description
-          in: query
-          required: false
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Bridge page (HTML) that stores the new session token and redirects
-          content:
-            text/html:
-              schema:
-                type: string
-        "400":
-          description: Unknown or expired login state
-          content:
-            text/plain:
-              schema:
-                type: string
-        "502":
-          description: The identity provider returned an error, or the code exchange/ID token verification failed
-          content:
-            text/plain:
-              schema:
-                type: string
-
-  /api/logout:
-    post:
-      tags: [auth]
-      summary: End the current dashboard session
-      operationId: logout
-      description: >
-        Revokes the bearer token carried in the Authorization header, if
-        any (a missing or already-invalid one is a no-op). Always succeeds;
-        the caller is expected to discard its own copy of the token
-        regardless of the response.
-      security:
-        - webUIBearer: []
-      responses:
-        "204":
-          description: Token revoked (or there was none to revoke)
-
-  /api/users:
-    get:
-      tags: [admin]
-      summary: List dashboard accounts
-      operationId: listUsers
-      description: >
-        Every web UI account managed through the "Users" admin section.
-        Requires admin access (the config-file admin, or a session holding
-        the `admin` permission).
-      security:
-        - webUIBearer: []
-      responses:
-        "200":
-          description: Users
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/User"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-    post:
-      tags: [admin]
-      summary: Create a dashboard account
-      operationId: createUser
-      description: >
-        Requires admin access. Rejects a username already taken, one
-        reserved for the config-file admin, or an `oidc_username` already
-        linked to another account.
-      security:
-        - webUIBearer: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/UserRequest"
-      responses:
-        "201":
-          description: User created
-        "400":
-          description: Missing username/password, or an unknown permission name
-          content:
-            text/plain:
-              schema:
-                type: string
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "409":
-          description: Username already exists, or `oidc_username` is already linked to another account
-          content:
-            text/plain:
-              schema:
-                type: string
-        "503":
-          description: User management requires the job state db, which isn't configured
-          content:
-            text/plain:
-              schema:
-                type: string
-
-  /api/users/{username}:
-    put:
-      tags: [admin]
-      summary: Update a dashboard account
-      operationId: updateUser
-      description: >
-        Updates the named account's permissions and OIDC identity link, and
-        its password too if `password` is non-empty (a blank `password`
-        leaves the stored one unchanged). Requires admin access.
-      security:
-        - webUIBearer: []
-      parameters:
-        - $ref: "#/components/parameters/Username"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/UserRequest"
-      responses:
-        "204":
-          description: User updated
-        "400":
-          description: Unknown permission name
-          content:
-            text/plain:
-              schema:
-                type: string
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          description: Unknown username
-          content:
-            text/plain:
-              schema:
-                type: string
-        "409":
-          description: "`oidc_username` is already linked to another account"
-          content:
-            text/plain:
-              schema:
-                type: string
-        "503":
-          description: User management requires the job state db, which isn't configured
-          content:
-            text/plain:
-              schema:
-                type: string
-    delete:
-      tags: [admin]
-      summary: Delete a dashboard account
-      operationId: deleteUser
-      description: Requires admin access.
-      security:
-        - webUIBearer: []
-      parameters:
-        - $ref: "#/components/parameters/Username"
-      responses:
-        "204":
-          description: User deleted
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          description: Unknown username
-          content:
-            text/plain:
-              schema:
-                type: string
-        "503":
-          description: User management requires the job state db, which isn't configured
-          content:
-            text/plain:
-              schema:
-                type: string
-
-  /api/users/{username}/tokens:
-    get:
-      tags: [admin]
-      summary: List a dashboard account's issued long-lived API tokens
-      operationId: listUserTokens
-      description: >
-        Every long-lived API token issued for the named account, most
-        recently issued first. Requires admin access.
-      security:
-        - webUIBearer: []
-      parameters:
-        - $ref: "#/components/parameters/Username"
-      responses:
-        "200":
-          description: API tokens
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/APIToken"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-    post:
-      tags: [admin]
-      summary: Issue a long-lived API token for a dashboard account
-      operationId: issueUserToken
-      description: >
-        Mints a bearer token carrying the named account's currently granted
-        permissions, valid for the requested number of days — the same
-        kind of token an interactive login produces, for
-        scripts/automation that can't sit through one. The raw token is
-        returned once, here, and never again; only its `jti` is kept for
-        later revocation (see `DELETE
-        /api/users/{username}/tokens/{jti}`). Requires admin access.
-      security:
-        - webUIBearer: []
-      parameters:
-        - $ref: "#/components/parameters/Username"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                days:
-                  type: integer
-                  description: How many days the token should stay valid for (1-3650).
-              required: [days]
-      responses:
-        "200":
-          description: Token issued
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  token:
-                    type: string
-                  expires_at:
-                    type: string
-                    format: date-time
-                required: [token, expires_at]
-        "400":
-          description: days out of range, or invalid request body
-          content:
-            text/plain:
-              schema:
-                type: string
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          description: Unknown username
-          content:
-            text/plain:
-              schema:
-                type: string
-        "503":
-          description: User management requires the job state db, which isn't configured
-          content:
-            text/plain:
-              schema:
-                type: string
-
-  /api/users/{username}/tokens/{jti}:
-    delete:
-      tags: [admin]
-      summary: Revoke a dashboard account's long-lived API token
-      operationId: revokeUserToken
-      description: >
-        Revoking an already-revoked token is a no-op, not an error.
-        Requires admin access.
-      security:
-        - webUIBearer: []
-      parameters:
-        - $ref: "#/components/parameters/Username"
-        - name: jti
-          in: path
-          required: true
-          description: The token's id, from the matching `GET .../tokens` listing.
-          schema:
-            type: string
-      responses:
-        "204":
-          description: Token revoked
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          description: Unknown jti, or jti does not belong to username
-          content:
-            text/plain:
-              schema:
-                type: string
-        "503":
-          description: User management requires the job state db, which isn't configured
-          content:
-            text/plain:
-              schema:
-                type: string
-
   /api/v1/objects/{id}/{key}:
     put:
       tags: [receiver-api]
@@ -995,12 +598,13 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: >
-        HS256 JWT returned by a successful /login (or, for SSO, minted
-        after the /login/oidc/callback dance and handed to the browser via
-        an inline script), signed with a key generated fresh per server
-        process — a restart invalidates every session. Only enforced when
-        webui.username or OIDC is configured, otherwise these endpoints are
-        open.
+        The OIDC provider's access token (a JWT), obtained by the SPA as a
+        public client (authorization code + PKCE). Verified on every request
+        against the issuer's JWKS (signature, issuer, expiry) and required to
+        name `webui.oidc.client-id` as its `azp` or in its `aud`. Permissions
+        are `webui.oidc.default-permissions` plus whatever the token's groups
+        map to in `webui.oidc.group-permissions`. Without `webui.oidc`
+        enabled, every request is rejected.
     receiverBearer:
       type: http
       scheme: bearer
@@ -1009,7 +613,7 @@ components:
         Per-receiver JWT, signed by the sending instance's private key and
         verified against the receiver's configured public-key: (see
         remoteAuth.SignRemoteAuthToken/VerifyRemoteAuthToken). Independent of
-        the dashboard's own session auth.
+        the dashboard's own SSO auth.
 
   parameters:
     ReceiverId:
@@ -1026,23 +630,16 @@ components:
       description: Object key, relative to the receiver's storage path (may contain "/").
       schema:
         type: string
-    Username:
-      name: username
-      in: path
-      required: true
-      description: A dashboard account's username, as created via `POST /api/users`.
-      schema:
-        type: string
 
   responses:
     Unauthorized:
-      description: No valid dashboard session
+      description: Missing, invalid, or expired access token
       content:
         text/plain:
           schema:
             type: string
     Forbidden:
-      description: Valid session, but missing the permission this endpoint requires
+      description: Valid access token, but missing the permission this endpoint requires
       content:
         text/plain:
           schema:
@@ -1052,7 +649,7 @@ components:
     Permission:
       type: string
       description: >
-        A single dashboard session capability. `download` implies `view`;
+        A single dashboard capability. `download` implies `view`;
         `admin` implies every other permission.
       enum:
         [
@@ -1068,33 +665,44 @@ components:
 
     Meta:
       type: object
-      description: Build/auth metadata for the dashboard shell (always public).
+      description: Build metadata for the dashboard footer (always public).
       properties:
         version:
           type: string
         commit:
           type: string
-        auth_enabled:
-          type: boolean
-        oidc_enabled:
-          type: boolean
-      required: [version, commit, auth_enabled, oidc_enabled]
+      required: [version, commit]
 
-    SessionInfo:
+    SSOStatus:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        buttonLabel:
+          type: string
+        issuerUrl:
+          type: string
+        clientId:
+          type: string
+        scopes:
+          type: string
+          description: Space-separated OAuth2 scopes the SPA should request.
+      required: [enabled, buttonLabel]
+
+    Me:
       type: object
       properties:
         username:
           type: string
+          description: The token's preferred_username, else its email, else its subject.
         permissions:
           type: array
           items:
             $ref: "#/components/schemas/Permission"
         admin:
           type: boolean
-          description: True if this session can reach the "Users" admin section.
-        oidc_enabled:
-          type: boolean
-      required: [permissions, admin, oidc_enabled]
+          description: True if this user holds the `admin` permission.
+      required: [username, permissions, admin]
 
     JobRunEvent:
       type: object
@@ -1156,69 +764,6 @@ components:
         error:
           type: string
       required: [at, receiver_id, kind, key, size, success]
-
-    User:
-      type: object
-      description: One dashboard account managed through the "Users" admin section.
-      properties:
-        username:
-          type: string
-        oidc_username:
-          type: string
-          description: Empty if this account has no linked/auto-provisioned OIDC identity.
-        permissions:
-          type: array
-          items:
-            $ref: "#/components/schemas/Permission"
-        created_at:
-          type: string
-          format: date-time
-      required: [username, oidc_username, permissions, created_at]
-
-    UserRequest:
-      type: object
-      description: >
-        Request body for creating (`POST /api/users`) or updating (`PUT
-        /api/users/{username}`) a dashboard account. `username` is only
-        used (and required) when creating one. `password` is required when
-        creating one, but optional when updating one — omitted or blank
-        leaves the stored password unchanged. `oidc_username` is always a
-        full-replace value; blank explicitly clears the link.
-      properties:
-        username:
-          type: string
-        password:
-          type: string
-        oidc_username:
-          type: string
-        permissions:
-          type: array
-          items:
-            $ref: "#/components/schemas/Permission"
-      required: [permissions]
-
-    APIToken:
-      type: object
-      description: >
-        One long-lived API token issued for a dashboard account (see `POST
-        /api/users/{username}/tokens`). Never carries the token's own
-        signed value — only its `jti`, shown once at issuance and never
-        again.
-      properties:
-        jti:
-          type: string
-        created_at:
-          type: string
-          format: date-time
-        expires_at:
-          type: string
-          format: date-time
-        revoked:
-          type: boolean
-        revoked_at:
-          type: string
-          format: date-time
-      required: [jti, created_at, expires_at, revoked]
 
     RunState:
       type: string

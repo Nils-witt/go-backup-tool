@@ -387,15 +387,64 @@ jobs:
 	}
 }
 
-func TestParseFlagsWebUIUsernamePassword(t *testing.T) {
+func TestParseFlagsRejectsRemovedLocalLogin(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		webuiYAML  string
+		wantErrHas string
+	}{
+		{name: "username/password", webuiYAML: "\n  username: \"admin\"\n  password: \"secret\"", wantErrHas: "webui.username"},
+		{name: "client-secret", webuiYAML: "\n  oidc:\n    enabled: true\n    issuer: \"https://idp.example.com\"\n    client-id: \"c\"\n    client-secret: \"s\"", wantErrHas: "client-secret"},
+		{name: "redirect-url", webuiYAML: "\n  oidc:\n    enabled: true\n    issuer: \"https://idp.example.com\"\n    client-id: \"c\"\n    redirect-url: \"https://x/cb\"", wantErrHas: "redirect-url"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := writeConfigFile(t, `
+webui:
+  enabled: true
+  listen: ":0"`+tc.webuiYAML+`
+
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+			_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), tc.wantErrHas) {
+				t.Fatalf("ParseFlags() error = %v, want substring %q", err, tc.wantErrHas)
+			}
+		})
+	}
+}
+
+func TestParseFlagsOIDCGroupPermissions(t *testing.T) {
 	t.Parallel()
 
 	path := writeConfigFile(t, `
 webui:
   enabled: true
   listen: ":0"
-  username: "admin"
-  password: "secret"
+  oidc:
+    enabled: true
+    issuer: "https://idp.example.com"
+    client-id: "my-client"
+    groups-claim: "roles"
+    button-label: "Log in with Keycloak"
+    group-permissions:
+      backup-admins: [admin]
+      auditors: [login-log, download-log]
 
 servers:
   - name: s
@@ -414,12 +463,47 @@ jobs:
 		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	if rc.WebUIUsername != "admin" {
-		t.Errorf("rc.WebUIUsername = %q, want %q", rc.WebUIUsername, "admin")
+	want := map[string]permission.Permission{
+		"backup-admins": permission.PermissionAdmin,
+		"auditors":      permission.PermissionViewLoginLog | permission.PermissionViewDownloadLog,
+	}
+	if !reflect.DeepEqual(rc.OIDC.GroupPermissions, want) {
+		t.Errorf("rc.OIDC.GroupPermissions = %v, want %v", rc.OIDC.GroupPermissions, want)
 	}
 
-	if rc.WebUIPassword != "secret" {
-		t.Errorf("rc.WebUIPassword = %q, want %q", rc.WebUIPassword, "secret")
+	if rc.OIDC.GroupsClaim != "roles" || rc.OIDC.ButtonLabel != "Log in with Keycloak" {
+		t.Errorf("rc.OIDC groupsClaim/buttonLabel = %q/%q", rc.OIDC.GroupsClaim, rc.OIDC.ButtonLabel)
+	}
+}
+
+func TestParseFlagsOIDCGroupPermissionsRejectsUnknown(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+webui:
+  enabled: true
+  listen: ":0"
+  oidc:
+    enabled: true
+    issuer: "https://idp.example.com"
+    client-id: "my-client"
+    group-permissions:
+      ops: [delete]
+
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	if _, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{}); err == nil {
+		t.Fatal("ParseFlags() with an unknown webui.oidc.group-permissions entry = nil error, want one")
 	}
 }
 
@@ -1877,8 +1961,6 @@ webui:
     enabled: true
     issuer: "https://idp.example.com"
     client-id: "my-client"
-    client-secret: "s3cr3t"
-    redirect-url: "https://backups.example.com/login/oidc/callback"
 
 servers:
   - name: s
@@ -1901,10 +1983,11 @@ jobs:
 		Enabled:            true,
 		Issuer:             "https://idp.example.com",
 		ClientID:           "my-client",
-		ClientSecret:       "s3cr3t",
-		RedirectURL:        "https://backups.example.com/login/oidc/callback",
-		Scopes:             []string{"profile", "email"},
+		Scopes:             []string{"openid", "profile", "email"},
+		ButtonLabel:        "Sign in with SSO",
+		GroupsClaim:        "groups",
 		DefaultPermissions: permission.PermissionView | permission.PermissionDownload,
+		GroupPermissions:   map[string]permission.Permission{},
 	}
 
 	if !reflect.DeepEqual(rc.OIDC, want) {
@@ -1923,8 +2006,6 @@ webui:
     enabled: true
     issuer: "https://idp.example.com"
     client-id: "my-client"
-    client-secret: "s3cr3t"
-    redirect-url: "https://backups.example.com/login/oidc/callback"
     default-permissions: ["view"]
 
 servers:
@@ -1960,8 +2041,6 @@ webui:
     enabled: true
     issuer: "https://idp.example.com"
     client-id: "my-client"
-    client-secret: "s3cr3t"
-    redirect-url: "https://backups.example.com/login/oidc/callback"
     default-permissions: ["delete"]
 
 servers:
@@ -1992,8 +2071,6 @@ webui:
     enabled: true
     issuer: "https://idp.example.com"
     client-id: "my-client"
-    client-secret: "s3cr3t"
-    redirect-url: "https://backups.example.com/login/oidc/callback"
     scopes: ["groups"]
 
 servers:
@@ -2027,8 +2104,6 @@ webui:
     enabled: true
     issuer: "https://idp.example.com"
     client-id: "my-client"
-    client-secret: "s3cr3t"
-    redirect-url: "https://backups.example.com/login/oidc/callback"
 
 servers:
   - name: s
@@ -2061,8 +2136,7 @@ func TestParseFlagsOIDCEnabledRequiresEveryField(t *testing.T) {
 			oidcYAML: `
     enabled: true
     client-id: "my-client"
-    client-secret: "s3cr3t"
-    redirect-url: "https://backups.example.com/login/oidc/callback"`,
+`,
 			wantErrHas: "webui.oidc.issuer",
 		},
 		{
@@ -2070,27 +2144,8 @@ func TestParseFlagsOIDCEnabledRequiresEveryField(t *testing.T) {
 			oidcYAML: `
     enabled: true
     issuer: "https://idp.example.com"
-    client-secret: "s3cr3t"
-    redirect-url: "https://backups.example.com/login/oidc/callback"`,
+`,
 			wantErrHas: "webui.oidc.client-id",
-		},
-		{
-			name: "missing client-secret",
-			oidcYAML: `
-    enabled: true
-    issuer: "https://idp.example.com"
-    client-id: "my-client"
-    redirect-url: "https://backups.example.com/login/oidc/callback"`,
-			wantErrHas: "webui.oidc.client-secret",
-		},
-		{
-			name: "missing redirect-url",
-			oidcYAML: `
-    enabled: true
-    issuer: "https://idp.example.com"
-    client-id: "my-client"
-    client-secret: "s3cr3t"`,
-			wantErrHas: "webui.oidc.redirect-url",
 		},
 	}
 
