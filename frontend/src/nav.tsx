@@ -8,6 +8,7 @@ import HistoryIcon from "@mui/icons-material/History";
 import PlaylistAddCheckIcon from "@mui/icons-material/PlaylistAddCheck";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import VpnKeyIcon from "@mui/icons-material/VpnKey";
+import KeyIcon from "@mui/icons-material/Key";
 import type { AuthState } from "./auth/useAuth";
 
 export interface NavItem {
@@ -31,6 +32,12 @@ export const NAV_GROUPS: NavGroup[] = [
       { to: "/", label: "Dashboard", icon: <DashboardIcon /> },
       { to: "/receivers", label: "Receivers", icon: <StorageIcon /> },
       { to: "/identity", label: "Identity", icon: <VpnKeyIcon /> },
+      {
+        to: "/tokens",
+        label: "API tokens",
+        icon: <KeyIcon />,
+        visible: (s) => s.canManageTokens,
+      },
     ],
   },
   {

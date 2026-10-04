@@ -21,6 +21,8 @@ export interface AuthState {
   canDownload: boolean;
   // canRetry mirrors the server's admin gate on POST /api/jobs/{name}/retry.
   canRetry: boolean;
+  // canManageTokens mirrors the server's admin gate on /api/tokens.
+  canManageTokens: boolean;
   canViewLoginLog: boolean;
   canViewDownloadLog: boolean;
   canViewJobRunLog: boolean;

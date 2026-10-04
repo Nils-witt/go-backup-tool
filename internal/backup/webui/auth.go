@@ -11,6 +11,9 @@
 // (see webui.oidc.group-permissions). Nothing about a user is stored
 // locally.
 //
+// The one other accepted bearer credential is a long-lived, read-only API
+// token this instance issued itself (see tokens.go).
+//
 // None of this applies to the receiver API (internal/backup/receiver),
 // which shares the same HTTP server but authenticates each sending
 // instance with its own per-receiver public-key-verified JWT.
@@ -73,15 +76,17 @@ func currentUser(ctx context.Context) (*principal, bool) {
 type authenticator struct {
 	oidc              config.OIDCSettings
 	verifiers         *ssoVerifierCache
+	tokens            *apiTokens
 	db                *store.Store
 	log               *slog.Logger
 	trustProxyHeaders bool
 }
 
-func newAuthenticator(oidcSettings config.OIDCSettings, db *store.Store, log *slog.Logger, trustProxyHeaders bool) *authenticator {
+func newAuthenticator(oidcSettings config.OIDCSettings, tokens *apiTokens, db *store.Store, log *slog.Logger, trustProxyHeaders bool) *authenticator {
 	return &authenticator{
 		oidc:              oidcSettings,
 		verifiers:         newSSOVerifierCache(),
+		tokens:            tokens,
 		db:                db,
 		log:               log,
 		trustProxyHeaders: trustProxyHeaders,
@@ -89,9 +94,10 @@ func newAuthenticator(oidcSettings config.OIDCSettings, db *store.Store, log *sl
 }
 
 // requireUser resolves the request to a principal before calling next,
-// storing it in the request context (see currentUser). The only accepted
+// storing it in the request context (see currentUser). The accepted
 // credential is an "Authorization: Bearer" SSO access token (see
-// ssoBearerUser) — there are no local accounts or session cookies. A
+// ssoBearerUser) or API token (see apiTokens) — there are no local accounts
+// or session cookies. A
 // missing/invalid credential gets a 401; the SPA itself decides whether to
 // renew its token or navigate to /login based on that.
 func requireUser(a *authenticator, next http.HandlerFunc) http.HandlerFunc {
@@ -99,6 +105,18 @@ func requireUser(a *authenticator, next http.HandlerFunc) http.HandlerFunc {
 		raw, ok := bearerToken(r)
 		if !ok {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		if token, ok := a.tokens.parse(raw); ok {
+			user, err := a.tokens.user(r.Context(), token)
+			if err != nil {
+				a.rejectAPIToken(w, r, err)
+				return
+			}
+
+			next(w, r.WithContext(context.WithValue(r.Context(), userContextKey, user)))
+
 			return
 		}
 
@@ -152,6 +170,17 @@ func (a *authenticator) rejectBearer(w http.ResponseWriter, r *http.Request, err
 	}
 
 	http.Error(w, "invalid or expired token", http.StatusUnauthorized)
+}
+
+// rejectAPIToken answers a failed API token check with a generic 401,
+// recording it as a failed login in the login log — unlike an SSO token, an
+// API token is never routinely renewed, so even an expired one is worth an
+// operator's attention.
+func (a *authenticator) rejectAPIToken(w http.ResponseWriter, r *http.Request, err error) {
+	a.log.Warn("web UI: api token rejected", "err", err)
+	recordLogin(r.Context(), a.db, a.log, r, a.trustProxyHeaders, loginMethodAPIToken, "api token", "", err.Error(), false)
+
+	http.Error(w, "invalid, expired or revoked token", http.StatusUnauthorized)
 }
 
 // ssoStatusJSON is what the public GET /api/sso/status returns: what the

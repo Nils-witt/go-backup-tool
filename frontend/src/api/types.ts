@@ -116,6 +116,22 @@ export interface SSOStatusJSON {
   scopes?: string;
 }
 
+export interface APITokenJSON {
+  id: string;
+  name: string;
+  permissions: string[];
+  created_by: string;
+  created_at: string;
+  expires_at: string;
+  revoked_at?: string;
+  revoked_by?: string;
+}
+
+/** POST /api/tokens' response: the new token plus its signed JWT, shown only once. */
+export interface CreatedAPITokenJSON extends APITokenJSON {
+  token: string;
+}
+
 export interface MetaJSON {
   version: string;
   commit: string;

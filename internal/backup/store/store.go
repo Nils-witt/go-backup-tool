@@ -28,7 +28,8 @@ import (
 // what's eligible for automatic deletion), and the web UI's audit logs.
 // Nothing about web UI users is stored: every login is SSO and every
 // permission comes from the access token's groups (see
-// internal/backup/webui/auth.go).
+// internal/backup/webui/auth.go). The only web UI credentials kept are the
+// read-only API tokens' metadata and signing key (see tokens.go).
 type Store struct {
 	db *gorm.DB
 }
@@ -74,6 +75,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		&jobRunModel{}, &targetRunModel{}, &outstandingTargetUploadModel{},
 		&objectModel{},
 		&loginEventModel{}, &downloadEventModel{}, &receiverEventModel{},
+		&apiTokenModel{}, &tokenSigningKeyModel{},
 	); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)

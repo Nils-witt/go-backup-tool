@@ -74,6 +74,7 @@ export function LoginLogSection({ events }: { events: LoginEventJSON[] }) {
           <MenuItem value="">All methods</MenuItem>
           <MenuItem value="password">Password</MenuItem>
           <MenuItem value="oidc">SSO</MenuItem>
+          <MenuItem value="api-token">API token</MenuItem>
         </Select>
         <Select
           size="small"

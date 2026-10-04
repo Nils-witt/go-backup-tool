@@ -70,7 +70,8 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 
 	downloadTickets := newDownloadTicketStore()
 
-	auth := newAuthenticator(oidcSettings, db, log, trustProxyHeaders)
+	tokens := newAPITokens(context.Background(), db, log)
+	auth := newAuthenticator(oidcSettings, tokens, db, log, trustProxyHeaders)
 
 	// perm gates a JSON endpoint the dashboard's own JavaScript calls via
 	// fetch() behind a valid SSO access token (see requireUser) whose
@@ -115,6 +116,9 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 	mux.HandleFunc("GET /api/login-events", apiLoginLog(handleLoginEvents(db, log)))
 	mux.HandleFunc("GET /api/download-events", apiDownloadLog(handleDownloadEvents(db, log)))
 	mux.HandleFunc("GET /api/receiver-events", apiReceiverLog(handleReceiverEvents(db, log)))
+	mux.HandleFunc("GET /api/tokens", admin(handleListAPITokens(tokens, log)))
+	mux.HandleFunc("POST /api/tokens", admin(handleCreateAPIToken(tokens, log)))
+	mux.HandleFunc("DELETE /api/tokens/{id}", admin(handleRevokeAPIToken(tokens, log)))
 
 	if registerExtraRoutes != nil {
 		registerExtraRoutes(mux)
