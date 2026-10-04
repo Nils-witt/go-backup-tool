@@ -254,11 +254,18 @@ jobs:
         # on-error (optional) names a top-level commands: entry (see
         # commands: below) to run once this target has failed on-error.after
         # times in a row — and again on every consecutive failure after
-        # that, until a success resets the streak. The streak is tracked in
-        # memory only and resets when go-backup-tool restarts.
+        # that, until a success resets the streak. Set repeat: false to fire
+        # only once per streak, when it first reaches after. The streak is
+        # tracked in memory only and resets when go-backup-tool restarts.
         # on-error:
         #   command: restart-nas-mount
         #   after: 3
+        #   repeat: true # default
+        # on-recover (optional) names a commands: entry to run once, on the
+        # first success after one or more consecutive failures of this
+        # target (independent of on-error.after).
+        # on-recover:
+        #   command: resolve-oncall
       - server: sibling-instance
         bucket: from-primary # = id of a receivers: entry on sibling-instance
     # no interval: this job runs once and doesn't repeat, even though
@@ -382,26 +389,30 @@ jobs:
 #       body: '{"text":"{user} downloaded {file} from {receiver} at {time}"}'
 
 # commands: are named, reusable shell commands, referenced by id from a job
-# target's on-error.command (see targets: above) — the same "define once,
-# reference by id" shape as notifications: above. id is required and must be
-# unique; cmd is required and is run through the platform shell exactly like
-# a job's own cmd: (sh -c on Linux/macOS, cmd /C on Windows) — it's
+# target's on-error.command or on-recover.command (see targets: above) — the
+# same "define once, reference by id" shape as notifications: above. id is
+# required and must be unique; cmd is required and is run through the
+# platform shell exactly like a job's own cmd: (sh -c on Linux/macOS, cmd /C on Windows) — it's
 # operator-supplied config, not sanitized in any way. timeout (optional,
 # same duration syntax as retention:) bounds how long one firing may run;
 # defaults to 30s.
 #
-# Failure context is passed to the command via environment variables (never
+# Context is passed to the command via environment variables (never
 # interpolated into the command string, so you never have to worry about an
-# error message containing shell metacharacters): GBT_JOB, GBT_TARGET (the
-# failed target's bucket), GBT_SERVER (its server name), GBT_ERROR,
-# GBT_CONSECUTIVE_FAILURES (the streak length that triggered this firing,
-# see on-error.after above), and GBT_TIME (RFC 3339).
+# error message containing shell metacharacters): GBT_EVENT ("error" or
+# "recover"), GBT_JOB, GBT_TARGET (the target's bucket), GBT_SERVER (its
+# server name), GBT_ERROR (on-error only; unset on recovery),
+# GBT_CONSECUTIVE_FAILURES (the streak length that triggered this firing, see
+# on-error.after above — or, for on-recover, the streak that just ended), and
+# GBT_TIME (RFC 3339).
 # commands:
 #   - id: restart-nas-mount
 #     cmd: "ssh nas-host systemctl restart nas-share"
 #     timeout: 15s
 #   - id: page-oncall
 #     cmd: "curl -fsS -X POST https://events.example.com/trigger -d \"target=$GBT_TARGET&error=$GBT_ERROR\""
+#   - id: resolve-oncall
+#     cmd: "curl -fsS -X POST https://events.example.com/resolve -d \"target=$GBT_TARGET&failures=$GBT_CONSECUTIVE_FAILURES\""
 
 # report: configures an optional summary of this instance's receiver
 # activity: how many files each configured receivers: entry received since

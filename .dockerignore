@@ -19,3 +19,6 @@ config.yaml
 Dockerfile
 .dockerignore
 README.md
+
+# CI only: buildkit-cache-dance staging dir (see .github/workflows/docker.yml)
+cache-mount

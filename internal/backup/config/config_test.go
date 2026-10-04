@@ -2791,6 +2791,43 @@ jobs:
 	if job.Targets[0].OnErrorAfter != 3 {
 		t.Errorf("Targets[0].OnErrorAfter = %d, want 3", job.Targets[0].OnErrorAfter)
 	}
+
+	if job.Targets[0].OnErrorOnce {
+		t.Errorf("Targets[0].OnErrorOnce = true, want false (repeat defaults to true)")
+	}
+}
+
+func TestParseFlagsTargetOnErrorRepeatFalse(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+commands:
+  - id: alert
+    cmd: "echo hi"
+
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets:
+      - server: s
+        bucket: b
+        on-error: {command: alert, after: 3, repeat: false}
+    recipients: [me@example.com]
+`)
+
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
+	}
+
+	if !singleJob(t, rc).Targets[0].OnErrorOnce {
+		t.Errorf("Targets[0].OnErrorOnce = false, want true for repeat: false")
+	}
 }
 
 func TestParseFlagsTargetOnErrorUnknownCommand(t *testing.T) {
@@ -2869,5 +2906,97 @@ jobs:
 	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "on-error.command is required") {
 		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "on-error.command is required")
+	}
+}
+
+func TestParseFlagsTargetOnRecoverResolves(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+commands:
+  - id: all-clear
+    cmd: "echo recovered"
+    timeout: 10s
+
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets:
+      - server: s
+        bucket: b
+        on-recover:
+          command: all-clear
+    recipients: [me@example.com]
+`)
+
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
+	}
+
+	job := singleJob(t, rc)
+
+	want := &Command{ID: "all-clear", Cmd: "echo recovered", Timeout: 10 * time.Second}
+	if !reflect.DeepEqual(job.Targets[0].OnRecoverCommand, want) {
+		t.Errorf("Targets[0].OnRecoverCommand = %+v, want %+v", job.Targets[0].OnRecoverCommand, want)
+	}
+
+	if job.Targets[0].OnErrorCommand != nil {
+		t.Errorf("Targets[0].OnErrorCommand = %+v, want nil (on-recover alone doesn't imply on-error)", job.Targets[0].OnErrorCommand)
+	}
+}
+
+func TestParseFlagsTargetOnRecoverUnknownCommand(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets:
+      - server: s
+        bucket: b
+        on-recover: {command: nope}
+    recipients: [me@example.com]
+`)
+
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "no command named") {
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "no command named")
+	}
+}
+
+func TestParseFlagsTargetOnRecoverCommandRequired(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets:
+      - server: s
+        bucket: b
+        on-recover: {command: "  "}
+    recipients: [me@example.com]
+`)
+
+	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "on-recover.command is required") {
+		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "on-recover.command is required")
 	}
 }

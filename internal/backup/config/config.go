@@ -109,12 +109,19 @@ type jobTargetRef struct {
 	// its own; that's not expected to be a common need.
 	retention time.Duration
 
-	// onErrorCommandID/onErrorAfter carry a targets: entry's on-error: block
-	// through to resolveJobTargets, which resolves onErrorCommandID against
-	// the top-level commands: map into Target.OnErrorCommand. An empty
-	// onErrorCommandID means no on-error: was configured for this target.
+	// onErrorCommandID/onErrorAfter/onErrorOnce carry a targets: entry's
+	// on-error: block through to resolveJobTargets, which resolves
+	// onErrorCommandID against the top-level commands: map into
+	// Target.OnErrorCommand. An empty onErrorCommandID means no on-error: was
+	// configured for this target. onErrorOnce is on-error.repeat: false.
 	onErrorCommandID string
 	onErrorAfter     int
+	onErrorOnce      bool
+
+	// onRecoverCommandID carries a targets: entry's on-recover: block through
+	// to resolveJobTargets, the same way as onErrorCommandID, into
+	// Target.OnRecoverCommand. Empty means no on-recover: was configured.
+	onRecoverCommandID string
 }
 
 // ServerKind distinguishes a servers: entry's destination type. There is no
@@ -169,18 +176,27 @@ type Target struct {
 	// Retention.go.
 	Retention time.Duration
 
-	// OnErrorCommand, if non-nil, is fired (see pipeline.runOnErrorCommand)
+	// OnErrorCommand, if non-nil, is fired (see pipeline.runTargetCommand)
 	// once this target's in-memory consecutive-failure streak reaches
-	// OnErrorAfter, and again on every consecutive failure after that — see
+	// OnErrorAfter, and again on every consecutive failure after that unless
+	// OnErrorOnce (on-error.repeat: false) is set — see
 	// Runner.handleTargetOutcome in the pipeline package. nil (the common
 	// case) means no on-error: was configured for this target.
 	OnErrorCommand *Command
 	OnErrorAfter   int
+	OnErrorOnce    bool
+
+	// OnRecoverCommand, if non-nil, is fired (see pipeline.runTargetCommand)
+	// once, on this target's first success after one or more consecutive
+	// failures — see Runner.handleTargetOutcome in the pipeline package. nil
+	// (the common case) means no on-recover: was configured for this target.
+	OnRecoverCommand *Command
 }
 
 // Command is one top-level commands: entry after validation, ready to be
-// run by the pipeline package (see pipeline.runOnErrorCommand) once a
-// target's consecutive-failure streak reaches its on-error.after threshold.
+// run by the pipeline package (see pipeline.runTargetCommand) once a
+// target's consecutive-failure streak reaches its on-error.after threshold,
+// or once a target recovers from a failure streak (on-recover:).
 type Command struct {
 	ID      string
 	Cmd     string
@@ -312,23 +328,35 @@ type fileJob struct {
 // retention: unchanged; it's an error to set it against a target whose
 // server isn't type: local.
 type fileJobTarget struct {
-	Server    string             `yaml:"server"`
-	Bucket    string             `yaml:"bucket"`
-	Retention string             `yaml:"retention"`
-	OnError   *fileTargetOnError `yaml:"on-error"`
+	Server    string               `yaml:"server"`
+	Bucket    string               `yaml:"bucket"`
+	Retention string               `yaml:"retention"`
+	OnError   *fileTargetOnError   `yaml:"on-error"`
+	OnRecover *fileTargetOnRecover `yaml:"on-recover"`
 }
 
 // fileTargetOnError mirrors a targets: entry's on-error: block for YAML
 // unmarshaling. Command references a top-level commands: entry's id
 // (required whenever on-error: is present at all — see applyFileJob).
 // After is how many consecutive times this target must fail, in a row,
-// before Command first fires — it then fires again on every subsequent
-// consecutive failure (see pipeline.Runner.handleTargetOutcome), not just
-// once per streak. Must be a positive integer — validated in
+// before Command first fires. Must be a positive integer — validated in
 // resolveJobTargets, once the target has been resolved against servers:.
+// Repeat (default true) makes Command fire again on every subsequent
+// consecutive failure (see pipeline.Runner.handleTargetOutcome); false fires
+// it only once per streak, when the streak reaches After.
 type fileTargetOnError struct {
 	Command string `yaml:"command"`
 	After   int    `yaml:"after"`
+	Repeat  *bool  `yaml:"repeat"`
+}
+
+// fileTargetOnRecover mirrors a targets: entry's on-recover: block for YAML
+// unmarshaling. Command references a top-level commands: entry's id
+// (required whenever on-recover: is present at all — see applyFileJob). It
+// fires once, on the first success after one or more consecutive failures
+// (see pipeline.Runner.handleTargetOutcome), independent of on-error:.
+type fileTargetOnRecover struct {
+	Command string `yaml:"command"`
 }
 
 // fileServer is one top-level servers: entry, defined once and referenced by
@@ -359,7 +387,7 @@ type fileServer struct {
 }
 
 // fileCommand is one top-level commands: entry, defined once and referenced
-// by id from a target's on-error.command — the same "define once, reference
+// by id from a target's on-error.command or on-recover.command — the same "define once, reference
 // by id" shape as notify.FileNotification. Cmd is run through the platform
 // shell, the same way a job's own cmd: is (see pipeline.newSourceCommand).
 // Timeout (optional) bounds how long one firing may run; defaults to
@@ -403,7 +431,8 @@ type fileConfig struct {
 	Notifications []notify.FileNotification `yaml:"notifications"`
 
 	// Commands are named, reusable shell commands, referenced by id from a
-	// target's on-error.command (see buildCommands) — the same "define
+	// target's on-error.command or on-recover.command (see buildCommands) —
+	// the same "define
 	// once, reference by id" shape as Notifications.
 	Commands []fileCommand `yaml:"commands"`
 
@@ -661,7 +690,8 @@ func resolveNotificationsAndCommands(fileCfg *fileConfig) (map[string]notify.Not
 const defaultOnErrorCommandTimeout = 30 * time.Second
 
 // buildCommands resolves fileCfg's top-level commands: entries into an
-// id -> Command map, used to resolve a target's on-error.command. Validates
+// id -> Command map, used to resolve a target's on-error.command and
+// on-recover.command. Validates
 // that every entry has a non-empty, unique id and a non-empty cmd — the
 // same validation shape as notify.Build for notifications:.
 func buildCommands(fileCommands []fileCommand) (map[string]Command, error) {
@@ -917,7 +947,7 @@ func parseLogLevel(s string) (slog.Level, error) {
 // top-level notifications: map (see notify.Build), used to resolve a job's
 // failure-notifications:. commands is the config file's already-resolved
 // top-level commands: map (see buildCommands), used to resolve a target's
-// on-error.command.
+// on-error.command and on-recover.command.
 //
 // An empty jobs: list is only allowed when the web UI is enabled, since that
 // still leaves the web UI (and receiver API) as a reason to run; otherwise
@@ -1160,8 +1190,8 @@ type resolvedServer struct {
 
 // resolveJobTargets resolves cfg's raw target references (targetRefs, from
 // targets:) against servers, building cfg.targets, and resolves each ref's
-// on-error.command (if any) against commands (see buildCommands) into that
-// target's OnErrorCommand. A job with no target references at all is left
+// on-error.command and on-recover.command (if any) against commands (see
+// buildCommands) into that target's OnErrorCommand/OnRecoverCommand. A job with no target references at all is left
 // with an empty cfg.targets; validateJob reports that as an error.
 func resolveJobTargets(cfg *Config, servers map[string]resolvedServer, commands map[string]Command) error {
 	if len(cfg.targetRefs) == 0 {
@@ -1215,6 +1245,16 @@ func resolveJobTargets(cfg *Config, servers map[string]resolvedServer, commands 
 
 			cfg.Targets[i].OnErrorCommand = &command
 			cfg.Targets[i].OnErrorAfter = ref.onErrorAfter
+			cfg.Targets[i].OnErrorOnce = ref.onErrorOnce
+		}
+
+		if ref.onRecoverCommandID != "" {
+			command, ok := commands[ref.onRecoverCommandID]
+			if !ok {
+				return fmt.Errorf("targets[%d]: no command named %q defined under commands", i, ref.onRecoverCommandID)
+			}
+
+			cfg.Targets[i].OnRecoverCommand = &command
 		}
 	}
 
@@ -1333,6 +1373,39 @@ func applyBool(dst *bool, val bool) {
 	}
 }
 
+// newJobTargetRef parses one targets: entry into its raw jobTargetRef,
+// leaving server/command id resolution to resolveJobTargets.
+func newJobTargetRef(t fileJobTarget) (jobTargetRef, error) {
+	retention, err := parseRetention(t.Retention)
+	if err != nil {
+		return jobTargetRef{}, err
+	}
+
+	ref := jobTargetRef{server: t.Server, bucket: t.Bucket, retention: retention}
+
+	if t.OnError != nil {
+		commandID := strings.TrimSpace(t.OnError.Command)
+		if commandID == "" {
+			return jobTargetRef{}, errors.New("on-error.command is required")
+		}
+
+		ref.onErrorCommandID = commandID
+		ref.onErrorAfter = t.OnError.After
+		ref.onErrorOnce = t.OnError.Repeat != nil && !*t.OnError.Repeat
+	}
+
+	if t.OnRecover != nil {
+		commandID := strings.TrimSpace(t.OnRecover.Command)
+		if commandID == "" {
+			return jobTargetRef{}, errors.New("on-recover.command is required")
+		}
+
+		ref.onRecoverCommandID = commandID
+	}
+
+	return ref, nil
+}
+
 // applyFileJob fills any field of cfg that fj sets, leaving the rest (its
 // current value, typically a built-in default or a shared top-level
 // default already applied) untouched. notifications is the config file's
@@ -1351,21 +1424,9 @@ func applyFileJob(cfg *Config, fj *fileJob, notifications map[string]notify.Noti
 		cfg.targetRefs = make([]jobTargetRef, len(fj.Targets))
 
 		for i, t := range fj.Targets {
-			retention, err := parseRetention(t.Retention)
+			ref, err := newJobTargetRef(t)
 			if err != nil {
 				return fmt.Errorf("targets[%d]: %w", i, err)
-			}
-
-			ref := jobTargetRef{server: t.Server, bucket: t.Bucket, retention: retention}
-
-			if t.OnError != nil {
-				commandID := strings.TrimSpace(t.OnError.Command)
-				if commandID == "" {
-					return fmt.Errorf("targets[%d]: on-error.command is required", i)
-				}
-
-				ref.onErrorCommandID = commandID
-				ref.onErrorAfter = t.OnError.After
 			}
 
 			cfg.targetRefs[i] = ref

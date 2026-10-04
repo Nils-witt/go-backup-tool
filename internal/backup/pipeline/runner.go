@@ -34,7 +34,7 @@ type Runner struct {
 	// Deliberately in-memory only and not backed by the state db: a
 	// consecutive-failure streak is only meaningful within one process's
 	// uptime, and resetting it across a restart is an accepted tradeoff for
-	// simplicity (see the on-error feature's design notes).
+	// simplicity (see the on-error/on-recover feature's design notes).
 	targetFailureMu sync.Mutex
 	targetFailures  map[targetKey]int
 }
@@ -412,15 +412,17 @@ func (r *Runner) persistTargetRun(ctx context.Context, jobName string, success b
 }
 
 // handleTargetOutcome updates t's in-memory consecutive-failure streak for
-// jobName (see Runner.targetFailures) and, once that streak reaches
-// t.OnErrorAfter, fires t.OnErrorCommand — and again on every subsequent
-// consecutive failure, until a success resets the streak. Called by both
-// runOnce's and RetryFailedTargets's own onTargetDone closures, so the two
-// entry points share identical on-error semantics. A nil t.OnErrorCommand
-// (the common case: no on-error: configured for this target) is a fast
-// no-op.
+// jobName (see Runner.targetFailures). On a failure, once that streak
+// reaches t.OnErrorAfter, it fires t.OnErrorCommand — and, unless
+// t.OnErrorOnce, again on every subsequent consecutive failure, until a
+// success resets the streak. On a
+// success that ends a streak of one or more failures, it fires
+// t.OnRecoverCommand once. Called by both runOnce's and
+// RetryFailedTargets's own onTargetDone closures, so the two entry points
+// share identical on-error/on-recover semantics. A target with neither
+// command configured (the common case) is a fast no-op.
 func (r *Runner) handleTargetOutcome(ctx context.Context, jobName string, t *config.Target, terr error, log *slog.Logger) {
-	if t.OnErrorCommand == nil {
+	if t.OnErrorCommand == nil && t.OnRecoverCommand == nil {
 		return
 	}
 
@@ -429,8 +431,13 @@ func (r *Runner) handleTargetOutcome(ctx context.Context, jobName string, t *con
 	r.targetFailureMu.Lock()
 
 	if terr == nil {
+		streak := r.targetFailures[key]
 		delete(r.targetFailures, key)
 		r.targetFailureMu.Unlock()
+
+		if t.OnRecoverCommand != nil && streak > 0 {
+			fireTargetCommand(ctx, "on-recover", jobName, t, *t.OnRecoverCommand, streak, nil, log)
+		}
 
 		return
 	}
@@ -440,14 +447,21 @@ func (r *Runner) handleTargetOutcome(ctx context.Context, jobName string, t *con
 
 	r.targetFailureMu.Unlock()
 
-	if streak < t.OnErrorAfter {
+	if t.OnErrorCommand == nil || streak < t.OnErrorAfter || (t.OnErrorOnce && streak > t.OnErrorAfter) {
 		return
 	}
 
-	cmdCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), t.OnErrorCommand.Timeout)
+	fireTargetCommand(ctx, "on-error", jobName, t, *t.OnErrorCommand, streak, terr, log)
+}
+
+// fireTargetCommand runs cmd via runTargetCommand under a context detached
+// from ctx's cancellation (the triggering run has already finished) and
+// bounded by cmd.Timeout.
+func fireTargetCommand(ctx context.Context, kind, jobName string, t *config.Target, cmd config.Command, streak int, terr error, log *slog.Logger) {
+	cmdCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cmd.Timeout)
 	defer cancel()
 
-	runOnErrorCommand(cmdCtx, jobName, t, *t.OnErrorCommand, streak, terr, log)
+	runTargetCommand(cmdCtx, kind, jobName, t, cmd, streak, terr, log)
 }
 
 // RunOutstandingUploadRetries retries every target upload recorded as
