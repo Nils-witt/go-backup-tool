@@ -388,16 +388,28 @@ func handleIdentity(identity *identity.ServerIdentity) http.HandlerFunc {
 // templating, so this replaces what dashboardHTML's now-removed
 // {{VERSION}}/{{COMMIT}} placeholder substitutions did.
 type metaJSON struct {
-	Version string `json:"version"`
-	Commit  string `json:"commit"`
+	Version      string `json:"version"`
+	Commit       string `json:"commit"`
+	InstanceName string `json:"instanceName,omitempty"`
 }
+
+// instanceNameEnv names the environment variable holding an optional,
+// free-form label for this instance (e.g. "prod" or "nas-01"), shown on the
+// login page and in the dashboard's app bar to tell instances apart.
+const instanceNameEnv = "INSTANCE_NAME"
 
 // handleMeta serves GET /api/meta: always public/unauthenticated, since the
 // footer it feeds is shown on the login page too. Leaks nothing the
 // binary's own --version doesn't already report.
 func handleMeta() http.HandlerFunc {
+	meta := metaJSON{
+		Version:      version.Version,
+		Commit:       version.Commit,
+		InstanceName: strings.TrimSpace(os.Getenv(instanceNameEnv)),
+	}
+
 	return func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, metaJSON{Version: version.Version, Commit: version.Commit})
+		writeJSON(w, meta)
 	}
 }
 

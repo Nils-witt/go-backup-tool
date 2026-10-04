@@ -119,6 +119,7 @@ export interface SSOStatusJSON {
 export interface MetaJSON {
   version: string;
   commit: string;
+  instanceName?: string;
 }
 
 export interface DownloadTicketJSON {

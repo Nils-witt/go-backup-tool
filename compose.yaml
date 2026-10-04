@@ -12,6 +12,10 @@ services:
     # build: .
     image: ghcr.io/nils-witt/go-backup-tool:local # use instead of build: once published
     restart: unless-stopped
+    # environment:
+    #   # Optional label shown on the dashboard's login page and app bar, to
+    #   # tell multiple instances apart.
+    #   INSTANCE_NAME: prod-nas
     volumes:
       - ./config.yaml:/data/config.yaml:ro
       - ./data:/data

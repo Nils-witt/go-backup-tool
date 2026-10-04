@@ -17,12 +17,14 @@ import Typography from "@mui/material/Typography";
 import Button from "@mui/material/Button";
 import { useAuth } from "./auth/useAuth";
 import { Footer } from "./components/Footer";
+import { useMeta } from "./hooks/useMeta";
 import { NAV_GROUPS } from "./nav";
 
 const DRAWER_WIDTH = 240;
 
 export function Layout() {
   const auth = useAuth();
+  const meta = useMeta();
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const drawerContent = (
@@ -76,9 +78,16 @@ export function Layout() {
           >
             <MenuIcon />
           </IconButton>
-          <Typography variant="h6" noWrap component="div" sx={{ flexGrow: 1 }}>
-            go-backup-tool
-          </Typography>
+          <Box sx={{ flexGrow: 1, minWidth: 0, display: "flex", alignItems: "baseline", gap: 1.5 }}>
+            <Typography variant="h6" noWrap component="div">
+              go-backup-tool
+            </Typography>
+            {meta?.instanceName ? (
+              <Typography variant="subtitle1" noWrap sx={{ opacity: 0.8 }}>
+                {meta.instanceName}
+              </Typography>
+            ) : null}
+          </Box>
           {auth.me ? (
             <Typography variant="body2" noWrap sx={{ display: { xs: "none", sm: "block" } }}>
               {auth.me.username}

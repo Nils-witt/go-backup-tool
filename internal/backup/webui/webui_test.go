@@ -71,6 +71,26 @@ func TestHandleStatusServesJSON(t *testing.T) {
 	}
 }
 
+// handleMeta reports INSTANCE_NAME (trimmed) so the SPA can show it on the
+// login page and in the app bar.
+func TestHandleMetaIncludesInstanceName(t *testing.T) {
+	t.Setenv(instanceNameEnv, "  prod-nas  ")
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/meta", nil)
+	rec := httptest.NewRecorder()
+
+	handleMeta()(rec, req)
+
+	var meta metaJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &meta); err != nil {
+		t.Fatalf("decoding response body: %v", err)
+	}
+
+	if meta.InstanceName != "prod-nas" {
+		t.Errorf("InstanceName = %q, want %q", meta.InstanceName, "prod-nas")
+	}
+}
+
 func TestHandleReceiverStatusIncludesStaleness(t *testing.T) {
 	t.Parallel()
 
