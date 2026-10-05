@@ -3000,3 +3000,31 @@ jobs:
 		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "on-recover.command is required")
 	}
 }
+
+func TestParseFlagsConfigFileLogFile(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+log-file: " /var/log/go-backup-tool.log "
+
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
+	}
+
+	if want := "/var/log/go-backup-tool.log"; rc.LogFile != want {
+		t.Errorf("rc.LogFile = %q, want %q", rc.LogFile, want)
+	}
+}

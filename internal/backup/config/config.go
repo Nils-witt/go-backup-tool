@@ -211,6 +211,7 @@ type RunConfig struct {
 	Listen     string // empty disables the web UI; see resolveWebUIListen
 	ConfigPath string // where the config file was loaded from; state db lives alongside it
 	LogLevel   slog.Level
+	LogFile    string                      // empty disables file logging; otherwise log output is also appended here
 	Receivers  map[string]ResolvedReceiver // this instance's receiver API entries, keyed by id; see receivers.go
 
 	// ServerName is fileConfig.ServerName, this instance's own {server_name}
@@ -407,6 +408,7 @@ type fileConfig struct {
 	Timeout  string       `yaml:"timeout"`
 	LogLevel string       `yaml:"log-level"` // debug, info, warn, or error; overridden by -log-level when that flag is explicitly given
 	KeysDir  string       `yaml:"keys-dir"`  // where this instance's persistent identity (RSA key pair + UUID) is stored; defaults to defaultServerKeyDir
+	LogFile  string       `yaml:"log-file"`  // if set, log output is also appended to this file (in addition to stderr)
 	Servers  []fileServer `yaml:"servers"`
 	Jobs     []fileJob    `yaml:"jobs"`
 
@@ -642,6 +644,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		Listen:            listen,
 		ConfigPath:        configPath,
 		LogLevel:          level,
+		LogFile:           strings.TrimSpace(fileCfg.LogFile),
 		Receivers:         receivers,
 		KeysDir:           keysDir,
 		LogViewer:         fileCfg.WebUI.LogViewer,

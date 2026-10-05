@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 
@@ -38,6 +39,16 @@ func newRunLogger(stderr io.Writer, rc *config.RunConfig) (*slog.Logger, *webui.
 	logs := webui.NewLogRingBuffer(webui.LogBufferCapacity)
 
 	return newLogger(io.MultiWriter(stderr, logs), rc.LogLevel), logs
+}
+
+// openLogFile opens path for appending log output, creating it (and its
+// parent directory) if needed. The caller must Close it.
+func openLogFile(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, err
+	}
+
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o640) //nolint:gosec // path comes from the operator's own config file
 }
 
 // Run parses args and executes every configured backup job, writing errors
@@ -117,6 +128,19 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		newLogger(stderr, slog.LevelInfo).Error("parsing flags", "err", err)
 
 		return 2
+	}
+
+	if rc.LogFile != "" {
+		f, err := openLogFile(rc.LogFile)
+		if err != nil {
+			newLogger(stderr, rc.LogLevel).Error("opening log file", "path", rc.LogFile, "err", err)
+
+			return 1
+		}
+
+		defer func() { _ = f.Close() }()
+
+		stderr = io.MultiWriter(stderr, f)
 	}
 
 	log, logs := newRunLogger(stderr, rc)

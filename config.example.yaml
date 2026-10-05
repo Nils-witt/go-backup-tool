@@ -104,6 +104,11 @@ servers:
 # log-level: info # debug, info, warn, or error (default info); the
 # -log-level flag overrides this when explicitly given on the command line.
 
+# log-file: data/go-backup-tool.log # if set, log output is also appended to
+# this file (created, along with its directory, if missing), in addition to
+# stderr (or the Windows Event Log when running as a service). Unset (the
+# default) disables file logging.
+
 # keys-dir: data/keys # where this instance's persistent identity (RSA key
 # pair + UUID, generated on first run — see type: remote above) is stored.
 # Defaults to ./data/keys, next to this file.
