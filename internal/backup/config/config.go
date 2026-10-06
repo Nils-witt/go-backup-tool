@@ -5,6 +5,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -1345,8 +1346,10 @@ func JobError(cfg *Config, err error) error {
 	return fmt.Errorf("job %q: %w", cfg.Name, err)
 }
 
-// loadFileConfig reads and parses the YAML config file at path. If explicit
-// is false (the caller didn't pass -config), a missing file at the default
+// loadFileConfig reads and parses the YAML config file at path, rejecting
+// any key that doesn't map to a known field (a typo, or an option that has
+// since been removed, would otherwise be silently ignored). If explicit is
+// false (the caller didn't pass -config), a missing file at the default
 // path is not an error and loadFileConfig returns (nil, nil).
 func loadFileConfig(path string, explicit bool) (*fileConfig, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // path is operator-supplied CLI config (-config flag or its default), not untrusted input
@@ -1359,7 +1362,13 @@ func loadFileConfig(path string, explicit bool) (*fileConfig, error) {
 	}
 
 	var fc fileConfig
-	if err := yaml.Unmarshal(data, &fc); err != nil {
+
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+
+	// io.EOF means the file is empty (or only comments): an empty config,
+	// same as yaml.Unmarshal would have produced.
+	if err := dec.Decode(&fc); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("parsing config file %q: %w", path, err)
 	}
 

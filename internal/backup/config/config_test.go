@@ -3028,3 +3028,80 @@ jobs:
 		t.Errorf("rc.LogFile = %q, want %q", rc.LogFile, want)
 	}
 }
+
+func TestParseFlagsRejectsUnknownKeys(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name:    "top level",
+			yaml:    "gpg-binary: gpg\n",
+			wantErr: "gpg-binary",
+		},
+		{
+			name: "nested in job",
+			yaml: `
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+jobs:
+  - name: j
+    cmd: echo hi
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+    recipent: typo@example.com
+`,
+			wantErr: "recipent",
+		},
+		{
+			name: "removed email.encrypt gpg-bin",
+			yaml: `
+smtp:
+  host: mail.example.com
+  username: backups@example.com
+  password: secret
+notifications:
+  - id: n
+    email:
+      to: [ops@example.com]
+      encrypt:
+        recipients: [ops@example.com]
+        gpg-bin: /usr/local/bin/gpg
+`,
+			wantErr: "gpg-bin",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := writeConfigFile(t, tc.yaml)
+
+			_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("ParseFlags() error = %v, want it to mention %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadFileConfigEmptyFile(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, "# only a comment\n")
+
+	fc, err := loadFileConfig(path, true)
+	if err != nil {
+		t.Fatalf("loadFileConfig() unexpected error: %v", err)
+	}
+
+	if fc == nil {
+		t.Fatal("loadFileConfig() = nil, want an empty config")
+	}
+}
