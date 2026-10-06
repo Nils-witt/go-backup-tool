@@ -366,10 +366,9 @@ jobs:
 # inbox provider — only the subject line stays in the clear, since SMTP/MIME
 # headers are never covered by this. encrypt.recipients names the GPG
 # identities (fingerprint or email address) to encrypt to; each must already
-# have its public key imported into the keyring gpg-bin/gpg-homedir resolve
-# to (`gpg --import their-key.asc`), the same prerequisite as a job's own
-# recipients: above for backups. gpg-bin/gpg-homedir default to "gpg" and
-# gpg's own default homedir, respectively.
+# have its public key imported into the keyring the top-level
+# gpg-bin/gpg-homedir (see above) resolve to (`gpg --import their-key.asc`) —
+# encrypted emails use the same gpg binary and keyring as backups.
 # notifications:
 #   - id: ops-email
 #     email:
@@ -379,8 +378,6 @@ jobs:
 #       to: ["ops@example.com"]
 #       encrypt:
 #         recipients: ["ops@example.com"]
-#         # gpg-bin: gpg
-#         # gpg-homedir: /etc/go-backup-tool/gnupg
 #   - id: pagerduty
 #     webhook:
 #       url: "https://events.eu.pagerduty.com/v2/enqueue"

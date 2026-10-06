@@ -142,7 +142,7 @@ func TestBuildNotifications(t *testing.T) {
 		{ID: "both", Webhook: &FileWebhook{URL: "https://example.com/hook2", Method: "put"}, Email: &FileEmail{To: []string{"a@example.com"}, From: "reports@example.com"}},
 	}
 
-	got, err := Build(fileNotifications, smtp)
+	got, err := Build(fileNotifications, smtp, GPGSettings{Bin: "gpg"})
 	if err != nil {
 		t.Fatalf("Build() error: %v", err)
 	}
@@ -175,16 +175,11 @@ func TestBuildNotificationsEmailEncrypt(t *testing.T) {
 				Encrypt: &FileEmailEncrypt{Recipients: []string{"ops@example.com", " sibling@example.com "}},
 			},
 		},
-		{
-			ID: "encrypted-custom-bin",
-			Email: &FileEmail{
-				To:      []string{"ops@example.com"},
-				Encrypt: &FileEmailEncrypt{Recipients: []string{"ops@example.com"}, GPGBin: "/usr/local/bin/gpg", GPGHomedir: "/etc/gbt/gnupg"},
-			},
-		},
 	}
 
-	got, err := Build(fileNotifications, smtp)
+	gpg := GPGSettings{Bin: "/usr/local/bin/gpg", Homedir: "/etc/gbt/gnupg"}
+
+	got, err := Build(fileNotifications, smtp, gpg)
 	if err != nil {
 		t.Fatalf("Build() error: %v", err)
 	}
@@ -194,14 +189,7 @@ func TestBuildNotificationsEmailEncrypt(t *testing.T) {
 			ID: "encrypted",
 			Email: &Email{
 				To: []string{"ops@example.com"}, From: "backups@example.com", SMTP: smtp,
-				Encrypt: &EmailEncrypt{Recipients: []string{"ops@example.com", "sibling@example.com"}, GPGBin: "gpg"},
-			},
-		},
-		"encrypted-custom-bin": {
-			ID: "encrypted-custom-bin",
-			Email: &Email{
-				To: []string{"ops@example.com"}, From: "backups@example.com", SMTP: smtp,
-				Encrypt: &EmailEncrypt{Recipients: []string{"ops@example.com"}, GPGBin: "/usr/local/bin/gpg", GPGHomedir: "/etc/gbt/gnupg"},
+				Encrypt: &EmailEncrypt{Recipients: []string{"ops@example.com", "sibling@example.com"}, GPGBin: "/usr/local/bin/gpg", GPGHomedir: "/etc/gbt/gnupg"},
 			},
 		},
 	}
@@ -287,7 +275,7 @@ func TestBuildNotificationsErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := Build(tc.fns, tc.smtp)
+			_, err := Build(tc.fns, tc.smtp, GPGSettings{Bin: "gpg"})
 			if err == nil || !strings.Contains(err.Error(), tc.wantErrHas) {
 				t.Fatalf("Build() error = %v, want it to mention %q", err, tc.wantErrHas)
 			}

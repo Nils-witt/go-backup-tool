@@ -660,14 +660,19 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 // entries (see notify.ResolveSMTP/notify.Build) into the id -> Notification
 // map used to resolve any of a job's failure-notifications: or a receiver's
 // stale-notifications:/download-notifications: — split out of ParseFlags to
-// keep its own cyclomatic complexity down.
+// keep its own cyclomatic complexity down. Encrypted notification emails use
+// the top-level gpg-bin/gpg-homedir, the same gpg and keyring as backups.
 func resolveNotifications(fileCfg *fileConfig) (map[string]notify.Notification, error) {
 	smtp, err := notify.ResolveSMTP(fileCfg.SMTP)
 	if err != nil {
 		return nil, err
 	}
 
-	return notify.Build(fileCfg.Notifications, smtp)
+	gpg := notify.GPGSettings{Bin: appconfig.DefaultGPGBin}
+	applyString(&gpg.Bin, fileCfg.GPGBin)
+	applyString(&gpg.Homedir, fileCfg.GPGHomedir)
+
+	return notify.Build(fileCfg.Notifications, smtp, gpg)
 }
 
 // resolveNotificationsAndCommands resolves fileCfg's top-level

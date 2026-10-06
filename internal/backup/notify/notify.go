@@ -45,15 +45,12 @@ type FileEmail struct {
 
 // FileEmailEncrypt is a notification's email.encrypt: block. Recipients
 // names the GPG identities (fingerprint or email address) to encrypt to;
-// each must already have its public key in the keyring gpg-bin/gpg-homedir
-// resolve to (import it once with `gpg --import`, the same prerequisite as
-// a job's own recipients: for backups). GPGBin/GPGHomedir mirror a job's
-// gpg-bin/gpg-homedir, defaulting to "gpg" and gpg's own default homedir
-// respectively.
+// each must already have its public key in the keyring the config file's
+// top-level gpg-bin/gpg-homedir resolve to (see GPGSettings) — the same
+// gpg binary and keyring backups are encrypted with, so importing a key
+// once with `gpg --import` serves both.
 type FileEmailEncrypt struct {
 	Recipients []string `yaml:"recipients"`
-	GPGBin     string   `yaml:"gpg-bin"`
-	GPGHomedir string   `yaml:"gpg-homedir"`
 }
 
 // FileNotification is one top-level notifications: entry: a named
@@ -140,18 +137,21 @@ type Email struct {
 }
 
 // EmailEncrypt is a FileEmailEncrypt after validation, ready to be passed to
-// SendMail. GPGBin defaults to "gpg" when unset in the config file.
+// SendMail. GPGBin/GPGHomedir come from the GPGSettings passed to Build.
 type EmailEncrypt struct {
 	Recipients []string
 	GPGBin     string
 	GPGHomedir string
 }
 
-// defaultGPGBin is used for a notification's email.encrypt.gpg-bin when
-// unset, matching the built-in default a job's own gpg-bin: falls back to
-// (see appconfig.DefaultGPGBin) — duplicated here rather than imported, since
-// notify is a leaf package (see the package doc comment).
-const defaultGPGBin = "gpg"
+// GPGSettings is the gpg binary and homedir every encrypted email is
+// encrypted with: the config file's top-level gpg-bin/gpg-homedir, already
+// resolved (Bin defaulted) by the caller, so notification emails use the
+// same gpg and keyring as backups.
+type GPGSettings struct {
+	Bin     string
+	Homedir string
+}
 
 // Notification is one FileNotification after validation, ready to be
 // referenced by report.notifications:/a receiver's
@@ -251,8 +251,9 @@ func defaultSMTPPort(security SMTPSecurity) int {
 // notifications: list) and builds an id -> Notification map, requiring every
 // entry to have a unique, non-empty id and at least one of webhook: or
 // email:. smtp is the already-resolved top-level smtp: entry (see
-// ResolveSMTP), required (non-zero) by any entry with an email: block.
-func Build(fileNotifications []FileNotification, smtp SMTPSettings) (map[string]Notification, error) {
+// ResolveSMTP), required (non-zero) by any entry with an email: block. gpg is
+// used by any entry whose email: block sets encrypt:.
+func Build(fileNotifications []FileNotification, smtp SMTPSettings, gpg GPGSettings) (map[string]Notification, error) {
 	notifications := make(map[string]Notification, len(fileNotifications))
 
 	for i, fn := range fileNotifications {
@@ -283,7 +284,7 @@ func Build(fileNotifications []FileNotification, smtp SMTPSettings) (map[string]
 		var email *Email
 
 		if fn.Email != nil {
-			resolved, err := resolveEmail(fn.Email, smtp)
+			resolved, err := resolveEmail(fn.Email, smtp, gpg)
 			if err != nil {
 				return nil, fmt.Errorf("notification %q: email: %w", id, err)
 			}
@@ -324,7 +325,7 @@ func resolveWebhook(fw *FileWebhook) (Webhook, error) {
 // against smtp (the top-level smtp: entry, see ResolveSMTP): to is
 // required; from defaults to smtp.Username, erroring if both are empty;
 // smtp itself must be configured (non-zero Host).
-func resolveEmail(fe *FileEmail, smtp SMTPSettings) (Email, error) {
+func resolveEmail(fe *FileEmail, smtp SMTPSettings, gpg GPGSettings) (Email, error) {
 	if smtp.Host == "" {
 		return Email{}, errors.New("smtp: is not configured (required for any notification with an email: block)")
 	}
@@ -353,7 +354,7 @@ func resolveEmail(fe *FileEmail, smtp SMTPSettings) (Email, error) {
 		return Email{}, errors.New("neither from nor smtp.username is set")
 	}
 
-	encrypt, err := resolveEmailEncrypt(fe.Encrypt)
+	encrypt, err := resolveEmailEncrypt(fe.Encrypt, gpg)
 	if err != nil {
 		return Email{}, fmt.Errorf("encrypt: %w", err)
 	}
@@ -363,8 +364,8 @@ func resolveEmail(fe *FileEmail, smtp SMTPSettings) (Email, error) {
 
 // resolveEmailEncrypt validates and resolves fe (a notification's
 // email.encrypt: block), returning nil when fe itself is nil (no
-// encryption). GPGBin defaults to defaultGPGBin when unset.
-func resolveEmailEncrypt(fe *FileEmailEncrypt) (*EmailEncrypt, error) {
+// encryption), encrypting with gpg's binary and homedir.
+func resolveEmailEncrypt(fe *FileEmailEncrypt, gpg GPGSettings) (*EmailEncrypt, error) {
 	if fe == nil {
 		return nil, nil
 	}
@@ -384,10 +385,5 @@ func resolveEmailEncrypt(fe *FileEmailEncrypt) (*EmailEncrypt, error) {
 		recipients[i] = r
 	}
 
-	gpgBin := strings.TrimSpace(fe.GPGBin)
-	if gpgBin == "" {
-		gpgBin = defaultGPGBin
-	}
-
-	return &EmailEncrypt{Recipients: recipients, GPGBin: gpgBin, GPGHomedir: strings.TrimSpace(fe.GPGHomedir)}, nil
+	return &EmailEncrypt{Recipients: recipients, GPGBin: gpg.Bin, GPGHomedir: gpg.Homedir}, nil
 }
