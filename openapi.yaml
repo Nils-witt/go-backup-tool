@@ -158,10 +158,11 @@ paths:
       summary: This instance's server identity
       operationId: getIdentity
       description: >
-        This instance's persistent UUID and PEM-encoded public key, used to
-        fill in a `receivers:` entry on another instance. A zero-value object
-        is returned if no identity was loaded at startup. Requires the
-        `view` permission.
+        This instance's persistent UUID (its server id) and PEM-encoded
+        public key plus that key's fingerprint, used to add this instance as
+        a trusted server on another instance. A zero-value object is returned
+        if no identity was loaded at startup. Requires the `view`
+        permission.
       security:
         - webUIBearer: []
       responses:
@@ -567,9 +568,9 @@ paths:
         Every receiver stored in the state db (the only source of receivers;
         the config file's deprecated `receivers:` entries are imported once
         at startup), as entered, plus the base directory receiver paths must
-        lie inside (`webui.receivers-base-dir`, empty if unset) and the
-        notification ids a receiver may reference. Requires the `admin`
-        permission.
+        lie inside (`webui.receivers-base-dir`, empty if unset), the
+        notification ids, and the trusted servers a receiver may reference.
+        Requires the `admin` permission.
       security:
         - webUIBearer: []
       responses:
@@ -663,7 +664,7 @@ paths:
       summary: Delete a receiver
       operationId: deleteReceiverConfig
       description: >
-        Removes the receiver; its sender is rejected from then on. Files
+        Removes the receiver; its senders are rejected from then on. Files
         already received, and the receiver's history, are kept. Requires the
         `admin` permission.
       security:
@@ -677,6 +678,140 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: Unknown receiver id
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+
+  /api/trusted-servers:
+    get:
+      tags: [admin]
+      summary: List trusted servers
+      operationId: listTrustedServers
+      description: >
+        Every remote instance this one accepts receiver API requests from,
+        keyed by that instance's server id (its UUID, the issuer of every
+        request token it signs), with its public key, the key's
+        fingerprint, and the receivers allowing it. Requires the `admin`
+        permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Trusted servers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrustedServerList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+    post:
+      tags: [admin]
+      summary: Add a trusted server
+      operationId: createTrustedServer
+      description: >
+        Validates and stores a new trusted server. It takes effect once a
+        receiver allows it. Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrustedServerInput"
+      responses:
+        "201":
+          description: Trusted server created
+        "400":
+          $ref: "#/components/responses/InvalidTrustedServer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: A trusted server with this id already exists
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+
+  /api/trusted-servers/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Trusted server id (the sending instance's UUID).
+        schema:
+          type: string
+          format: uuid
+    put:
+      tags: [admin]
+      summary: Update a trusted server
+      operationId: updateTrustedServer
+      description: >
+        Replaces the trusted server's name and public key (e.g. after the
+        sending instance's key pair was regenerated); every receiver allowing
+        it verifies against the new key from the next request on. The id
+        can't be changed (a body `id`, if given, must match the path).
+        Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrustedServerInput"
+      responses:
+        "204":
+          description: Trusted server updated
+        "400":
+          $ref: "#/components/responses/InvalidTrustedServer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Unknown trusted server id
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+    delete:
+      tags: [admin]
+      summary: Delete a trusted server
+      operationId: deleteTrustedServer
+      description: >
+        Removes the trusted server. Refused while any receiver still allows
+        it. Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "204":
+          description: Trusted server deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Unknown trusted server id
+          content:
+            text/plain:
+              schema:
+                type: string
+        "409":
+          description: Still allowed by a receiver (the message names them)
           content:
             text/plain:
               schema:
@@ -986,8 +1121,12 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: >
-        Per-receiver JWT, signed by the sending instance's private key and
-        verified against the receiver's configured public-key: (see
+        Short-lived JWT signed by the sending instance's private key, issued
+        by its server id and scoped to the receiver id. Accepted when the
+        issuer is one of the receiver's allowed trusted servers and the
+        signature verifies against that server's public key, or — for
+        receivers predating trusted servers — when it verifies against the
+        receiver's deprecated public_key (see
         remoteAuth.SignRemoteAuthToken/VerifyRemoteAuthToken). Independent of
         the dashboard's own SSO auth.
 
@@ -1022,6 +1161,12 @@ components:
             type: string
     InvalidReceiver:
       description: The receiver definition doesn't validate; the body says why
+      content:
+        text/plain:
+          schema:
+            type: string
+    InvalidTrustedServer:
+      description: The trusted server definition doesn't validate (e.g. the id isn't a UUID or the key isn't an RSA PEM public key); the body says why
       content:
         text/plain:
           schema:
@@ -1238,7 +1383,10 @@ components:
         public_key:
           type: string
           description: PEM-encoded public key.
-      required: [uuid, public_key]
+        fingerprint:
+          type: string
+          description: The public key's SHA-256 fingerprint, OpenSSH-style ("SHA256:...").
+      required: [uuid, public_key, fingerprint]
 
     ReceiverSnapshot:
       type: object
@@ -1325,14 +1473,22 @@ components:
 
     ReceiverConfigInput:
       type: object
-      description: A receiver's editable fields, with the same syntax as the former `receivers:` config entries.
       properties:
         id:
           type: string
           description: What the sender's remote target names as its bucket. Immutable once created.
+        allowed_servers:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Ids of the trusted servers allowed to send to this receiver.
         public_key:
           type: string
-          description: PEM-encoded RSA public key of the sending instance (its server.pub).
+          description: >
+            Deprecated: PEM-encoded RSA public key of a single sending
+            instance, accepted from any issuer. Kept for receivers predating
+            trusted servers; send "" to remove it.
         path:
           type: string
           description: Absolute directory incoming objects are written under.
@@ -1352,7 +1508,11 @@ components:
           items:
             type: string
           description: Notification ids fired on every dashboard download from this receiver.
-      required: [id, public_key, path]
+      required: [id, path]
+      description: >
+        A receiver's editable fields, with the same syntax as the former
+        `receivers:` config entries. At least one of allowed_servers or
+        public_key must be set.
 
     ReceiverConfig:
       allOf:
@@ -1386,11 +1546,76 @@ components:
           items:
             type: string
           description: Notification ids defined in the config file.
+        trusted_servers:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              name:
+                type: string
+            required: [id, name]
+          description: Active trusted servers a receiver may allow.
         receivers:
           type: array
           items:
             $ref: "#/components/schemas/ReceiverConfig"
-      required: [base_dir, notifications, receivers]
+      required: [base_dir, notifications, trusted_servers, receivers]
+
+    TrustedServerInput:
+      type: object
+      description: A trusted server's editable fields.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The sending instance's server id (its UUID, shown on its Identity page). Immutable once created.
+        name:
+          type: string
+          description: Label to tell servers apart.
+        public_key:
+          type: string
+          description: PEM-encoded RSA public key of the sending instance (its server.pub).
+      required: [id, name, public_key]
+
+    TrustedServer:
+      allOf:
+        - $ref: "#/components/schemas/TrustedServerInput"
+        - type: object
+          properties:
+            fingerprint:
+              type: string
+              description: The public key's SHA-256 fingerprint, OpenSSH-style ("SHA256:...").
+            used_by:
+              type: array
+              items:
+                type: string
+              description: The receivers allowing this server, as "receiver <id>".
+            created_at:
+              type: string
+              format: date-time
+            created_by:
+              type: string
+            updated_at:
+              type: string
+              format: date-time
+            updated_by:
+              type: string
+            error:
+              type: string
+              description: Set when the stored server no longer validates and so is inactive.
+          required: [fingerprint, used_by, created_at, created_by, updated_at, updated_by]
+
+    TrustedServerList:
+      type: object
+      properties:
+        servers:
+          type: array
+          items:
+            $ref: "#/components/schemas/TrustedServer"
+      required: [servers]
 
     WebhookConfig:
       type: object

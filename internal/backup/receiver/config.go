@@ -14,6 +14,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
+	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
 
 var (
@@ -45,6 +46,7 @@ type Manager struct {
 	registry      *backup.ReceiverRegistry
 	status        *backup.ReceiverStatusStore
 	notifications *notify.Registry
+	trusted       *trust.Registry
 	serverName    string
 	baseDir       string
 	log           *slog.Logger
@@ -58,13 +60,14 @@ type Manager struct {
 }
 
 // NewManager builds a Manager over db (nil if the state db couldn't be
-// opened), resolving receivers against the live notification registry and
-// serverName (see config.ResolveReceiver) and restricting web UI paths to baseDir (see
-// config.ValidateReceiverPath). Call Load before serving anything.
-func NewManager(db *store.Store, registry *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, notifications *notify.Registry, serverName, baseDir string, log *slog.Logger) *Manager {
+// opened), resolving receivers against the live notification and trusted
+// server registries and serverName (see config.ResolveReceiver) and
+// restricting web UI paths to baseDir (see config.ValidateReceiverPath).
+// Call Load before serving anything.
+func NewManager(db *store.Store, registry *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, notifications *notify.Registry, trusted *trust.Registry, serverName, baseDir string, log *slog.Logger) *Manager {
 	return &Manager{
 		db: db, registry: registry, status: status,
-		notifications: notifications, serverName: serverName, baseDir: baseDir,
+		notifications: notifications, trusted: trusted, serverName: serverName, baseDir: baseDir,
 		log: log, invalid: make(map[string]string),
 	}
 }
@@ -77,6 +80,12 @@ func (m *Manager) BaseDir() string { return m.baseDir }
 // in stale-notifications:/download-notifications:, sorted.
 func (m *Manager) NotificationIDs() []string {
 	return m.notifications.IDs()
+}
+
+// TrustedServers returns every trusted server a receiver may allow, in id
+// order.
+func (m *Manager) TrustedServers() []trust.Server {
+	return m.trusted.List()
 }
 
 // configFileUser is recorded as created_by/updated_by on receivers imported
@@ -134,7 +143,7 @@ func (m *Manager) Load(ctx context.Context, yamlReceivers []config.FileReceiver)
 // activateLocked resolves fr and puts it in the registry and status store,
 // or records why it doesn't resolve. m.mu must be held.
 func (m *Manager) activateLocked(ctx context.Context, fr config.FileReceiver) {
-	recv, err := config.ResolveReceiver(fr, m.notifications, m.serverName)
+	recv, err := config.ResolveReceiver(fr, m.notifications, m.trusted, m.serverName)
 	if err != nil {
 		m.log.Error("receiver is invalid and stays inactive until fixed in the web UI", "id", fr.ID, "err", err)
 		m.invalid[fr.ID] = err.Error()
@@ -192,6 +201,7 @@ func (m *Manager) Create(ctx context.Context, user string, fr config.FileReceive
 	defer m.mu.Unlock()
 
 	now := time.Now()
+	fr.AllowedServers = recv.AllowedServers
 	rc := toStoreConfig(fr)
 	rc.CreatedAt, rc.CreatedBy = now, user
 	rc.UpdatedAt, rc.UpdatedBy = now, user
@@ -239,6 +249,7 @@ func (m *Manager) Update(ctx context.Context, user string, fr config.FileReceive
 		return err
 	}
 
+	fr.AllowedServers = recv.AllowedServers
 	rc := toStoreConfig(fr)
 	rc.UpdatedAt, rc.UpdatedBy = time.Now(), user
 
@@ -283,7 +294,7 @@ func (m *Manager) Delete(ctx context.Context, user, id string) error {
 // the path check when it equals unchangedPath (the stored path on Update,
 // "" on Create).
 func (m *Manager) validate(fr config.FileReceiver, unchangedPath string) (config.ResolvedReceiver, error) {
-	recv, err := config.ResolveReceiver(fr, m.notifications, m.serverName)
+	recv, err := config.ResolveReceiver(fr, m.notifications, m.trusted, m.serverName)
 	if err != nil {
 		return config.ResolvedReceiver{}, fmt.Errorf("%w: %w", ErrInvalidReceiver, err)
 	}
@@ -309,14 +320,17 @@ func normalizeFileReceiver(fr config.FileReceiver) config.FileReceiver {
 
 	fr.Retention = strings.TrimSpace(fr.Retention)
 	fr.StaleAfter = strings.TrimSpace(fr.StaleAfter)
-	fr.PublicKey = strings.TrimSpace(fr.PublicKey) + "\n"
+
+	if fr.PublicKey = strings.TrimSpace(fr.PublicKey); fr.PublicKey != "" {
+		fr.PublicKey += "\n"
+	}
 
 	return fr
 }
 
 func toStoreConfig(fr config.FileReceiver) store.ReceiverConfig {
 	return store.ReceiverConfig{
-		ID: strings.TrimSpace(fr.ID), PublicKey: fr.PublicKey, Path: fr.Path,
+		ID: strings.TrimSpace(fr.ID), PublicKey: fr.PublicKey, AllowedServers: fr.AllowedServers, Path: fr.Path,
 		Retention: fr.Retention, StaleAfter: fr.StaleAfter,
 		StaleNotifications: fr.StaleNotifications, DownloadNotifications: fr.DownloadNotifications,
 	}
@@ -324,7 +338,7 @@ func toStoreConfig(fr config.FileReceiver) store.ReceiverConfig {
 
 func toFileReceiver(rc store.ReceiverConfig) config.FileReceiver {
 	return config.FileReceiver{
-		ID: rc.ID, PublicKey: rc.PublicKey, Path: rc.Path,
+		ID: rc.ID, PublicKey: rc.PublicKey, AllowedServers: rc.AllowedServers, Path: rc.Path,
 		Retention: rc.Retention, StaleAfter: rc.StaleAfter,
 		StaleNotifications: rc.StaleNotifications, DownloadNotifications: rc.DownloadNotifications,
 	}

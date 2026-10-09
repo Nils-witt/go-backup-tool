@@ -43,7 +43,7 @@ func TestSignAndVerifyRemoteAuthToken(t *testing.T) {
 		t.Fatalf("signRemoteAuthToken() unexpected error: %v", err)
 	}
 
-	if err := VerifyRemoteAuthToken(token, &id.privateKey.PublicKey, "receiver-a"); err != nil {
+	if err := VerifyRemoteAuthToken(token, &id.privateKey.PublicKey, "receiver-a", ""); err != nil {
 		t.Errorf("verifyRemoteAuthToken() unexpected error: %v", err)
 	}
 }
@@ -59,7 +59,7 @@ func TestVerifyRemoteAuthTokenWrongPublicKey(t *testing.T) {
 		t.Fatalf("signRemoteAuthToken() unexpected error: %v", err)
 	}
 
-	if err := VerifyRemoteAuthToken(token, &other.privateKey.PublicKey, "receiver-a"); err == nil {
+	if err := VerifyRemoteAuthToken(token, &other.privateKey.PublicKey, "receiver-a", ""); err == nil {
 		t.Error("verifyRemoteAuthToken() with the wrong public key = nil error, want one")
 	}
 }
@@ -74,7 +74,7 @@ func TestVerifyRemoteAuthTokenWrongAudience(t *testing.T) {
 		t.Fatalf("signRemoteAuthToken() unexpected error: %v", err)
 	}
 
-	if err := VerifyRemoteAuthToken(token, &id.privateKey.PublicKey, "receiver-b"); err == nil {
+	if err := VerifyRemoteAuthToken(token, &id.privateKey.PublicKey, "receiver-b", ""); err == nil {
 		t.Error("verifyRemoteAuthToken() with the wrong audience = nil error, want one")
 	}
 }
@@ -105,7 +105,7 @@ func TestVerifyRemoteAuthTokenExpired(t *testing.T) {
 		t.Fatalf("serializing token: %v", err)
 	}
 
-	err = VerifyRemoteAuthToken(token, &id.privateKey.PublicKey, "receiver-a")
+	err = VerifyRemoteAuthToken(token, &id.privateKey.PublicKey, "receiver-a", "")
 	if err == nil || !strings.Contains(err.Error(), "expired") {
 		t.Errorf("verifyRemoteAuthToken() with an expired token error = %v, want it to mention expiry", err)
 	}
@@ -116,7 +116,7 @@ func TestVerifyRemoteAuthTokenMalformed(t *testing.T) {
 
 	id := testServerIdentity(t)
 
-	if err := VerifyRemoteAuthToken("not-a-jwt", &id.privateKey.PublicKey, "receiver-a"); err == nil {
+	if err := VerifyRemoteAuthToken("not-a-jwt", &id.privateKey.PublicKey, "receiver-a", ""); err == nil {
 		t.Error("verifyRemoteAuthToken() with a malformed token = nil error, want one")
 	}
 }

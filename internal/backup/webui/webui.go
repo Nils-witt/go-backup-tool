@@ -33,6 +33,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
 	"nilswitt.dev/go-backup-tool/internal/backup/settings"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
+	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
@@ -52,7 +53,7 @@ type Server struct {
 // StartWebUI starts the -listen web UI dashboard and returns a Server the
 // caller can shut down with Server.Shutdown. Returns nil if the server
 // fails to start.
-func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Config, runner *pipeline.Runner, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, receiverManager *receiver.Manager, settingsManager *settings.Manager, log *slog.Logger, db *store.Store, logs *LogRingBuffer, oidcSettings config.OIDCSettings, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, instanceName string, registerExtraRoutes func(*http.ServeMux), queue *notify.Queue) *Server {
+func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Config, runner *pipeline.Runner, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, receiverManager *receiver.Manager, settingsManager *settings.Manager, trustManager *trust.Manager, log *slog.Logger, db *store.Store, logs *LogRingBuffer, oidcSettings config.OIDCSettings, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, instanceName string, registerExtraRoutes func(*http.ServeMux), queue *notify.Queue) *Server {
 	jobsByName := make(map[string]*config.Config, len(jobs))
 	for _, j := range jobs {
 		jobsByName[j.Name] = j
@@ -133,6 +134,10 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 	mux.HandleFunc("POST /api/receiver-configs", admin(handleCreateReceiverConfig(receiverManager, log)))
 	mux.HandleFunc("PUT /api/receiver-configs/{id}", admin(handleUpdateReceiverConfig(receiverManager, log)))
 	mux.HandleFunc("DELETE /api/receiver-configs/{id}", admin(handleDeleteReceiverConfig(receiverManager, log)))
+	mux.HandleFunc("GET /api/trusted-servers", admin(handleListTrustedServers(trustManager, log)))
+	mux.HandleFunc("POST /api/trusted-servers", admin(handleCreateTrustedServer(trustManager, log)))
+	mux.HandleFunc("PUT /api/trusted-servers/{id}", admin(handleUpdateTrustedServer(trustManager, log)))
+	mux.HandleFunc("DELETE /api/trusted-servers/{id}", admin(handleDeleteTrustedServer(trustManager, log)))
 	mux.HandleFunc("GET /api/notification-configs", admin(handleListNotificationConfigs(settingsManager, log)))
 	mux.HandleFunc("POST /api/notification-configs", admin(handleCreateNotificationConfig(settingsManager, log)))
 	mux.HandleFunc("PUT /api/notification-configs/{id}", admin(handleUpdateNotificationConfig(settingsManager, log)))
@@ -424,8 +429,9 @@ func receiverSnapshots(receivers *backup.ReceiverRegistry, store *backup.Receive
 // the dashboard's own field naming (snake_case, as every other /api/...
 // endpoint here uses).
 type identityJSON struct {
-	UUID      string `json:"uuid"`
-	PublicKey string `json:"public_key"`
+	UUID        string `json:"uuid"`
+	PublicKey   string `json:"public_key"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 // handleIdentity serves GET /api/identity: this instance's persistent UUID
@@ -442,6 +448,9 @@ func handleIdentity(identity *identity.ServerIdentity) http.HandlerFunc {
 
 		if identity != nil {
 			out = identityJSON{UUID: identity.UUID(), PublicKey: identity.PublicKeyPEM()}
+			if key := identity.PrivateKey(); key != nil {
+				out.Fingerprint = trust.Fingerprint(&key.PublicKey)
+			}
 		}
 
 		writeJSON(w, out)

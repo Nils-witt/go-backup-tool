@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetchJSON, apiFetchOK } from "../api/client";
-import type { ReceiverConfigJSON, ReceiverConfigListJSON } from "../api/types";
+import type {
+  ReceiverConfigJSON,
+  ReceiverConfigListJSON,
+  TrustedServerOptionJSON,
+} from "../api/types";
 import { StatusChip } from "./StatusChip";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { fmtTime } from "../lib/format";
@@ -31,6 +35,7 @@ import EditIcon from "@mui/icons-material/Edit";
 // fields, as sent to POST/PUT /api/receiver-configs.
 interface ReceiverForm {
   id: string;
+  allowed_servers: string[];
   public_key: string;
   path: string;
   retention: string;
@@ -41,6 +46,7 @@ interface ReceiverForm {
 
 const EMPTY_FORM: ReceiverForm = {
   id: "",
+  allowed_servers: [],
   public_key: "",
   path: "",
   retention: "",
@@ -52,6 +58,7 @@ const EMPTY_FORM: ReceiverForm = {
 function formFrom(r: ReceiverConfigJSON): ReceiverForm {
   return {
     id: r.id,
+    allowed_servers: r.allowed_servers,
     public_key: r.public_key,
     path: r.path,
     retention: r.retention,
@@ -87,7 +94,9 @@ function NotificationSelect({
         const v = e.target.value as unknown as string | string[];
         onChange(typeof v === "string" ? v.split(",") : v);
       }}
-      helperText={options.length ? helperText : "No notifications yet — create one on the Notifications page."}
+      helperText={
+        options.length ? helperText : "No notifications yet — create one on the Notifications page."
+      }
       disabled={!options.length}
       slotProps={{ select: { multiple: true } }}
     >
@@ -100,11 +109,18 @@ function NotificationSelect({
   );
 }
 
+// serverLabel shows a trusted server by name, falling back to its id when
+// it's no longer in the list.
+function serverLabel(servers: TrustedServerOptionJSON[], id: string): string {
+  return servers.find((s) => s.id === id)?.name ?? id;
+}
+
 function ReceiverDialog({
   editing,
   form,
   baseDir,
   notifications,
+  trustedServers,
   saving,
   error,
   onChange,
@@ -115,6 +131,7 @@ function ReceiverDialog({
   form: ReceiverForm;
   baseDir: string;
   notifications: string[];
+  trustedServers: TrustedServerOptionJSON[];
   saving: boolean;
   error: string | null;
   onChange: (f: ReceiverForm) => void;
@@ -122,7 +139,10 @@ function ReceiverDialog({
   onSave: () => void;
 }) {
   const set = (patch: Partial<ReceiverForm>) => onChange({ ...form, ...patch });
-  const canSave = !!form.id.trim() && !!form.public_key.trim() && !!form.path.trim();
+  const canSave =
+    !!form.id.trim() &&
+    (form.allowed_servers.length > 0 || !!form.public_key.trim()) &&
+    !!form.path.trim();
 
   return (
     <Dialog open onClose={onCancel} fullWidth maxWidth="sm">
@@ -140,21 +160,50 @@ function ReceiverDialog({
             required
           />
           <TextField
-            label="Sender public key"
-            value={form.public_key}
-            onChange={(e) => set({ public_key: e.target.value })}
-            helperText="The sending instance's server.pub, shown on its Identity page."
-            placeholder={"-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"}
-            multiline
-            minRows={4}
-            required
+            select
+            label="Allowed servers"
+            value={form.allowed_servers}
+            onChange={(e) => {
+              const v = e.target.value as unknown as string | string[];
+              set({ allowed_servers: typeof v === "string" ? v.split(",") : v });
+            }}
+            helperText={
+              trustedServers.length
+                ? "Trusted servers that may send backups to this receiver."
+                : "No trusted servers yet — add the sending instance on the Trusted servers page."
+            }
+            disabled={!trustedServers.length}
+            required={!form.public_key.trim()}
             slotProps={{
-              htmlInput: {
-                spellCheck: false,
-                style: { fontFamily: "monospace", fontSize: ".8rem" },
+              select: {
+                multiple: true,
+                renderValue: (v) =>
+                  (v as string[]).map((id) => serverLabel(trustedServers, id)).join(", "),
               },
             }}
-          />
+          >
+            {trustedServers.map((s) => (
+              <MenuItem key={s.id} value={s.id}>
+                {s.name}
+                <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                  {s.id}
+                </Typography>
+              </MenuItem>
+            ))}
+          </TextField>
+          {form.public_key.trim() ? (
+            <Alert
+              severity="warning"
+              action={
+                <Button color="inherit" size="small" onClick={() => set({ public_key: "" })}>
+                  Remove
+                </Button>
+              }
+            >
+              This receiver still accepts the deprecated single sender public key. Add the sender as
+              a trusted server, allow it above, then remove the old key.
+            </Alert>
+          ) : null}
           <TextField
             label="Path"
             value={form.path}
@@ -275,6 +324,7 @@ export function ReceiverConfigSection() {
 
   const receivers = data?.receivers ?? [];
   const baseDir = data?.base_dir ?? "";
+  const trustedServers = data?.trusted_servers ?? [];
 
   return (
     <Stack spacing={2}>
@@ -319,6 +369,7 @@ export function ReceiverConfigSection() {
             <TableHead>
               <TableRow>
                 <TableCell>ID</TableCell>
+                <TableCell>Allowed servers</TableCell>
                 <TableCell>Path</TableCell>
                 <TableCell>Retention</TableCell>
                 <TableCell>Stale after</TableCell>
@@ -339,6 +390,15 @@ export function ReceiverConfigSection() {
                         </span>
                       </Tooltip>
                     ) : null}
+                  </TableCell>
+                  <TableCell sx={{ overflowWrap: "anywhere" }}>
+                    {r.allowed_servers.map((id) => serverLabel(trustedServers, id)).join(", ")}
+                    {r.public_key ? (
+                      <Typography variant="caption" color="warning.main" sx={{ display: "block" }}>
+                        + legacy public key
+                      </Typography>
+                    ) : null}
+                    {!r.allowed_servers.length && !r.public_key ? "—" : null}
                   </TableCell>
                   <TableCell sx={{ overflowWrap: "anywhere" }}>
                     <code>{r.path}</code>
@@ -389,6 +449,7 @@ export function ReceiverConfigSection() {
           form={form}
           baseDir={baseDir}
           notifications={data?.notifications ?? []}
+          trustedServers={trustedServers}
           saving={saving}
           error={saveError}
           onChange={setForm}

@@ -15,8 +15,11 @@ import (
 // notification ids unparsed — so a row round-trips to the edit form, and is
 // validated (config.ResolveReceiver) on every load rather than once on save.
 type receiverModel struct {
-	ID                    string    `gorm:"column:id;primaryKey"`
+	ID string `gorm:"column:id;primaryKey"`
+	// PublicKey is the deprecated single sender key, "" once a receiver
+	// only names AllowedServers.
 	PublicKey             string    `gorm:"column:public_key;not null"`
+	AllowedServers        []string  `gorm:"column:allowed_servers;serializer:json"`
 	Path                  string    `gorm:"column:path;not null"`
 	Retention             string    `gorm:"column:retention;not null;default:''"`
 	StaleAfter            string    `gorm:"column:stale_after;not null;default:''"`
@@ -34,6 +37,7 @@ func (receiverModel) TableName() string { return "receivers" }
 type ReceiverConfig struct {
 	ID                    string
 	PublicKey             string
+	AllowedServers        []string
 	Path                  string
 	Retention             string
 	StaleAfter            string
@@ -110,9 +114,9 @@ func (s *Store) UpdateReceiverConfig(ctx context.Context, r ReceiverConfig) erro
 	r = normalizeReceiverTimes(r)
 
 	res := s.db.WithContext(ctx).Model(&receiverModel{}).Where("id = ?", r.ID).
-		Select("public_key", "path", "retention", "stale_after", "stale_notifications", "download_notifications", "updated_at", "updated_by").
+		Select("public_key", "allowed_servers", "path", "retention", "stale_after", "stale_notifications", "download_notifications", "updated_at", "updated_by").
 		Updates(&receiverModel{
-			PublicKey: r.PublicKey, Path: r.Path, Retention: r.Retention, StaleAfter: r.StaleAfter,
+			PublicKey: r.PublicKey, AllowedServers: r.AllowedServers, Path: r.Path, Retention: r.Retention, StaleAfter: r.StaleAfter,
 			StaleNotifications: r.StaleNotifications, DownloadNotifications: r.DownloadNotifications,
 			UpdatedAt: r.UpdatedAt, UpdatedBy: r.UpdatedBy,
 		})

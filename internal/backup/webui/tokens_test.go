@@ -63,7 +63,7 @@ func startTokenWebUI(t *testing.T, idp *testIDP) (*Server, *store.Store) {
 	db := openTestStateDB(t)
 	receivers := map[string]config.ResolvedReceiver{"a": {ID: "a", Path: root}}
 
-	srv := StartWebUI("127.0.0.1:0", statusStore, nil, nil, backup.NewReceiverRegistry(receivers), nil, nil, nil, discardLogger, db, nil, idp.settings(), nil, false, false, "", nil, nil)
+	srv := StartWebUI("127.0.0.1:0", statusStore, nil, nil, backup.NewReceiverRegistry(receivers), nil, nil, nil, nil, discardLogger, db, nil, idp.settings(), nil, false, false, "", nil, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}

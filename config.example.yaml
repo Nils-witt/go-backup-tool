@@ -65,9 +65,10 @@ servers:
     endpoint: "https://backup2.example.com:8443"
     # No auth field here: this instance authenticates to the destination
     # with its own generated identity (see above). Give the destination
-    # instance's operator this instance's public key — the contents of
-    # ./data/keys/server.pub — to paste into its own receivers: entry's
-    # public-key: (see below).
+    # instance's operator this instance's server ID and public key (both on
+    # the web UI's Identity page; also ./data/keys/server.uuid and
+    # server.pub) to add as a trusted server there (Trusted servers, admin
+    # only) and allow on the matching receiver.
 
 # Every job is defined under jobs:, one entry per backup; run all jobs (in
 # order) with no -job flag, or one with -job <name>. Every key below is
@@ -306,7 +307,9 @@ jobs:
 # public-key must be the sending instance's own public key — the contents
 # of that instance's ./data/keys/server.pub (see "sibling-instance" above) —
 # so this instance can verify the JSON Web Token every request from it is
-# signed with, instead of a shared secret; path is the root directory
+# signed with, instead of a shared secret (imported receivers accept it
+# alongside any trusted servers later allowed on them in the web UI, which
+# replace it); path is the root directory
 # incoming objects for this id are written under (object ends up at
 # path/key, mirroring a local server's path/bucket/key); retention
 # (optional, same syntax as a local server's) deletes objects here once

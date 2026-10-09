@@ -1,10 +1,13 @@
 package receiver
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
@@ -42,7 +45,7 @@ func RegisterRoutes(mux *http.ServeMux, receivers *backup.ReceiverRegistry, stat
 // reflects it.
 func HandleReceiveObject(receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		recv, cfg, t, key, ok := resolveReceiverRequest(w, r, receivers, db)
+		recv, cfg, t, key, ok := resolveReceiverRequest(w, r, receivers, db, log)
 		if !ok {
 			return
 		}
@@ -96,7 +99,7 @@ func HandleReceiveObject(receivers *backup.ReceiverRegistry, status *backup.Rece
 // reflects it.
 func HandleDeleteObject(receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		recv, cfg, t, key, ok := resolveReceiverRequest(w, r, receivers, db)
+		recv, cfg, t, key, ok := resolveReceiverRequest(w, r, receivers, db, log)
 		if !ok {
 			return
 		}
@@ -122,12 +125,10 @@ func HandleDeleteObject(receivers *backup.ReceiverRegistry, status *backup.Recei
 }
 
 // authorizeReceiver looks up the receiver named by the request's {id} path
-// value and verifies its Authorization: Bearer <token> header as a JWT
-// signed by that receiver's configured public-key: (see
-// backup.VerifyRemoteAuthToken/backup.SignRemoteAuthToken), writing an
-// error response and returning ok=false if either the id is unknown or the
-// token doesn't verify.
-func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry) (recv config.ResolvedReceiver, ok bool) {
+// value and verifies its Authorization: Bearer <token> header (see
+// verifyReceiverToken), writing an error response and returning ok=false if
+// either the id is unknown or the token doesn't verify.
+func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry, log *slog.Logger) (recv config.ResolvedReceiver, ok bool) {
 	recv, exists := receivers.Get(r.PathValue("id"))
 	if !exists {
 		http.Error(w, "unknown receiver id", http.StatusNotFound)
@@ -135,12 +136,77 @@ func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *backup
 	}
 
 	token, hasToken := bearerToken(r)
-	if !hasToken || remoteAuth.VerifyRemoteAuthToken(token, recv.PublicKey, recv.ID) != nil {
+	if !hasToken {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return config.ResolvedReceiver{}, false
 	}
 
+	issuer, err := verifyReceiverToken(recv, token)
+	if err != nil {
+		log.Debug("receiver: rejected request", "id", recv.ID, "err", err)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+
+		return config.ResolvedReceiver{}, false
+	}
+
+	if issuer == "" {
+		warnLegacyKeyOnce(recv.ID, token, log)
+	}
+
 	return recv, true
+}
+
+// verifyReceiverToken verifies token as a request token (see
+// remoteAuth.SignRemoteAuthToken) for recv, returning the trusted server id
+// it was verified as coming from. A token whose issuer is one of recv's
+// allowed servers must verify against that server's current key; any other
+// token is checked against recv's deprecated public-key: instead, if set,
+// returning "" as the issuer on success.
+func verifyReceiverToken(recv config.ResolvedReceiver, token string) (string, error) {
+	issuer, err := remoteAuth.UnverifiedIssuer(token)
+	if err != nil {
+		return "", err
+	}
+
+	if slices.Contains(recv.AllowedServers, issuer) {
+		srv, ok := recv.TrustedServers.Get(issuer)
+		if !ok {
+			return "", fmt.Errorf("allowed server %q is no longer trusted", issuer)
+		}
+
+		if err := remoteAuth.VerifyRemoteAuthToken(token, srv.PublicKey, recv.ID, issuer); err != nil {
+			return "", err
+		}
+
+		return issuer, nil
+	}
+
+	if recv.PublicKey == nil {
+		return "", fmt.Errorf("issuer %q is not an allowed server", issuer)
+	}
+
+	if err := remoteAuth.VerifyRemoteAuthToken(token, recv.PublicKey, recv.ID, ""); err != nil {
+		return "", err
+	}
+
+	return "", nil
+}
+
+// legacyKeyWarned records the receiver ids warnLegacyKeyOnce has already
+// warned about this run.
+var legacyKeyWarned sync.Map
+
+// warnLegacyKeyOnce logs, once per receiver per run, that recv accepted a
+// request through its deprecated public-key:, naming the (now verified)
+// issuer so the operator can register it as a trusted server.
+func warnLegacyKeyOnce(receiverID, token string, log *slog.Logger) {
+	if _, loaded := legacyKeyWarned.LoadOrStore(receiverID, struct{}{}); loaded {
+		return
+	}
+
+	issuer, _ := remoteAuth.UnverifiedIssuer(token)
+	log.Warn("receiver: request authorized by the receiver's deprecated public key; add the sender as a trusted server and allow it on this receiver instead",
+		"id", receiverID, "sender_server_id", issuer)
 }
 
 // resolveReceiverRequest authorizes r against receivers (see
@@ -151,8 +217,8 @@ func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *backup
 // WriteLocalObject/DeleteLocalObject as a type: local target would (see
 // backup.ReceiverTarget). Shared by both handlers, which otherwise duplicate
 // this exact preamble.
-func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry, db *store.Store) (recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, key string, ok bool) {
-	recv, ok = authorizeReceiver(w, r, receivers)
+func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry, db *store.Store, log *slog.Logger) (recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, key string, ok bool) {
+	recv, ok = authorizeReceiver(w, r, receivers, log)
 	if !ok {
 		return config.ResolvedReceiver{}, nil, nil, "", false
 	}

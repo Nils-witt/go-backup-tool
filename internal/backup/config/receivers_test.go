@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
 
 // testReceiverPublicKeyPEM generates a fresh (test-speed) RSA key pair and
@@ -418,7 +420,43 @@ func TestResolveReceiverRequiresID(t *testing.T) {
 
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
-	if _, err := ResolveReceiver(FileReceiver{ID: "  ", PublicKey: pemText, Path: "/mnt/a"}, nil, ""); err == nil {
+	if _, err := ResolveReceiver(FileReceiver{ID: "  ", PublicKey: pemText, Path: "/mnt/a"}, nil, nil, ""); err == nil {
 		t.Fatal("ResolveReceiver() expected error for blank id, got nil")
+	}
+}
+
+func TestResolveReceiverAllowedServers(t *testing.T) {
+	t.Parallel()
+
+	const id = "0b8e1d5c-5a4e-4f43-9d6b-1d2a3b4c5d6e"
+
+	pemText, pub := testReceiverPublicKeyPEM(t)
+	trusted := trust.NewRegistry(map[string]trust.Server{id: {ID: id, Name: "nas", PublicKey: pub}})
+
+	// Allowed servers alone suffice; ids are normalized and deduplicated.
+	recv, err := ResolveReceiver(FileReceiver{ID: "a", AllowedServers: []string{strings.ToUpper(id), id}, Path: "/mnt/a"}, nil, trusted, "")
+	if err != nil {
+		t.Fatalf("ResolveReceiver() error: %v", err)
+	}
+
+	if !reflect.DeepEqual(recv.AllowedServers, []string{id}) || recv.PublicKey != nil || recv.TrustedServers != trusted {
+		t.Errorf("ResolveReceiver() = %+v, want AllowedServers [%s], no public key, the trusted registry", recv, id)
+	}
+
+	cases := map[string]FileReceiver{
+		"unknown server":       {ID: "a", AllowedServers: []string{"6f1c0e0a-0000-4000-8000-000000000000"}, Path: "/mnt/a"},
+		"neither key nor list": {ID: "a", Path: "/mnt/a"},
+		"empty id in list":     {ID: "a", AllowedServers: []string{" "}, PublicKey: pemText, Path: "/mnt/a"},
+	}
+
+	for name, fr := range cases {
+		if _, err := ResolveReceiver(fr, nil, trusted, ""); err == nil {
+			t.Errorf("%s: ResolveReceiver() = nil error, want one", name)
+		}
+	}
+
+	// The deprecated public key still works on its own, and alongside.
+	if recv, err := ResolveReceiver(FileReceiver{ID: "a", AllowedServers: []string{id}, PublicKey: pemText, Path: "/mnt/a"}, nil, trusted, ""); err != nil || !recv.PublicKey.Equal(pub) {
+		t.Errorf("ResolveReceiver() with both = %+v, %v", recv, err)
 	}
 }

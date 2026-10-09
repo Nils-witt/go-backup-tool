@@ -39,11 +39,19 @@ export function IdentitySection() {
     <Card variant="outlined">
       <CardContent>
         <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>
-          UUID: <Box component="code">{identity.uuid}</Box>
+          Server ID: <Box component="code">{identity.uuid}</Box>
         </Typography>
+        {identity.fingerprint ? (
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ mt: 1, overflowWrap: "anywhere" }}
+          >
+            Key fingerprint: <Box component="code">{identity.fingerprint}</Box>
+          </Typography>
+        ) : null}
         <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-          Public key — paste into the receiving instance's Receiver settings as the sender public
-          key:
+          Public key — add this server ID and key as a trusted server on the receiving instance:
         </Typography>
         <Box
           component="pre"

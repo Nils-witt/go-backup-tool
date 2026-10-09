@@ -17,6 +17,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
+	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
 
 func publicKeyPEM(t *testing.T, key *rsa.PublicKey) string {
@@ -36,6 +37,7 @@ type testManager struct {
 	registry *backup.ReceiverRegistry
 	status   *backup.ReceiverStatusStore
 	db       *store.Store
+	trusted  *trust.Registry
 	baseDir  string
 }
 
@@ -46,10 +48,11 @@ func newTestManager(t *testing.T, db *store.Store) testManager {
 	status := backup.NewReceiverStatusStore(nil)
 	baseDir := t.TempDir()
 	notifications := notify.NewRegistry(map[string]notify.Notification{"ops": {ID: "ops", Webhook: &notify.Webhook{URL: "http://example.invalid"}}})
+	trusted := trust.NewRegistry(nil)
 
 	return testManager{
-		Manager:  NewManager(db, registry, status, notifications, "host", baseDir, discardLogger),
-		registry: registry, status: status, db: db, baseDir: baseDir,
+		Manager:  NewManager(db, registry, status, notifications, trusted, "host", baseDir, discardLogger),
+		registry: registry, status: status, db: db, trusted: trusted, baseDir: baseDir,
 	}
 }
 

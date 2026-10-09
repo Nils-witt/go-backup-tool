@@ -295,7 +295,7 @@ func TestStartWebUIWithoutOIDCIsLocked(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, nil, nil, discardLogger, nil, nil, config.OIDCSettings{}, nil, false, false, "", nil, nil)
+	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, nil, nil, nil, discardLogger, nil, nil, config.OIDCSettings{}, nil, false, false, "", nil, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}
@@ -390,7 +390,7 @@ func TestStartWebUIBadAddrReturnsNil(t *testing.T) {
 	store, _ := newTestStore()
 
 	// Port 0 is valid (means "pick one"); an unparseable address is not.
-	srv := StartWebUI("not-a-valid-address", store, nil, nil, nil, nil, nil, nil, discardLogger, nil, nil, config.OIDCSettings{}, nil, false, false, "", nil, nil)
+	srv := StartWebUI("not-a-valid-address", store, nil, nil, nil, nil, nil, nil, nil, discardLogger, nil, nil, config.OIDCSettings{}, nil, false, false, "", nil, nil)
 	if srv != nil {
 		t.Cleanup(srv.Shutdown)
 		t.Fatal("StartWebUI() with an invalid address = non-nil, want nil")

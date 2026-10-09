@@ -15,6 +15,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
+	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
 
 // putJSON issues PUT path on srv with token and body encoded as JSON,
@@ -72,10 +73,11 @@ func startReceiverConfigWebUI(t *testing.T, idp *testIDP) (*Server, *backup.Rece
 	registry := backup.NewReceiverRegistry(nil)
 	status := backup.NewReceiverStatusStore(nil)
 	notifications := notify.NewRegistry(map[string]notify.Notification{"ops": {ID: "ops", Webhook: &notify.Webhook{URL: "http://example.invalid"}}})
-	manager := receiver.NewManager(db, registry, status, notifications, "", baseDir, discardLogger)
+	trustManager := trust.NewManager(db, trust.NewRegistry(nil), discardLogger)
+	manager := receiver.NewManager(db, registry, status, notifications, trustManager.Registry(), "", baseDir, discardLogger)
 	statusStore, _ := newTestStore()
 
-	srv := StartWebUI("127.0.0.1:0", statusStore, nil, nil, registry, status, manager, nil, discardLogger, db, nil, idp.settings(), nil, false, false, "", nil, nil)
+	srv := StartWebUI("127.0.0.1:0", statusStore, nil, nil, registry, status, manager, nil, trustManager, discardLogger, db, nil, idp.settings(), nil, false, false, "", nil, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}

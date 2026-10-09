@@ -17,6 +17,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
+	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
 
 // testConfigRSAPublicKeyPEM is a fixed RSA public key, PEM-encoded the same
@@ -40,7 +41,7 @@ MQIDAQAB
 func testConfigRSAPublicKey(t *testing.T) *rsa.PublicKey {
 	t.Helper()
 
-	pub, err := parseReceiverPublicKey(testConfigRSAPublicKeyPEM)
+	pub, err := trust.ParsePublicKey(testConfigRSAPublicKeyPEM)
 	if err != nil {
 		t.Fatalf("parsing testConfigRSAPublicKeyPEM: %v", err)
 	}

@@ -28,13 +28,22 @@ type receiverConfigJSON struct {
 	Error     string    `json:"error,omitempty"`
 }
 
+// trustedServerOptionJSON is one trusted server a receiver may allow, as
+// the dashboard's edit form lists it.
+type trustedServerOptionJSON struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 // receiverConfigListJSON is GET /api/receiver-configs' response: every
 // stored receiver, plus what the dashboard's edit form needs — the base dir
-// paths must lie inside, and the notification ids it may pick from.
+// paths must lie inside, and the notification ids and trusted servers it
+// may pick from.
 type receiverConfigListJSON struct {
-	BaseDir       string               `json:"base_dir"`
-	Notifications []string             `json:"notifications"`
-	Receivers     []receiverConfigJSON `json:"receivers"`
+	BaseDir        string                    `json:"base_dir"`
+	Notifications  []string                  `json:"notifications"`
+	TrustedServers []trustedServerOptionJSON `json:"trusted_servers"`
+	Receivers      []receiverConfigJSON      `json:"receivers"`
 }
 
 // handleListReceiverConfigs serves GET /api/receiver-configs (admin only).
@@ -48,10 +57,18 @@ func handleListReceiverConfigs(m *receiver.Manager, log *slog.Logger) http.Handl
 
 		out := receiverConfigListJSON{BaseDir: m.BaseDir(), Notifications: m.NotificationIDs(), Receivers: make([]receiverConfigJSON, len(list))}
 
+		for _, s := range m.TrustedServers() {
+			out.TrustedServers = append(out.TrustedServers, trustedServerOptionJSON{ID: s.ID, Name: s.Name})
+		}
+
+		if out.TrustedServers == nil {
+			out.TrustedServers = []trustedServerOptionJSON{}
+		}
+
 		for i, mr := range list {
 			rc := mr.ReceiverConfig
 			out.Receivers[i] = receiverConfigJSON{
-				ID: rc.ID, PublicKey: rc.PublicKey, Path: rc.Path, Retention: rc.Retention, StaleAfter: rc.StaleAfter,
+				ID: rc.ID, PublicKey: rc.PublicKey, AllowedServers: nonNil(rc.AllowedServers), Path: rc.Path, Retention: rc.Retention, StaleAfter: rc.StaleAfter,
 				StaleNotifications: nonNil(rc.StaleNotifications), DownloadNotifications: nonNil(rc.DownloadNotifications),
 				CreatedAt: rc.CreatedAt, CreatedBy: rc.CreatedBy, UpdatedAt: rc.UpdatedAt, UpdatedBy: rc.UpdatedBy,
 				Error: mr.Error,

@@ -12,6 +12,7 @@ import KeyIcon from "@mui/icons-material/Key";
 import SettingsIcon from "@mui/icons-material/Settings";
 import NotificationsIcon from "@mui/icons-material/Notifications";
 import SummarizeIcon from "@mui/icons-material/Summarize";
+import VerifiedUserIcon from "@mui/icons-material/VerifiedUser";
 import type { AuthState } from "./auth/useAuth";
 
 export interface NavItem {
@@ -50,6 +51,12 @@ export const NAV_GROUPS: NavGroup[] = [
         to: "/receiver-settings",
         label: "Receivers",
         icon: <SettingsIcon />,
+        visible: (s) => s.canManageReceivers,
+      },
+      {
+        to: "/trusted-servers",
+        label: "Trusted servers",
+        icon: <VerifiedUserIcon />,
         visible: (s) => s.canManageReceivers,
       },
       {

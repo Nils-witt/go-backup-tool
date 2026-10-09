@@ -56,13 +56,13 @@ func SignRemoteAuthToken(privateKey *rsa.PrivateKey, issuer, audience string) (s
 }
 
 // VerifyRemoteAuthToken parses raw as a JWT, verifies its RS256 signature
-// against publicKey (the sender's public key, as configured on the
-// matching receivers: entry's public-key: — see fileReceiver.PublicKey),
-// and checks it's currently valid (exp/nbf/iat, with jwt.Claims.Validate's
-// default one-minute clock-skew leeway) and scoped to audience (this
-// receiver's own id). See signRemoteAuthToken for what a sender puts in the
-// token.
-func VerifyRemoteAuthToken(raw string, publicKey *rsa.PublicKey, audience string) error {
+// against publicKey (the sender's public key: a trusted server's, or a
+// receiver's deprecated public-key:), and checks it's currently valid
+// (exp/nbf/iat, with jwt.Claims.Validate's default one-minute clock-skew
+// leeway), scoped to audience (this receiver's own id), and — unless issuer
+// is "" — issued by issuer (the trusted server's id). See
+// SignRemoteAuthToken for what a sender puts in the token.
+func VerifyRemoteAuthToken(raw string, publicKey *rsa.PublicKey, audience, issuer string) error {
 	token, err := jwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.RS256})
 	if err != nil {
 		return fmt.Errorf("parsing token: %w", err)
@@ -73,9 +73,27 @@ func VerifyRemoteAuthToken(raw string, publicKey *rsa.PublicKey, audience string
 		return fmt.Errorf("verifying signature: %w", err)
 	}
 
-	if err := claims.Validate(jwt.Expected{AnyAudience: jwt.Audience{audience}, Time: time.Now()}); err != nil {
+	if err := claims.Validate(jwt.Expected{Issuer: issuer, AnyAudience: jwt.Audience{audience}, Time: time.Now()}); err != nil {
 		return fmt.Errorf("validating claims: %w", err)
 	}
 
 	return nil
+}
+
+// UnverifiedIssuer returns raw's iss claim WITHOUT verifying its signature,
+// solely to pick which trusted server's key to verify raw against; the
+// result must never be trusted until VerifyRemoteAuthToken has checked raw
+// against that key with the same issuer.
+func UnverifiedIssuer(raw string) (string, error) {
+	token, err := jwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.RS256})
+	if err != nil {
+		return "", fmt.Errorf("parsing token: %w", err)
+	}
+
+	var claims jwt.Claims
+	if err := token.UnsafeClaimsWithoutVerification(&claims); err != nil {
+		return "", fmt.Errorf("reading claims: %w", err)
+	}
+
+	return claims.Issuer, nil
 }

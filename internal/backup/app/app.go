@@ -25,6 +25,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
 	"nilswitt.dev/go-backup-tool/internal/backup/settings"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
+	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 	"nilswitt.dev/go-backup-tool/internal/backup/webui"
 	"nilswitt.dev/go-backup-tool/internal/version"
 )
@@ -88,16 +89,16 @@ func Run(args []string, stderr io.Writer) int {
 // when rc.Listen is unset. queue lets a download/stale notification email
 // that fails to send be retried later (see notify.Queue). receivers,
 // receiverStore and receiverManager are the live receiver set, its
-// dashboard status, and the web UI's way of changing it (see
-// newReceivers).
-func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, statusStore *backup.StatusStore, stateDB *store.Store, logs *webui.LogRingBuffer, serverIdentity *identity.ServerIdentity, runner *pipeline.Runner, queue *notify.Queue, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, receiverManager *receiver.Manager, settingsManager *settings.Manager, log *slog.Logger) *webui.Server {
+// dashboard status, and the web UI's way of changing it, and trustManager
+// manages the trusted servers receivers allow (see newReceivers).
+func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, statusStore *backup.StatusStore, stateDB *store.Store, logs *webui.LogRingBuffer, serverIdentity *identity.ServerIdentity, runner *pipeline.Runner, queue *notify.Queue, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, receiverManager *receiver.Manager, settingsManager *settings.Manager, trustManager *trust.Manager, log *slog.Logger) *webui.Server {
 	if rc.Listen == "" {
 		return nil
 	}
 
 	go receiver.MonitorReceiverRetention(ctx, stateDB, receivers, log)
 
-	srv := webui.StartWebUI(rc.Listen, statusStore, rc.Jobs, runner, receivers, receiverStore, receiverManager, settingsManager, log, stateDB, logs, rc.OIDC, serverIdentity, rc.TrustProxyHeaders, rc.DevMode, rc.ServerName, func(mux *http.ServeMux) {
+	srv := webui.StartWebUI(rc.Listen, statusStore, rc.Jobs, runner, receivers, receiverStore, receiverManager, settingsManager, trustManager, log, stateDB, logs, rc.OIDC, serverIdentity, rc.TrustProxyHeaders, rc.DevMode, rc.ServerName, func(mux *http.ServeMux) {
 		receiver.RegisterRoutes(mux, receivers, receiverStore, log, stateDB)
 	}, queue)
 
@@ -111,15 +112,22 @@ func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, statusSto
 // fresh registry and status store — shared between the dashboard's receiver
 // views, the receiver API's write path, the monitors, and the report, so a
 // write or a web UI edit is reflected everywhere immediately.
+// The trusted servers are loaded first, into the registry receivers verify
+// requests against, and their manager returned for the web UI.
 // notifications must already be loaded (see newSettings), since receivers
 // are checked against it.
-func newReceivers(ctx context.Context, rc *config.RunConfig, stateDB *store.Store, notifications *notify.Registry, log *slog.Logger) (*backup.ReceiverRegistry, *backup.ReceiverStatusStore, *receiver.Manager) {
+func newReceivers(ctx context.Context, rc *config.RunConfig, stateDB *store.Store, notifications *notify.Registry, log *slog.Logger) (*backup.ReceiverRegistry, *backup.ReceiverStatusStore, *receiver.Manager, *trust.Manager) {
+	// Trusted servers load first: every receiver resolves its allowed
+	// servers against them.
+	trustManager := trust.NewManager(stateDB, trust.NewRegistry(nil), log)
+	trustManager.Load(ctx)
+
 	registry := backup.NewReceiverRegistry(nil)
 	status := backup.NewReceiverStatusStore(nil)
-	manager := receiver.NewManager(stateDB, registry, status, notifications, rc.ServerName, rc.ReceiversBaseDir, log)
+	manager := receiver.NewManager(stateDB, registry, status, notifications, trustManager.Registry(), rc.ServerName, rc.ReceiversBaseDir, log)
 	manager.Load(ctx, rc.FileReceivers)
 
-	return registry, status, manager
+	return registry, status, manager, trustManager
 }
 
 // newSettings loads every notification and the report settings (see
@@ -228,14 +236,14 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	// pipeline.Runner.RunOutstandingUploadRetries.
 	go r.RunOutstandingUploadRetries(ctx, rc.Jobs)
 
-	receivers, receiverStore, receiverManager := newReceivers(ctx, rc, stateDB, notifications, log)
+	receivers, receiverStore, receiverManager, trustManager := newReceivers(ctx, rc, stateDB, notifications, log)
 
 	// Independent of the web UI: a daily report is useful for anyone
 	// monitoring receivers by inbox, not just those watching the dashboard.
 	// RunReportLoop idles while the report is disabled.
 	go pipeline.RunReportLoop(ctx, rc, reportSettings, notifications, receivers, stateDB, mailQueue, log)
 
-	srv := startWebUIIfConfigured(ctx, rc, statusStore, stateDB, logs, serverIdentity, r, mailQueue, receivers, receiverStore, receiverManager, settingsManager, log)
+	srv := startWebUIIfConfigured(ctx, rc, statusStore, stateDB, logs, serverIdentity, r, mailQueue, receivers, receiverStore, receiverManager, settingsManager, trustManager, log)
 
 	var wg sync.WaitGroup
 

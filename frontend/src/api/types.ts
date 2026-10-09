@@ -57,6 +57,7 @@ export interface ReceiverFile {
 export interface IdentityJSON {
   uuid: string;
   public_key: string;
+  fingerprint: string;
 }
 
 export interface LoginEventJSON {
@@ -155,6 +156,9 @@ export interface DownloadTicketJSON {
 // plus error when it no longer resolves and so isn't currently active.
 export interface ReceiverConfigJSON {
   id: string;
+  allowed_servers: string[];
+  // public_key is the deprecated single sender key, "" unless the receiver
+  // predates trusted servers.
   public_key: string;
   path: string;
   retention: string;
@@ -173,7 +177,39 @@ export interface ReceiverConfigJSON {
 export interface ReceiverConfigListJSON {
   base_dir: string;
   notifications: string[];
+  trusted_servers: TrustedServerOptionJSON[];
   receivers: ReceiverConfigJSON[];
+}
+
+// TrustedServerOptionJSON mirrors trustedServerOptionJSON in
+// internal/backup/webui/receivers_config.go: a trusted server a receiver may
+// allow.
+export interface TrustedServerOptionJSON {
+  id: string;
+  name: string;
+}
+
+// TrustedServerJSON mirrors trustedServerJSON in
+// internal/backup/webui/trusted_servers.go: one stored trusted server, plus
+// its key's fingerprint, the receivers allowing it, and error when it no
+// longer resolves and so isn't currently active.
+export interface TrustedServerJSON {
+  id: string;
+  name: string;
+  public_key: string;
+  fingerprint: string;
+  used_by: string[];
+  created_at: string;
+  created_by: string;
+  updated_at: string;
+  updated_by: string;
+  error?: string;
+}
+
+// TrustedServerListJSON mirrors trustedServerListJSON (GET
+// /api/trusted-servers).
+export interface TrustedServerListJSON {
+  servers: TrustedServerJSON[];
 }
 
 // WebhookConfigJSON mirrors webhookConfigJSON in

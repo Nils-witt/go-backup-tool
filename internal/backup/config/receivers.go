@@ -2,8 +2,6 @@ package config
 
 import (
 	"crypto/rsa"
-	"crypto/x509"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -13,6 +11,7 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
 
 // FileReceiver is one top-level receivers: entry, defining a path this
@@ -24,13 +23,18 @@ import (
 type FileReceiver struct {
 	ID string `yaml:"id" json:"id"`
 
-	// PublicKey is the PEM-encoded RSA public key of the sending instance
-	// allowed to write to this receiver — the contents of that instance's
-	// own generated data/keys/server.pub (see ensureServerKeyPair). Every
-	// request must present a JSON Web Token signed with the matching
-	// private key (see signRemoteAuthToken/verifyRemoteAuthToken and
-	// authorizeReceiver in webui.go); unlike the token: field this replaces,
-	// nothing here is itself a secret; it just names who's allowed to send.
+	// AllowedServers names the trusted servers (see internal/backup/trust)
+	// allowed to write to this receiver, by server UUID. Every request must
+	// present a JSON Web Token issued by one of them and signed with that
+	// server's private key (see authorizeReceiver in internal/backup/receiver).
+	// Managed in the web UI only, so not read from the config file.
+	AllowedServers []string `yaml:"-" json:"allowed_servers"`
+
+	// PublicKey is the deprecated way of naming a receiver's sender: the
+	// PEM-encoded RSA public key of the one sending instance allowed to
+	// write to it, accepted from any issuer. Still honored alongside
+	// AllowedServers so receivers set up before trusted servers existed
+	// keep working; optional once AllowedServers is set.
 	PublicKey  string `yaml:"public-key" json:"public_key"`
 	Path       string `yaml:"path" json:"path"`               // root directory incoming objects for this id are written under
 	Retention  string `yaml:"retention" json:"retention"`     // optional, same syntax as a local server's retention: e.g. "30d"
@@ -53,8 +57,16 @@ type FileReceiver struct {
 // ResolvedReceiver is one fileReceiver after validation, ready to be used by
 // the receiver API's handlers.
 type ResolvedReceiver struct {
-	ID         string
-	PublicKey  *rsa.PublicKey
+	ID string
+
+	// AllowedServers are the trusted server ids allowed to write to this
+	// receiver, looked up in TrustedServers on every request, so a key
+	// rotated in the web UI applies immediately. PublicKey is the
+	// deprecated sender key (see FileReceiver.PublicKey), nil when unset.
+	AllowedServers []string
+	TrustedServers *trust.Registry
+	PublicKey      *rsa.PublicKey
+
 	Path       string
 	Retention  time.Duration
 	StaleAfter time.Duration // 0 disables the stale-receiver monitor for this receiver
@@ -84,7 +96,8 @@ type ResolvedReceiver struct {
 
 // buildReceivers validates fileReceivers and builds an id -> resolvedReceiver
 // map, requiring every entry to have a unique, non-empty id, a valid RSA
-// public-key:, and a non-empty path. notifications, if non-nil, is checked
+// public-key: (the config file can't name trusted servers), and a non-empty
+// path. notifications, if non-nil, is checked
 // for every stale-notifications:/download-notifications: id (see
 // ResolveReceiver). serverName is
 // the config file's top-level server-name:, copied onto every resolved
@@ -102,7 +115,13 @@ func buildReceivers(fileReceivers []FileReceiver, notifications *notify.Registry
 			return nil, fmt.Errorf("receivers[%d]: duplicate receiver id %q", i, id)
 		}
 
-		recv, err := ResolveReceiver(fr, notifications, serverName)
+		// The config file can't name trusted servers, so its receivers
+		// still need the (deprecated) public-key:.
+		if strings.TrimSpace(fr.PublicKey) == "" {
+			return nil, fmt.Errorf("receiver %q: public-key is required", id)
+		}
+
+		recv, err := ResolveReceiver(fr, notifications, nil, serverName)
 		if err != nil {
 			return nil, fmt.Errorf("receiver %q: %w", id, err)
 		}
@@ -115,21 +134,33 @@ func buildReceivers(fileReceivers []FileReceiver, notifications *notify.Registry
 
 // ResolveReceiver validates one receiver definition — from the config
 // file's receivers: or from the state db's receivers table, managed in the
-// web UI — requiring a non-empty id, a valid RSA public-key, and a
-// non-empty path, and checking every notification id exists in
-// notifications (skipped when notifications is nil, as when parsing the
-// config file). notifications and serverName are copied onto the result
-// (see ResolvedReceiver.Notifications/ServerName). Errors don't name the
-// receiver; callers add that context.
-func ResolveReceiver(fr FileReceiver, notifications *notify.Registry, serverName string) (ResolvedReceiver, error) {
+// web UI — requiring a non-empty id, at least one allowed server or a
+// (deprecated) public-key, and a non-empty path, and checking every
+// notification id exists in notifications and every allowed server in
+// trusted. A nil notifications or trusted skips that check, as when parsing
+// the config file. notifications, trusted, and serverName are copied onto
+// the result (see ResolvedReceiver). Errors don't name the receiver;
+// callers add that context.
+func ResolveReceiver(fr FileReceiver, notifications *notify.Registry, trusted *trust.Registry, serverName string) (ResolvedReceiver, error) {
 	id := strings.TrimSpace(fr.ID)
 	if id == "" {
 		return ResolvedReceiver{}, errors.New("id is required")
 	}
 
-	publicKey, err := parseReceiverPublicKey(fr.PublicKey)
+	allowed, err := resolveAllowedServers(fr.AllowedServers, trusted)
 	if err != nil {
 		return ResolvedReceiver{}, err
+	}
+
+	var publicKey *rsa.PublicKey
+
+	switch {
+	case strings.TrimSpace(fr.PublicKey) != "":
+		if publicKey, err = trust.ParsePublicKey(fr.PublicKey); err != nil {
+			return ResolvedReceiver{}, err
+		}
+	case len(allowed) == 0:
+		return ResolvedReceiver{}, errors.New("an allowed server (or the deprecated public-key) is required")
 	}
 
 	if strings.TrimSpace(fr.Path) == "" {
@@ -160,6 +191,8 @@ func ResolveReceiver(fr FileReceiver, notifications *notify.Registry, serverName
 
 	return ResolvedReceiver{
 		ID:                    id,
+		AllowedServers:        allowed,
+		TrustedServers:        trusted,
 		PublicKey:             publicKey,
 		Path:                  fr.Path,
 		Retention:             retention,
@@ -267,27 +300,32 @@ func CheckNotificationRefs(ids []string, notifications *notify.Registry) error {
 	return nil
 }
 
-// parseReceiverPublicKey parses raw (a receiver's public-key: value) as a
-// PEM-encoded PKIX public key — the same format ensureServerKeyPair writes
-// to server.pub — requiring it to be an RSA key, since that's the only
-// algorithm signRemoteAuthToken/verifyRemoteAuthToken sign and verify with.
-func parseReceiverPublicKey(raw string) (*rsa.PublicKey, error) {
-	block, _ := pem.Decode([]byte(raw))
-	if block == nil || block.Type != "PUBLIC KEY" {
-		return nil, errors.New("public-key is required and must be a PEM-encoded PUBLIC KEY block")
+// resolveAllowedServers normalizes ids (see trust.NormalizeID), dropping
+// duplicates, and checks each names a server in trusted (skipped when
+// trusted is nil).
+func resolveAllowedServers(ids []string, trusted *trust.Registry) ([]string, error) {
+	var out []string
+
+	for i, raw := range ids {
+		id := trust.NormalizeID(raw)
+		if id == "" {
+			return nil, fmt.Errorf("allowed-servers[%d]: empty server id", i)
+		}
+
+		if slices.Contains(out, id) {
+			continue
+		}
+
+		if trusted != nil {
+			if _, ok := trusted.Get(id); !ok {
+				return nil, fmt.Errorf("allowed-servers[%d]: unknown trusted server %q", i, id)
+			}
+		}
+
+		out = append(out, id)
 	}
 
-	key, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parsing public-key: %w", err)
-	}
-
-	rsaKey, ok := key.(*rsa.PublicKey)
-	if !ok {
-		return nil, fmt.Errorf("public-key must be an RSA key, got %T", key)
-	}
-
-	return rsaKey, nil
+	return out, nil
 }
 
 // parseStaleAfter parses a receiver's stale-after: string into a
