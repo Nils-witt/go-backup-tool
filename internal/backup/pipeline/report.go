@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,8 +25,9 @@ import (
 // state db couldn't be opened at startup); the report is still sent, just
 // without any receiver_events/job_runs history (see buildReport).
 // Receivers and notifications are read from their live registries at each
-// send, so ones managed in the web UI are included.
-func RunReportLoop(ctx context.Context, rc *config.RunConfig, live *reportpkg.Live, notifications *notify.Registry, receivers *backup.ReceiverRegistry, db *store.Store, queue *notify.Queue, log *slog.Logger) {
+// send, and jobs from jobNames, so ones managed in the web UI are included.
+// serverName is this instance's {server_name} (see config.RunConfig.ServerName).
+func RunReportLoop(ctx context.Context, serverName string, jobNames func() []string, live *reportpkg.Live, notifications *notify.Registry, receivers *backup.ReceiverRegistry, db *store.Store, queue *notify.Queue, log *slog.Logger) {
 	log = log.With("component", "report")
 
 	var prev time.Time // zero until the first report in this process has been sent
@@ -59,7 +61,7 @@ func RunReportLoop(ctx context.Context, rc *config.RunConfig, live *reportpkg.Li
 			start = next.Add(-24 * time.Hour)
 		}
 
-		sendReport(ctx, rc, notifications.Resolve(settings.Notifications, log), receivers.Snapshot(), db, start, next, queue, log)
+		sendReport(ctx, serverName, jobNames(), notifications.Resolve(settings.Notifications, log), receivers.Snapshot(), db, start, next, queue, log)
 		prev = next
 	}
 }
@@ -141,11 +143,11 @@ type reportContent struct {
 // query failure is logged and leaves that section empty rather than failing
 // the whole report — a partial report is better than none, matching this
 // codebase's usual failure handling.
-func buildReport(ctx context.Context, rc *config.RunConfig, receivers map[string]config.ResolvedReceiver, db *store.Store, start, end time.Time, log *slog.Logger) reportContent {
-	report := reportContent{start: start, end: end, serverName: rc.ServerName}
+func buildReport(ctx context.Context, serverName string, jobNames []string, receivers map[string]config.ResolvedReceiver, db *store.Store, start, end time.Time, log *slog.Logger) reportContent {
+	report := reportContent{start: start, end: end, serverName: serverName}
 
 	report.receivers, report.stale, report.errors = buildReceiverReport(ctx, receivers, db, start, end, log)
-	report.jobs, report.jobErrors = buildJobReport(ctx, rc, db, start, end, log)
+	report.jobs, report.jobErrors = buildJobReport(ctx, jobNames, db, start, end, log)
 
 	return report
 }
@@ -217,17 +219,12 @@ func buildReceiverReport(ctx context.Context, receivers map[string]config.Resolv
 	return lines, stale, errs
 }
 
-// buildJobReport summarizes rc's configured jobs' activity in the window
+// buildJobReport summarizes jobNames' activity in the window
 // from start to end: runs completed and errors from job_runs (db, skipped
 // if nil), mirroring buildReceiverReport. A query failure is logged and
 // leaves that section empty rather than failing the whole report.
-func buildJobReport(ctx context.Context, rc *config.RunConfig, db *store.Store, start, end time.Time, log *slog.Logger) ([]jobReportLine, []store.JobRunErrorEvent) {
-	ids := make([]string, 0, len(rc.Jobs))
-	for _, job := range rc.Jobs {
-		ids = append(ids, job.Name)
-	}
-
-	sort.Strings(ids)
+func buildJobReport(ctx context.Context, jobNames []string, db *store.Store, start, end time.Time, log *slog.Logger) ([]jobReportLine, []store.JobRunErrorEvent) {
+	ids := slices.Sorted(slices.Values(jobNames))
 
 	byID := make(map[string]store.JobRunDaySummary, len(ids))
 
@@ -423,8 +420,8 @@ func reportWebhookBody(wh notify.Webhook, report reportContent) ([]byte, error) 
 // download notifications, a delivery problem here shouldn't affect anything
 // else this process is doing, and there's no caller to report it to — the
 // next scheduled report gets another chance.
-func sendReport(ctx context.Context, rc *config.RunConfig, notifications []notify.Notification, receivers map[string]config.ResolvedReceiver, db *store.Store, start, end time.Time, queue *notify.Queue, log *slog.Logger) {
-	report := buildReport(ctx, rc, receivers, db, start, end, log)
+func sendReport(ctx context.Context, serverName string, jobNames []string, notifications []notify.Notification, receivers map[string]config.ResolvedReceiver, db *store.Store, start, end time.Time, queue *notify.Queue, log *slog.Logger) {
+	report := buildReport(ctx, serverName, jobNames, receivers, db, start, end, log)
 	body := renderReportBody(report)
 
 	for _, n := range notifications {

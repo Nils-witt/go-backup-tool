@@ -93,9 +93,10 @@ func TestParseFlags(t *testing.T) {
 		wantErr string // substring expected in the error, "" means no error
 	}{
 		{
-			name:    "missing jobs list",
-			yaml:    "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\nrecipients: [me@example.com]\n",
-			wantErr: "must define at least one job",
+			// Jobs may be stored in the state db instead; the "nothing to
+			// run" check happens once they're loaded (see app.Run).
+			name: "missing jobs list",
+			yaml: "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\nrecipients: [me@example.com]\n",
 		},
 		{
 			name: "missing jobs list allowed with listen set",
@@ -1309,9 +1310,131 @@ jobs:
     recipients: [me@example.com]
 `)
 
-	_, err := ParseFlags([]string{"-config", path, "-job", "nope"}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "no such job") {
-		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "no such job")
+	// The job may be stored in the state db instead, so an unknown -job is
+	// only reported once jobs are loaded (see jobs.Manager.Load).
+	rc, err := ParseFlags([]string{"-config", path, "-job", "nope"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
+	}
+
+	if len(rc.Jobs) != 0 || rc.JobFilter != "nope" {
+		t.Errorf("rc.Jobs = %d, rc.JobFilter = %q; want 0, %q", len(rc.Jobs), rc.JobFilter, "nope")
+	}
+
+	if len(rc.FileJobs) != 1 || rc.FileJobs[0].Name != "database" {
+		t.Errorf("rc.FileJobs = %+v, want the database job", rc.FileJobs)
+	}
+}
+
+func TestParseFlagsFlattensFileJobs(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+gpg-bin: /usr/bin/gpg2
+cmd: "echo default"
+recipients: [me@example.com]
+interval: 1h
+armor: true
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+targets: [{server: s, bucket: shared}]
+
+jobs:
+  - name: a
+  - name: b
+    cmd: "echo b"
+    gpg-homedir: /keys
+    recipients: [other@example.com]
+`)
+
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
+	}
+
+	if len(rc.FileJobs) != 2 {
+		t.Fatalf("rc.FileJobs = %d, want 2", len(rc.FileJobs))
+	}
+
+	a, b := rc.FileJobs[0], rc.FileJobs[1]
+
+	if a.Cmd != "echo default" || a.Interval != "1h" || !a.Armor || len(a.Targets) != 1 || a.Recipients[0] != "me@example.com" {
+		t.Errorf("job a = %+v, want the top-level defaults layered in", a)
+	}
+
+	if a.GPGBin != "" {
+		t.Errorf("job a GPGBin = %q, want \"\" (top-level gpg-bin stays global)", a.GPGBin)
+	}
+
+	if b.Cmd != "echo b" || b.GPGHomedir != "/keys" || b.Recipients[0] != "other@example.com" {
+		t.Errorf("job b = %+v, want its own fields kept", b)
+	}
+
+	if rc.GPG.Bin != "/usr/bin/gpg2" {
+		t.Errorf("rc.GPG.Bin = %q, want /usr/bin/gpg2", rc.GPG.Bin)
+	}
+}
+
+func TestResolveJob(t *testing.T) {
+	t.Parallel()
+
+	local, err := ResolveServer(FileServer{Name: "nas", Type: "local", Path: "/mnt", Retention: "7d"})
+	if err != nil {
+		t.Fatalf("ResolveServer() error: %v", err)
+	}
+
+	cmd, err := ResolveCommand(FileCommand{ID: "page", Cmd: "echo page"})
+	if err != nil {
+		t.Fatalf("ResolveCommand() error: %v", err)
+	}
+
+	servers := map[string]ResolvedServer{"nas": local}
+	commands := map[string]Command{"page": cmd}
+	gpg := notify.GPGSettings{Bin: "gpg", Homedir: "/keys"}
+
+	job, err := ResolveJob(FileJob{
+		Name: " db ", Cmd: "dump", Recipients: []string{"me@example.com"}, Interval: "1h",
+		Targets: []FileJobTarget{{Server: "nas", Bucket: "b", OnError: &FileTargetOnError{Command: "page", After: 2}}},
+	}, gpg, servers, commands, "primary")
+	if err != nil {
+		t.Fatalf("ResolveJob() error: %v", err)
+	}
+
+	if job.Name != "db" || job.GPGHomedir != "/keys" || job.ServerName != "primary" || job.Interval != time.Hour {
+		t.Errorf("ResolveJob() = %+v", job)
+	}
+
+	if len(job.Targets) != 1 || job.Targets[0].Retention != 7*24*time.Hour || job.Targets[0].OnErrorCommand == nil {
+		t.Errorf("ResolveJob() targets = %+v", job.Targets)
+	}
+}
+
+func TestResolveJobErrors(t *testing.T) {
+	t.Parallel()
+
+	local, err := ResolveServer(FileServer{Name: "nas", Type: "local", Path: "/mnt"})
+	if err != nil {
+		t.Fatalf("ResolveServer() error: %v", err)
+	}
+
+	servers := map[string]ResolvedServer{"nas": local}
+	gpg := notify.GPGSettings{Bin: "gpg"}
+
+	for _, tc := range []struct {
+		name string
+		fj   FileJob
+		want string
+	}{
+		{"no name", FileJob{Cmd: "x"}, "name is required"},
+		{"no cmd", FileJob{Name: "x", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "nas", Bucket: "b"}}}, "cmd is required"},
+		{"unknown server", FileJob{Name: "x", Cmd: "x", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "gone", Bucket: "b"}}}, "no server named"},
+		{"unknown command", FileJob{Name: "x", Cmd: "x", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "nas", Bucket: "b", OnRecover: &FileTargetOnRecover{Command: "gone"}}}}, "no command named"},
+	} {
+		if _, err := ResolveJob(tc.fj, gpg, servers, nil, ""); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: ResolveJob() error = %v, want substring %q", tc.name, err, tc.want)
+		}
 	}
 }
 

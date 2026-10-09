@@ -194,7 +194,7 @@ func TestHandleRetryFailedTargetsUnknownJobReturns404(t *testing.T) {
 	t.Parallel()
 
 	statusStore, job := newTestStore()
-	jobs := map[string]*config.Config{job.Name: job}
+	jobs := pipeline.StaticJobs([]*config.Config{job})
 	runner := pipeline.NewRunner(discardLogger, statusStore, nil, nil, nil, nil)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/jobs/nope/retry", nil)
@@ -213,7 +213,7 @@ func TestHandleRetryFailedTargetsNoFailedTargetsReturns409(t *testing.T) {
 	t.Parallel()
 
 	statusStore, job := newTestStore()
-	jobs := map[string]*config.Config{job.Name: job}
+	jobs := pipeline.StaticJobs([]*config.Config{job})
 	runner := pipeline.NewRunner(discardLogger, statusStore, nil, nil, nil, nil)
 
 	// No run has happened yet, so every target is idle, not failed.
@@ -258,7 +258,7 @@ func TestHandleRetryFailedTargetsKicksOffRetry(t *testing.T) {
 	statusStore.TargetDone(job.Name, 0, context.DeadlineExceeded) // simulate a prior failure
 	statusStore.Finished(job.Name, context.DeadlineExceeded, 0)
 
-	jobs := map[string]*config.Config{job.Name: job}
+	jobs := pipeline.StaticJobs([]*config.Config{job})
 	runner := pipeline.NewRunner(discardLogger, statusStore, nil, nil, nil, nil)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/jobs/test/retry", nil)

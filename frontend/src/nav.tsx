@@ -13,6 +13,9 @@ import SettingsIcon from "@mui/icons-material/Settings";
 import NotificationsIcon from "@mui/icons-material/Notifications";
 import SummarizeIcon from "@mui/icons-material/Summarize";
 import VerifiedUserIcon from "@mui/icons-material/VerifiedUser";
+import ScheduleIcon from "@mui/icons-material/Schedule";
+import DnsIcon from "@mui/icons-material/Dns";
+import CodeIcon from "@mui/icons-material/Code";
 import type { AuthState } from "./auth/useAuth";
 
 export interface NavItem {
@@ -47,6 +50,24 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: "Settings",
     items: [
+      {
+        to: "/job-settings",
+        label: "Jobs",
+        icon: <ScheduleIcon />,
+        visible: (s) => s.canManageJobs,
+      },
+      {
+        to: "/server-settings",
+        label: "Servers",
+        icon: <DnsIcon />,
+        visible: (s) => s.canManageJobs,
+      },
+      {
+        to: "/command-settings",
+        label: "Commands",
+        icon: <CodeIcon />,
+        visible: (s) => s.canManageJobs,
+      },
       {
         to: "/receiver-settings",
         label: "Receivers",

@@ -4,10 +4,10 @@ import (
 	"net/http"
 	"testing"
 
-	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
 	"nilswitt.dev/go-backup-tool/internal/backup/settings"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 // startSettingsWebUI starts an SSO-enabled web UI whose notifications and
@@ -18,8 +18,12 @@ func startSettingsWebUI(t *testing.T, idp *testIDP) (*Server, *notify.Registry) 
 
 	db := openTestStateDB(t)
 	registry := notify.NewRegistry(nil)
-	jobs := []*config.Config{{Name: "db", FailureNotifications: []string{"ops"}}}
-	manager := settings.NewManager(db, registry, report.NewLive(report.Settings{}), notify.SMTPSettings{}, notify.GPGSettings{}, jobs, discardLogger)
+
+	if err := db.CreateJobConfig(t.Context(), store.JobConfig{Name: "db", FailureNotifications: []string{"ops"}}); err != nil {
+		t.Fatalf("CreateJobConfig() error: %v", err)
+	}
+
+	manager := settings.NewManager(db, registry, report.NewLive(report.Settings{}), notify.SMTPSettings{}, notify.GPGSettings{}, discardLogger)
 	statusStore, _ := newTestStore()
 
 	srv := StartWebUI("127.0.0.1:0", statusStore, nil, nil, nil, nil, nil, manager, nil, discardLogger, db, nil, idp.settings(), nil, false, false, "", nil, nil)

@@ -79,6 +79,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		&apiTokenModel{}, &tokenSigningKeyModel{},
 		&receiverModel{}, &notificationModel{}, &reportSettingsModel{},
 		&trustedServerModel{},
+		&serverModel{}, &commandModel{}, &jobModel{},
 	); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)

@@ -28,6 +28,9 @@ export interface AuthState {
   // canManageSettings mirrors the server's admin gate on
   // /api/notification-configs and /api/report-config.
   canManageSettings: boolean;
+  // canManageJobs mirrors the server's admin gate on /api/job-configs,
+  // /api/server-configs, and /api/command-configs.
+  canManageJobs: boolean;
   canViewLoginLog: boolean;
   canViewDownloadLog: boolean;
   canViewJobRunLog: boolean;

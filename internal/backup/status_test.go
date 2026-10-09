@@ -519,3 +519,31 @@ func TestStatusStoreChangedFiresOnEveryMutation(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusStoreUpsertAndRemove(t *testing.T) {
+	t.Parallel()
+
+	b := &config.Config{Name: "b", Targets: []config.Target{{ServerName: "nas", Bucket: "x"}}}
+	s := NewStatusStore([]*config.Config{b})
+
+	s.TargetDone("b", 0, errors.New("boom"))
+
+	s.Upsert(&config.Config{Name: "a", Interval: time.Hour})
+	s.Upsert(&config.Config{Name: "b", Targets: []config.Target{{ServerName: "nas", Bucket: "x"}, {ServerName: "remote", Bucket: "y"}}})
+
+	snap := s.Snapshot()
+	if len(snap) != 2 || snap[0].Name != "a" || snap[0].Interval != "1h0m0s" || snap[1].Name != "b" {
+		t.Fatalf("Snapshot() = %+v, want a then b", snap)
+	}
+
+	if got := snap[1].Targets; len(got) != 2 || got[0].State != StateFailed || got[1].State != StateIdle {
+		t.Errorf("b targets = %+v, want the kept failed target plus a new idle one", got)
+	}
+
+	s.Remove("a")
+	s.Remove("missing")
+
+	if snap := s.Snapshot(); len(snap) != 1 || snap[0].Name != "b" {
+		t.Errorf("after Remove, Snapshot() = %+v", snap)
+	}
+}

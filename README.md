@@ -8,6 +8,7 @@ go-backup-tool runs a shell command, encrypts its output with GPG, and sends the
 - **Targets**
   - `local`: writes to `path/bucket/key` on the filesystem (NAS mount, external disk, …).
   - `remote`: uploads to another instance's receiver API. Each instance creates its own RSA key pair and UUID on first run and signs requests with it, so no shared secrets are needed.
+- **Config file or dashboard**: by default, jobs, the servers they upload to, and their `on-error`/`on-recover` commands are defined in the config file and shown read-only in the web dashboard. With `webui.job-editing: true`, they're imported into the state database once and admins manage them in the dashboard instead (off by default, since they run shell commands on the host). Dashboard changes apply without a restart: a job picks up an edit from its next run on and is only rescheduled when its interval or start time changes.
 - **Scheduling**: jobs run once, or repeat on an `interval`, optionally anchored to a `start-time` (UTC). The last successful run is stored in a SQLite state database, so missed runs are caught up once on startup.
 - **Retention**: objects older than a configured age (`7d`, `168h`, …) are deleted automatically, per server, target, or receiver. Only objects the tool wrote itself are ever deleted.
 - **Receivers**: an instance can accept backups from trusted servers. It can also alert when a sender stops delivering (`stale-after`). Receivers are managed by admins in the web dashboard (stored in the state database, applied without a restart); their paths are restricted to `webui.receivers-base-dir`.
@@ -18,7 +19,7 @@ go-backup-tool runs a shell command, encrypts its output with GPG, and sends the
 
 ## Usage
 
-Everything is configured in a single YAML file. See [`config.example.yaml`](config.example.yaml), which documents every option.
+Instance-wide settings are configured in a single YAML file. See [`config.example.yaml`](config.example.yaml), which documents every option. Receivers, notifications, and the report can be defined there once and are then managed in the web dashboard; jobs, servers, and commands too, if `webui.job-editing` is on.
 
 ```sh
 cp config.example.yaml config.yaml

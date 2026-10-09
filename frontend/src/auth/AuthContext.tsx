@@ -70,6 +70,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       canManageTokens: admin,
       canManageReceivers: admin,
       canManageSettings: admin,
+      canManageJobs: admin,
       canViewLoginLog: admin || has("login-log"),
       canViewDownloadLog: admin || has("download-log"),
       canViewJobRunLog: admin || has("job-run-log"),

@@ -139,7 +139,7 @@ const (
 	ServerKindRemote ServerKind = "remote" // type: remote
 )
 
-// parseServerKind validates a fileServer's Type field.
+// parseServerKind validates a FileServer's Type field.
 func parseServerKind(t string) (ServerKind, error) {
 	switch strings.TrimSpace(t) {
 	case string(ServerKindLocal):
@@ -211,7 +211,34 @@ type Command struct {
 // RunConfig is the result of ParseFlags: one or more jobs to run, plus the
 // overall run timeout and the optional web UI listen address.
 type RunConfig struct {
-	Jobs       []*Config
+	// Jobs are the config file's (deprecated) jobs: entries, resolved
+	// against its servers:/commands: and narrowed by -job. Every job lives
+	// in the state db from startup on (see jobs.Manager, which imports
+	// FileJobs/FileServers/FileCommands); Jobs is only what the config file
+	// itself defines.
+	Jobs []*Config
+
+	// FileJobs, FileServers and FileCommands are the config file's
+	// (deprecated) jobs:/servers:/commands: entries as written, already
+	// validated, kept raw so jobs.Manager can import them into the state db,
+	// where they live from then on (managed in the web UI). Each FileJobs
+	// entry already has the config file's top-level job defaults layered
+	// in (see flattenFileJob), except gpg-bin/gpg-homedir: those stay
+	// top-level settings (see GPG) every job falls back to.
+	FileJobs     []FileJob
+	FileServers  []FileServer
+	FileCommands []FileCommand
+
+	// JobFilter is -job: when set, only the job of that name is scheduled.
+	// It may name a job stored only in the state db, so an unknown name is
+	// reported once jobs are loaded (see jobs.Manager), not here.
+	JobFilter string
+
+	// JobEditing mirrors fileWebUI.JobEditing: whether the web UI may
+	// create, change, or delete jobs, servers, and commands. Off, they're
+	// shown read-only.
+	JobEditing bool
+
 	Timeout    time.Duration
 	Listen     string // empty disables the web UI; see resolveWebUIListen
 	ConfigPath string // where the config file was loaded from; state db lives alongside it
@@ -323,51 +350,51 @@ const (
 	defaultOIDCGroupsClaim = "groups"
 )
 
-// fileJob mirrors config's per-job fields for YAML unmarshaling, used both
+// FileJob mirrors config's per-job fields for YAML unmarshaling, used both
 // for the top-level shared defaults and for each entry under jobs:. Any
 // field left unset falls through to the built-in default (top-level) or the
 // top-level value (a jobs: entry).
 //
 // A job names its upload destination(s) via targets:, each entry a
 // {server, bucket} pair referencing a servers: entry defined at the top
-// level (see fileServer) — server connection details (endpoint) live there,
+// level (see FileServer) — server connection details (endpoint) live there,
 // not on the job. A targets: entry may also set its own retention: (local
 // servers only), overriding the server's for that job's writes to that
-// target — see fileJobTarget.
-type fileJob struct {
-	Name       string          `yaml:"name"`
-	Cmd        string          `yaml:"cmd"`
-	Key        string          `yaml:"key"`
-	Targets    []fileJobTarget `yaml:"targets"`
-	Recipients []string        `yaml:"recipients"`
-	Armor      bool            `yaml:"armor"`
-	GPGBin     string          `yaml:"gpg-bin"`
-	GPGHomedir string          `yaml:"gpg-homedir"`
-	Interval   string          `yaml:"interval"`
-	StartTime  string          `yaml:"start-time"`
-	StagingDir string          `yaml:"staging-dir"`
+// target — see FileJobTarget.
+type FileJob struct {
+	Name       string          `yaml:"name" json:"name"`
+	Cmd        string          `yaml:"cmd" json:"cmd"`
+	Key        string          `yaml:"key" json:"key"`
+	Targets    []FileJobTarget `yaml:"targets" json:"targets"`
+	Recipients []string        `yaml:"recipients" json:"recipients"`
+	Armor      bool            `yaml:"armor" json:"armor"`
+	GPGBin     string          `yaml:"gpg-bin" json:"gpg_bin"`
+	GPGHomedir string          `yaml:"gpg-homedir" json:"gpg_homedir"`
+	Interval   string          `yaml:"interval" json:"interval"`
+	StartTime  string          `yaml:"start-time" json:"start_time"`
+	StagingDir string          `yaml:"staging-dir" json:"staging_dir"`
 
 	// FailureNotifications names top-level notifications: entries (see
 	// notify.Build) to fire whenever this job's run ends in an error on any
 	// target — whether every target failed or just some. Optional.
-	FailureNotifications []string `yaml:"failure-notifications"`
+	FailureNotifications []string `yaml:"failure-notifications" json:"failure_notifications"`
 }
 
-// fileJobTarget mirrors jobTargetRef for YAML unmarshaling. Retention (local
+// FileJobTarget mirrors jobTargetRef for YAML unmarshaling. Retention (local
 // servers only) overrides, for this job's writes to this target, the
 // retention its server otherwise applies — same duration syntax as a
-// server's own retention: (see fileServer). Unset keeps the server's
+// server's own retention: (see FileServer). Unset keeps the server's
 // retention: unchanged; it's an error to set it against a target whose
 // server isn't type: local.
-type fileJobTarget struct {
-	Server    string               `yaml:"server"`
-	Bucket    string               `yaml:"bucket"`
-	Retention string               `yaml:"retention"`
-	OnError   *fileTargetOnError   `yaml:"on-error"`
-	OnRecover *fileTargetOnRecover `yaml:"on-recover"`
+type FileJobTarget struct {
+	Server    string               `yaml:"server" json:"server"`
+	Bucket    string               `yaml:"bucket" json:"bucket"`
+	Retention string               `yaml:"retention" json:"retention"`
+	OnError   *FileTargetOnError   `yaml:"on-error" json:"on_error"`
+	OnRecover *FileTargetOnRecover `yaml:"on-recover" json:"on_recover"`
 }
 
-// fileTargetOnError mirrors a targets: entry's on-error: block for YAML
+// FileTargetOnError mirrors a targets: entry's on-error: block for YAML
 // unmarshaling. Command references a top-level commands: entry's id
 // (required whenever on-error: is present at all — see applyFileJob).
 // After is how many consecutive times this target must fail, in a row,
@@ -376,22 +403,22 @@ type fileJobTarget struct {
 // Repeat (default true) makes Command fire again on every subsequent
 // consecutive failure (see pipeline.Runner.handleTargetOutcome); false fires
 // it only once per streak, when the streak reaches After.
-type fileTargetOnError struct {
-	Command string `yaml:"command"`
-	After   int    `yaml:"after"`
-	Repeat  *bool  `yaml:"repeat"`
+type FileTargetOnError struct {
+	Command string `yaml:"command" json:"command"`
+	After   int    `yaml:"after" json:"after"`
+	Repeat  *bool  `yaml:"repeat" json:"repeat"`
 }
 
-// fileTargetOnRecover mirrors a targets: entry's on-recover: block for YAML
+// FileTargetOnRecover mirrors a targets: entry's on-recover: block for YAML
 // unmarshaling. Command references a top-level commands: entry's id
 // (required whenever on-recover: is present at all — see applyFileJob). It
 // fires once, on the first success after one or more consecutive failures
 // (see pipeline.Runner.handleTargetOutcome), independent of on-error:.
-type fileTargetOnRecover struct {
-	Command string `yaml:"command"`
+type FileTargetOnRecover struct {
+	Command string `yaml:"command" json:"command"`
 }
 
-// fileServer is one top-level servers: entry, defined once and referenced by
+// FileServer is one top-level servers: entry, defined once and referenced by
 // name from any job's targets: list. type: selects the destination kind:
 // "local" for a directory on the local filesystem, using only path; or
 // "remote" for another go-backup-tool instance's receiver API, using only
@@ -410,38 +437,38 @@ type fileTargetOnRecover struct {
 // this instance's own persistent identity (see loadServerIdentity), which
 // the destination instance verifies against the public key configured on
 // its matching receivers: entry's public-key: (see fileReceiver).
-type fileServer struct {
-	Name      string `yaml:"name"`
-	Type      string `yaml:"type"`
-	Endpoint  string `yaml:"endpoint"`
-	Path      string `yaml:"path"`      // local only: root directory backups are written under
-	Retention string `yaml:"retention"` // local only: e.g. "7d" or "168h"; unset/"0" keeps objects forever
+type FileServer struct {
+	Name      string `yaml:"name" json:"name"`
+	Type      string `yaml:"type" json:"type"`
+	Endpoint  string `yaml:"endpoint" json:"endpoint"`
+	Path      string `yaml:"path" json:"path"`           // local only: root directory backups are written under
+	Retention string `yaml:"retention" json:"retention"` // local only: e.g. "7d" or "168h"; unset/"0" keeps objects forever
 }
 
-// fileCommand is one top-level commands: entry, defined once and referenced
+// FileCommand is one top-level commands: entry, defined once and referenced
 // by id from a target's on-error.command or on-recover.command — the same "define once, reference
 // by id" shape as notify.FileNotification. Cmd is run through the platform
 // shell, the same way a job's own cmd: is (see pipeline.newSourceCommand).
 // Timeout (optional) bounds how long one firing may run; defaults to
 // defaultOnErrorCommandTimeout when unset.
-type fileCommand struct {
-	ID      string `yaml:"id"`
-	Cmd     string `yaml:"cmd"`
-	Timeout string `yaml:"timeout"`
+type FileCommand struct {
+	ID      string `yaml:"id" json:"id"`
+	Cmd     string `yaml:"cmd" json:"cmd"`
+	Timeout string `yaml:"timeout" json:"timeout"`
 }
 
 // fileConfig is the top-level shape of the YAML config file. Its embedded
-// fileJob holds shared defaults applied to every entry in Jobs before that
+// FileJob holds shared defaults applied to every entry in Jobs before that
 // entry's own fields override them.
 type fileConfig struct {
-	fileJob `yaml:",inline"`
+	FileJob `yaml:",inline"`
 
 	Timeout  string       `yaml:"timeout"`
 	LogLevel string       `yaml:"log-level"` // debug, info, warn, or error; overridden by -log-level when that flag is explicitly given
 	KeysDir  string       `yaml:"keys-dir"`  // where this instance's persistent identity (RSA key pair + UUID) is stored; defaults to defaultServerKeyDir
 	LogFile  string       `yaml:"log-file"`  // if set, log output is also appended to this file (in addition to stderr)
-	Servers  []fileServer `yaml:"servers"`
-	Jobs     []fileJob    `yaml:"jobs"`
+	Servers  []FileServer `yaml:"servers"`
+	Jobs     []FileJob    `yaml:"jobs"`
 
 	// ServerName identifies this instance in notifications: a {server_name}
 	// placeholder, substituted the same way as a stale/download
@@ -470,7 +497,7 @@ type fileConfig struct {
 	// target's on-error.command or on-recover.command (see buildCommands) —
 	// the same "define
 	// once, reference by id" shape as Notifications.
-	Commands []fileCommand `yaml:"commands"`
+	Commands []FileCommand `yaml:"commands"`
 
 	Receivers []FileReceiver    `yaml:"receivers"`
 	WebUI     fileWebUI         `yaml:"webui"`
@@ -539,6 +566,14 @@ type fileWebUI struct {
 	// absolute. Unset leaves the web UI unable to create receivers or change
 	// their path.
 	ReceiversBaseDir string `yaml:"receivers-base-dir"`
+
+	// JobEditing lets web UI admins create, change, and delete jobs,
+	// servers, and commands. Off by default: a job's cmd: and a command's
+	// cmd: run as shell commands on this machine, and a local server's
+	// path: is written to, so editing them from the web UI amounts to
+	// running arbitrary commands as this process's user. Off, the web UI
+	// shows them read-only.
+	JobEditing bool `yaml:"job-editing"`
 }
 
 // fileWebUIOIDC is the webui.oidc: entry, configuring Single Sign-On for the
@@ -654,7 +689,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		return nil, err
 	}
 
-	jobs, err := resolveJobs(fileCfg, listen, commands)
+	jobs, err := resolveJobs(fileCfg, commands)
 	if err != nil {
 		return nil, err
 	}
@@ -688,6 +723,11 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 
 	return &RunConfig{
 		Jobs:              jobs,
+		FileJobs:          flattenFileJobs(fileCfg),
+		FileServers:       fileCfg.Servers,
+		FileCommands:      fileCfg.Commands,
+		JobFilter:         jobFilter,
+		JobEditing:        fileCfg.WebUI.JobEditing,
 		Timeout:           timeout,
 		Listen:            listen,
 		ConfigPath:        configPath,
@@ -767,7 +807,7 @@ const defaultOnErrorCommandTimeout = 30 * time.Second
 // on-recover.command. Validates
 // that every entry has a non-empty, unique id and a non-empty cmd — the
 // same validation shape as notify.Build for notifications:.
-func buildCommands(fileCommands []fileCommand) (map[string]Command, error) {
+func buildCommands(fileCommands []FileCommand) (map[string]Command, error) {
 	commands := make(map[string]Command, len(fileCommands))
 
 	for i, fc := range fileCommands {
@@ -780,20 +820,38 @@ func buildCommands(fileCommands []fileCommand) (map[string]Command, error) {
 			return nil, fmt.Errorf("commands[%d]: duplicate command id %q", i, id)
 		}
 
-		cmd := strings.TrimSpace(fc.Cmd)
-		if cmd == "" {
-			return nil, fmt.Errorf("command %q: cmd is required", id)
-		}
-
-		timeout, err := parseOnErrorCommandTimeout(fc.Timeout)
+		command, err := ResolveCommand(fc)
 		if err != nil {
-			return nil, fmt.Errorf("command %q: %w", id, err)
+			return nil, err
 		}
 
-		commands[id] = Command{ID: id, Cmd: cmd, Timeout: timeout}
+		commands[id] = command
 	}
 
 	return commands, nil
+}
+
+// ResolveCommand validates one commands: entry — from the config file or
+// stored in the state db (see jobs.Manager) — into a Command: a non-empty id
+// and cmd, and an optional positive timeout (default
+// defaultOnErrorCommandTimeout).
+func ResolveCommand(fc FileCommand) (Command, error) {
+	id := strings.TrimSpace(fc.ID)
+	if id == "" {
+		return Command{}, errors.New("id is required")
+	}
+
+	cmd := strings.TrimSpace(fc.Cmd)
+	if cmd == "" {
+		return Command{}, fmt.Errorf("command %q: cmd is required", id)
+	}
+
+	timeout, err := parseOnErrorCommandTimeout(fc.Timeout)
+	if err != nil {
+		return Command{}, fmt.Errorf("command %q: %w", id, err)
+	}
+
+	return Command{ID: id, Cmd: cmd, Timeout: timeout}, nil
 }
 
 // parseOnErrorCommandTimeout parses a commands: entry's timeout: string,
@@ -1045,19 +1103,14 @@ func parseLogLevel(s string) (slog.Level, error) {
 // resolveJobs builds the list of jobs to run from fileCfg's jobs: list,
 // layering fileCfg's top-level fields as shared defaults under each entry's
 // own fields, and resolving each job's targets: against fileCfg's servers:.
-// listen is the web UI's resolved effective listen address (see
-// resolveWebUIListen). commands is the config file's already-resolved
+// commands is the config file's already-resolved
 // top-level commands: map (see buildCommands), used to resolve a target's
 // on-error.command and on-recover.command.
 //
-// An empty jobs: list is only allowed when the web UI is enabled, since that
-// still leaves the web UI (and receiver API) as a reason to run; otherwise
-// the process would start and immediately have nothing to do.
-func resolveJobs(fileCfg *fileConfig, listen string, commands map[string]Command) ([]*Config, error) {
-	if len(fileCfg.Jobs) == 0 && listen == "" {
-		return nil, errors.New("config file must define at least one job under a jobs list, or set webui.enabled: true to run without any")
-	}
-
+// An empty jobs: list is fine here: jobs may be stored in the state db
+// instead (see jobs.Manager), which is where the "nothing to run" check
+// happens.
+func resolveJobs(fileCfg *fileConfig, commands map[string]Command) ([]*Config, error) {
 	return buildJobsFromFile(fileCfg, commands)
 }
 
@@ -1089,7 +1142,7 @@ func buildJobsFromFile(fileCfg *fileConfig, commands map[string]Command) ([]*Con
 		cfg.Name = name
 		cfg.ServerName = fileCfg.ServerName
 
-		if err := applyFileJob(cfg, &fileCfg.fileJob); err != nil {
+		if err := applyFileJob(cfg, &fileCfg.FileJob); err != nil {
 			return nil, fmt.Errorf("job %q: %w", name, err)
 		}
 
@@ -1107,11 +1160,11 @@ func buildJobsFromFile(fileCfg *fileConfig, commands map[string]Command) ([]*Con
 	return jobs, nil
 }
 
-// buildServers resolves fileServers into a name -> resolvedServer map,
+// buildServers resolves fileServers into a name -> ResolvedServer map,
 // validating that every entry has a non-empty, unique name and an explicit,
 // valid type:.
-func buildServers(fileServers []fileServer) (map[string]resolvedServer, error) {
-	servers := make(map[string]resolvedServer, len(fileServers))
+func buildServers(fileServers []FileServer) (map[string]ResolvedServer, error) {
+	servers := make(map[string]ResolvedServer, len(fileServers))
 
 	for i, fs := range fileServers {
 		name := strings.TrimSpace(fs.Name)
@@ -1123,20 +1176,7 @@ func buildServers(fileServers []fileServer) (map[string]resolvedServer, error) {
 			return nil, fmt.Errorf("servers[%d]: duplicate server name %q", i, name)
 		}
 
-		kind, err := parseServerKind(fs.Type)
-		if err != nil {
-			return nil, fmt.Errorf("server %q: %w", name, err)
-		}
-
-		var server resolvedServer
-
-		switch kind {
-		case ServerKindLocal:
-			server, err = buildLocalServer(name, &fs)
-		case ServerKindRemote:
-			server, err = buildRemoteServer(name, &fs)
-		}
-
+		server, err := ResolveServer(fs)
 		if err != nil {
 			return nil, err
 		}
@@ -1147,38 +1187,60 @@ func buildServers(fileServers []fileServer) (map[string]resolvedServer, error) {
 	return servers, nil
 }
 
-// buildLocalServer validates and builds a resolvedServer for a type: local
+// ResolveServer validates one servers: entry — from the config file or
+// stored in the state db (see jobs.Manager) — into a ResolvedServer jobs'
+// targets can be resolved against: a non-empty name and an explicit, valid
+// type: with only the fields that type uses.
+func ResolveServer(fs FileServer) (ResolvedServer, error) {
+	name := strings.TrimSpace(fs.Name)
+	if name == "" {
+		return ResolvedServer{}, errors.New("name is required")
+	}
+
+	kind, err := parseServerKind(fs.Type)
+	if err != nil {
+		return ResolvedServer{}, fmt.Errorf("server %q: %w", name, err)
+	}
+
+	if kind == ServerKindLocal {
+		return buildLocalServer(name, &fs)
+	}
+
+	return buildRemoteServer(name, &fs)
+}
+
+// buildLocalServer validates and builds a ResolvedServer for a type: local
 // servers: entry, which uses only path and retention.
-func buildLocalServer(name string, fs *fileServer) (resolvedServer, error) {
+func buildLocalServer(name string, fs *FileServer) (ResolvedServer, error) {
 	if strings.TrimSpace(fs.Path) == "" {
-		return resolvedServer{}, fmt.Errorf("server %q: path is required for type: local", name)
+		return ResolvedServer{}, fmt.Errorf("server %q: path is required for type: local", name)
 	}
 
 	if fs.Endpoint != "" {
-		return resolvedServer{}, fmt.Errorf("server %q: endpoint is not valid for type: local", name)
+		return ResolvedServer{}, fmt.Errorf("server %q: endpoint is not valid for type: local", name)
 	}
 
 	retention, err := parseRetention(fs.Retention)
 	if err != nil {
-		return resolvedServer{}, fmt.Errorf("server %q: %w", name, err)
+		return ResolvedServer{}, fmt.Errorf("server %q: %w", name, err)
 	}
 
-	return resolvedServer{name: name, kind: ServerKindLocal, path: fs.Path, retention: retention}, nil
+	return ResolvedServer{name: name, kind: ServerKindLocal, path: fs.Path, retention: retention}, nil
 }
 
-// buildRemoteServer validates and builds a resolvedServer for a type: remote
+// buildRemoteServer validates and builds a ResolvedServer for a type: remote
 // servers: entry, which uses only endpoint — auth is this instance's own
 // identity (see loadServerIdentity), not a config field.
-func buildRemoteServer(name string, fs *fileServer) (resolvedServer, error) {
+func buildRemoteServer(name string, fs *FileServer) (ResolvedServer, error) {
 	if strings.TrimSpace(fs.Endpoint) == "" {
-		return resolvedServer{}, fmt.Errorf("server %q: endpoint is required for type: remote", name)
+		return ResolvedServer{}, fmt.Errorf("server %q: endpoint is required for type: remote", name)
 	}
 
 	if fs.Path != "" || fs.Retention != "" {
-		return resolvedServer{}, fmt.Errorf("server %q: path/retention are not valid for type: remote", name)
+		return ResolvedServer{}, fmt.Errorf("server %q: path/retention are not valid for type: remote", name)
 	}
 
-	return resolvedServer{name: name, kind: ServerKindRemote, endpoint: fs.Endpoint}, nil
+	return ResolvedServer{name: name, kind: ServerKindRemote, endpoint: fs.Endpoint}, nil
 }
 
 // parseRetention parses a local server's retention: string into a
@@ -1279,9 +1341,9 @@ func parseDayDuration(s string) (time.Duration, error) {
 	return total, nil
 }
 
-// resolvedServer is one servers: entry, ready to be combined with a job's
+// ResolvedServer is one servers: entry, ready to be combined with a job's
 // targetRef bucket into a target.
-type resolvedServer struct {
+type ResolvedServer struct {
 	name      string
 	kind      ServerKind
 	endpoint  string
@@ -1289,12 +1351,15 @@ type resolvedServer struct {
 	retention time.Duration // local only: 0 means no automatic expiry
 }
 
+// Kind is s's type:.
+func (s ResolvedServer) Kind() ServerKind { return s.kind }
+
 // resolveJobTargets resolves cfg's raw target references (targetRefs, from
 // targets:) against servers, building cfg.targets, and resolves each ref's
 // on-error.command and on-recover.command (if any) against commands (see
 // buildCommands) into that target's OnErrorCommand/OnRecoverCommand. A job with no target references at all is left
 // with an empty cfg.targets; validateJob reports that as an error.
-func resolveJobTargets(cfg *Config, servers map[string]resolvedServer, commands map[string]Command) error {
+func resolveJobTargets(cfg *Config, servers map[string]ResolvedServer, commands map[string]Command) error {
 	if len(cfg.targetRefs) == 0 {
 		return nil
 	}
@@ -1387,7 +1452,8 @@ func prepareJobs(jobs []*Config, jobFilter string) ([]*Config, error) {
 }
 
 // applyJobFilter applies -job, if given, restricting jobs to the single
-// named job. It's an error to name a job that doesn't exist.
+// named job — none, if the config file doesn't define it: it may be stored
+// in the state db instead (see RunConfig.JobFilter).
 func applyJobFilter(jobs []*Config, jobFilter string) ([]*Config, error) {
 	if jobFilter == "" {
 		return jobs, nil
@@ -1399,7 +1465,7 @@ func applyJobFilter(jobs []*Config, jobFilter string) ([]*Config, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("-job %q: no such job in config file", jobFilter)
+	return nil, nil
 }
 
 // validateJobs validates every job, returning the first error found.
@@ -1416,20 +1482,116 @@ func validateJobs(jobs []*Config) error {
 // validateJob checks that a single job's parameters are complete and
 // self-consistent.
 func validateJob(cfg *Config) error {
-	switch {
-	case strings.TrimSpace(cfg.Cmd) == "":
-		return JobError(cfg, errors.New("cmd is required"))
-	case len(cfg.Targets) == 0:
-		return JobError(cfg, errors.New("at least one target is required (see targets: and servers:)"))
-	case len(cfg.Recipients) == 0:
-		return JobError(cfg, errors.New("specify at least one recipient"))
-	case cfg.Interval < 0:
-		return JobError(cfg, errors.New("interval must not be negative"))
-	case !cfg.StartTime.IsZero() && cfg.Interval <= 0:
-		return JobError(cfg, errors.New("start-time requires interval"))
+	if err := checkJob(cfg); err != nil {
+		return JobError(cfg, err)
 	}
 
 	return nil
+}
+
+// checkJob is validateJob without the job name prefix, for ResolveJob,
+// whose caller already knows which job it asked about.
+func checkJob(cfg *Config) error {
+	switch {
+	case strings.TrimSpace(cfg.Cmd) == "":
+		return errors.New("cmd is required")
+	case len(cfg.Targets) == 0:
+		return errors.New("at least one target is required (see targets: and servers:)")
+	case len(cfg.Recipients) == 0:
+		return errors.New("specify at least one recipient")
+	case cfg.Interval < 0:
+		return errors.New("interval must not be negative")
+	case !cfg.StartTime.IsZero() && cfg.Interval <= 0:
+		return errors.New("start-time requires interval")
+	}
+
+	return nil
+}
+
+// ResolveJob builds and validates one job from fj — a stored job, managed in
+// the web UI (see jobs.Manager) — on top of the built-in defaults and gpg
+// (the config file's top-level gpg-bin/gpg-homedir, which fj's own override),
+// resolving its targets against servers and commands (see ResolveServer/
+// ResolveCommand). serverName is copied onto the job (see
+// Config.ServerName). fj.FailureNotifications ids aren't checked here.
+func ResolveJob(fj FileJob, gpg notify.GPGSettings, servers map[string]ResolvedServer, commands map[string]Command, serverName string) (*Config, error) {
+	name := strings.TrimSpace(fj.Name)
+	if name == "" {
+		return nil, errors.New("name is required")
+	}
+
+	cfg := newConfigDefaults()
+	cfg.Name = name
+	cfg.ServerName = serverName
+
+	applyString(&cfg.GPGBin, gpg.Bin)
+	applyString(&cfg.GPGHomedir, gpg.Homedir)
+
+	if err := applyFileJob(cfg, &fj); err != nil {
+		return nil, err
+	}
+
+	if err := resolveJobTargets(cfg, servers, commands); err != nil {
+		return nil, err
+	}
+
+	if err := checkJob(cfg); err != nil {
+		return nil, err
+	}
+
+	return cfg, nil
+}
+
+// flattenFileJobs flattens every one of fileCfg's jobs: entries (see
+// flattenFileJob).
+func flattenFileJobs(fileCfg *fileConfig) []FileJob {
+	out := make([]FileJob, len(fileCfg.Jobs))
+	for i, fj := range fileCfg.Jobs {
+		out[i] = flattenFileJob(fileCfg.FileJob, fj)
+	}
+
+	return out
+}
+
+// flattenFileJob layers fj (one jobs: entry) over defaults (the config
+// file's top-level job fields), the same way buildJobsFromFile does, into
+// the single self-contained definition jobs.Manager imports into the state
+// db. gpg-bin/gpg-homedir are left as fj's own: the top-level ones stay a
+// config file setting every stored job falls back to (see ResolveJob).
+func flattenFileJob(defaults, fj FileJob) FileJob {
+	out := fj
+	out.Name = strings.TrimSpace(fj.Name)
+
+	for _, f := range []struct {
+		dst *string
+		def string
+	}{
+		{&out.Cmd, defaults.Cmd},
+		{&out.Key, defaults.Key},
+		{&out.Interval, defaults.Interval},
+		{&out.StartTime, defaults.StartTime},
+		{&out.StagingDir, defaults.StagingDir},
+	} {
+		if *f.dst == "" {
+			*f.dst = f.def
+		}
+	}
+
+	if len(out.Targets) == 0 {
+		out.Targets = slices.Clone(defaults.Targets)
+	}
+
+	if len(out.Recipients) == 0 {
+		out.Recipients = slices.Clone(defaults.Recipients)
+	}
+
+	if len(out.FailureNotifications) == 0 {
+		out.FailureNotifications = slices.Clone(defaults.FailureNotifications)
+	}
+
+	out.Armor = fj.Armor || defaults.Armor
+
+	return out
 }
 
 // JobError prefixes err with cfg's job name, so validation errors are
@@ -1484,7 +1646,7 @@ func applyBool(dst *bool, val bool) {
 
 // newJobTargetRef parses one targets: entry into its raw jobTargetRef,
 // leaving server/command id resolution to resolveJobTargets.
-func newJobTargetRef(t fileJobTarget) (jobTargetRef, error) {
+func newJobTargetRef(t FileJobTarget) (jobTargetRef, error) {
 	retention, err := parseRetention(t.Retention)
 	if err != nil {
 		return jobTargetRef{}, err
@@ -1521,7 +1683,7 @@ func newJobTargetRef(t fileJobTarget) (jobTargetRef, error) {
 // copied as-is: they're checked against the live notification registry at
 // startup and looked up there when the job fails (see
 // Config.FailureNotifications).
-func applyFileJob(cfg *Config, fj *fileJob) error {
+func applyFileJob(cfg *Config, fj *FileJob) error {
 	applyString(&cfg.Cmd, fj.Cmd)
 	applyString(&cfg.Key, fj.Key)
 	applyString(&cfg.GPGBin, fj.GPGBin)

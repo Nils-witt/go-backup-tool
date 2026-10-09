@@ -986,8 +986,7 @@ func TestRetryOutstandingUploadSucceedsAfterTargetRecovers(t *testing.T) {
 		t.Fatalf("ListDueOutstandingTargetUploads() = %+v, %v, want one outstanding row", due, err)
 	}
 
-	byName := map[string]*config.Config{job.Name: job}
-	r.retryOutstandingUpload(context.Background(), byName, due[0], discardLogger)
+	r.retryOutstandingUpload(context.Background(), StaticJobs([]*config.Config{job}), due[0], discardLogger)
 
 	if got := requests.Load(); got != 2 {
 		t.Fatalf("requests after retry = %d, want 2 (the retry should have succeeded)", got)
@@ -1073,7 +1072,7 @@ func TestRetryOutstandingUploadGivesUpWhenStagedFileIsGone(t *testing.T) {
 	statusStore := backup.NewStatusStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore, stateDB: stateDB}
 
-	r.retryOutstandingUpload(context.Background(), map[string]*config.Config{job.Name: job}, due[0], discardLogger)
+	r.retryOutstandingUpload(context.Background(), StaticJobs([]*config.Config{job}), due[0], discardLogger)
 
 	stillDue, err := stateDB.ListDueOutstandingTargetUploads(context.Background(), time.Now())
 	if err != nil {

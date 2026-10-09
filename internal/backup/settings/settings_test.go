@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
@@ -36,15 +35,22 @@ type testManager struct {
 	db       *store.Store
 }
 
-func newTestManager(t *testing.T, db *store.Store, jobs ...*config.Config) testManager {
+// newTestManager builds a Manager over db, storing jobs in it first.
+func newTestManager(t *testing.T, db *store.Store, jobs ...store.JobConfig) testManager {
 	t.Helper()
+
+	for _, j := range jobs {
+		if err := db.CreateJobConfig(t.Context(), j); err != nil {
+			t.Fatalf("CreateJobConfig() error: %v", err)
+		}
+	}
 
 	registry := notify.NewRegistry(nil)
 	live := report.NewLive(report.Settings{})
 	smtp := notify.SMTPSettings{Host: "smtp.example.com", Port: 587, Username: "backups@example.com"}
 
 	return testManager{
-		Manager:  NewManager(db, registry, live, smtp, notify.GPGSettings{}, jobs, discardLogger),
+		Manager:  NewManager(db, registry, live, smtp, notify.GPGSettings{}, discardLogger),
 		registry: registry, live: live, db: db,
 	}
 }
@@ -159,7 +165,7 @@ func TestDeleteNotificationRefusedWhileInUse(t *testing.T) {
 
 	db := openTestStateDB(t)
 	ctx := t.Context()
-	m := newTestManager(t, db, &config.Config{Name: "db", FailureNotifications: []string{"jobs"}})
+	m := newTestManager(t, db, store.JobConfig{Name: "db", FailureNotifications: []string{"jobs"}})
 
 	for _, id := range []string{"jobs", "recv", "rep", "free"} {
 		if err := m.CreateNotification(ctx, "erin", webhookInput(id, "https://x", nil)); err != nil {

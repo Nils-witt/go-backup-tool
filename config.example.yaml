@@ -19,6 +19,22 @@
 # one), and it shuts down on SCM stop/shutdown requests instead of Ctrl-C.
 # This is Windows-only; on other platforms -service isn't a recognized flag.
 #
+# Where jobs, servers, and commands are managed depends on
+# webui.job-editing (see webui: below):
+#
+# - Off (the default): this file is the source of truth. servers:, jobs:,
+#   and commands: below are read at every startup, and the web UI
+#   (Settings > Jobs/Servers/Commands, admin only) only shows them.
+# - On: the state db is, and admins manage them in the web UI, where changes
+#   apply without a restart. Entries still listed here are imported once at
+#   startup — each job with the top-level defaults below folded in — and a
+#   name already stored is left alone, so web UI edits win; remove the
+#   sections once imported. Switching back off later makes this file the
+#   source again (what's in the state db is then ignored).
+#
+# gpg-bin/gpg-homedir stay top-level settings every job falls back to either
+# way.
+#
 # Every server go-backup-tool can upload to is defined once, by name, under
 # servers:. Jobs never set endpoint/path themselves — a job's targets: list
 # just names which server(s) to upload to and which bucket to use on each,
@@ -70,8 +86,9 @@ servers:
     # server.pub) to add as a trusted server there (Trusted servers, admin
     # only) and allow on the matching receiver.
 
-# Every job is defined under jobs:, one entry per backup; run all jobs (in
-# order) with no -job flag, or one with -job <name>. Every key below is
+# Every job is defined under jobs:, one entry per backup; run all jobs
+# with no -job flag, or one with -job <name> (with webui.job-editing, any
+# stored job, including ones created in the web UI). Every key below is
 # optional and falls back to a built-in default. Any key may also be set at
 # the top level, alongside jobs:, to act as a shared default every job
 # inherits and can override. timeout applies to the whole run (every job),
@@ -179,6 +196,16 @@ servers:
 #   # default) leaves the web UI unable to create receivers or change their
 #   # path (other fields can still be edited).
 #   receivers-base-dir: /mnt/remote-backups
+#
+#   # job-editing moves jobs, servers, and commands from this file into the
+#   # state db, where dashboard admins create, change, and delete them
+#   # (Settings > Jobs/Servers/Commands); see servers: above. Unset (the
+#   # default) keeps them in this file, shown read-only in the dashboard. A
+#   # job's cmd and a command's cmd run as shell commands on this machine,
+#   # and a local server's path is written to, so enabling this lets every
+#   # admin run arbitrary commands as this process's user — only enable it
+#   # if that's acceptable for everyone granted "admin".
+#   job-editing: true
 #
 #   # oidc configures single sign-on via an OpenID Connect provider
 #   # (Keycloak, Authentik, Okta, ...). The dashboard itself is the OIDC

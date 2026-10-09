@@ -27,6 +27,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/jobs"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
@@ -53,10 +54,10 @@ type Server struct {
 // StartWebUI starts the -listen web UI dashboard and returns a Server the
 // caller can shut down with Server.Shutdown. Returns nil if the server
 // fails to start.
-func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Config, runner *pipeline.Runner, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, receiverManager *receiver.Manager, settingsManager *settings.Manager, trustManager *trust.Manager, log *slog.Logger, db *store.Store, logs *LogRingBuffer, oidcSettings config.OIDCSettings, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, instanceName string, registerExtraRoutes func(*http.ServeMux), queue *notify.Queue) *Server {
-	jobsByName := make(map[string]*config.Config, len(jobs))
-	for _, j := range jobs {
-		jobsByName[j.Name] = j
+func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.Manager, runner *pipeline.Runner, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, receiverManager *receiver.Manager, settingsManager *settings.Manager, trustManager *trust.Manager, log *slog.Logger, db *store.Store, logs *LogRingBuffer, oidcSettings config.OIDCSettings, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, instanceName string, registerExtraRoutes func(*http.ServeMux), queue *notify.Queue) *Server {
+	lookupJob := pipeline.StaticJobs(nil)
+	if jobsManager != nil {
+		lookupJob = jobsManager.Get
 	}
 
 	var lc net.ListenConfig
@@ -120,7 +121,7 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 	mux.HandleFunc("GET /api/live", handleLive(liveCtx, statusStore, receivers, receiverStore, liveTickets, devMode, trustProxyHeaders, log))
 	mux.HandleFunc("GET /api/job-runs", apiJobRunLog(handleJobRunEvents(db, log)))
 	mux.HandleFunc("GET /api/target-runs", apiTargetRunLog(handleTargetRunEvents(db, log)))
-	mux.HandleFunc("POST /api/jobs/{name}/retry", admin(handleRetryFailedTargets(jobsByName, statusStore, runner, log)))
+	mux.HandleFunc("POST /api/jobs/{name}/retry", admin(handleRetryFailedTargets(lookupJob, statusStore, runner, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/files", api(handleReceiverFiles(receivers, log)))
 	mux.HandleFunc("POST /api/receivers/{id}/download/{key...}", apiDownload(handleMintDownloadTicket(receivers, downloadTickets)))
 	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", handleDownloadFile(receivers, log, db, downloadTickets, trustProxyHeaders, queue))
@@ -144,6 +145,7 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 	mux.HandleFunc("DELETE /api/notification-configs/{id}", admin(handleDeleteNotificationConfig(settingsManager, log)))
 	mux.HandleFunc("GET /api/report-config", admin(handleGetReportConfig(settingsManager, log)))
 	mux.HandleFunc("PUT /api/report-config", admin(handleUpdateReportConfig(settingsManager, log)))
+	registerJobConfigRoutes(mux, jobsManager, admin, log)
 
 	if registerExtraRoutes != nil {
 		registerExtraRoutes(mux)
@@ -362,11 +364,11 @@ func handleStatus(store *backup.StatusStore) http.HandlerFunc {
 // the retry's progress instead.
 // context.WithoutCancel detaches the retry from this request's own
 // context, so it isn't cut short the moment the response is written.
-func handleRetryFailedTargets(jobs map[string]*config.Config, statusStore *backup.StatusStore, runner *pipeline.Runner, log *slog.Logger) http.HandlerFunc {
+func handleRetryFailedTargets(lookupJob pipeline.JobLookup, statusStore *backup.StatusStore, runner *pipeline.Runner, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
 
-		job, ok := jobs[name]
+		job, ok := lookupJob(name)
 		if !ok {
 			http.Error(w, "unknown job", http.StatusNotFound)
 			return

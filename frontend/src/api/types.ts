@@ -262,3 +262,103 @@ export interface ReportConfigJSON {
   next_run: string | null;
   notification_ids: string[];
 }
+
+// JobTargetJSON mirrors config.FileJobTarget's JSON form: one of a job's
+// targets as entered.
+export interface JobTargetJSON {
+  server: string;
+  bucket: string;
+  retention: string;
+  on_error: { command: string; after: number; repeat: boolean | null } | null;
+  on_recover: { command: string } | null;
+}
+
+// JobDefinitionJSON mirrors config.FileJob's JSON form: a job's editable
+// fields, as sent to POST/PUT /api/job-configs.
+export interface JobDefinitionJSON {
+  name: string;
+  cmd: string;
+  key: string;
+  targets: JobTargetJSON[];
+  recipients: string[];
+  armor: boolean;
+  gpg_bin: string;
+  gpg_homedir: string;
+  interval: string;
+  start_time: string;
+  staging_dir: string;
+  failure_notifications: string[];
+}
+
+interface AuditJSON {
+  created_at: string;
+  created_by: string;
+  updated_at: string;
+  updated_by: string;
+}
+
+// JobConfigJSON mirrors jobConfigJSON in
+// internal/backup/webui/jobs_config.go: one stored job, plus error when it
+// doesn't resolve and so isn't active.
+export interface JobConfigJSON extends JobDefinitionJSON, AuditJSON {
+  error?: string;
+}
+
+// ServerOptionJSON mirrors serverOptionJSON: a server a job's targets may
+// name.
+export interface ServerOptionJSON {
+  name: string;
+  type: string;
+}
+
+// JobConfigListJSON mirrors jobConfigListJSON (GET /api/job-configs).
+export interface JobConfigListJSON {
+  editing: boolean;
+  servers: ServerOptionJSON[];
+  commands: string[];
+  notifications: string[];
+  jobs: JobConfigJSON[];
+}
+
+// ServerDefinitionJSON mirrors config.FileServer's JSON form.
+export interface ServerDefinitionJSON {
+  name: string;
+  type: "local" | "remote" | string;
+  endpoint: string;
+  path: string;
+  retention: string;
+}
+
+// ServerConfigJSON mirrors serverConfigJSON: one stored server, the jobs
+// using it, and error when it doesn't resolve.
+export interface ServerConfigJSON extends ServerDefinitionJSON, AuditJSON {
+  used_by: string[];
+  error?: string;
+}
+
+// ServerConfigListJSON mirrors serverConfigListJSON (GET /api/server-configs).
+export interface ServerConfigListJSON {
+  editing: boolean;
+  servers: ServerConfigJSON[];
+}
+
+// CommandDefinitionJSON mirrors config.FileCommand's JSON form.
+export interface CommandDefinitionJSON {
+  id: string;
+  cmd: string;
+  timeout: string;
+}
+
+// CommandConfigJSON mirrors commandConfigJSON: one stored command, the jobs
+// using it, and error when it doesn't resolve.
+export interface CommandConfigJSON extends CommandDefinitionJSON, AuditJSON {
+  used_by: string[];
+  error?: string;
+}
+
+// CommandConfigListJSON mirrors commandConfigListJSON (GET
+// /api/command-configs).
+export interface CommandConfigListJSON {
+  editing: boolean;
+  commands: CommandConfigJSON[];
+}

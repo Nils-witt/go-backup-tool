@@ -102,7 +102,7 @@ func TestBuildReportSummarizesReceiverEvents(t *testing.T) {
 		"recv-c": {ID: "recv-c"}, // no events at all in the window
 	}}
 
-	report := buildReport(ctx, rc, rc.Receivers, db, start, end, discardLogger)
+	report := buildReport(ctx, rc.ServerName, jobNamesOf(rc), rc.Receivers, db, start, end, discardLogger)
 
 	if len(report.receivers) != 3 {
 		t.Fatalf("report.receivers = %+v, want 3 entries (one per configured receiver)", report.receivers)
@@ -173,7 +173,7 @@ func TestBuildReportSummarizesJobRuns(t *testing.T) {
 		{Name: "job-b"}, // no runs at all in the window
 	}}
 
-	report := buildReport(ctx, rc, rc.Receivers, db, start, end, discardLogger)
+	report := buildReport(ctx, rc.ServerName, jobNamesOf(rc), rc.Receivers, db, start, end, discardLogger)
 
 	if len(report.jobs) != 2 {
 		t.Fatalf("report.jobs = %+v, want 2 entries (one per configured job)", report.jobs)
@@ -227,7 +227,7 @@ func TestBuildReportDetectsStaleReceiver(t *testing.T) {
 	}}
 
 	now := time.Now()
-	report := buildReport(ctx, rc, rc.Receivers, nil, now.Add(-24*time.Hour), now, discardLogger)
+	report := buildReport(ctx, rc.ServerName, jobNamesOf(rc), rc.Receivers, nil, now.Add(-24*time.Hour), now, discardLogger)
 
 	if len(report.stale) != 1 || report.stale[0].id != "stale" {
 		t.Errorf("report.stale = %+v, want only \"stale\" (fresh isn't stale, never has nothing to be stale)", report.stale)
@@ -365,7 +365,7 @@ func TestRunReportLoopPicksUpSettingsChanges(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	go RunReportLoop(ctx, &config.RunConfig{}, live, notifications, backup.NewReceiverRegistry(nil), nil, nil, discardLogger)
+	go RunReportLoop(ctx, "", func() []string { return nil }, live, notifications, backup.NewReceiverRegistry(nil), nil, nil, discardLogger)
 
 	select {
 	case <-sent:
@@ -385,4 +385,13 @@ func TestRunReportLoopPicksUpSettingsChanges(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no report sent after enabling it")
 	}
+}
+
+func jobNamesOf(rc *config.RunConfig) []string {
+	names := make([]string, len(rc.Jobs))
+	for i, j := range rc.Jobs {
+		names[i] = j.Name
+	}
+
+	return names
 }

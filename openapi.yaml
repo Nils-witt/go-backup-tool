@@ -1004,6 +1004,369 @@ paths:
         "503":
           $ref: "#/components/responses/StateDBUnavailable"
 
+  /api/job-configs:
+    get:
+      tags: [admin]
+      summary: List stored jobs
+      operationId: listJobConfigs
+      description: >
+        Every job, as entered — from the config file's `jobs:` unless `webui.job-editing` is on, in which case from the state db (the config file's entries are imported once at startup) — plus whether editing is allowed and the servers, command ids, and notification ids a job may reference.
+        Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Stored jobs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobConfigList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+    post:
+      tags: [admin]
+      summary: Create a job
+      operationId: createJobConfig
+      description: >
+        Validates and stores a new job and schedules it immediately; without a start_time, it runs right away.
+        Requires the `admin` permission and `webui.job-editing: true`.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JobConfigInput"
+      responses:
+        "201":
+          description: Job created
+        "400":
+          $ref: "#/components/responses/InvalidSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForbiddenOrEditingDisabled"
+        "409":
+          description: A job with this name already exists
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+
+  /api/job-configs/{key}:
+    parameters:
+      - $ref: "#/components/parameters/ConfigKey"
+    put:
+      tags: [admin]
+      summary: Update a job
+      operationId: updateJobConfig
+      description: >
+        Replaces the job's definition. It applies from the job's next run on; a changed interval or start_time reschedules it (a run in progress finishes first). The name can't be changed (a body name, if
+        given, must match the path). Requires the `admin` permission and
+        `webui.job-editing: true`.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JobConfigInput"
+      responses:
+        "204":
+          description: Job updated
+        "400":
+          $ref: "#/components/responses/InvalidSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForbiddenOrEditingDisabled"
+        "404":
+          description: Unknown job
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+    delete:
+      tags: [admin]
+      summary: Delete a job
+      operationId: deleteJobConfig
+      description: >
+        Unschedules the job (a run in progress finishes) and removes it from the dashboard. Its run history and the backups it wrote are kept. Requires the `admin` permission and
+        `webui.job-editing: true`.
+      security:
+        - webUIBearer: []
+      responses:
+        "204":
+          description: Job deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForbiddenOrEditingDisabled"
+        "404":
+          description: Unknown job
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+
+  /api/server-configs:
+    get:
+      tags: [admin]
+      summary: List stored servers
+      operationId: listServerConfigs
+      description: >
+        Every upload destination, as entered — from the config file's `servers:` unless `webui.job-editing` is on, in which case from the state db — with the jobs using each.
+        Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Stored servers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServerConfigList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+    post:
+      tags: [admin]
+      summary: Create a server
+      operationId: createServerConfig
+      description: >
+        Validates and stores a new server.
+        Requires the `admin` permission and `webui.job-editing: true`.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServerConfigInput"
+      responses:
+        "201":
+          description: Server created
+        "400":
+          $ref: "#/components/responses/InvalidSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForbiddenOrEditingDisabled"
+        "409":
+          description: A server with this name already exists
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+
+  /api/server-configs/{key}:
+    parameters:
+      - $ref: "#/components/parameters/ConfigKey"
+    put:
+      tags: [admin]
+      summary: Update a server
+      operationId: updateServerConfig
+      description: >
+        Replaces the server's definition; every job using it picks it up from its next run on. Refused (400) when a job using it would no longer validate, e.g. a target overriding retention on a server changed to `remote`. The name can't be changed (a body name, if
+        given, must match the path). Requires the `admin` permission and
+        `webui.job-editing: true`.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServerConfigInput"
+      responses:
+        "204":
+          description: Server updated
+        "400":
+          $ref: "#/components/responses/InvalidSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForbiddenOrEditingDisabled"
+        "404":
+          description: Unknown server
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+    delete:
+      tags: [admin]
+      summary: Delete a server
+      operationId: deleteServerConfig
+      description: >
+        Removes the server. Backups already written to it are kept. Requires the `admin` permission and
+        `webui.job-editing: true`.
+      security:
+        - webUIBearer: []
+      responses:
+        "204":
+          description: Server deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForbiddenOrEditingDisabled"
+        "404":
+          description: Unknown server
+          content:
+            text/plain:
+              schema:
+                type: string
+        "409":
+          description: Still used by a job; the body names them
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+
+  /api/command-configs:
+    get:
+      tags: [admin]
+      summary: List stored commands
+      operationId: listCommandConfigs
+      description: >
+        Every on-error/on-recover command, as entered — from the config file's `commands:` unless `webui.job-editing` is on, in which case from the state db — with the jobs using each.
+        Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Stored commands
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandConfigList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+    post:
+      tags: [admin]
+      summary: Create a command
+      operationId: createCommandConfig
+      description: >
+        Validates and stores a new command.
+        Requires the `admin` permission and `webui.job-editing: true`.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommandConfigInput"
+      responses:
+        "201":
+          description: Command created
+        "400":
+          $ref: "#/components/responses/InvalidSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForbiddenOrEditingDisabled"
+        "409":
+          description: A command with this id already exists
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+
+  /api/command-configs/{key}:
+    parameters:
+      - $ref: "#/components/parameters/ConfigKey"
+    put:
+      tags: [admin]
+      summary: Update a command
+      operationId: updateCommandConfig
+      description: >
+        Replaces the command; every target using it runs the new one from its next firing on. The id can't be changed (a body id, if
+        given, must match the path). Requires the `admin` permission and
+        `webui.job-editing: true`.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommandConfigInput"
+      responses:
+        "204":
+          description: Command updated
+        "400":
+          $ref: "#/components/responses/InvalidSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForbiddenOrEditingDisabled"
+        "404":
+          description: Unknown command
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+    delete:
+      tags: [admin]
+      summary: Delete a command
+      operationId: deleteCommandConfig
+      description: >
+        Removes the command. Requires the `admin` permission and
+        `webui.job-editing: true`.
+      security:
+        - webUIBearer: []
+      responses:
+        "204":
+          description: Command deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForbiddenOrEditingDisabled"
+        "404":
+          description: Unknown command
+          content:
+            text/plain:
+              schema:
+                type: string
+        "409":
+          description: Still run by a job; the body names them
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+
   /api/v1/objects/{id}/{key}:
     put:
       tags: [receiver-api]
@@ -1146,6 +1509,14 @@ components:
       schema:
         type: string
 
+    ConfigKey:
+      name: key
+      in: path
+      required: true
+      description: The job's or server's name, or the command's id.
+      schema:
+        type: string
+
   responses:
     Unauthorized:
       description: Missing, invalid, or expired access token
@@ -1173,6 +1544,12 @@ components:
             type: string
     InvalidSettings:
       description: The definition doesn't validate; the body says why
+      content:
+        text/plain:
+          schema:
+            type: string
+    ForbiddenOrEditingDisabled:
+      description: Missing the `admin` permission, or `webui.job-editing` isn't enabled in the config file; the body says which
       content:
         text/plain:
           schema:
@@ -1760,3 +2137,252 @@ components:
               items:
                 type: string
           required: [schedule, notifications, updated_by, default_schedule, notification_ids]
+
+    JobTarget:
+      type: object
+      description: One of a job's targets, with the same syntax as a former `targets:` config entry.
+      properties:
+        server:
+          type: string
+          description: A server's name.
+        bucket:
+          type: string
+          description: Subdirectory on a local server; the receiver id on a remote one.
+        retention:
+          type: string
+          description: Overrides a local server's retention for this job, e.g. "30d". Empty keeps the server's.
+        on_error:
+          type: object
+          nullable: true
+          properties:
+            command:
+              type: string
+              description: A command's id.
+            after:
+              type: integer
+              minimum: 1
+              description: Consecutive failures before it first runs.
+            repeat:
+              type: boolean
+              nullable: true
+              description: false runs it only once per failure streak; default true.
+          required: [command, after]
+        on_recover:
+          type: object
+          nullable: true
+          properties:
+            command:
+              type: string
+          required: [command]
+      required: [server, bucket]
+
+    JobConfigInput:
+      type: object
+      description: >
+        A job's editable fields, with the same syntax as a former `jobs:`
+        config entry. Unlike the config file, there are no shared top-level
+        defaults besides gpg-bin/gpg-homedir.
+      properties:
+        name:
+          type: string
+          description: Immutable once created; the job's run history is keyed by it.
+        cmd:
+          type: string
+          description: Shell command whose standard output is the backup.
+        key:
+          type: string
+          description: Object key; "{time}" becomes the run's UTC timestamp. Empty means "backup-{time}.gpg".
+        targets:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/JobTarget"
+        recipients:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: GPG identities to encrypt to.
+        armor:
+          type: boolean
+        gpg_bin:
+          type: string
+          description: Empty uses the config file's gpg-bin.
+        gpg_homedir:
+          type: string
+          description: Empty uses the config file's gpg-homedir.
+        interval:
+          type: string
+          description: Repeat interval, e.g. "6h". Empty runs once.
+        start_time:
+          type: string
+          description: RFC 3339 time anchoring the interval grid; requires interval.
+        staging_dir:
+          type: string
+        failure_notifications:
+          type: array
+          items:
+            type: string
+          description: Notification ids fired whenever a run fails on any target.
+      required: [name, cmd, targets, recipients]
+
+    JobConfig:
+      allOf:
+        - $ref: "#/components/schemas/JobConfigInput"
+        - type: object
+          properties:
+            created_at:
+              type: string
+              format: date-time
+            created_by:
+              type: string
+              description: Username, or "config file" when imported or read from it (times are then zero).
+            updated_at:
+              type: string
+              format: date-time
+            updated_by:
+              type: string
+            error:
+              type: string
+              description: Set when the stored job doesn't validate (e.g. it names a removed server) and so isn't scheduled.
+          required: [created_at, created_by, updated_at, updated_by]
+
+    JobConfigList:
+      type: object
+      properties:
+        editing:
+          type: boolean
+          description: Whether `webui.job-editing` is on; off, everything here comes from the config file and is read-only.
+        servers:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              type:
+                type: string
+                enum: [local, remote]
+            required: [name, type]
+          description: Active servers a job's targets may name.
+        commands:
+          type: array
+          items:
+            type: string
+          description: Active command ids a target's on_error/on_recover may name.
+        notifications:
+          type: array
+          items:
+            type: string
+        jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/JobConfig"
+      required: [editing, servers, commands, notifications, jobs]
+
+    ServerConfigInput:
+      type: object
+      description: An upload destination, with the same syntax as a former `servers:` config entry.
+      properties:
+        name:
+          type: string
+          description: Immutable once created.
+        type:
+          type: string
+          enum: [local, remote]
+        endpoint:
+          type: string
+          description: Remote only; the other instance's base URL.
+        path:
+          type: string
+          description: Local only; root directory backups are written under.
+        retention:
+          type: string
+          description: Local only, e.g. "7d". Empty keeps objects forever.
+      required: [name, type]
+
+    ServerConfig:
+      allOf:
+        - $ref: "#/components/schemas/ServerConfigInput"
+        - type: object
+          properties:
+            created_at:
+              type: string
+              format: date-time
+            created_by:
+              type: string
+              description: Username, or "config file" when imported or read from it (times are then zero).
+            updated_at:
+              type: string
+              format: date-time
+            updated_by:
+              type: string
+            used_by:
+              type: array
+              items:
+                type: string
+              description: The jobs whose targets name it, as "job <name>".
+            error:
+              type: string
+          required: [created_at, created_by, updated_at, updated_by, used_by]
+
+    ServerConfigList:
+      type: object
+      properties:
+        editing:
+          type: boolean
+        servers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ServerConfig"
+      required: [editing, servers]
+
+    CommandConfigInput:
+      type: object
+      description: An on-error/on-recover shell command, with the same syntax as a former `commands:` config entry.
+      properties:
+        id:
+          type: string
+          description: Immutable once created.
+        cmd:
+          type: string
+        timeout:
+          type: string
+          description: e.g. "15s". Empty means 30s.
+      required: [id, cmd]
+
+    CommandConfig:
+      allOf:
+        - $ref: "#/components/schemas/CommandConfigInput"
+        - type: object
+          properties:
+            created_at:
+              type: string
+              format: date-time
+            created_by:
+              type: string
+              description: Username, or "config file" when imported or read from it (times are then zero).
+            updated_at:
+              type: string
+              format: date-time
+            updated_by:
+              type: string
+            used_by:
+              type: array
+              items:
+                type: string
+              description: The jobs whose targets run it, as "job <name>".
+            error:
+              type: string
+          required: [created_at, created_by, updated_at, updated_by, used_by]
+
+    CommandConfigList:
+      type: object
+      properties:
+        editing:
+          type: boolean
+        commands:
+          type: array
+          items:
+            $ref: "#/components/schemas/CommandConfig"
+      required: [editing, commands]

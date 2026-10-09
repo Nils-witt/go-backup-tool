@@ -10,13 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/url"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
@@ -48,8 +48,11 @@ type Manager struct {
 	report        *report.Live
 	smtp          notify.SMTPSettings
 	gpg           notify.GPGSettings
-	jobs          []*config.Config
 	log           *slog.Logger
+
+	// jobRefs, once set by UseJobs, maps every job's name to its
+	// failure-notifications ids; nil reads the jobs stored in the state db.
+	jobRefs func() map[string][]string
 
 	// mu serializes mutations, so the db and the live state never disagree.
 	mu sync.Mutex
@@ -63,13 +66,23 @@ type Manager struct {
 // NewManager builds a Manager over db (nil if the state db couldn't be
 // opened), resolving notifications into notifications and the report into
 // live. smtp/gpg are what email notifications send and encrypt with (they
-// stay in the config file); jobs are checked for references before a
-// notification is deleted. Call Load before anything reads the registry.
-func NewManager(db *store.Store, notifications *notify.Registry, live *report.Live, smtp notify.SMTPSettings, gpg notify.GPGSettings, jobs []*config.Config, log *slog.Logger) *Manager {
+// stay in the config file). Call Load before anything reads the registry.
+func NewManager(db *store.Store, notifications *notify.Registry, live *report.Live, smtp notify.SMTPSettings, gpg notify.GPGSettings, log *slog.Logger) *Manager {
 	return &Manager{
-		db: db, notifications: notifications, report: live, smtp: smtp, gpg: gpg, jobs: jobs,
+		db: db, notifications: notifications, report: live, smtp: smtp, gpg: gpg,
 		log: log, invalid: make(map[string]string),
 	}
+}
+
+// UseJobs makes DeleteNotification check jobs' failure-notifications via
+// refs (job name -> notification ids) — the live job set, see
+// jobs.Manager.NotificationRefs, which may come from the config file rather
+// than the state db. Call it before serving the web UI.
+func (m *Manager) UseJobs(refs func() map[string][]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.jobRefs = refs
 }
 
 // SMTPConfigured reports whether the config file's smtp: is set, i.e.
@@ -85,8 +98,8 @@ func (m *Manager) NotificationIDs() []string { return m.notifications.IDs() }
 // stored into the live registry and report settings. Something stored that
 // no longer resolves is logged and left inactive (see ListNotifications/
 // GetReport). With no state db, the config file's entries are resolved in
-// memory instead. Finally, every job's failure-notifications ids are
-// checked, logging any that don't exist.
+// memory instead. Jobs' failure-notifications ids are checked once jobs are
+// loaded (see jobs.Manager.Load).
 func (m *Manager) Load(ctx context.Context, yamlNotifications []notify.FileNotification, yamlReport report.FileReport) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -97,7 +110,6 @@ func (m *Manager) Load(ctx context.Context, yamlNotifications []notify.FileNotif
 		}
 
 		m.activateReportLocked(yamlReport)
-		m.checkJobRefsLocked()
 
 		return
 	}
@@ -119,8 +131,6 @@ func (m *Manager) Load(ctx context.Context, yamlNotifications []notify.FileNotif
 	} else if ok {
 		m.activateReportLocked(report.FileReport{Enabled: rs.Enabled, Schedule: rs.Schedule, Notifications: rs.Notifications})
 	}
-
-	m.checkJobRefsLocked()
 }
 
 // importLocked carries the config file's deprecated notifications:/report:
@@ -190,17 +200,6 @@ func (m *Manager) activateReportLocked(fr report.FileReport) {
 
 	m.reportErr = ""
 	m.report.Set(s)
-}
-
-// checkJobRefsLocked logs every job failure-notifications id with no
-// active notification: the config file can't be checked for these while
-// it's parsed, since notifications live in the state db.
-func (m *Manager) checkJobRefsLocked() {
-	for _, job := range m.jobs {
-		if err := config.CheckNotificationRefs(job.FailureNotifications, m.notifications); err != nil {
-			m.log.Error("job failure-notifications references a notification that doesn't exist; it will be skipped", "job", job.Name, "err", err)
-		}
-	}
 }
 
 // ManagedNotification is one stored notification as the web UI lists it:
@@ -378,8 +377,13 @@ func (m *Manager) usersByNotification(ctx context.Context) (map[string][]string,
 		}
 	}
 
-	for _, job := range m.jobs {
-		add(job.FailureNotifications, "job "+job.Name)
+	jobRefs, err := m.jobNotificationRefs(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, name := range slices.Sorted(maps.Keys(jobRefs)) {
+		add(jobRefs[name], "job "+name)
 	}
 
 	receivers, err := m.db.ListReceiverConfigs(ctx)
@@ -402,6 +406,26 @@ func (m *Manager) usersByNotification(ctx context.Context) (map[string][]string,
 	}
 
 	return users, nil
+}
+
+// jobNotificationRefs maps every job's name to its failure-notifications
+// ids (see UseJobs).
+func (m *Manager) jobNotificationRefs(ctx context.Context) (map[string][]string, error) {
+	if m.jobRefs != nil {
+		return m.jobRefs(), nil
+	}
+
+	jobs, err := m.db.ListJobConfigs(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	refs := make(map[string][]string, len(jobs))
+	for _, jc := range jobs {
+		refs[jc.Name] = jc.FailureNotifications
+	}
+
+	return refs, nil
 }
 
 // validateNotification turns in into a stored definition — filling in

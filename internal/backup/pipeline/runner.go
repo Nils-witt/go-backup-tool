@@ -125,38 +125,76 @@ func (r *Runner) lastJobSuccess(ctx context.Context, name string) time.Time {
 	return t
 }
 
-// Schedule runs job on its configured cadence until ctx is done.
+// JobLookup returns the current definition of the job name, reporting false
+// if there's no such job (any more) — e.g. jobs.Manager.Get, which reflects
+// web UI edits as they're made.
+type JobLookup func(name string) (*config.Config, bool)
+
+// StaticJobs is a JobLookup over a fixed set of jobs.
+func StaticJobs(jobs []*config.Config) JobLookup {
+	byName := make(map[string]*config.Config, len(jobs))
+	for _, j := range jobs {
+		byName[j.Name] = j
+	}
+
+	return func(name string) (*config.Config, bool) {
+		j, ok := byName[name]
+		return j, ok
+	}
+}
+
+// Schedule runs job on its configured cadence until ctx is done — see
+// ScheduleLive, which this is for a job that never changes.
+func (r *Runner) Schedule(ctx context.Context, job *config.Config) {
+	r.ScheduleLive(ctx, ctx, job, StaticJobs([]*config.Config{job}), false)
+}
+
+// ScheduleLive runs job on its configured cadence until stop is done.
 //
 // A job with no start-time runs once immediately, then, if job.Interval > 0,
-// keeps re-running it every interval — the original behavior, unchanged.
+// keeps re-running it every interval.
 //
 // A job with start-time set runs on the start-time, start-time+interval,
 // start-time+2*interval, ... grid. If the most recent due grid slot has no
 // recorded successful run (see lastJobSuccess), it's a genuinely missed run
-// (e.g. the process was down through it) and Schedule catches up with a
+// (e.g. the process was down through it) and ScheduleLive catches up with a
 // single immediate run; otherwise it just waits for the next future slot.
 // Every subsequent run recomputes its next slot from start-time rather than
 // accumulating +interval, so the schedule stays exactly grid-aligned
 // regardless of how long a run takes.
-func (r *Runner) Schedule(ctx context.Context, job *config.Config) {
-	log := r.log.With("job", job.Name)
+//
+// job's interval and start-time fix the schedule; everything else is looked
+// up afresh (via lookup, by job's name) right before every run, so an edit
+// that leaves the schedule alone applies from the next run on, and a job
+// that no longer exists ends the schedule. Runs use runCtx, while stop only
+// ends the waiting between them: canceling stop (e.g. to reschedule a job
+// whose interval changed) never interrupts a run in flight.
+//
+// resumed marks a job rescheduled after such an edit rather than starting
+// fresh: without start-time, it then doesn't run immediately but waits out
+// its interval from its last run's start — and a job that doesn't repeat
+// doesn't run again at all.
+func (r *Runner) ScheduleLive(runCtx, stop context.Context, job *config.Config, lookup JobLookup, resumed bool) {
+	name := job.Name
+	log := r.log.With("job", name)
 
-	if job.StartTime.IsZero() {
-		r.runOnce(ctx, job)
-
-		if job.Interval <= 0 {
-			return
+	run := func() bool {
+		if stop.Err() != nil {
+			return false
 		}
 
-		r.store.SetNextRun(job.Name, time.Now().UTC().Add(job.Interval))
-		log.Debug("scheduled next run", "interval", job.Interval)
+		cur, ok := lookup(name)
+		if !ok {
+			return false
+		}
 
-		backup.RunPeriodically(ctx, job.Interval, false, func() {
-			r.runOnce(ctx, job)
-			r.store.SetNextRun(job.Name, time.Now().UTC().Add(job.Interval))
-			log.Debug("scheduled next run", "interval", job.Interval)
-		})
+		r.runOnce(runCtx, cur)
 
+		return true
+	}
+
+	if job.StartTime.IsZero() {
+		r.scheduleInterval(stop, name, job.Interval, resumed, run, log)
 		return
 	}
 
@@ -165,7 +203,7 @@ func (r *Runner) Schedule(ctx context.Context, job *config.Config) {
 	next := job.StartTime
 
 	if due, ok := lastDueSlot(job.StartTime, job.Interval, time.Now()); ok &&
-		!r.lastJobSuccess(ctx, job.Name).Before(due) {
+		!r.lastJobSuccess(runCtx, name).Before(due) {
 		// The most recent due slot is already covered by a recorded
 		// success (e.g. we restarted moments after an on-time run) — no
 		// run was actually missed, so don't fire an extra one now.
@@ -175,18 +213,60 @@ func (r *Runner) Schedule(ctx context.Context, job *config.Config) {
 		log.Debug("scheduling on start-time grid", "start_time", job.StartTime, "next_run", next)
 	}
 
-	r.store.SetNextRun(job.Name, next)
+	r.store.SetNextRun(name, next)
 
 	for {
-		if !waitUntil(ctx, next) {
+		if !waitUntil(stop, next) || !run() {
 			return
 		}
 
-		r.runOnce(ctx, job)
-
 		next = nextGridTime(job.StartTime, job.Interval, time.Now())
-		r.store.SetNextRun(job.Name, next)
+		r.store.SetNextRun(name, next)
 		log.Debug("scheduled next run", "next_run", next)
+	}
+}
+
+// scheduleInterval is ScheduleLive for a job without start-time: run once
+// (immediately, unless resumed — see ScheduleLive), then every interval, on
+// a fixed rate from the end of that first run (a slot that passes while a
+// run is still going is skipped, not queued). run reports false once the
+// schedule should end.
+func (r *Runner) scheduleInterval(stop context.Context, name string, interval time.Duration, resumed bool, run func() bool, log *slog.Logger) {
+	if resumed {
+		if interval <= 0 {
+			r.store.SetNextRun(name, time.Time{})
+			return
+		}
+
+		first := time.Now().UTC()
+		if last := r.store.LastStart(name); !last.IsZero() && last.Add(interval).After(first) {
+			first = last.Add(interval).UTC()
+		}
+
+		r.store.SetNextRun(name, first)
+
+		if !waitUntil(stop, first) {
+			return
+		}
+	}
+
+	if !run() || interval <= 0 {
+		return
+	}
+
+	next := time.Now().UTC().Add(interval)
+
+	for {
+		r.store.SetNextRun(name, next)
+		log.Debug("scheduled next run", "interval", interval, "next_run", next)
+
+		if !waitUntil(stop, next) || !run() {
+			return
+		}
+
+		for now := time.Now(); !next.After(now); {
+			next = next.Add(interval)
+		}
 	}
 }
 
@@ -471,23 +551,17 @@ func fireTargetCommand(ctx context.Context, kind, jobName string, t *config.Targ
 // RunOutstandingUploadRetries retries every target upload recorded as
 // outstanding (see uploadStagedToTargets) every TargetUploadRetryInterval,
 // until ctx is done. It's meant to run for the process's lifetime in its own
-// goroutine, mirroring notify.Queue.Run, started once by app.Run. jobs is
-// the static, top-level job configuration (rc.Jobs) — used to look up each
-// outstanding row's job and target definition by name, since a row can
+// goroutine, mirroring notify.Queue.Run, started once by app.Run. lookup finds
+// each outstanding row's job and target definition by name, since a row can
 // outlive the run that recorded it. A nil r.stateDB (no persistence
 // available, so nothing could have been recorded in the first place) makes
 // this a no-op.
-func (r *Runner) RunOutstandingUploadRetries(ctx context.Context, jobs []*config.Config) {
+func (r *Runner) RunOutstandingUploadRetries(ctx context.Context, lookup JobLookup) {
 	if r.stateDB == nil {
 		return
 	}
 
 	log := r.log.With("component", "upload-retry-queue")
-
-	byName := make(map[string]*config.Config, len(jobs))
-	for _, j := range jobs {
-		byName[j.Name] = j
-	}
 
 	ticker := time.NewTicker(TargetUploadRetryInterval)
 	defer ticker.Stop()
@@ -497,14 +571,14 @@ func (r *Runner) RunOutstandingUploadRetries(ctx context.Context, jobs []*config
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			r.retryOutstandingUploads(ctx, byName, log)
+			r.retryOutstandingUploads(ctx, lookup, log)
 		}
 	}
 }
 
 // retryOutstandingUploads attempts every outstanding target upload whose
 // retry time has come due.
-func (r *Runner) retryOutstandingUploads(ctx context.Context, byName map[string]*config.Config, log *slog.Logger) {
+func (r *Runner) retryOutstandingUploads(ctx context.Context, lookup JobLookup, log *slog.Logger) {
 	due, err := r.stateDB.ListDueOutstandingTargetUploads(ctx, time.Now())
 	if err != nil {
 		log.Warn("listing due outstanding target uploads", "err", err)
@@ -512,7 +586,7 @@ func (r *Runner) retryOutstandingUploads(ctx context.Context, byName map[string]
 	}
 
 	for _, row := range due {
-		r.retryOutstandingUpload(ctx, byName, row, log)
+		r.retryOutstandingUpload(ctx, lookup, row, log)
 	}
 }
 
@@ -522,10 +596,10 @@ func (r *Runner) retryOutstandingUploads(ctx context.Context, byName map[string]
 // gives up (forgetting row without ever succeeding) if row's job or target
 // no longer exists in the current config, or if its staged file is gone —
 // none of those are things a later retry could ever fix.
-func (r *Runner) retryOutstandingUpload(ctx context.Context, byName map[string]*config.Config, row store.OutstandingTargetUpload, log *slog.Logger) {
+func (r *Runner) retryOutstandingUpload(ctx context.Context, lookup JobLookup, row store.OutstandingTargetUpload, log *slog.Logger) {
 	log = log.With("job", row.JobName, "target", row.Target, "file", row.FileName)
 
-	job, ok := byName[row.JobName]
+	job, ok := lookup(row.JobName)
 	if !ok {
 		log.Warn("outstanding target upload references unknown job; giving up")
 		r.forgetOutstandingUpload(ctx, row, log)

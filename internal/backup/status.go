@@ -91,26 +91,96 @@ func (s *StatusStore) Changed() <-chan struct{} {
 }
 
 // NewStatusStore builds a StatusStore with one idle entry per job in jobs,
-// preserving their config-file order.
+// preserving their order.
 func NewStatusStore(jobs []*config.Config) *StatusStore {
 	s := &StatusStore{jobs: make(map[string]*JobSnapshot, len(jobs)), changeNotifier: newChangeNotifier()}
 
 	for _, j := range jobs {
-		targets := make([]TargetSnapshot, len(j.Targets))
-		for i, t := range j.Targets {
-			targets[i] = TargetSnapshot{Server: t.ServerName, Bucket: t.Bucket, Kind: string(t.Kind), State: StateIdle}
-		}
-
-		snap := &JobSnapshot{Name: j.Name, Interval: intervalString(j.Interval), State: StateIdle, Targets: targets}
-		if !j.StartTime.IsZero() {
-			snap.NextRun = j.StartTime
-		}
-
-		s.jobs[j.Name] = snap
+		s.jobs[j.Name] = newJobSnapshot(j)
 		s.order = append(s.order, j.Name)
 	}
 
 	return s
+}
+
+// newJobSnapshot is job's idle, never-run entry.
+func newJobSnapshot(job *config.Config) *JobSnapshot {
+	snap := &JobSnapshot{Name: job.Name, Interval: intervalString(job.Interval), State: StateIdle, Targets: idleTargets(job)}
+	if !job.StartTime.IsZero() {
+		snap.NextRun = job.StartTime
+	}
+
+	return snap
+}
+
+func idleTargets(job *config.Config) []TargetSnapshot {
+	targets := make([]TargetSnapshot, len(job.Targets))
+	for i, t := range job.Targets {
+		targets[i] = TargetSnapshot{Server: t.ServerName, Bucket: t.Bucket, Kind: string(t.Kind), State: StateIdle}
+	}
+
+	return targets
+}
+
+// Upsert adds job as an idle entry (kept in name order among the others), or
+// — for a job already present, e.g. one just edited in the web UI — updates
+// its interval and targets, keeping its last-run info and each target whose
+// server and bucket are unchanged.
+func (s *StatusStore) Upsert(job *config.Config) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	defer s.notifyLocked()
+
+	j, ok := s.jobs[job.Name]
+	if !ok {
+		s.jobs[job.Name] = newJobSnapshot(job)
+		s.order = append(s.order, job.Name)
+		slices.Sort(s.order)
+
+		return
+	}
+
+	j.Interval = intervalString(job.Interval)
+
+	targets := idleTargets(job)
+	for i := range targets {
+		idx := slices.IndexFunc(j.Targets, func(t TargetSnapshot) bool {
+			return t.Server == targets[i].Server && t.Bucket == targets[i].Bucket
+		})
+		if idx >= 0 {
+			targets[i].State, targets[i].Error = j.Targets[idx].State, j.Targets[idx].Error
+		}
+	}
+
+	j.Targets = targets
+}
+
+// Remove drops job name, e.g. once it's deleted in the web UI. A run still
+// in flight for it keeps going; its updates are then ignored.
+func (s *StatusStore) Remove(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	defer s.notifyLocked()
+
+	if _, ok := s.jobs[name]; !ok {
+		return
+	}
+
+	delete(s.jobs, name)
+	s.order = slices.DeleteFunc(s.order, func(n string) bool { return n == name })
+}
+
+// LastStart returns when job name's most recent run started, the zero Time
+// if it hasn't run (or isn't known).
+func (s *StatusStore) LastStart(name string) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if j, ok := s.jobs[name]; ok {
+		return j.LastStart
+	}
+
+	return time.Time{}
 }
 
 // intervalString renders d for display, or "" for a job that doesn't repeat.
