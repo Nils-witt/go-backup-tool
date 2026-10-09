@@ -287,6 +287,12 @@ type RunConfig struct {
 	// the "view" permission.
 	LogViewer bool
 
+	// EventLogLimit is how many of the most recent entries each web UI
+	// event log serves (see fileWebUI.EventLogLimit). Always positive: an
+	// unset webui.event-log-limit: resolves to
+	// appconfig.DefaultEventLogLimit.
+	EventLogLimit int
+
 	// TrustProxyHeaders, when set, makes the web UI derive the client
 	// address it records (login/download logs, access log) from
 	// proxy-supplied headers rather than the raw TCP connection — see
@@ -530,6 +536,14 @@ type fileWebUI struct {
 	// off.
 	LogViewer bool `yaml:"log-viewer"`
 
+	// EventLogLimit caps how many of the most recent entries each of the
+	// web UI's event logs (job runs, target runs, logins, downloads,
+	// receiver events) shows. Every entry stays in the state database
+	// regardless; this only limits how many are served. Unset (0) defaults
+	// to appconfig.DefaultEventLogLimit. Must be between 1 and
+	// maxEventLogLimit when set.
+	EventLogLimit int `yaml:"event-log-limit"`
+
 	// TrustProxyHeaders makes the web UI take the client address recorded
 	// in the login/download logs and access log (see clientAddr in
 	// webui.go) from the Forwarded/X-Forwarded-For/X-Real-Ip request
@@ -741,6 +755,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		ReceiversBaseDir:  webUI.receiversBaseDir,
 		KeysDir:           keysDir,
 		LogViewer:         fileCfg.WebUI.LogViewer,
+		EventLogLimit:     webUI.eventLogLimit,
 		TrustProxyHeaders: fileCfg.WebUI.TrustProxyHeaders,
 		DevMode:           fileCfg.WebUI.DevMode,
 		OIDC:              webUI.oidc,
@@ -881,6 +896,7 @@ type webUISettings struct {
 	listen           string
 	oidc             OIDCSettings
 	receiversBaseDir string
+	eventLogLimit    int
 }
 
 // resolveWebUISettings resolves cfg (the config file's webui: entry) into
@@ -908,7 +924,31 @@ func resolveWebUISettings(cfg fileWebUI) (webUISettings, error) {
 		return webUISettings{}, err
 	}
 
-	return webUISettings{listen: listen, oidc: oidc, receiversBaseDir: baseDir}, nil
+	limit, err := resolveEventLogLimit(cfg.EventLogLimit)
+	if err != nil {
+		return webUISettings{}, err
+	}
+
+	return webUISettings{listen: listen, oidc: oidc, receiversBaseDir: baseDir, eventLogLimit: limit}, nil
+}
+
+// maxEventLogLimit bounds webui.event-log-limit:, since every entry it
+// allows is read, sent, and rendered by the dashboard on each poll.
+const maxEventLogLimit = 10000
+
+// resolveEventLogLimit validates webui.event-log-limit: (see
+// fileWebUI.EventLogLimit), returning appconfig.DefaultEventLogLimit when
+// it's unset.
+func resolveEventLogLimit(n int) (int, error) {
+	if n == 0 {
+		return appconfig.DefaultEventLogLimit, nil
+	}
+
+	if n < 1 || n > maxEventLogLimit {
+		return 0, fmt.Errorf("webui.event-log-limit %d must be between 1 and %d", n, maxEventLogLimit)
+	}
+
+	return n, nil
 }
 
 // resolveReceiversBaseDir validates webui.receivers-base-dir: (see

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
+	appconfig "nilswitt.dev/go-backup-tool/internal/backup/app/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/gpgkeys"
@@ -55,7 +56,7 @@ type Server struct {
 // StartWebUI starts the -listen web UI dashboard and returns a Server the
 // caller can shut down with Server.Shutdown. Returns nil if the server
 // fails to start.
-func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.Manager, gpgKeyring *gpgkeys.Keyring, runner *pipeline.Runner, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, receiverManager *receiver.Manager, settingsManager *settings.Manager, trustManager *trust.Manager, log *slog.Logger, db *store.Store, logs *LogRingBuffer, oidcSettings config.OIDCSettings, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, instanceName string, registerExtraRoutes func(*http.ServeMux), queue *notify.Queue) *Server {
+func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.Manager, gpgKeyring *gpgkeys.Keyring, runner *pipeline.Runner, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, receiverManager *receiver.Manager, settingsManager *settings.Manager, trustManager *trust.Manager, log *slog.Logger, db *store.Store, logs *LogRingBuffer, oidcSettings config.OIDCSettings, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, eventLogLimit int, instanceName string, registerExtraRoutes func(*http.ServeMux), queue *notify.Queue) *Server {
 	lookupJob := pipeline.StaticJobs(nil)
 	if jobsManager != nil {
 		lookupJob = jobsManager.Get
@@ -120,15 +121,15 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.
 	mux.HandleFunc("GET /api/receivers", api(handleReceiverStatus(receivers, receiverStore, log)))
 	mux.HandleFunc("POST /api/live/ticket", api(handleMintLiveTicket(liveTickets)))
 	mux.HandleFunc("GET /api/live", handleLive(liveCtx, statusStore, receivers, receiverStore, liveTickets, devMode, trustProxyHeaders, log))
-	mux.HandleFunc("GET /api/job-runs", apiJobRunLog(handleJobRunEvents(db, log)))
-	mux.HandleFunc("GET /api/target-runs", apiTargetRunLog(handleTargetRunEvents(db, log)))
+	mux.HandleFunc("GET /api/job-runs", apiJobRunLog(handleJobRunEvents(db, log, eventLogLimit)))
+	mux.HandleFunc("GET /api/target-runs", apiTargetRunLog(handleTargetRunEvents(db, log, eventLogLimit)))
 	mux.HandleFunc("POST /api/jobs/{name}/retry", admin(handleRetryFailedTargets(lookupJob, statusStore, runner, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/files", api(handleReceiverFiles(receivers, log)))
 	mux.HandleFunc("POST /api/receivers/{id}/download/{key...}", apiDownload(handleMintDownloadTicket(receivers, downloadTickets)))
 	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", handleDownloadFile(receivers, log, db, downloadTickets, trustProxyHeaders, queue))
-	mux.HandleFunc("GET /api/login-events", apiLoginLog(handleLoginEvents(db, log)))
-	mux.HandleFunc("GET /api/download-events", apiDownloadLog(handleDownloadEvents(db, log)))
-	mux.HandleFunc("GET /api/receiver-events", apiReceiverLog(handleReceiverEvents(db, log)))
+	mux.HandleFunc("GET /api/login-events", apiLoginLog(handleLoginEvents(db, log, eventLogLimit)))
+	mux.HandleFunc("GET /api/download-events", apiDownloadLog(handleDownloadEvents(db, log, eventLogLimit)))
+	mux.HandleFunc("GET /api/receiver-events", apiReceiverLog(handleReceiverEvents(db, log, eventLogLimit)))
 	mux.HandleFunc("GET /api/tokens", admin(handleListAPITokens(tokens, log)))
 	mux.HandleFunc("POST /api/tokens", admin(handleCreateAPIToken(tokens, log)))
 	mux.HandleFunc("DELETE /api/tokens/{id}", admin(handleRevokeAPIToken(tokens, log)))
@@ -657,18 +658,14 @@ type loginEventJSON struct {
 	Detail     string    `json:"detail"`
 }
 
-// loginEventsLimit caps how many of the most recent login events
-// handleLoginEvents serves, for the dashboard's login log view.
-const loginEventsLimit = 200
-
 // handleLoginEvents serves GET /api/login-events: the most recently recorded
 // dashboard login attempts (see recordLoginEvent), newest first, as JSON.
 // db nil (state tracking unavailable) serves an empty list rather than
 // failing the request, matching handleReceiverStatus's own tolerance for a
 // missing dependency.
-func handleLoginEvents(db *store.Store, log *slog.Logger) http.HandlerFunc {
+func handleLoginEvents(db *store.Store, log *slog.Logger, limit int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		serveEventLog(w, r, log, db, loginEventsLimit, db.ListLoginEvents,
+		serveEventLog(w, r, log, db, limit, db.ListLoginEvents,
 			func(ev store.LoginEvent) loginEventJSON { return loginEventJSON(ev) },
 			"reading login events failed")
 	}
@@ -684,6 +681,12 @@ func handleLoginEvents(db *store.Store, log *slog.Logger) http.HandlerFunc {
 // and handleDownloadEvents, whose bodies would otherwise be identical but
 // for the event/read/limit types involved.
 func serveEventLog[E, J any](w http.ResponseWriter, r *http.Request, log *slog.Logger, db *store.Store, limit int, read func(context.Context, int) ([]E, error), toJSON func(E) J, errMsg string) {
+	// A limit below 1 (a caller that didn't resolve webui.event-log-limit:,
+	// e.g. a test) falls back to the default rather than serving nothing.
+	if limit < 1 {
+		limit = appconfig.DefaultEventLogLimit
+	}
+
 	var events []E
 
 	if db != nil {
@@ -719,18 +722,14 @@ type downloadEventJSON struct {
 	Detail     string    `json:"detail"`
 }
 
-// downloadEventsLimit caps how many of the most recent download events
-// handleDownloadEvents serves, for the dashboard's download log view.
-const downloadEventsLimit = 200
-
 // handleDownloadEvents serves GET /api/download-events: the most recently
 // recorded file download attempts (see recordDownloadEvent), newest first,
 // as JSON. db nil (state tracking unavailable) serves an empty list rather
 // than failing the request, matching handleLoginEvents's own tolerance for
 // a missing dependency.
-func handleDownloadEvents(db *store.Store, log *slog.Logger) http.HandlerFunc {
+func handleDownloadEvents(db *store.Store, log *slog.Logger, limit int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		serveEventLog(w, r, log, db, downloadEventsLimit, db.ListDownloadEvents,
+		serveEventLog(w, r, log, db, limit, db.ListDownloadEvents,
 			func(ev store.DownloadEvent) downloadEventJSON { return downloadEventJSON(ev) },
 			"reading download events failed")
 	}
@@ -748,18 +747,14 @@ type jobRunEventJSON struct {
 	Error   string    `json:"error"`
 }
 
-// jobRunEventsLimit caps how many of the most recent job runs
-// handleJobRunEvents serves, for the dashboard's job run log view.
-const jobRunEventsLimit = 200
-
 // handleJobRunEvents serves GET /api/job-runs: the most recently recorded
 // job runs (see Runner.recordJobRun), newest first, across every job, as
 // JSON. db nil (state tracking unavailable) serves an empty list rather
 // than failing the request, matching handleLoginEvents's own tolerance for
 // a missing dependency.
-func handleJobRunEvents(db *store.Store, log *slog.Logger) http.HandlerFunc {
+func handleJobRunEvents(db *store.Store, log *slog.Logger, limit int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		serveEventLog(w, r, log, db, jobRunEventsLimit, db.ListJobRunEvents,
+		serveEventLog(w, r, log, db, limit, db.ListJobRunEvents,
 			func(ev store.JobRunEvent) jobRunEventJSON { return jobRunEventJSON(ev) },
 			"reading job run events failed")
 	}
@@ -777,18 +772,14 @@ type targetRunEventJSON struct {
 	Error   string    `json:"error"`
 }
 
-// targetRunEventsLimit caps how many of the most recent target runs
-// handleTargetRunEvents serves, for the dashboard's target run log view.
-const targetRunEventsLimit = 200
-
 // handleTargetRunEvents serves GET /api/target-runs: the most recently
 // recorded job target runs (see Runner.persistTargetRun), newest first,
 // across every job, as JSON. db nil (state tracking unavailable) serves an
 // empty list rather than failing the request, matching handleLoginEvents's
 // own tolerance for a missing dependency.
-func handleTargetRunEvents(db *store.Store, log *slog.Logger) http.HandlerFunc {
+func handleTargetRunEvents(db *store.Store, log *slog.Logger, limit int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		serveEventLog(w, r, log, db, targetRunEventsLimit, db.ListTargetRunEvents,
+		serveEventLog(w, r, log, db, limit, db.ListTargetRunEvents,
 			func(ev store.TargetRunEvent) targetRunEventJSON { return targetRunEventJSON(ev) },
 			"reading target run events failed")
 	}
@@ -807,19 +798,15 @@ type receiverEventJSON struct {
 	Error      string    `json:"error"`
 }
 
-// receiverEventsLimit caps how many of the most recent receiver events
-// handleReceiverEvents serves, for the dashboard's receiver log view.
-const receiverEventsLimit = 200
-
 // handleReceiverEvents serves GET /api/receiver-events: the most recently
 // recorded receiver API requests (see recordReceiverEventBestEffort in
 // internal/backup/receiver), newest first, across every receiver, as JSON.
 // db nil (state tracking unavailable) serves an empty list rather than
 // failing the request, matching handleLoginEvents's own tolerance for a
 // missing dependency.
-func handleReceiverEvents(db *store.Store, log *slog.Logger) http.HandlerFunc {
+func handleReceiverEvents(db *store.Store, log *slog.Logger, limit int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		serveEventLog(w, r, log, db, receiverEventsLimit, db.ListReceiverEvents,
+		serveEventLog(w, r, log, db, limit, db.ListReceiverEvents,
 			func(ev store.ReceiverEvent) receiverEventJSON { return receiverEventJSON(ev) },
 			"reading receiver events failed")
 	}

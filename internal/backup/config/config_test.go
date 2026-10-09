@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	appconfig "nilswitt.dev/go-backup-tool/internal/backup/app/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
@@ -565,6 +566,67 @@ jobs:
 
 	if !rc.LogViewer {
 		t.Error("rc.LogViewer = false, want true (enable-log-viewer: true set in config file)")
+	}
+}
+
+// TestParseFlagsEventLogLimit covers webui.event-log-limit: defaulting to
+// appconfig.DefaultEventLogLimit when unset, being taken as given in range,
+// and being rejected outside 1..maxEventLogLimit.
+func TestParseFlagsEventLogLimit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		setting string
+		want    int
+		wantErr bool
+	}{
+		{name: "unset uses default", setting: "", want: appconfig.DefaultEventLogLimit},
+		{name: "explicit value", setting: "event-log-limit: 1000", want: 1000},
+		{name: "maximum", setting: "event-log-limit: 10000", want: 10000},
+		{name: "negative rejected", setting: "event-log-limit: -1", wantErr: true},
+		{name: "above maximum rejected", setting: "event-log-limit: 10001", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := writeConfigFile(t, `
+webui:
+  enabled: true
+  listen: ":0"
+  `+tt.setting+`
+
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+			rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("ParseFlags() error = nil, want an error")
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("ParseFlags() unexpected error: %v", err)
+			}
+
+			if rc.EventLogLimit != tt.want {
+				t.Errorf("rc.EventLogLimit = %d, want %d", rc.EventLogLimit, tt.want)
+			}
+		})
 	}
 }
 

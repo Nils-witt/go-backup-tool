@@ -272,8 +272,9 @@ paths:
       summary: Historical job run log
       operationId: getJobRunEvents
       description: >
-        The most recently recorded job runs (up to 200) across every job,
-        newest first. Requires the `job-run-log` permission, independent of
+        The most recently recorded job runs (up to
+        `webui.event-log-limit:`, default 200) across every job, newest
+        first. Requires the `job-run-log` permission, independent of
         `view`.
       security:
         - webUIBearer: []
@@ -297,9 +298,10 @@ paths:
       summary: Historical job target run log
       operationId: getTargetRunEvents
       description: >
-        The most recently recorded job target runs (up to 200) across every
-        job, newest first. Requires the `target-run-log` permission,
-        independent of `view`.
+        The most recently recorded job target runs (up to
+        `webui.event-log-limit:`, default 200) across every job, newest
+        first. Requires the `target-run-log` permission, independent of
+        `view`.
       security:
         - webUIBearer: []
       responses:
@@ -491,8 +493,9 @@ paths:
       summary: Recent dashboard login attempts
       operationId: getLoginEvents
       description: >
-        The most recently recorded login attempts (up to 200), newest
-        first. Requires the `login-log` permission, independent of `view`.
+        The most recently recorded login attempts (up to
+        `webui.event-log-limit:`, default 200), newest first. Requires
+        the `login-log` permission, independent of `view`.
       security:
         - webUIBearer: []
       responses:
@@ -515,9 +518,9 @@ paths:
       summary: Recent file download attempts
       operationId: getDownloadEvents
       description: >
-        The most recently recorded download attempts (up to 200), newest
-        first. Requires the `download-log` permission, independent of
-        `view`/`download`.
+        The most recently recorded download attempts (up to
+        `webui.event-log-limit:`, default 200), newest first. Requires
+        the `download-log` permission, independent of `view`/`download`.
       security:
         - webUIBearer: []
       responses:
@@ -541,8 +544,9 @@ paths:
       operationId: getReceiverEvents
       description: >
         The most recently recorded receiver API requests (PUT or DELETE, up
-        to 200) across every receiver, win or lose, newest first. Requires
-        the `receiver-log` permission, independent of `view`.
+        to `webui.event-log-limit:`, default 200) across every receiver, win
+        or lose, newest first. Requires the `receiver-log` permission,
+        independent of `view`.
       security:
         - webUIBearer: []
       responses:

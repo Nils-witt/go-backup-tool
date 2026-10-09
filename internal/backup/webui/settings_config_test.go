@@ -26,7 +26,7 @@ func startSettingsWebUI(t *testing.T, idp *testIDP) (*Server, *notify.Registry) 
 	manager := settings.NewManager(db, registry, report.NewLive(report.Settings{}), notify.SMTPSettings{}, notify.GPGSettings{}, discardLogger)
 	statusStore, _ := newTestStore()
 
-	srv := StartWebUI("127.0.0.1:0", statusStore, nil, nil, nil, nil, nil, nil, manager, nil, discardLogger, db, nil, idp.settings(), nil, false, false, "", nil, nil)
+	srv := StartWebUI("127.0.0.1:0", statusStore, nil, nil, nil, nil, nil, nil, manager, nil, discardLogger, db, nil, idp.settings(), nil, false, false, 0, "", nil, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}

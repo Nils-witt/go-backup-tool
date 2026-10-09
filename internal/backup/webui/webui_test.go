@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
+	appconfig "nilswitt.dev/go-backup-tool/internal/backup/app/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
@@ -295,7 +296,7 @@ func TestStartWebUIWithoutOIDCIsLocked(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, nil, nil, nil, nil, discardLogger, nil, nil, config.OIDCSettings{}, nil, false, false, "", nil, nil)
+	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, nil, nil, nil, nil, discardLogger, nil, nil, config.OIDCSettings{}, nil, false, false, 0, "", nil, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}
@@ -390,7 +391,7 @@ func TestStartWebUIBadAddrReturnsNil(t *testing.T) {
 	store, _ := newTestStore()
 
 	// Port 0 is valid (means "pick one"); an unparseable address is not.
-	srv := StartWebUI("not-a-valid-address", store, nil, nil, nil, nil, nil, nil, nil, nil, discardLogger, nil, nil, config.OIDCSettings{}, nil, false, false, "", nil, nil)
+	srv := StartWebUI("not-a-valid-address", store, nil, nil, nil, nil, nil, nil, nil, nil, discardLogger, nil, nil, config.OIDCSettings{}, nil, false, false, 0, "", nil, nil)
 	if srv != nil {
 		t.Cleanup(srv.Shutdown)
 		t.Fatal("StartWebUI() with an invalid address = non-nil, want nil")
@@ -646,7 +647,7 @@ func TestHandleLoginEventsServesJSON(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/login-events", nil)
 	rec := httptest.NewRecorder()
 
-	handleLoginEvents(db, discardLogger)(rec, req)
+	handleLoginEvents(db, discardLogger, appconfig.DefaultEventLogLimit)(rec, req)
 
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		t.Errorf("Content-Type = %q, want application/json prefix", ct)
@@ -662,13 +663,41 @@ func TestHandleLoginEventsServesJSON(t *testing.T) {
 	}
 }
 
+// TestHandleLoginEventsHonorsLimit covers an event log handler serving only
+// the limit most recent events (webui.event-log-limit:), newest first.
+func TestHandleLoginEventsHonorsLimit(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStateDB(t)
+
+	for _, user := range []string{"first", "second", "third"} {
+		if err := db.SaveLoginEvent(t.Context(), store.LoginEvent{At: time.Now(), Username: user, Method: "sso", Success: true}); err != nil {
+			t.Fatalf("SaveLoginEvent() error: %v", err)
+		}
+	}
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/login-events", nil)
+	rec := httptest.NewRecorder()
+
+	handleLoginEvents(db, discardLogger, 2)(rec, req)
+
+	var got []loginEventJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding response body: %v", err)
+	}
+
+	if len(got) != 2 || got[0].Username != "third" || got[1].Username != "second" {
+		t.Errorf("decoded events = %+v, want third then second only", got)
+	}
+}
+
 func TestHandleLoginEventsWithoutDBServesEmptyList(t *testing.T) {
 	t.Parallel()
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/login-events", nil)
 	rec := httptest.NewRecorder()
 
-	handleLoginEvents(nil, discardLogger)(rec, req)
+	handleLoginEvents(nil, discardLogger, appconfig.DefaultEventLogLimit)(rec, req)
 
 	var got []loginEventJSON
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -867,7 +896,7 @@ func TestHandleDownloadEventsServesJSON(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/download-events", nil)
 	rec := httptest.NewRecorder()
 
-	handleDownloadEvents(db, discardLogger)(rec, req)
+	handleDownloadEvents(db, discardLogger, appconfig.DefaultEventLogLimit)(rec, req)
 
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		t.Errorf("Content-Type = %q, want application/json prefix", ct)
@@ -889,7 +918,7 @@ func TestHandleDownloadEventsWithoutDBServesEmptyList(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/download-events", nil)
 	rec := httptest.NewRecorder()
 
-	handleDownloadEvents(nil, discardLogger)(rec, req)
+	handleDownloadEvents(nil, discardLogger, appconfig.DefaultEventLogLimit)(rec, req)
 
 	var got []downloadEventJSON
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -913,7 +942,7 @@ func TestHandleReceiverEventsServesJSON(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receiver-events", nil)
 	rec := httptest.NewRecorder()
 
-	handleReceiverEvents(db, discardLogger)(rec, req)
+	handleReceiverEvents(db, discardLogger, appconfig.DefaultEventLogLimit)(rec, req)
 
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		t.Errorf("Content-Type = %q, want application/json prefix", ct)
@@ -935,7 +964,7 @@ func TestHandleReceiverEventsWithoutDBServesEmptyList(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receiver-events", nil)
 	rec := httptest.NewRecorder()
 
-	handleReceiverEvents(nil, discardLogger)(rec, req)
+	handleReceiverEvents(nil, discardLogger, appconfig.DefaultEventLogLimit)(rec, req)
 
 	var got []receiverEventJSON
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {

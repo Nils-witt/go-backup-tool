@@ -168,6 +168,12 @@ servers:
 #   # may include detail (paths, error text) not meant for every viewer.
 #   log-viewer: true
 #
+#   # event-log-limit caps how many of the most recent entries each event
+#   # log (job runs, target runs, logins, downloads, receiver events) shows
+#   # in the dashboard. Every entry stays in the state database regardless.
+#   # Unset defaults to 200; must be between 1 and 10000.
+#   event-log-limit: 1000
+#
 #   # trust-proxy-headers makes the dashboard's login/download logs and
 #   # access log record the client address from the Forwarded/
 #   # X-Forwarded-For/X-Real-Ip request headers instead of the raw TCP

@@ -35,7 +35,7 @@ func startJobsWebUIWithKeyring(t *testing.T, idp *testIDP, editing bool, keyring
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	srv := StartWebUI("127.0.0.1:0", status, manager, keyring, runner, nil, nil, nil, nil, nil, discardLogger, db, nil, idp.settings(), nil, false, false, "", nil, nil)
+	srv := StartWebUI("127.0.0.1:0", status, manager, keyring, runner, nil, nil, nil, nil, nil, discardLogger, db, nil, idp.settings(), nil, false, false, 0, "", nil, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}
