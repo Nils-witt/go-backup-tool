@@ -1,4 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
+import { useSearchParams } from "react-router-dom";
 import type { JobRunEventJSON, JobSnapshot, ReceiverSnapshot, RunState } from "../api/types";
 import { usePoll } from "../hooks/usePoll";
 import { usePermissionPoll } from "../hooks/usePermissionPoll";
@@ -12,12 +13,15 @@ import { ReceiversSection } from "../components/ReceiversSection";
 import { RemoteBackendsDialog } from "../components/RemoteBackendsDialog";
 import { StatusChip } from "../components/StatusChip";
 import { SummaryTile } from "../components/StatusSummary";
+import { TopologyChart } from "../components/TopologyChart";
 import { countStates, type Sourced } from "../lib/status";
 import { useRemoteBackends } from "../lib/remoteBackends";
 import { fmtRelative, fmtTime, hasTime } from "../lib/format";
 import Button from "@mui/material/Button";
 import Grid from "@mui/material/Grid";
 import Stack from "@mui/material/Stack";
+import ToggleButton from "@mui/material/ToggleButton";
+import ToggleButtonGroup from "@mui/material/ToggleButtonGroup";
 import Typography from "@mui/material/Typography";
 
 // Run history changes only when a job finishes, so it's polled far less
@@ -64,6 +68,9 @@ function SectionHeader({ title, action }: { title: string; action?: ReactNode })
 
 export function DashboardPage() {
   const session = useAuth();
+  // The view lives in the URL so a reload or shared link keeps it.
+  const [params, setParams] = useSearchParams();
+  const view = params.get("view") === "topology" ? "topology" : "overview";
   const live = useLiveStatus();
   // Polling only runs while the live status socket is down.
   const poll = usePoll<JobSnapshot>("/api/status", 2000, !live.live);
@@ -194,20 +201,42 @@ export function DashboardPage() {
         </Grid>
       </Grid>
 
-      <SectionHeader title="Jobs" />
-      <JobsGrid
-        jobs={jobs}
-        canRetry={session.canRetry}
-        refreshNow={poll.refreshNow}
-        runsByJob={runsByJob}
-      />
+      <ToggleButtonGroup
+        size="small"
+        exclusive
+        value={view}
+        onChange={(_, v: string | null) => {
+          if (v) setParams(v === "topology" ? { view: v } : {}, { replace: true });
+        }}
+        aria-label="Dashboard view"
+      >
+        <ToggleButton value="overview">Overview</ToggleButton>
+        <ToggleButton value="topology">Topology</ToggleButton>
+      </ToggleButtonGroup>
 
-      {receivers.length ? (
+      {view === "topology" ? (
         <>
-          <SectionHeader title="Receivers" />
-          <ReceiversSection receivers={receivers} canDownload={session.canDownload} />
+          <SectionHeader title="Topology" />
+          <TopologyChart jobs={jobs} receivers={receivers} />
         </>
-      ) : null}
+      ) : (
+        <>
+          <SectionHeader title="Jobs" />
+          <JobsGrid
+            jobs={jobs}
+            canRetry={session.canRetry}
+            refreshNow={poll.refreshNow}
+            runsByJob={runsByJob}
+          />
+
+          {receivers.length ? (
+            <>
+              <SectionHeader title="Receivers" />
+              <ReceiversSection receivers={receivers} canDownload={session.canDownload} />
+            </>
+          ) : null}
+        </>
+      )}
     </>
   );
 }
