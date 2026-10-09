@@ -29,7 +29,7 @@ export async function apiFetch(url: string, opts: RequestInit = {}): Promise<Res
   let res = await send(url, opts, token);
 
   if (res.status === 401 && token) {
-    token = await renewAccessToken();
+    token = await renewAccessToken(true);
     if (token) res = await send(url, opts, token);
   }
 

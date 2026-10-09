@@ -4,7 +4,7 @@
 // verifies the provider-issued access token (a JWT), which client.ts sends as
 // "Authorization: Bearer ..." on every /api/... call (see
 // internal/backup/webui/auth.go).
-import { UserManager, WebStorageStateStore } from "oidc-client-ts";
+import { ErrorResponse, UserManager, WebStorageStateStore } from "oidc-client-ts";
 import type { SSOStatusJSON } from "../api/types";
 
 export const SSO_CALLBACK_PATH = "/login/sso/callback";
@@ -38,8 +38,22 @@ export function initOidc(status: SSOStatusJSON) {
     automaticSilentRenew: false,
   });
 
+  // Refresh shortly before the token expires (60s by default), so requests
+  // never have to wait for it. The expired event covers a refresh that
+  // hasn't succeeded by then, and ends a session without a refresh token
+  // even while the page sits idle. Both timers are armed by the first
+  // getUser() and re-armed after every refresh.
   manager.events.addAccessTokenExpiring(() => {
     void renewAccessToken();
+  });
+  manager.events.addAccessTokenExpired(() => {
+    void renewAccessToken();
+  });
+
+  // A refresh that failed while offline is retried as soon as the network
+  // is back, rather than waiting out the backoff.
+  window.addEventListener("online", () => {
+    if (retryTimer !== undefined) void renewAccessToken();
   });
 }
 
@@ -70,16 +84,28 @@ export async function getAccessToken(): Promise<string | null> {
 
 let renewing: Promise<string | null> | null = null;
 
+const minRetryMs = 5_000;
+const maxRetryMs = 60_000;
+let retryTimer: ReturnType<typeof setTimeout> | undefined;
+let retryDelay = minRetryMs;
+
 /**
  * Gets a fresh access token with the stored refresh token (a plain back-channel
  * request to the provider's token endpoint — never an iframe). The provider
  * only issues a refresh token if asked for one, typically via the
- * "offline_access" scope. Without one, or if the refresh fails, the stored
- * user is dropped (ending the session, see onSsoSessionEnded) and null is
- * returned. Concurrent callers share one in-flight refresh, since a provider
- * rotating refresh tokens would reject the second use of the same one.
+ * "offline_access" scope. Concurrent callers share one in-flight refresh,
+ * since a provider rotating refresh tokens would reject the second use of the
+ * same one.
+ *
+ * Without a refresh token, the current token stays in use until it expires —
+ * or until the backend rejects it (rejected=true, see client.ts). The session
+ * then ends: the stored user is dropped (see onSsoSessionEnded) and null is
+ * returned. The same happens when the provider refuses the refresh token.
+ * A refresh that fails for any other reason (offline, provider unreachable)
+ * keeps the session and is retried with backoff; meanwhile the current token
+ * is returned while it's still valid, null otherwise.
  */
-export function renewAccessToken(): Promise<string | null> {
+export function renewAccessToken(rejected = false): Promise<string | null> {
   renewing ??= (async () => {
     try {
       if (!manager) return null;
@@ -87,23 +113,48 @@ export function renewAccessToken(): Promise<string | null> {
       const user = await manager.getUser();
       if (!user) return null;
 
-      if (user.refresh_token) {
-        try {
-          const renewed = await manager.signinSilent();
-          if (renewed) return renewed.access_token;
-        } catch {
-          /* fall through: session over */
-        }
+      if (!user.refresh_token) {
+        if (!rejected && !user.expired) return user.access_token;
+        await endSession();
+        return null;
       }
 
-      await manager.removeUser();
-      return null;
+      try {
+        const renewed = await manager.signinSilent();
+        if (!renewed) throw new Error("no user returned");
+        clearRetry();
+        return renewed.access_token;
+      } catch (err) {
+        if (err instanceof ErrorResponse) {
+          await endSession();
+          return null;
+        }
+        scheduleRetry();
+        return !rejected && !user.expired ? user.access_token : null;
+      }
     } finally {
       renewing = null;
     }
   })();
 
   return renewing;
+}
+
+function scheduleRetry() {
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(() => void renewAccessToken(), retryDelay);
+  retryDelay = Math.min(retryDelay * 2, maxRetryMs);
+}
+
+function clearRetry() {
+  clearTimeout(retryTimer);
+  retryTimer = undefined;
+  retryDelay = minRetryMs;
+}
+
+async function endSession() {
+  clearRetry();
+  await manager?.removeUser();
 }
 
 /** Sends the browser to the provider's login page. */
@@ -134,6 +185,7 @@ export async function logoutOidc(): Promise<boolean> {
   if (!manager) return false;
 
   const user = await manager.getUser();
+  clearRetry();
   await manager.removeUser();
   if (!user) return false;
 
