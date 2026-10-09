@@ -5,6 +5,7 @@ import { StatusChip } from "./StatusChip";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { RunHistoryStrip } from "./RunHistoryStrip";
 import { fmtRelative, fmtTime, hasTime } from "../lib/format";
+import { sourcedKey, type Sourced } from "../lib/status";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
@@ -17,7 +18,9 @@ import Typography from "@mui/material/Typography";
 import { useTheme } from "@mui/material/styles";
 
 interface JobsGridProps {
-  jobs: JobSnapshot[];
+  // jobs may come from several instances (see Sourced); remote ones never
+  // offer a retry or show run history, which their API token can't reach.
+  jobs: Sourced<JobSnapshot>[];
   canRetry: boolean;
   refreshNow: () => void;
   // runsByJob holds each job's recent runs, newest first; undefined hides
@@ -75,7 +78,7 @@ export function JobsGrid({ jobs, canRetry, refreshNow, runsByJob }: JobsGridProp
           const accent = theme.palette.status[j.state] ?? theme.palette.status.idle;
 
           return (
-            <Grid key={j.name} size={{ xs: 12, sm: 6, md: 4 }}>
+            <Grid key={sourcedKey(j.source, j.name)} size={{ xs: 12, sm: 6, md: 4 }}>
               <Card
                 variant="outlined"
                 sx={{
@@ -104,9 +107,16 @@ export function JobsGrid({ jobs, canRetry, refreshNow, runsByJob }: JobsGridProp
                     spacing={1}
                     sx={{ alignItems: "center", justifyContent: "space-between", mb: 1.5 }}
                   >
-                    <Typography sx={{ fontWeight: 600, overflowWrap: "anywhere" }}>
-                      {j.name}
-                    </Typography>
+                    <Box sx={{ minWidth: 0 }}>
+                      <Typography sx={{ fontWeight: 600, overflowWrap: "anywhere" }}>
+                        {j.name}
+                      </Typography>
+                      {j.source ? (
+                        <Typography variant="caption" color="text.secondary">
+                          {j.source}
+                        </Typography>
+                      ) : null}
+                    </Box>
                     <StatusChip state={j.state} error={j.error} />
                   </Stack>
 
@@ -132,7 +142,7 @@ export function JobsGrid({ jobs, canRetry, refreshNow, runsByJob }: JobsGridProp
                     {j.size ? <Fact label="Size">{j.size}</Fact> : null}
                   </Box>
 
-                  {runsByJob ? (
+                  {runsByJob && !j.remote ? (
                     <Box sx={{ mb: 1.5 }}>
                       <RunHistoryStrip runs={runsByJob.get(j.name) ?? []} />
                     </Box>
@@ -155,7 +165,7 @@ export function JobsGrid({ jobs, canRetry, refreshNow, runsByJob }: JobsGridProp
                     ))}
                   </Stack>
 
-                  {hasFailedTarget && canRetry ? (
+                  {hasFailedTarget && canRetry && !j.remote ? (
                     <Box sx={{ mt: 1.5 }}>
                       <Button
                         size="small"

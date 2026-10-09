@@ -198,7 +198,8 @@ servers:
 #   # cors-get-origins enables CORS for the read-only GET /api/... endpoints
 #   # only, so another site's JavaScript (e.g. a status page) can read this
 #   # instance's API with its own bearer token (an API token from the
-#   # dashboard). List bare origins (scheme://host[:port]) or "*" for any
+#   # dashboard) — e.g. another instance's dashboard showing this one under
+#   # "Remote backends". List bare origins (scheme://host[:port]) or "*" for any
 #   # origin. POST/PUT/DELETE stay same-origin only. Unset (the default)
 #   # adds no CORS headers; dev-mode, if set, takes precedence.
 #   cors-get-origins:

@@ -1,15 +1,21 @@
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import type { JobRunEventJSON, JobSnapshot, ReceiverSnapshot, RunState } from "../api/types";
 import { usePoll } from "../hooks/usePoll";
 import { usePermissionPoll } from "../hooks/usePermissionPoll";
 import { useLiveStatus } from "../hooks/useLiveStatus";
+import { useMeta } from "../hooks/useMeta";
+import { useRemoteStatus, type RemoteStatus } from "../hooks/useRemoteStatus";
 import { useAuth } from "../auth/useAuth";
 import { JobsGrid } from "../components/JobsGrid";
 import { PageHeader } from "../components/PageHeader";
 import { ReceiversSection } from "../components/ReceiversSection";
+import { RemoteBackendsDialog } from "../components/RemoteBackendsDialog";
+import { StatusChip } from "../components/StatusChip";
 import { SummaryTile } from "../components/StatusSummary";
-import { countStates } from "../lib/status";
+import { countStates, type Sourced } from "../lib/status";
+import { useRemoteBackends } from "../lib/remoteBackends";
 import { fmtRelative, fmtTime, hasTime } from "../lib/format";
+import Button from "@mui/material/Button";
 import Grid from "@mui/material/Grid";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
@@ -17,6 +23,24 @@ import Typography from "@mui/material/Typography";
 // Run history changes only when a job finishes, so it's polled far less
 // often than the live job state.
 const runHistoryPollMs = 15000;
+
+// RemoteBackendsBar shows each remote backend's connection state, so one
+// that's unreachable or rejecting its token is visible rather than its jobs
+// silently missing from the merged view.
+function RemoteBackendsBar({ remotes }: { remotes: RemoteStatus[] }) {
+  return (
+    <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap", mb: 2 }}>
+      {remotes.map((r) => (
+        <StatusChip
+          key={r.backend.id}
+          state={r.error ? "failed" : r.loaded ? "ok" : "idle"}
+          label={r.name}
+          error={r.error ?? undefined}
+        />
+      ))}
+    </Stack>
+  );
+}
 
 // receiverState folds a receiver's staleness into its state for the summary
 // bar: a stale receiver counts as "incomplete", labelled "stale".
@@ -44,8 +68,25 @@ export function DashboardPage() {
   // Polling only runs while the live status socket is down.
   const poll = usePoll<JobSnapshot>("/api/status", 2000, !live.live);
   const receiverPoll = usePoll<ReceiverSnapshot>("/api/receivers", 2000, !live.live);
-  const jobs = live.live ? live.jobs : poll.data;
-  const receivers = live.live ? live.receivers : receiverPoll.data;
+  const localJobs = live.live ? live.jobs : poll.data;
+  const localReceivers = live.live ? live.receivers : receiverPoll.data;
+
+  const meta = useMeta();
+  const [backends] = useRemoteBackends();
+  const remotes = useRemoteStatus(backends);
+  const [remotesOpen, setRemotesOpen] = useState(false);
+
+  // With remote backends configured, every job and receiver is tagged with
+  // the instance it came from; the summary tiles count across all of them.
+  const localName = backends.length ? meta?.instanceName || "this instance" : undefined;
+  const jobs: Sourced<JobSnapshot>[] = [
+    ...localJobs.map((j) => ({ ...j, source: localName })),
+    ...remotes.flatMap((r) => r.jobs.map((j) => ({ ...j, source: r.name, remote: true }))),
+  ];
+  const receivers: Sourced<ReceiverSnapshot>[] = [
+    ...localReceivers.map((r) => ({ ...r, source: localName })),
+    ...remotes.flatMap((r) => r.receivers.map((rcv) => ({ ...rcv, source: r.name, remote: true }))),
+  ];
 
   const runs = usePermissionPoll<JobRunEventJSON>(
     "/api/job-runs",
@@ -79,7 +120,15 @@ export function DashboardPage() {
       <PageHeader
         title="Dashboard"
         subtitle="Backup jobs, their recent runs, and the receivers accepting backups from other instances."
+        action={
+          <Button size="small" variant="outlined" onClick={() => setRemotesOpen(true)}>
+            Remote backends
+          </Button>
+        }
       />
+      <RemoteBackendsDialog open={remotesOpen} onClose={() => setRemotesOpen(false)} />
+
+      {remotes.length ? <RemoteBackendsBar remotes={remotes} /> : null}
 
       <Grid container spacing={2} sx={{ mb: 3 }}>
         <Grid size={{ xs: 12, sm: 6, md: 3 }}>
@@ -134,6 +183,7 @@ export function DashboardPage() {
             caption={
               nextJob ? (
                 <>
+                  {nextJob.source ? nextJob.source + " · " : ""}
                   {nextJob.name} · {fmtTime(nextJob.next_run)}
                 </>
               ) : (

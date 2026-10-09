@@ -4,6 +4,7 @@ import type { ReceiverFile, ReceiverSnapshot } from "../api/types";
 import { StatusChip } from "./StatusChip";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { encodePathKey, fmtSize, fmtTime, hasTime } from "../lib/format";
+import { sourcedKey, type Sourced } from "../lib/status";
 import AppBar from "@mui/material/AppBar";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -24,7 +25,9 @@ import Toolbar from "@mui/material/Toolbar";
 import Typography from "@mui/material/Typography";
 
 interface ReceiversSectionProps {
-  receivers: ReceiverSnapshot[];
+  // receivers may come from several instances (see Sourced); remote ones
+  // offer no file listing, since their downloads can't work cross-origin.
+  receivers: Sourced<ReceiverSnapshot>[];
   canDownload: boolean;
 }
 
@@ -135,7 +138,7 @@ export function ReceiversCard({
   receiver,
   canDownload,
 }: {
-  receiver: ReceiverSnapshot;
+  receiver: Sourced<ReceiverSnapshot>;
   canDownload: boolean;
 }) {
   const lastSeen = hasTime(receiver.last_seen)
@@ -154,7 +157,14 @@ export function ReceiversCard({
             spacing={1}
             sx={{ alignItems: "baseline", justifyContent: "space-between", mb: 0.5 }}
           >
-            <Typography sx={{ fontWeight: 600 }}>{receiver.id}</Typography>
+            <Box sx={{ minWidth: 0 }}>
+              <Typography sx={{ fontWeight: 600 }}>{receiver.id}</Typography>
+              {receiver.source ? (
+                <Typography variant="caption" color="text.secondary">
+                  {receiver.source}
+                </Typography>
+              ) : null}
+            </Box>
             <Stack direction="row" spacing={0.5}>
               <StatusChip state={receiver.state} error={receiver.error} />
               {receiver.stale ? <StatusChip state="failed" label="stale" /> : null}
@@ -176,9 +186,11 @@ export function ReceiversCard({
               {lastSeen}
             </Typography>
           </Stack>
-          <Button size="small" variant="outlined" onClick={() => setOpenFilesFor(receiver.id)}>
-            Show files
-          </Button>
+          {receiver.remote ? null : (
+            <Button size="small" variant="outlined" onClick={() => setOpenFilesFor(receiver.id)}>
+              Show files
+            </Button>
+          )}
         </CardContent>
       </Card>
       <FileListDialog
@@ -221,7 +233,7 @@ export function ReceiversSection({ receivers, canDownload }: ReceiversSectionPro
       <Grid container spacing={2}>
         {receivers.map((rcv) => {
           return (
-            <Grid key={rcv.id} size={{ xs: 12, sm: 6, md: 4 }}>
+            <Grid key={sourcedKey(rcv.source, rcv.id)} size={{ xs: 12, sm: 6, md: 4 }}>
               <ReceiversCard receiver={rcv} canDownload={canDownload} />
             </Grid>
           );

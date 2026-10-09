@@ -74,6 +74,39 @@ async function publicJSON<T>(url: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+// remoteFetchJSON GETs path from another instance (see lib/remoteBackends)
+// with that instance's API token — never this instance's SSO token. A
+// network failure, which is also how a browser reports a CORS refusal,
+// rejects with a TypeError rather than an ApiError.
+export async function remoteFetchJSON<T>(
+  backend: { url: string; token: string },
+  path: string,
+): Promise<T> {
+  const res = await fetch(backend.url + path, {
+    headers: { Authorization: "Bearer " + backend.token },
+  });
+  if (!res.ok) throw await errorFrom(res, `request failed: ${res.status}`);
+
+  return (await res.json()) as T;
+}
+
+// remoteErrorMessage turns a remoteFetchJSON failure into something an
+// operator can act on.
+export function remoteErrorMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.status === 401) return "API token rejected (invalid, revoked or expired)";
+    return `${err.status}: ${err.message}`;
+  }
+  if (err instanceof TypeError) {
+    return `unreachable, or this origin (${window.location.origin}) is not in the remote's webui.cors-get-origins`;
+  }
+
+  return String(err);
+}
+
+export const fetchRemoteMeta = (backend: { url: string }) =>
+  publicJSON<MetaJSON>(backend.url + "/api/meta");
+
 export const fetchMeta = () => publicJSON<MetaJSON>("/api/meta");
 export const fetchSSOStatus = () => publicJSON<SSOStatusJSON>("/api/sso/status");
 export const fetchMe = () => apiFetchJSON<MeJSON>("/api/me");
