@@ -171,6 +171,14 @@ servers:
 #   # holds a valid bearer token for this instance.
 #   dev-mode: true
 #
+#   # receivers-base-dir is the directory every receiver path set from the
+#   # web UI (Receiver settings) must lie inside, so a dashboard admin can't
+#   # point a receiver at an arbitrary location on this machine; symlinks
+#   # leading outside it are rejected too. Must be absolute. Unset (the
+#   # default) leaves the web UI unable to create receivers or change their
+#   # path (other fields can still be edited).
+#   receivers-base-dir: /mnt/remote-backups
+#
 #   # oidc configures single sign-on via an OpenID Connect provider
 #   # (Keycloak, Authentik, Okta, ...). The dashboard itself is the OIDC
 #   # client: a public client running authorization code + PKCE in the
@@ -225,12 +233,14 @@ jobs:
     # armor: false
     # gpg-bin: gpg
     # gpg-homedir: ""
-    # failure-notifications (optional) names notifications: entries (see
-    # notifications: below) to fire whenever this job's run ends in an
-    # error on any target — every target failing or just some. Accepts the
-    # {job}, {error}, {state} ("failed" or "incomplete"), {duration},
-    # {started_at} (RFC 3339), and {server_name} placeholders in a
-    # notification's webhook.body/email.subject/email.body.
+    # failure-notifications (optional) names notifications (by id, as
+    # managed in the web UI — see notifications: below) to fire whenever
+    # this job's run ends in an error on any target — every target failing
+    # or just some. An id that doesn't exist is logged at startup and
+    # skipped when firing. Accepts the {job}, {error}, {state} ("failed"
+    # or "incomplete"), {duration}, {started_at} (RFC 3339), and
+    # {server_name} placeholders in a notification's
+    # webhook.body/email.subject/email.body.
     # failure-notifications: [pagerduty]
     interval: 6h # this job repeats every 6h; go-backup-tool keeps running instead of exiting
     # start-time: "2026-01-01T03:00:00Z" # anchors the repeat grid: with
@@ -281,18 +291,26 @@ jobs:
     # no interval: this job runs once and doesn't repeat, even though
     # "database" above keeps the whole process alive
 
-# receivers: configures this instance's own receiver API — the destination
-# side of another go-backup-tool instance's type: remote target above. Only
-# reachable when webui.enabled: true is set (the receiver API is served by
-# the same HTTP server as the dashboard). Each entry's id is what a
-# sender's target names as its bucket; public-key must be the sending
-# instance's own public key — the contents of that instance's
-# ./data/keys/server.pub (see "sibling-instance" above) — so this instance
-# can verify the JSON Web Token every request from it is signed with,
-# instead of a shared secret; path is the root directory incoming objects
-# for this id are written under (object ends up at path/key, mirroring a
-# local server's path/bucket/key); retention (optional, same syntax as a
-# local server's) deletes objects here once they're older than that.
+# receivers: is DEPRECATED. Receivers — the destination side of another
+# go-backup-tool instance's type: remote target above — are managed in the
+# web UI now (Receiver settings, admin only), stored in the state db, and
+# take effect immediately without a restart. Any receivers: entries still
+# listed here are imported into the state db once at startup (an id already
+# stored is left alone, so web UI edits win) and a warning is logged; remove
+# the section once imported. The receiver API is only reachable when
+# webui.enabled: true is set (it's served by the same HTTP server as the
+# dashboard), and receiver paths set from the web UI must lie inside
+# webui.receivers-base-dir: (see webui: above).
+#
+# Each receiver's id is what a sender's target names as its bucket;
+# public-key must be the sending instance's own public key — the contents
+# of that instance's ./data/keys/server.pub (see "sibling-instance" above) —
+# so this instance can verify the JSON Web Token every request from it is
+# signed with, instead of a shared secret; path is the root directory
+# incoming objects for this id are written under (object ends up at
+# path/key, mirroring a local server's path/bucket/key); retention
+# (optional, same syntax as a local server's) deletes objects here once
+# they're older than that.
 #
 # stale-after and stale-notifications (optional, set together) monitor this
 # receiver for a sender that's stopped showing up: once at least one file has
@@ -331,8 +349,10 @@ jobs:
 # last one; go-backup-tool warns at startup if a repeating job's key has no
 # {time} placeholder at all.
 
-# smtp: is the outgoing mail server used by any notifications: entry below
-# with an email: block. Omit entirely if no notification uses email.
+# smtp: is the outgoing mail server used by any notification with an email
+# channel (see notifications: below). It stays in this file — it isn't
+# configurable in the web UI — and changing it needs a restart. Omit
+# entirely if no notification uses email.
 # smtp:
 #   host: "smtp.example.com"
 #   # port: 587 # default 587, or 465 if security: tls
@@ -350,6 +370,16 @@ jobs:
 #   # never encrypts, for a trusted local relay only.
 #   security: starttls
 
+# notifications: is DEPRECATED. Notifications are managed in the web UI now
+# (Settings > Notifications, admin only), stored in the state db, and edits
+# apply immediately without a restart. Any entries still listed here are
+# imported into the state db once at startup (an id already stored is left
+# alone, so web UI edits win) and a warning is logged; remove the section
+# once imported. A notification can't be deleted in the web UI while a job,
+# receiver, or the report still references it. Webhook header values are
+# write-only there: they're never shown again after saving. The format
+# below is what the import reads.
+#
 # notifications: are named, reusable webhook/email destinations, referenced
 # by id from report.notifications: below and a receivers: entry's
 # stale-notifications:/download-notifications: above. Each entry needs at
@@ -421,6 +451,12 @@ jobs:
 #   - id: resolve-oncall
 #     cmd: "curl -fsS -X POST https://events.example.com/resolve -d \"target=$GBT_TARGET&failures=$GBT_CONSECUTIVE_FAILURES\""
 
+# report: is DEPRECATED. The report is configured in the web UI now
+# (Settings > Report, admin only), stored in the state db, and a changed
+# schedule applies immediately. A report: section still here is imported
+# into the state db once, only if none is stored yet, and a warning is
+# logged; remove it once imported.
+#
 # report: configures an optional summary of this instance's receiver
 # activity: how many files each configured receivers: entry received since
 # the previous report, any receiver API errors, and any receiver currently

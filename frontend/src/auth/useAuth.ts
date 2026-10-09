@@ -23,6 +23,11 @@ export interface AuthState {
   canRetry: boolean;
   // canManageTokens mirrors the server's admin gate on /api/tokens.
   canManageTokens: boolean;
+  // canManageReceivers mirrors the server's admin gate on /api/receiver-configs.
+  canManageReceivers: boolean;
+  // canManageSettings mirrors the server's admin gate on
+  // /api/notification-configs and /api/report-config.
+  canManageSettings: boolean;
   canViewLoginLog: boolean;
   canViewDownloadLog: boolean;
   canViewJobRunLog: boolean;

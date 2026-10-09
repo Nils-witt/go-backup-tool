@@ -3,8 +3,10 @@ package backup
 import (
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -315,4 +317,102 @@ func (s *ReceiverStatusStore) Snapshot() []ReceiverSnapshot {
 	}
 
 	return out
+}
+
+// Upsert adds recv to the store as an idle entry, or — for an id already
+// present — updates its configured Path/Retention while keeping its live
+// state, so a receiver created or edited in the web UI shows up on the
+// dashboard immediately.
+func (s *ReceiverStatusStore) Upsert(recv config.ResolvedReceiver) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	defer s.notifyLocked()
+
+	if r, ok := s.byID[recv.ID]; ok {
+		r.Path = recv.Path
+		r.Retention = intervalString(recv.Retention)
+
+		return
+	}
+
+	s.byID[recv.ID] = &ReceiverSnapshot{ID: recv.ID, Path: recv.Path, Retention: intervalString(recv.Retention), State: StateIdle}
+	s.order = append(s.order, recv.ID)
+	sort.Strings(s.order)
+}
+
+// Remove drops receiver id from the store, a no-op if it isn't present.
+func (s *ReceiverStatusStore) Remove(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	defer s.notifyLocked()
+
+	if _, ok := s.byID[id]; !ok {
+		return
+	}
+
+	delete(s.byID, id)
+	s.order = slices.DeleteFunc(s.order, func(o string) bool { return o == id })
+}
+
+// ReceiverRegistry holds every receiver this instance currently accepts
+// objects into, keyed by id. It's shared by the receiver API, the
+// dashboard, the stale/retention monitors, and the report, and changes at
+// runtime as receivers are created, edited, or deleted in the web UI (see
+// receiver.Manager), so every reader looks receivers up here per use rather
+// than holding on to its own copy. Safe for concurrent use.
+type ReceiverRegistry struct {
+	mu   sync.RWMutex
+	byID map[string]config.ResolvedReceiver
+}
+
+// NewReceiverRegistry builds a registry holding receivers (copied).
+func NewReceiverRegistry(receivers map[string]config.ResolvedReceiver) *ReceiverRegistry {
+	return &ReceiverRegistry{byID: maps.Clone(receivers)}
+}
+
+// Get returns receiver id, reporting false if there is none. A nil
+// registry holds no receivers.
+func (r *ReceiverRegistry) Get(id string) (config.ResolvedReceiver, bool) {
+	if r == nil {
+		return config.ResolvedReceiver{}, false
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	recv, ok := r.byID[id]
+
+	return recv, ok
+}
+
+// Snapshot returns a copy of every receiver, keyed by id.
+func (r *ReceiverRegistry) Snapshot() map[string]config.ResolvedReceiver {
+	if r == nil {
+		return nil
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return maps.Clone(r.byID)
+}
+
+// Put adds recv, replacing any existing receiver with the same id.
+func (r *ReceiverRegistry) Put(recv config.ResolvedReceiver) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.byID == nil {
+		r.byID = make(map[string]config.ResolvedReceiver)
+	}
+
+	r.byID[recv.ID] = recv
+}
+
+// Delete removes receiver id, a no-op if there is none.
+func (r *ReceiverRegistry) Delete(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	delete(r.byID, id)
 }

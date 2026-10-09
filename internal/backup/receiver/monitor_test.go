@@ -23,10 +23,11 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
-// staleWebhookNotifications wraps wh as the single stale-notifications:
-// entry a test's config.ResolvedReceiver fixture needs.
-func staleWebhookNotifications(wh notify.Webhook) []notify.Notification {
-	return []notify.Notification{{ID: "test", Webhook: &wh}}
+// testWebhookRegistry is a notification registry holding wh as the single
+// notification "test", for a config.ResolvedReceiver fixture whose
+// stale/download notifications are []string{"test"}.
+func testWebhookRegistry(wh notify.Webhook) *notify.Registry {
+	return notify.NewRegistry(map[string]notify.Notification{"test": {ID: "test", Webhook: &wh}})
 }
 
 // testServerIdentity builds a *backup.ServerIdentity backed by a freshly
@@ -160,7 +161,7 @@ func TestStaleReceiverMonitorCheckFreshFileDoesNotFire(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "recent.gpg"), "a")
 
-	recv := config.ResolvedReceiver{ID: "a", Path: root, StaleAfter: time.Hour, StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
+	recv := config.ResolvedReceiver{ID: "a", Path: root, StaleAfter: time.Hour, StaleNotifications: []string{"test"}, Notifications: testWebhookRegistry(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
 	newStaleReceiverMonitor().check(recv, nil, discardLogger)
 
@@ -191,7 +192,7 @@ func TestStaleReceiverMonitorCheckStaleFileFires(t *testing.T) {
 		t.Fatalf("Chtimes(%q): %v", stale, err)
 	}
 
-	recv := config.ResolvedReceiver{ID: "recv-a", Path: root, StaleAfter: time.Hour, StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
+	recv := config.ResolvedReceiver{ID: "recv-a", Path: root, StaleAfter: time.Hour, StaleNotifications: []string{"test"}, Notifications: testWebhookRegistry(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
 	monitor := newStaleReceiverMonitor()
 	monitor.check(recv, nil, discardLogger)
@@ -230,7 +231,7 @@ func TestStaleReceiverMonitorCheckNeverReceivedDoesNotFire(t *testing.T) {
 
 	srv := newTestWebhookServer(t, &mu, &calls)
 
-	recv := config.ResolvedReceiver{ID: "a", Path: t.TempDir(), StaleAfter: time.Hour, StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
+	recv := config.ResolvedReceiver{ID: "a", Path: t.TempDir(), StaleAfter: time.Hour, StaleNotifications: []string{"test"}, Notifications: testWebhookRegistry(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
 	newStaleReceiverMonitor().check(recv, nil, discardLogger)
 
@@ -261,7 +262,7 @@ func TestStaleReceiverMonitorCheckRefiresAfterGapReopens(t *testing.T) {
 		t.Fatalf("Chtimes(%q): %v", f, err)
 	}
 
-	recv := config.ResolvedReceiver{ID: "a", Path: root, StaleAfter: time.Hour, StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
+	recv := config.ResolvedReceiver{ID: "a", Path: root, StaleAfter: time.Hour, StaleNotifications: []string{"test"}, Notifications: testWebhookRegistry(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
 	monitor := newStaleReceiverMonitor()
 	monitor.check(recv, nil, discardLogger)
@@ -295,7 +296,7 @@ func TestStaleReceiverMonitorCheckDisabledIsNoop(t *testing.T) {
 
 	srv := newTestWebhookServer(t, &mu, &calls)
 
-	recv := config.ResolvedReceiver{ID: "a", Path: t.TempDir(), StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})} // staleAfter left at zero
+	recv := config.ResolvedReceiver{ID: "a", Path: t.TempDir(), StaleNotifications: []string{"test"}, Notifications: testWebhookRegistry(notify.Webhook{URL: srv.URL, Method: http.MethodPost})} // staleAfter left at zero
 
 	newStaleReceiverMonitor().check(recv, nil, discardLogger)
 
@@ -349,7 +350,7 @@ func TestStaleReceiverMonitorCheckUsesCustomMethodHeadersAndBody(t *testing.T) {
 
 	recv := config.ResolvedReceiver{
 		ID: "recv-a", Path: root, StaleAfter: time.Hour,
-		StaleNotifications: staleWebhookNotifications(notify.Webhook{
+		StaleNotifications: []string{"test"}, Notifications: testWebhookRegistry(notify.Webhook{
 			URL:     srv.URL,
 			Method:  http.MethodPut,
 			Headers: map[string]string{"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer tok"},
@@ -412,7 +413,7 @@ func TestStaleReceiverMonitorCheckDefaultContentTypeWhenNoHeadersSet(t *testing.
 
 	recv := config.ResolvedReceiver{
 		ID: "a", Path: root, StaleAfter: time.Hour,
-		StaleNotifications: staleWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost}),
+		StaleNotifications: []string{"test"}, Notifications: testWebhookRegistry(notify.Webhook{URL: srv.URL, Method: http.MethodPost}),
 	}
 
 	newStaleReceiverMonitor().check(recv, nil, discardLogger)
@@ -469,7 +470,7 @@ func TestMonitorReceiverRetentionNilDBIsNoop(t *testing.T) {
 
 	// Must return promptly rather than blocking on RunPeriodically's loop:
 	// a nil db means retention tracking is unavailable this run.
-	MonitorReceiverRetention(ctx, nil, receivers, discardLogger)
+	MonitorReceiverRetention(ctx, nil, backup.NewReceiverRegistry(receivers), discardLogger)
 }
 
 func TestMonitorReceiverRetentionNoRetentionConfiguredIsNoop(t *testing.T) {
@@ -483,7 +484,7 @@ func TestMonitorReceiverRetentionNoRetentionConfiguredIsNoop(t *testing.T) {
 
 	// Same as the nil-db case: no receiver has retention: set, so there's
 	// nothing to sweep and this must return promptly.
-	MonitorReceiverRetention(ctx, db, receivers, discardLogger)
+	MonitorReceiverRetention(ctx, db, backup.NewReceiverRegistry(receivers), discardLogger)
 }
 
 func TestSeedReceiverStatusFromState(t *testing.T) {

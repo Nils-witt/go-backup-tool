@@ -15,10 +15,11 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 )
 
-// jobFailureWebhookNotifications wraps wh as the single
-// failure-notifications: entry a test's *config.Config fixture needs.
-func jobFailureWebhookNotifications(wh notify.Webhook) []notify.Notification {
-	return []notify.Notification{{ID: "test", Webhook: &wh}}
+// testWebhookRegistry is a notification registry holding wh as the single
+// notification "test", for a job fixture whose failure-notifications are
+// []string{"test"}.
+func testWebhookRegistry(wh notify.Webhook) *notify.Registry {
+	return notify.NewRegistry(map[string]notify.Notification{"test": {ID: "test", Webhook: &wh}})
 }
 
 func TestRenderJobFailurePayload(t *testing.T) {
@@ -55,7 +56,7 @@ func TestNotifyJobFailureWebhookNoopWhenUnconfigured(t *testing.T) {
 
 	job := &config.Config{Name: "test"} // no FailureNotifications configured
 
-	notifyJobFailure(job, errors.New("boom"), backup.StateFailed, time.Now(), time.Second, nil, discardLogger)
+	notifyJobFailure(job, nil, errors.New("boom"), backup.StateFailed, time.Now(), time.Second, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -89,12 +90,14 @@ func TestNotifyJobFailureWebhookDefaultJSONPayload(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
+	notifications := testWebhookRegistry(notify.Webhook{URL: srv.URL, Method: http.MethodPost})
+
 	job := &config.Config{
 		Name:                 "db-backup",
-		FailureNotifications: jobFailureWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost}),
+		FailureNotifications: []string{"test"},
 	}
 
-	notifyJobFailure(job, errors.New("boom"), backup.StateIncomplete, time.Now(), time.Second, nil, discardLogger)
+	notifyJobFailure(job, notifications, errors.New("boom"), backup.StateIncomplete, time.Now(), time.Second, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -134,15 +137,17 @@ func TestNotifyJobFailureWebhookUsesCustomBody(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
+	notifications := testWebhookRegistry(notify.Webhook{
+		URL:  srv.URL,
+		Body: `{"text":"job {job} {state}: {error}"}`,
+	})
+
 	job := &config.Config{
-		Name: "db-backup",
-		FailureNotifications: jobFailureWebhookNotifications(notify.Webhook{
-			URL:  srv.URL,
-			Body: `{"text":"job {job} {state}: {error}"}`,
-		}),
+		Name:                 "db-backup",
+		FailureNotifications: []string{"test"},
 	}
 
-	notifyJobFailure(job, errors.New("boom"), backup.StateFailed, time.Now(), time.Second, nil, discardLogger)
+	notifyJobFailure(job, notifications, errors.New("boom"), backup.StateFailed, time.Now(), time.Second, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()

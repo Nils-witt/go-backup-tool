@@ -14,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/robfig/cron/v3"
-
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
@@ -1837,16 +1835,8 @@ jobs:
 
 	want := ResolvedReceiver{
 		ID: "from-primary", PublicKey: testConfigRSAPublicKey(t), Path: dir,
-		StaleAfter: 6 * time.Hour,
-		StaleNotifications: []notify.Notification{{
-			ID: "alerts",
-			Webhook: &notify.Webhook{
-				URL:     "https://alerts.example.com/hook",
-				Method:  http.MethodPut,
-				Headers: map[string]string{"Authorization": "Bearer webhook-token"},
-				Body:    `{"text":"{receiver_id} is stale"}`,
-			},
-		}},
+		StaleAfter:         6 * time.Hour,
+		StaleNotifications: []string{"alerts"},
 	}
 	if !reflect.DeepEqual(recv, want) {
 		t.Errorf("rc.Receivers[%q] = %+v, want %+v", "from-primary", recv, want)
@@ -2278,40 +2268,14 @@ jobs:
 		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	schedule, err := cron.ParseStandard("30 6 * * *")
-	if err != nil {
-		t.Fatalf("cron.ParseStandard() unexpected error: %v", err)
+	want := report.FileReport{Enabled: true, Schedule: "30 6 * * *", Notifications: []string{"ops-email"}}
+	if !reflect.DeepEqual(rc.FileReport, want) {
+		t.Errorf("rc.FileReport = %+v, want %+v", rc.FileReport, want)
 	}
 
-	// report.ResolveSettings pins every schedule to UTC.
-	spec, ok := schedule.(*cron.SpecSchedule)
-	if !ok {
-		t.Fatalf("cron.ParseStandard() = %T, want *cron.SpecSchedule", schedule)
-	}
-
-	spec.Location = time.UTC
-
-	want := report.Settings{
-		Enabled:  true,
-		Schedule: schedule,
-		Notifications: []notify.Notification{{
-			ID: "ops-email",
-			Email: &notify.Email{
-				To:   []string{"ops@example.com"},
-				From: "backups@example.com",
-				SMTP: notify.SMTPSettings{
-					Host:     "smtp.example.com",
-					Port:     2525,
-					Username: "backups@example.com",
-					Password: "s3cr3t",
-					Security: notify.SMTPSecurityNone,
-				},
-			},
-		}},
-	}
-
-	if !reflect.DeepEqual(rc.Report, want) {
-		t.Errorf("rc.Report = %+v, want %+v", rc.Report, want)
+	wantSMTP := notify.SMTPSettings{Host: "smtp.example.com", Port: 2525, Username: "backups@example.com", Password: "s3cr3t", Security: notify.SMTPSecurityNone}
+	if rc.SMTP != wantSMTP {
+		t.Errorf("rc.SMTP = %+v, want %+v", rc.SMTP, wantSMTP)
 	}
 }
 
@@ -2336,8 +2300,8 @@ jobs:
 		t.Fatalf("ParseFlags() unexpected error: %v", err)
 	}
 
-	if rc.Report.Enabled {
-		t.Error("rc.Report.Enabled = true, want false (report: not configured)")
+	if rc.FileReport.Enabled {
+		t.Error("rc.FileReport.Enabled = true, want false (report: not configured)")
 	}
 }
 
@@ -2369,9 +2333,9 @@ jobs:
 // TestParseFlagsNotificationSharedAcrossTriggers exercises the reusable
 // notifications: design end to end: one notification combining both a
 // webhook: and an email: channel, referenced by id from both a receiver's
-// stale-notifications: and report.notifications:, confirming the same
-// resolved notify.Notification is reused rather than re-parsed per
-// reference.
+// stale-notifications: and report.notifications:, confirming both keep
+// the id (resolved against the live registry at fire time) and the
+// notification itself resolves with both channels.
 func TestParseFlagsNotificationSharedAcrossTriggers(t *testing.T) {
 	t.Parallel()
 
@@ -2434,12 +2398,21 @@ jobs:
 		},
 	}
 
-	if !reflect.DeepEqual(recv.StaleNotifications, []notify.Notification{want}) {
-		t.Errorf("recv.StaleNotifications = %+v, want [%+v]", recv.StaleNotifications, want)
+	if len(rc.FileNotifications) != 1 {
+		t.Fatalf("rc.FileNotifications = %+v, want just ops", rc.FileNotifications)
 	}
 
-	if !reflect.DeepEqual(rc.Report.Notifications, []notify.Notification{want}) {
-		t.Errorf("rc.Report.Notifications = %+v, want [%+v]", rc.Report.Notifications, want)
+	got, err := notify.ResolveNotification(rc.FileNotifications[0], rc.SMTP, rc.GPG)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("ResolveNotification(ops) = %+v, %v, want %+v", got, err, want)
+	}
+
+	if !reflect.DeepEqual(recv.StaleNotifications, []string{"ops"}) {
+		t.Errorf("recv.StaleNotifications = %+v, want [ops]", recv.StaleNotifications)
+	}
+
+	if !reflect.DeepEqual(rc.FileReport.Notifications, []string{"ops"}) {
+		t.Errorf("rc.FileReport.Notifications = %+v, want [ops]", rc.FileReport.Notifications)
 	}
 }
 
@@ -2543,10 +2516,7 @@ jobs:
 
 	job := singleJob(t, rc)
 
-	want := []notify.Notification{{
-		ID:      "ops-email",
-		Webhook: &notify.Webhook{URL: "https://alerts.example.com/hook", Method: http.MethodPost},
-	}}
+	want := []string{"ops-email"}
 	if !reflect.DeepEqual(job.FailureNotifications, want) {
 		t.Errorf("job.FailureNotifications = %+v, want %+v", job.FailureNotifications, want)
 	}
@@ -2598,15 +2568,19 @@ jobs:
 
 	inherits, overrides := rc.Jobs[0], rc.Jobs[1]
 
-	if len(inherits.FailureNotifications) != 1 || inherits.FailureNotifications[0].ID != "shared" {
+	if len(inherits.FailureNotifications) != 1 || inherits.FailureNotifications[0] != "shared" {
 		t.Errorf("inherits.FailureNotifications = %+v, want the shared default [shared]", inherits.FailureNotifications)
 	}
 
-	if len(overrides.FailureNotifications) != 1 || overrides.FailureNotifications[0].ID != "override" {
+	if len(overrides.FailureNotifications) != 1 || overrides.FailureNotifications[0] != "override" {
 		t.Errorf("overrides.FailureNotifications = %+v, want the per-job override [override]", overrides.FailureNotifications)
 	}
 }
 
+// TestParseFlagsJobUnknownFailureNotificationID checks an unknown
+// failure-notifications id isn't a parse error: notifications live in the
+// state db, so ids are checked at startup (see settings.Manager.Load) and
+// skipped when firing.
 func TestParseFlagsJobUnknownFailureNotificationID(t *testing.T) {
 	t.Parallel()
 
@@ -2624,9 +2598,13 @@ jobs:
     failure-notifications: [nope]
 `)
 
-	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "unknown notification id") {
-		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "unknown notification id")
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("ParseFlags() unexpected error: %v", err)
+	}
+
+	if job := singleJob(t, rc); !reflect.DeepEqual(job.FailureNotifications, []string{"nope"}) {
+		t.Errorf("job.FailureNotifications = %+v, want [nope]", job.FailureNotifications)
 	}
 }
 

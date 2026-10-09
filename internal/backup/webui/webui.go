@@ -31,6 +31,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
+	"nilswitt.dev/go-backup-tool/internal/backup/settings"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 	"nilswitt.dev/go-backup-tool/internal/version"
 )
@@ -51,7 +52,7 @@ type Server struct {
 // StartWebUI starts the -listen web UI dashboard and returns a Server the
 // caller can shut down with Server.Shutdown. Returns nil if the server
 // fails to start.
-func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Config, runner *pipeline.Runner, receivers map[string]config.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store, logs *LogRingBuffer, oidcSettings config.OIDCSettings, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, instanceName string, registerExtraRoutes func(*http.ServeMux), queue *notify.Queue) *Server {
+func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Config, runner *pipeline.Runner, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, receiverManager *receiver.Manager, settingsManager *settings.Manager, log *slog.Logger, db *store.Store, logs *LogRingBuffer, oidcSettings config.OIDCSettings, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, instanceName string, registerExtraRoutes func(*http.ServeMux), queue *notify.Queue) *Server {
 	jobsByName := make(map[string]*config.Config, len(jobs))
 	for _, j := range jobs {
 		jobsByName[j.Name] = j
@@ -128,6 +129,16 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 	mux.HandleFunc("GET /api/tokens", admin(handleListAPITokens(tokens, log)))
 	mux.HandleFunc("POST /api/tokens", admin(handleCreateAPIToken(tokens, log)))
 	mux.HandleFunc("DELETE /api/tokens/{id}", admin(handleRevokeAPIToken(tokens, log)))
+	mux.HandleFunc("GET /api/receiver-configs", admin(handleListReceiverConfigs(receiverManager, log)))
+	mux.HandleFunc("POST /api/receiver-configs", admin(handleCreateReceiverConfig(receiverManager, log)))
+	mux.HandleFunc("PUT /api/receiver-configs/{id}", admin(handleUpdateReceiverConfig(receiverManager, log)))
+	mux.HandleFunc("DELETE /api/receiver-configs/{id}", admin(handleDeleteReceiverConfig(receiverManager, log)))
+	mux.HandleFunc("GET /api/notification-configs", admin(handleListNotificationConfigs(settingsManager, log)))
+	mux.HandleFunc("POST /api/notification-configs", admin(handleCreateNotificationConfig(settingsManager, log)))
+	mux.HandleFunc("PUT /api/notification-configs/{id}", admin(handleUpdateNotificationConfig(settingsManager, log)))
+	mux.HandleFunc("DELETE /api/notification-configs/{id}", admin(handleDeleteNotificationConfig(settingsManager, log)))
+	mux.HandleFunc("GET /api/report-config", admin(handleGetReportConfig(settingsManager, log)))
+	mux.HandleFunc("PUT /api/report-config", admin(handleUpdateReportConfig(settingsManager, log)))
 
 	if registerExtraRoutes != nil {
 		registerExtraRoutes(mux)
@@ -389,7 +400,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 // annotated with each receiver's live staleness (see
 // annotateReceiverStaleness) for any entry in receivers with stale-after:
 // set.
-func handleReceiverStatus(receivers map[string]config.ResolvedReceiver, store *backup.ReceiverStatusStore, log *slog.Logger) http.HandlerFunc {
+func handleReceiverStatus(receivers *backup.ReceiverRegistry, store *backup.ReceiverStatusStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, receiverSnapshots(receivers, store, log))
 	}
@@ -398,11 +409,12 @@ func handleReceiverStatus(receivers map[string]config.ResolvedReceiver, store *b
 // receiverSnapshots returns store's current receiver statuses, each
 // annotated with its live staleness (see annotateReceiverStaleness). Shared
 // by handleReceiverStatus and the live status WebSocket (see handleLive).
-func receiverSnapshots(receivers map[string]config.ResolvedReceiver, store *backup.ReceiverStatusStore, log *slog.Logger) []backup.ReceiverSnapshot {
+func receiverSnapshots(receivers *backup.ReceiverRegistry, store *backup.ReceiverStatusStore, log *slog.Logger) []backup.ReceiverSnapshot {
 	snapshots := store.Snapshot()
 
 	for i := range snapshots {
-		annotateReceiverStaleness(&snapshots[i], receivers[snapshots[i].ID], log)
+		recv, _ := receivers.Get(snapshots[i].ID)
+		annotateReceiverStaleness(&snapshots[i], recv, log)
 	}
 
 	return snapshots
@@ -419,7 +431,7 @@ type identityJSON struct {
 // handleIdentity serves GET /api/identity: this instance's persistent UUID
 // and PEM-encoded public key (see serverIdentity), for the dashboard's
 // "Server identity" section — an operator reads them off there to fill in a
-// receiving instance's matching receivers: entry (id: and public-key:)
+// receiving instance's matching receiver (its sender public key, in Receiver settings)
 // rather than digging through this instance's keys-dir: on disk. identity
 // nil (loadServerIdentityAtStartup failed at startup, or the receiver API
 // isn't used by any type: remote target) serves a zero-value identityJSON,
@@ -507,7 +519,7 @@ func annotateReceiverStaleness(snap *backup.ReceiverSnapshot, recv config.Resolv
 // the web UI dashboard's per-receiver file listing. Unlike the receiver API
 // (HandleReceiveObject/HandleDeleteObject), this is dashboard-only and isn't
 // JWT-authenticated, matching /api/receivers.
-func handleReceiverFiles(receivers map[string]config.ResolvedReceiver, log *slog.Logger) http.HandlerFunc {
+func handleReceiverFiles(receivers *backup.ReceiverRegistry, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := lookupReceiver(w, r, receivers)
 		if !ok {
@@ -529,8 +541,8 @@ func handleReceiverFiles(receivers map[string]config.ResolvedReceiver, log *slog
 // lookupReceiver returns the receiver named by r's {id} path value, writing
 // a 404 and reporting ok as false if it's unknown. Shared by
 // handleReceiverFiles and handleDownloadFile.
-func lookupReceiver(w http.ResponseWriter, r *http.Request, receivers map[string]config.ResolvedReceiver) (config.ResolvedReceiver, bool) {
-	recv, ok := receivers[r.PathValue("id")]
+func lookupReceiver(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry) (config.ResolvedReceiver, bool) {
+	recv, ok := receivers.Get(r.PathValue("id"))
 	if !ok {
 		http.Error(w, "unknown receiver id", http.StatusNotFound)
 	}
@@ -901,7 +913,7 @@ type ticketJSON struct {
 // dashboard's JS calls this — with its Authorization: Bearer header — right
 // before navigating the browser to the matching GET, which can't carry that
 // header itself (see handleDownloadFile).
-func handleMintDownloadTicket(receivers map[string]config.ResolvedReceiver, tickets *downloadTicketStore) http.HandlerFunc {
+func handleMintDownloadTicket(receivers *backup.ReceiverRegistry, tickets *downloadTicketStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := lookupReceiver(w, r, receivers)
 		if !ok {
@@ -945,7 +957,7 @@ func handleMintDownloadTicket(receivers map[string]config.ResolvedReceiver, tick
 // section (see handleDownloadEvents); a write failure there is only logged,
 // not surfaced to the browser, mirroring recordLogin's own tolerance for a
 // login log write failure.
-func handleDownloadFile(receivers map[string]config.ResolvedReceiver, log *slog.Logger, db *store.Store, tickets *downloadTicketStore, trustProxyHeaders bool, queue *notify.Queue) http.HandlerFunc {
+func handleDownloadFile(receivers *backup.ReceiverRegistry, log *slog.Logger, db *store.Store, tickets *downloadTicketStore, trustProxyHeaders bool, queue *notify.Queue) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := lookupReceiver(w, r, receivers)
 		if !ok {

@@ -42,8 +42,8 @@ export function IdentitySection() {
           UUID: <Box component="code">{identity.uuid}</Box>
         </Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-          Public key — paste into a receiving instance's <code>receivers:</code> entry as{" "}
-          <code>public-key:</code>:
+          Public key — paste into the receiving instance's Receiver settings as the sender public
+          key:
         </Typography>
         <Box
           component="pre"

@@ -5,6 +5,8 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -166,7 +168,7 @@ func TestBuildReceiversStaleAfterAndNotifications(t *testing.T) {
 	pemText, pub := testReceiverPublicKeyPEM(t)
 
 	pagerduty := testNotification("pagerduty", "https://example.com/hook")
-	notifications := map[string]notify.Notification{"pagerduty": pagerduty}
+	notifications := notify.NewRegistry(map[string]notify.Notification{"pagerduty": pagerduty})
 
 	receivers, err := buildReceivers([]FileReceiver{
 		{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h", StaleNotifications: []string{"pagerduty"}},
@@ -178,7 +180,8 @@ func TestBuildReceiversStaleAfterAndNotifications(t *testing.T) {
 	want := ResolvedReceiver{
 		ID: "a", PublicKey: pub, Path: "/mnt/a",
 		StaleAfter:         6 * time.Hour,
-		StaleNotifications: []notify.Notification{pagerduty},
+		StaleNotifications: []string{"pagerduty"},
+		Notifications:      notifications,
 	}
 
 	if got := receivers["a"]; !reflect.DeepEqual(got, want) {
@@ -203,7 +206,7 @@ func TestBuildReceiversNotificationsRequireStaleAfter(t *testing.T) {
 	pemText, _ := testReceiverPublicKeyPEM(t)
 
 	pagerduty := testNotification("pagerduty", "https://example.com/hook")
-	notifications := map[string]notify.Notification{"pagerduty": pagerduty}
+	notifications := notify.NewRegistry(map[string]notify.Notification{"pagerduty": pagerduty})
 
 	_, err := buildReceivers([]FileReceiver{
 		{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleNotifications: []string{"pagerduty"}},
@@ -220,7 +223,7 @@ func TestBuildReceiversUnknownStaleNotificationID(t *testing.T) {
 
 	_, err := buildReceivers([]FileReceiver{
 		{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h", StaleNotifications: []string{"nope"}},
-	}, nil, "")
+	}, notify.NewRegistry(nil), "")
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for unknown stale-notifications id, got nil")
 	}
@@ -232,7 +235,7 @@ func TestBuildReceiversDownloadNotificationsIndependentOfStaleAfter(t *testing.T
 	pemText, pub := testReceiverPublicKeyPEM(t)
 
 	slack := testNotification("slack", "https://example.com/downloaded")
-	notifications := map[string]notify.Notification{"slack": slack}
+	notifications := notify.NewRegistry(map[string]notify.Notification{"slack": slack})
 
 	receivers, err := buildReceivers([]FileReceiver{
 		{ID: "a", PublicKey: pemText, Path: "/mnt/a", DownloadNotifications: []string{"slack"}},
@@ -243,7 +246,8 @@ func TestBuildReceiversDownloadNotificationsIndependentOfStaleAfter(t *testing.T
 
 	want := ResolvedReceiver{
 		ID: "a", PublicKey: pub, Path: "/mnt/a",
-		DownloadNotifications: []notify.Notification{slack},
+		DownloadNotifications: []string{"slack"},
+		Notifications:         notifications,
 	}
 
 	if got := receivers["a"]; !reflect.DeepEqual(got, want) {
@@ -258,7 +262,7 @@ func TestBuildReceiversDownloadAndStaleNotificationsCoexist(t *testing.T) {
 
 	pagerduty := testNotification("pagerduty", "https://example.com/stale")
 	slack := testNotification("slack", "https://example.com/downloaded")
-	notifications := map[string]notify.Notification{"pagerduty": pagerduty, "slack": slack}
+	notifications := notify.NewRegistry(map[string]notify.Notification{"pagerduty": pagerduty, "slack": slack})
 
 	receivers, err := buildReceivers([]FileReceiver{
 		{
@@ -273,11 +277,11 @@ func TestBuildReceiversDownloadAndStaleNotificationsCoexist(t *testing.T) {
 	}
 
 	got := receivers["a"]
-	if len(got.StaleNotifications) != 1 || got.StaleNotifications[0].Webhook.URL != "https://example.com/stale" {
+	if !reflect.DeepEqual(got.StaleNotifications, []string{"pagerduty"}) {
 		t.Errorf("StaleNotifications = %+v, want [pagerduty]", got.StaleNotifications)
 	}
 
-	if len(got.DownloadNotifications) != 1 || got.DownloadNotifications[0].Webhook.URL != "https://example.com/downloaded" {
+	if !reflect.DeepEqual(got.DownloadNotifications, []string{"slack"}) {
 		t.Errorf("DownloadNotifications = %+v, want [slack]", got.DownloadNotifications)
 	}
 }
@@ -289,7 +293,7 @@ func TestBuildReceiversUnknownDownloadNotificationID(t *testing.T) {
 
 	_, err := buildReceivers([]FileReceiver{
 		{ID: "a", PublicKey: pemText, Path: "/mnt/a", DownloadNotifications: []string{"nope"}},
-	}, nil, "")
+	}, notify.NewRegistry(nil), "")
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for unknown download-notifications id, got nil")
 	}
@@ -368,5 +372,53 @@ func TestParseRetention(t *testing.T) {
 				t.Errorf("parseRetention(%q) = (%v, %v), want (%v, nil)", tt.in, got, err, tt.want)
 			}
 		})
+	}
+}
+
+func TestValidateReceiverPath(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	outside := t.TempDir()
+
+	if err := os.Symlink(outside, filepath.Join(base, "escape")); err != nil {
+		t.Fatalf("creating symlink: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		baseDir string
+		path    string
+		wantErr bool
+	}{
+		{"direct child", base, filepath.Join(base, "a"), false},
+		{"nested, not yet existing", base, filepath.Join(base, "a", "b", "c"), false},
+		{"base itself", base, base, true},
+		{"dot-dot escape", base, filepath.Join(base, "..", "elsewhere"), true},
+		{"sibling with shared prefix", base, base + "-other", true},
+		{"relative", base, "a/b", true},
+		{"symlink escape", base, filepath.Join(base, "escape", "x"), true},
+		{"no base dir", "", filepath.Join(base, "a"), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := ValidateReceiverPath(tt.baseDir, tt.path)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateReceiverPath(%q, %q) error = %v, wantErr %v", tt.baseDir, tt.path, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestResolveReceiverRequiresID(t *testing.T) {
+	t.Parallel()
+
+	pemText, _ := testReceiverPublicKeyPEM(t)
+
+	if _, err := ResolveReceiver(FileReceiver{ID: "  ", PublicKey: pemText, Path: "/mnt/a"}, nil, ""); err == nil {
+		t.Fatal("ResolveReceiver() expected error for blank id, got nil")
 	}
 }

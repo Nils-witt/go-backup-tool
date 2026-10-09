@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,7 +12,11 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
+
+	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	reportpkg "nilswitt.dev/go-backup-tool/internal/backup/report"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -96,7 +102,7 @@ func TestBuildReportSummarizesReceiverEvents(t *testing.T) {
 		"recv-c": {ID: "recv-c"}, // no events at all in the window
 	}}
 
-	report := buildReport(ctx, rc, db, start, end, discardLogger)
+	report := buildReport(ctx, rc, rc.Receivers, db, start, end, discardLogger)
 
 	if len(report.receivers) != 3 {
 		t.Fatalf("report.receivers = %+v, want 3 entries (one per configured receiver)", report.receivers)
@@ -167,7 +173,7 @@ func TestBuildReportSummarizesJobRuns(t *testing.T) {
 		{Name: "job-b"}, // no runs at all in the window
 	}}
 
-	report := buildReport(ctx, rc, db, start, end, discardLogger)
+	report := buildReport(ctx, rc, rc.Receivers, db, start, end, discardLogger)
 
 	if len(report.jobs) != 2 {
 		t.Fatalf("report.jobs = %+v, want 2 entries (one per configured job)", report.jobs)
@@ -221,7 +227,7 @@ func TestBuildReportDetectsStaleReceiver(t *testing.T) {
 	}}
 
 	now := time.Now()
-	report := buildReport(ctx, rc, nil, now.Add(-24*time.Hour), now, discardLogger)
+	report := buildReport(ctx, rc, rc.Receivers, nil, now.Add(-24*time.Hour), now, discardLogger)
 
 	if len(report.stale) != 1 || report.stale[0].id != "stale" {
 		t.Errorf("report.stale = %+v, want only \"stale\" (fresh isn't stale, never has nothing to be stale)", report.stale)
@@ -336,5 +342,47 @@ func TestRenderReportSubjectServerName(t *testing.T) {
 	want := "[primary-backup-host] report"
 	if got != want {
 		t.Errorf("renderReportSubject() = %q, want %q", got, want)
+	}
+}
+
+// TestRunReportLoopPicksUpSettingsChanges checks the loop idles while the
+// report is disabled and starts sending as soon as it's enabled through
+// report.Live — the web UI path — without a restart.
+func TestRunReportLoopPicksUpSettingsChanges(t *testing.T) {
+	t.Parallel()
+
+	sent := make(chan struct{}, 10)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		sent <- struct{}{}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	notifications := notify.NewRegistry(map[string]notify.Notification{"hook": {ID: "hook", Webhook: &notify.Webhook{URL: srv.URL, Method: http.MethodPost}}})
+	live := reportpkg.NewLive(reportpkg.Settings{})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	go RunReportLoop(ctx, &config.RunConfig{}, live, notifications, backup.NewReceiverRegistry(nil), nil, nil, discardLogger)
+
+	select {
+	case <-sent:
+		t.Fatal("report sent while disabled")
+	case <-time.After(1500 * time.Millisecond):
+	}
+
+	settings, err := reportpkg.ResolveSettings(reportpkg.FileReport{Enabled: true, Schedule: "@every 1s", Notifications: []string{"hook"}}, notifications)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	live.Set(settings)
+
+	select {
+	case <-sent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no report sent after enabling it")
 	}
 }

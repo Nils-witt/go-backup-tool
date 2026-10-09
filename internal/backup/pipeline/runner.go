@@ -26,7 +26,11 @@ type Runner struct {
 	stateDB  *store.Store             // nil only if the db couldn't be opened
 	identity *identity.ServerIdentity // nil if loadServerIdentity failed at startup; see Config.Identity
 	queue    *notify.Queue            // retries a failed job-failure email later; see notify.SendMailQueued
-	failed   atomic.Bool
+
+	// notifications is the live registry jobs' failure-notifications ids
+	// are looked up in when a run fails (see notifyJobFailure).
+	notifications *notify.Registry
+	failed        atomic.Bool
 
 	// targetFailureMu guards targetFailures, the in-memory (not persisted)
 	// consecutive-failure streak per (job, target) — reset to 0 on any
@@ -51,8 +55,8 @@ type targetKey struct {
 
 // NewRunner builds a Runner sharing store/stateDB/identity/queue across
 // every job scheduled through it in this run.
-func NewRunner(log *slog.Logger, statusStore *backup.StatusStore, stateDB *store.Store, identity *identity.ServerIdentity, queue *notify.Queue) *Runner {
-	return &Runner{log: log, store: statusStore, stateDB: stateDB, identity: identity, queue: queue, targetFailures: make(map[targetKey]int)}
+func NewRunner(log *slog.Logger, statusStore *backup.StatusStore, stateDB *store.Store, identity *identity.ServerIdentity, queue *notify.Queue, notifications *notify.Registry) *Runner {
+	return &Runner{log: log, store: statusStore, stateDB: stateDB, identity: identity, queue: queue, notifications: notifications, targetFailures: make(map[targetKey]int)}
 }
 
 // Failed reports whether any job run has failed so far.
@@ -279,7 +283,7 @@ func (r *Runner) runOnce(ctx context.Context, job *config.Config) {
 			log.Error("job failed", "duration", duration, "err", config.JobError(job, err))
 		}
 
-		notifyJobFailure(job, err, state, start, duration, r.queue, log)
+		notifyJobFailure(job, r.notifications, err, state, start, duration, r.queue, log)
 		r.recordJobRun(ctx, job.Name, state, false, start, bytesWritten, config.JobError(job, err).Error())
 
 		return
@@ -364,7 +368,7 @@ func (r *Runner) RetryFailedTargets(ctx context.Context, job *config.Config, tar
 			log.Error("retry failed", "duration", duration, "err", config.JobError(job, err))
 		}
 
-		notifyJobFailure(job, err, state, start, duration, r.queue, log)
+		notifyJobFailure(job, r.notifications, err, state, start, duration, r.queue, log)
 		r.recordJobRun(ctx, job.Name, state, false, start, bytesWritten, config.JobError(job, err).Error())
 
 		return err

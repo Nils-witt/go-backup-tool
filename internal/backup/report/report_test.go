@@ -45,7 +45,7 @@ func TestResolveSettingsDefaults(t *testing.T) {
 	t.Parallel()
 
 	ops := notify.Notification{ID: "ops-email", Email: &notify.Email{To: []string{"ops@example.com"}, From: "backups@example.com"}}
-	notifications := map[string]notify.Notification{"ops-email": ops}
+	notifications := notify.NewRegistry(map[string]notify.Notification{"ops-email": ops})
 
 	cfg := FileReport{
 		Enabled:       true,
@@ -59,8 +59,8 @@ func TestResolveSettingsDefaults(t *testing.T) {
 
 	want := Settings{
 		Enabled:       true,
-		Schedule:      wantSchedule(t, defaultReportSchedule),
-		Notifications: []notify.Notification{ops},
+		Schedule:      wantSchedule(t, DefaultSchedule),
+		Notifications: []string{"ops-email"},
 	}
 
 	if !reflect.DeepEqual(got, want) {
@@ -72,7 +72,7 @@ func TestResolveSettingsExplicitSchedule(t *testing.T) {
 	t.Parallel()
 
 	ops := notify.Notification{ID: "ops-email", Email: &notify.Email{To: []string{"a@example.com"}, From: "reports@example.com"}}
-	notifications := map[string]notify.Notification{"ops-email": ops}
+	notifications := notify.NewRegistry(map[string]notify.Notification{"ops-email": ops})
 
 	cfg := FileReport{
 		Enabled:       true,
@@ -99,7 +99,7 @@ func TestResolveSettingsExplicitSchedule(t *testing.T) {
 func TestResolveSettingsDescriptorScheduleIsUTC(t *testing.T) {
 	t.Parallel()
 
-	notifications := map[string]notify.Notification{"ops-email": {ID: "ops-email", Email: &notify.Email{To: []string{"a@example.com"}}}}
+	notifications := notify.NewRegistry(map[string]notify.Notification{"ops-email": {ID: "ops-email", Email: &notify.Email{To: []string{"a@example.com"}}}})
 
 	got, err := ResolveSettings(FileReport{Enabled: true, Schedule: "@daily", Notifications: []string{"ops-email"}}, notifications)
 	if err != nil {
@@ -119,7 +119,7 @@ func TestResolveSettingsMultipleNotifications(t *testing.T) {
 
 	email := notify.Notification{ID: "ops-email", Email: &notify.Email{To: []string{"a@example.com"}, From: "reports@example.com"}}
 	webhook := notify.Notification{ID: "ops-webhook", Webhook: &notify.Webhook{URL: "https://example.com/hook", Method: "POST"}}
-	notifications := map[string]notify.Notification{"ops-email": email, "ops-webhook": webhook}
+	notifications := notify.NewRegistry(map[string]notify.Notification{"ops-email": email, "ops-webhook": webhook})
 
 	cfg := FileReport{Enabled: true, Notifications: []string{"ops-email", "ops-webhook"}}
 
@@ -128,9 +128,36 @@ func TestResolveSettingsMultipleNotifications(t *testing.T) {
 		t.Fatalf("ResolveSettings() error: %v", err)
 	}
 
-	want := []notify.Notification{email, webhook}
+	want := []string{"ops-email", "ops-webhook"}
 	if !reflect.DeepEqual(got.Notifications, want) {
 		t.Errorf("Notifications = %+v, want %+v", got.Notifications, want)
+	}
+}
+
+func TestResolveSettingsDisabledStillChecksSchedule(t *testing.T) {
+	t.Parallel()
+
+	if _, err := ResolveSettings(FileReport{Schedule: "nope"}, nil); err == nil {
+		t.Fatal("ResolveSettings() of a disabled report with a bad schedule succeeded")
+	}
+}
+
+func TestLiveSetWakesChanged(t *testing.T) {
+	t.Parallel()
+
+	live := NewLive(Settings{})
+	changed := live.Changed()
+
+	live.Set(Settings{Enabled: true})
+
+	select {
+	case <-changed:
+	default:
+		t.Fatal("Changed() not closed after Set()")
+	}
+
+	if !live.Get().Enabled {
+		t.Error("Get() after Set() = disabled, want enabled")
 	}
 }
 
@@ -138,12 +165,12 @@ func TestResolveSettingsErrors(t *testing.T) {
 	t.Parallel()
 
 	ops := notify.Notification{ID: "ops-email", Email: &notify.Email{To: []string{"a@example.com"}, From: "reports@example.com"}}
-	notifications := map[string]notify.Notification{"ops-email": ops}
+	notifications := notify.NewRegistry(map[string]notify.Notification{"ops-email": ops})
 
 	cases := []struct {
 		name          string
 		cfg           FileReport
-		notifications map[string]notify.Notification
+		notifications *notify.Registry
 		wantErrHas    string
 	}{
 		{

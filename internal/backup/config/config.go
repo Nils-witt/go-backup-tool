@@ -12,7 +12,9 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -87,13 +89,15 @@ type Config struct {
 	// parameter. "" when server-name: is unset.
 	ServerName string
 
-	// FailureNotifications names top-level notifications: entries (see
-	// notify.Build) to fire whenever this job's run ends in an error on any
-	// target — whether every target failed or just some (see
-	// pipeline.notifyJobFailure). Empty means no live notification on
-	// failure; the periodic report (see report.go) still aggregates job
-	// errors regardless of this field.
-	FailureNotifications []notify.Notification
+	// FailureNotifications names notifications (by id) to fire whenever
+	// this job's run ends in an error on any target — whether every target
+	// failed or just some (see pipeline.notifyJobFailure). They're looked up
+	// in the live notify.Registry when the job fails, so notifications
+	// managed in the web UI apply without a restart; an unknown id is logged
+	// and skipped. Empty means no live notification on failure; the
+	// periodic report (see report.go) still aggregates job errors
+	// regardless of this field.
+	FailureNotifications []string
 }
 
 // jobTargetRef is one targets: entry as written in a job: a server name
@@ -213,7 +217,31 @@ type RunConfig struct {
 	ConfigPath string // where the config file was loaded from; state db lives alongside it
 	LogLevel   slog.Level
 	LogFile    string                      // empty disables file logging; otherwise log output is also appended here
-	Receivers  map[string]ResolvedReceiver // this instance's receiver API entries, keyed by id; see receivers.go
+	Receivers  map[string]ResolvedReceiver // the config file's (deprecated) receivers: entries, keyed by id; imported into the state db at startup, see receiver.Manager
+
+	// FileReceivers are the config file's receivers: entries as written,
+	// already validated into Receivers above, kept raw so receiver.Manager
+	// can import them into the state db's receivers table, which is where
+	// every receiver lives from then on (managed in the web UI).
+	FileReceivers []FileReceiver
+
+	// FileNotifications are the config file's (deprecated) notifications:
+	// entries as written, already validated, kept raw so settings.Manager
+	// can import them into the state db, where every notification lives
+	// from then on (managed in the web UI).
+	FileNotifications []notify.FileNotification
+
+	// SMTP is the config file's resolved smtp: entry, and GPG its
+	// gpg-bin/gpg-homedir: what every email notification — including ones
+	// created in the web UI — sends and encrypts with (see
+	// notify.ResolveNotification). SMTP stays configured in the config file.
+	SMTP notify.SMTPSettings
+	GPG  notify.GPGSettings
+
+	// ReceiversBaseDir is fileWebUI.ReceiversBaseDir, cleaned: every path a
+	// receiver is given from the web UI must lie inside it (see
+	// ValidateReceiverPath). Empty means the web UI can't set receiver paths.
+	ReceiversBaseDir string
 
 	// ServerName is fileConfig.ServerName, this instance's own {server_name}
 	// notification placeholder (see fileConfig.ServerName).
@@ -251,12 +279,13 @@ type RunConfig struct {
 	// resolveOIDCSettings).
 	OIDC OIDCSettings
 
-	// Report, when its enabled field is set, sends a daily email summarizing
-	// this instance's receiver activity (files received per receiver, any
-	// errors, and any receiver currently stale) — see report.go. Independent
-	// of the web UI: a daily report is useful for anyone monitoring
-	// receivers by inbox, not just those watching the dashboard.
-	Report report.Settings
+	// FileReport is the config file's (deprecated) report: entry as
+	// written, its schedule already validated, kept raw so settings.Manager
+	// can import it into the state db, where the report's settings live
+	// from then on (managed in the web UI). The report itself — a periodic
+	// summary of receiver and job activity, see pipeline.RunReportLoop — is
+	// independent of the web UI.
+	FileReport report.FileReport
 }
 
 // OIDCSettings is runConfig's resolved form of the config file's
@@ -503,6 +532,13 @@ type fileWebUI struct {
 	// instance: it lets any website's JavaScript read API responses from a
 	// browser that also holds a valid bearer token for this instance.
 	DevMode bool `yaml:"dev-mode"`
+
+	// ReceiversBaseDir is the directory every receiver path set from the
+	// web UI must lie inside (see ValidateReceiverPath), so an admin can't
+	// point a receiver at an arbitrary location on this machine. Must be
+	// absolute. Unset leaves the web UI unable to create receivers or change
+	// their path.
+	ReceiversBaseDir string `yaml:"receivers-base-dir"`
 }
 
 // fileWebUIOIDC is the webui.oidc: entry, configuring Single Sign-On for the
@@ -606,17 +642,19 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		return nil, err
 	}
 
-	listen, oidc, err := resolveWebUISettings(fileCfg.WebUI)
+	webUI, err := resolveWebUISettings(fileCfg.WebUI)
 	if err != nil {
 		return nil, err
 	}
+
+	listen := webUI.listen
 
 	notifications, commands, err := resolveNotificationsAndCommands(fileCfg)
 	if err != nil {
 		return nil, err
 	}
 
-	jobs, err := resolveJobs(fileCfg, listen, notifications, commands)
+	jobs, err := resolveJobs(fileCfg, listen, commands)
 	if err != nil {
 		return nil, err
 	}
@@ -626,7 +664,10 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		return nil, err
 	}
 
-	receivers, err := buildReceivers(fileCfg.Receivers, notifications, fileCfg.ServerName)
+	// Notification ids are checked against the live registry at startup
+	// (see settings.Manager/receiver.Manager), not here: the config file's
+	// notifications: is deprecated and may already be gone.
+	receivers, err := buildReceivers(fileCfg.Receivers, nil, fileCfg.ServerName)
 	if err != nil {
 		return nil, err
 	}
@@ -641,8 +682,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		keysDir = identity.DefaultServerKeyDir
 	}
 
-	report, err := report.ResolveSettings(fileCfg.Report, notifications)
-	if err != nil {
+	if _, err := report.ResolveSettings(fileCfg.Report, nil); err != nil {
 		return nil, err
 	}
 
@@ -654,48 +694,65 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		LogLevel:          level,
 		LogFile:           strings.TrimSpace(fileCfg.LogFile),
 		Receivers:         receivers,
+		FileReceivers:     fileCfg.Receivers,
+		FileNotifications: fileCfg.Notifications,
+		SMTP:              notifications.smtp,
+		GPG:               notifications.gpg,
+		ReceiversBaseDir:  webUI.receiversBaseDir,
 		KeysDir:           keysDir,
 		LogViewer:         fileCfg.WebUI.LogViewer,
 		TrustProxyHeaders: fileCfg.WebUI.TrustProxyHeaders,
 		DevMode:           fileCfg.WebUI.DevMode,
-		OIDC:              oidc,
-		Report:            report,
+		OIDC:              webUI.oidc,
+		FileReport:        fileCfg.Report,
 		ServerName:        fileCfg.ServerName,
 	}, nil
 }
 
+// resolvedNotifications is what resolveNotifications derives from the
+// config file: the resolved smtp:/gpg settings every email notification
+// uses, and its (deprecated) notifications: entries, validated.
+type resolvedNotifications struct {
+	smtp notify.SMTPSettings
+	gpg  notify.GPGSettings
+	byID map[string]notify.Notification
+}
+
 // resolveNotifications resolves fileCfg's top-level smtp:/notifications:
-// entries (see notify.ResolveSMTP/notify.Build) into the id -> Notification
-// map used to resolve any of a job's failure-notifications: or a receiver's
-// stale-notifications:/download-notifications: — split out of ParseFlags to
+// entries (see notify.ResolveSMTP/notify.Build) — split out of ParseFlags to
 // keep its own cyclomatic complexity down. Encrypted notification emails use
 // the top-level gpg-bin/gpg-homedir, the same gpg and keyring as backups.
-func resolveNotifications(fileCfg *fileConfig) (map[string]notify.Notification, error) {
+func resolveNotifications(fileCfg *fileConfig) (resolvedNotifications, error) {
 	smtp, err := notify.ResolveSMTP(fileCfg.SMTP)
 	if err != nil {
-		return nil, err
+		return resolvedNotifications{}, err
 	}
 
 	gpg := notify.GPGSettings{Bin: appconfig.DefaultGPGBin}
 	applyString(&gpg.Bin, fileCfg.GPGBin)
 	applyString(&gpg.Homedir, fileCfg.GPGHomedir)
 
-	return notify.Build(fileCfg.Notifications, smtp, gpg)
+	byID, err := notify.Build(fileCfg.Notifications, smtp, gpg)
+	if err != nil {
+		return resolvedNotifications{}, err
+	}
+
+	return resolvedNotifications{smtp: smtp, gpg: gpg, byID: byID}, nil
 }
 
 // resolveNotificationsAndCommands resolves fileCfg's top-level
 // notifications: and commands: entries together, so ParseFlags only needs
 // one error check for both (keeping its own cyclomatic complexity down)
 // instead of one each.
-func resolveNotificationsAndCommands(fileCfg *fileConfig) (map[string]notify.Notification, map[string]Command, error) {
+func resolveNotificationsAndCommands(fileCfg *fileConfig) (resolvedNotifications, map[string]Command, error) {
 	notifications, err := resolveNotifications(fileCfg)
 	if err != nil {
-		return nil, nil, err
+		return resolvedNotifications{}, nil, err
 	}
 
 	commands, err := buildCommands(fileCfg.Commands)
 	if err != nil {
-		return nil, nil, err
+		return resolvedNotifications{}, nil, err
 	}
 
 	return notifications, commands, nil
@@ -760,26 +817,56 @@ func parseOnErrorCommandTimeout(s string) (time.Duration, error) {
 	return d, nil
 }
 
+// webUISettings is what ParseFlags derives from the config file's webui:
+// entry beyond a plain field copy (see resolveWebUISettings).
+type webUISettings struct {
+	listen           string
+	oidc             OIDCSettings
+	receiversBaseDir string
+}
+
 // resolveWebUISettings resolves cfg (the config file's webui: entry) into
-// its listen address (see resolveWebUIListen) and its SSO settings (see
-// resolveOIDCSettings), the two pieces of runConfig ParseFlags derives from
-// webui: that need validation beyond a plain field copy.
-func resolveWebUISettings(cfg fileWebUI) (listen string, oidc OIDCSettings, err error) {
-	listen, err = resolveWebUIListen(cfg)
+// its listen address (see resolveWebUIListen), its SSO settings (see
+// resolveOIDCSettings), and its receivers base dir (see
+// resolveReceiversBaseDir) — the pieces of runConfig ParseFlags derives
+// from webui: that need validation beyond a plain field copy.
+func resolveWebUISettings(cfg fileWebUI) (webUISettings, error) {
+	listen, err := resolveWebUIListen(cfg)
 	if err != nil {
-		return "", OIDCSettings{}, err
+		return webUISettings{}, err
 	}
 
 	if cfg.Username != "" || cfg.Password != "" {
-		return "", OIDCSettings{}, errors.New("webui.username/webui.password are no longer supported: the web UI only supports SSO login, configure webui.oidc instead")
+		return webUISettings{}, errors.New("webui.username/webui.password are no longer supported: the web UI only supports SSO login, configure webui.oidc instead")
 	}
 
-	oidc, err = resolveOIDCSettings(cfg.OIDC, listen)
+	oidc, err := resolveOIDCSettings(cfg.OIDC, listen)
 	if err != nil {
-		return "", OIDCSettings{}, err
+		return webUISettings{}, err
 	}
 
-	return listen, oidc, nil
+	baseDir, err := resolveReceiversBaseDir(cfg.ReceiversBaseDir)
+	if err != nil {
+		return webUISettings{}, err
+	}
+
+	return webUISettings{listen: listen, oidc: oidc, receiversBaseDir: baseDir}, nil
+}
+
+// resolveReceiversBaseDir validates webui.receivers-base-dir: (see
+// fileWebUI.ReceiversBaseDir), requiring an absolute path when set, and
+// returns it cleaned. Unset returns "".
+func resolveReceiversBaseDir(dir string) (string, error) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return "", nil
+	}
+
+	if !filepath.IsAbs(dir) {
+		return "", fmt.Errorf("webui.receivers-base-dir %q must be an absolute path", dir)
+	}
+
+	return filepath.Clean(dir), nil
 }
 
 // resolveOIDCSettings validates cfg (the config file's webui.oidc: entry)
@@ -959,27 +1046,25 @@ func parseLogLevel(s string) (slog.Level, error) {
 // layering fileCfg's top-level fields as shared defaults under each entry's
 // own fields, and resolving each job's targets: against fileCfg's servers:.
 // listen is the web UI's resolved effective listen address (see
-// resolveWebUIListen). notifications is the config file's already-resolved
-// top-level notifications: map (see notify.Build), used to resolve a job's
-// failure-notifications:. commands is the config file's already-resolved
+// resolveWebUIListen). commands is the config file's already-resolved
 // top-level commands: map (see buildCommands), used to resolve a target's
 // on-error.command and on-recover.command.
 //
 // An empty jobs: list is only allowed when the web UI is enabled, since that
 // still leaves the web UI (and receiver API) as a reason to run; otherwise
 // the process would start and immediately have nothing to do.
-func resolveJobs(fileCfg *fileConfig, listen string, notifications map[string]notify.Notification, commands map[string]Command) ([]*Config, error) {
+func resolveJobs(fileCfg *fileConfig, listen string, commands map[string]Command) ([]*Config, error) {
 	if len(fileCfg.Jobs) == 0 && listen == "" {
 		return nil, errors.New("config file must define at least one job under a jobs list, or set webui.enabled: true to run without any")
 	}
 
-	return buildJobsFromFile(fileCfg, notifications, commands)
+	return buildJobsFromFile(fileCfg, commands)
 }
 
 // buildJobsFromFile builds one *config per entry in fileCfg.Jobs, layering
 // fileCfg's top-level fields as defaults under each entry's own fields and
 // resolving each job's targets: against fileCfg.Servers/commands.
-func buildJobsFromFile(fileCfg *fileConfig, notifications map[string]notify.Notification, commands map[string]Command) ([]*Config, error) {
+func buildJobsFromFile(fileCfg *fileConfig, commands map[string]Command) ([]*Config, error) {
 	servers, err := buildServers(fileCfg.Servers)
 	if err != nil {
 		return nil, err
@@ -1004,11 +1089,11 @@ func buildJobsFromFile(fileCfg *fileConfig, notifications map[string]notify.Noti
 		cfg.Name = name
 		cfg.ServerName = fileCfg.ServerName
 
-		if err := applyFileJob(cfg, &fileCfg.fileJob, notifications); err != nil {
+		if err := applyFileJob(cfg, &fileCfg.fileJob); err != nil {
 			return nil, fmt.Errorf("job %q: %w", name, err)
 		}
 
-		if err := applyFileJob(cfg, &fj, notifications); err != nil {
+		if err := applyFileJob(cfg, &fj); err != nil {
 			return nil, fmt.Errorf("job %q: %w", name, err)
 		}
 
@@ -1432,10 +1517,11 @@ func newJobTargetRef(t fileJobTarget) (jobTargetRef, error) {
 
 // applyFileJob fills any field of cfg that fj sets, leaving the rest (its
 // current value, typically a built-in default or a shared top-level
-// default already applied) untouched. notifications is the config file's
-// already-resolved top-level notifications: map (see notify.Build), used to
-// resolve fj.FailureNotifications.
-func applyFileJob(cfg *Config, fj *fileJob, notifications map[string]notify.Notification) error {
+// default already applied) untouched. fj.FailureNotifications ids are
+// copied as-is: they're checked against the live notification registry at
+// startup and looked up there when the job fails (see
+// Config.FailureNotifications).
+func applyFileJob(cfg *Config, fj *fileJob) error {
 	applyString(&cfg.Cmd, fj.Cmd)
 	applyString(&cfg.Key, fj.Key)
 	applyString(&cfg.GPGBin, fj.GPGBin)
@@ -1462,12 +1548,7 @@ func applyFileJob(cfg *Config, fj *fileJob, notifications map[string]notify.Noti
 	}
 
 	if len(fj.FailureNotifications) > 0 {
-		resolved, err := resolveNotificationRefs(fj.FailureNotifications, notifications)
-		if err != nil {
-			return fmt.Errorf("failure-notifications: %w", err)
-		}
-
-		cfg.FailureNotifications = resolved
+		cfg.FailureNotifications = slices.Clone(fj.FailureNotifications)
 	}
 
 	if fj.Interval != "" {

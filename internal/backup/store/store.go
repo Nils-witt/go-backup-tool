@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 
 	glebarezsqlite "github.com/glebarez/sqlite"
@@ -76,6 +77,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		&objectModel{},
 		&loginEventModel{}, &downloadEventModel{}, &receiverEventModel{},
 		&apiTokenModel{}, &tokenSigningKeyModel{},
+		&receiverModel{}, &notificationModel{}, &reportSettingsModel{},
 	); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
@@ -97,6 +99,31 @@ func (s *Store) Close() error {
 	}
 
 	return sqlDB.Close()
+}
+
+// insertMissing inserts every one of rows whose primary key isn't taken yet,
+// in one transaction, leaving existing rows untouched, and returns the id
+// (as id reports it) of each row it inserted. Shared by the Import* methods that carry
+// the config file's deprecated sections over into the state db.
+func insertMissing[M any](ctx context.Context, db *gorm.DB, rows []M, id func(M) string) ([]string, error) {
+	var inserted []string
+
+	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, m := range rows {
+			res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&m)
+			if res.Error != nil {
+				return res.Error
+			}
+
+			if res.RowsAffected > 0 {
+				inserted = append(inserted, id(m))
+			}
+		}
+
+		return nil
+	})
+
+	return inserted, err
 }
 
 // isRecordNotFound reports whether err is GORM's "no row matched" sentinel,

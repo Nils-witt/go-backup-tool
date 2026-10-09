@@ -76,14 +76,15 @@ func renderJobFailurePayload(tmpl string, job *config.Config, jobErr error, stat
 }
 
 // notifyJobFailure sends job's just-finished failure to every one of
-// job.FailureNotifications (a no-op if there are none). Logs, rather than
+// job.FailureNotifications, looked up in notifications (a no-op if there
+// are none; an unknown id is logged and skipped). Logs, rather than
 // returns, any delivery failure: a notification delivery problem shouldn't
 // affect the run that already finished, and there's no caller waiting on
 // the result — mirrors receiver.notifyStaleReceiver/NotifyDownload's
 // fire-and-forget style. queue, if non-nil, retries a failed email later
 // instead of losing it (see notify.SendMailQueued).
-func notifyJobFailure(job *config.Config, jobErr error, state backup.RunState, start time.Time, duration time.Duration, queue *notify.Queue, log *slog.Logger) {
-	for _, n := range job.FailureNotifications {
+func notifyJobFailure(job *config.Config, notifications *notify.Registry, jobErr error, state backup.RunState, start time.Time, duration time.Duration, queue *notify.Queue, log *slog.Logger) {
+	for _, n := range notifications.Resolve(job.FailureNotifications, log, "job", job.Name) {
 		if n.Webhook != nil {
 			notifyJobFailureWebhook(job, *n.Webhook, jobErr, state, start, duration, log)
 		}

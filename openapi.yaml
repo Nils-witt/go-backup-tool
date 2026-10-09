@@ -558,6 +558,317 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /api/receiver-configs:
+    get:
+      tags: [admin]
+      summary: List stored receivers
+      operationId: listReceiverConfigs
+      description: >
+        Every receiver stored in the state db (the only source of receivers;
+        the config file's deprecated `receivers:` entries are imported once
+        at startup), as entered, plus the base directory receiver paths must
+        lie inside (`webui.receivers-base-dir`, empty if unset) and the
+        notification ids a receiver may reference. Requires the `admin`
+        permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Stored receivers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReceiverConfigList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+    post:
+      tags: [admin]
+      summary: Create a receiver
+      operationId: createReceiverConfig
+      description: >
+        Validates and stores a new receiver and activates it immediately —
+        the receiver API accepts uploads for it without a restart. `path`
+        must lie inside `webui.receivers-base-dir`. Requires the `admin`
+        permission.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReceiverConfigInput"
+      responses:
+        "201":
+          description: Receiver created
+        "400":
+          $ref: "#/components/responses/InvalidReceiver"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: A receiver with this id already exists
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+
+  /api/receiver-configs/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ReceiverId"
+    put:
+      tags: [admin]
+      summary: Update a receiver
+      operationId: updateReceiverConfig
+      description: >
+        Replaces the receiver's definition and applies it immediately. The
+        id can't be changed (a body `id`, if given, must match the path). A
+        changed `path` must lie inside `webui.receivers-base-dir`; an
+        unchanged one is kept even if it doesn't (e.g. one imported from the
+        config file). Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReceiverConfigInput"
+      responses:
+        "204":
+          description: Receiver updated
+        "400":
+          $ref: "#/components/responses/InvalidReceiver"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Unknown receiver id
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+    delete:
+      tags: [admin]
+      summary: Delete a receiver
+      operationId: deleteReceiverConfig
+      description: >
+        Removes the receiver; its sender is rejected from then on. Files
+        already received, and the receiver's history, are kept. Requires the
+        `admin` permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "204":
+          description: Receiver deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Unknown receiver id
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+
+  /api/notification-configs:
+    get:
+      tags: [admin]
+      summary: List stored notifications
+      operationId: listNotificationConfigs
+      description: >
+        Every notification stored in the state db (the only source of
+        notifications; the config file's deprecated `notifications:` is
+        imported once at startup), with what references each one and
+        whether `smtp:` (still configured in the config file) is set.
+        Webhook header values are write-only and always listed as `null`.
+        Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Stored notifications
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationConfigList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+    post:
+      tags: [admin]
+      summary: Create a notification
+      operationId: createNotificationConfig
+      description: >
+        Validates and stores a new notification; it can be referenced
+        immediately. Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NotificationConfigInput"
+      responses:
+        "201":
+          description: Notification created
+        "400":
+          $ref: "#/components/responses/InvalidSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: A notification with this id already exists
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+
+  /api/notification-configs/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Notification id.
+        schema:
+          type: string
+    put:
+      tags: [admin]
+      summary: Update a notification
+      operationId: updateNotificationConfig
+      description: >
+        Replaces the notification's channels; everything referencing it uses
+        the new definition on its next firing. The id can't be changed. A
+        webhook header sent as `null` keeps its stored value; an omitted
+        header is removed. Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NotificationConfigInput"
+      responses:
+        "204":
+          description: Notification updated
+        "400":
+          $ref: "#/components/responses/InvalidSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Unknown notification id
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+    delete:
+      tags: [admin]
+      summary: Delete a notification
+      operationId: deleteNotificationConfig
+      description: >
+        Removes the notification. Refused while a job, receiver, or the
+        report references it. Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "204":
+          description: Notification deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Unknown notification id
+          content:
+            text/plain:
+              schema:
+                type: string
+        "409":
+          description: Still referenced; the body names by what
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+
+  /api/report-config:
+    get:
+      tags: [admin]
+      summary: Get the report settings
+      operationId: getReportConfig
+      description: >
+        The stored report settings (the config file's deprecated `report:`
+        is imported once at startup), plus the default schedule, the next
+        run (null while disabled), and the notification ids to pick from.
+        Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Report settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+    put:
+      tags: [admin]
+      summary: Update the report settings
+      operationId: updateReportConfig
+      description: >
+        Validates and stores the report settings; the report reschedules
+        immediately. Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportConfigInput"
+      responses:
+        "204":
+          description: Report settings updated
+        "400":
+          $ref: "#/components/responses/InvalidSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+
   /api/v1/objects/{id}/{key}:
     put:
       tags: [receiver-api]
@@ -685,7 +996,7 @@ components:
       name: id
       in: path
       required: true
-      description: "Receiver id, as configured under `receivers:` in the config file."
+      description: "Receiver id, as managed under Receiver settings in the web UI."
       schema:
         type: string
     ObjectKey:
@@ -705,6 +1016,24 @@ components:
             type: string
     Forbidden:
       description: Valid access token, but missing the permission this endpoint requires
+      content:
+        text/plain:
+          schema:
+            type: string
+    InvalidReceiver:
+      description: The receiver definition doesn't validate; the body says why
+      content:
+        text/plain:
+          schema:
+            type: string
+    InvalidSettings:
+      description: The definition doesn't validate; the body says why
+      content:
+        text/plain:
+          schema:
+            type: string
+    StateDBUnavailable:
+      description: The state db couldn't be opened at startup, so these settings can't be managed
       content:
         text/plain:
           schema:
@@ -993,3 +1322,216 @@ components:
           type: string
           description: Failure reason; empty on success.
       required: [at, username, receiver_id, key, success, remote_addr]
+
+    ReceiverConfigInput:
+      type: object
+      description: A receiver's editable fields, with the same syntax as the former `receivers:` config entries.
+      properties:
+        id:
+          type: string
+          description: What the sender's remote target names as its bucket. Immutable once created.
+        public_key:
+          type: string
+          description: PEM-encoded RSA public key of the sending instance (its server.pub).
+        path:
+          type: string
+          description: Absolute directory incoming objects are written under.
+        retention:
+          type: string
+          description: Optional, e.g. "30d" or "12h"; empty keeps objects forever.
+        stale_after:
+          type: string
+          description: Optional, e.g. "26h"; set together with stale_notifications.
+        stale_notifications:
+          type: array
+          items:
+            type: string
+          description: Notification ids fired once per gap when the receiver turns stale.
+        download_notifications:
+          type: array
+          items:
+            type: string
+          description: Notification ids fired on every dashboard download from this receiver.
+      required: [id, public_key, path]
+
+    ReceiverConfig:
+      allOf:
+        - $ref: "#/components/schemas/ReceiverConfigInput"
+        - type: object
+          properties:
+            created_at:
+              type: string
+              format: date-time
+            created_by:
+              type: string
+              description: Username, or "config file" for an imported receiver.
+            updated_at:
+              type: string
+              format: date-time
+            updated_by:
+              type: string
+            error:
+              type: string
+              description: Set when the stored receiver no longer validates (e.g. it names a removed notification) and so is inactive.
+          required: [created_at, created_by, updated_at, updated_by]
+
+    ReceiverConfigList:
+      type: object
+      properties:
+        base_dir:
+          type: string
+          description: "`webui.receivers-base-dir`; empty when unset, in which case receivers can't be created or moved."
+        notifications:
+          type: array
+          items:
+            type: string
+          description: Notification ids defined in the config file.
+        receivers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReceiverConfig"
+      required: [base_dir, notifications, receivers]
+
+    WebhookConfig:
+      type: object
+      properties:
+        url:
+          type: string
+          description: Absolute http(s) URL.
+        method:
+          type: string
+          description: Defaults to POST.
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+            nullable: true
+          description: >
+            Header name to value. Values are write-only: listed as null; on
+            update, null keeps the stored value.
+        body:
+          type: string
+          description: Empty sends the trigger's default JSON summary.
+      required: [url]
+
+    EmailConfig:
+      type: object
+      properties:
+        to:
+          type: array
+          items:
+            type: string
+        from:
+          type: string
+          description: Empty uses smtp.username.
+        subject:
+          type: string
+        body:
+          type: string
+        encrypt:
+          type: object
+          nullable: true
+          properties:
+            recipients:
+              type: array
+              items:
+                type: string
+          required: [recipients]
+      required: [to]
+
+    NotificationConfigInput:
+      type: object
+      description: At least one of webhook and email must be set.
+      properties:
+        id:
+          type: string
+          description: Immutable once created.
+        webhook:
+          type: object
+          allOf:
+            - $ref: "#/components/schemas/WebhookConfig"
+          nullable: true
+        email:
+          type: object
+          allOf:
+            - $ref: "#/components/schemas/EmailConfig"
+          nullable: true
+      required: [id]
+
+    NotificationConfig:
+      allOf:
+        - $ref: "#/components/schemas/NotificationConfigInput"
+        - type: object
+          properties:
+            created_at:
+              type: string
+              format: date-time
+            created_by:
+              type: string
+              description: Username, or "config file" for an imported notification.
+            updated_at:
+              type: string
+              format: date-time
+            updated_by:
+              type: string
+            error:
+              type: string
+              description: Set when the stored notification no longer validates (e.g. email without smtp:) and so is inactive.
+            used_by:
+              type: array
+              items:
+                type: string
+              description: 'What references it: "job <name>", "receiver <id>", or "report".'
+          required: [created_at, created_by, updated_at, updated_by, used_by]
+
+    NotificationConfigList:
+      type: object
+      properties:
+        smtp_configured:
+          type: boolean
+        notifications:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationConfig"
+      required: [smtp_configured, notifications]
+
+    ReportConfigInput:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        schedule:
+          type: string
+          description: 5-field cron expression or descriptor, evaluated in UTC; empty uses the default.
+        notifications:
+          type: array
+          items:
+            type: string
+          description: Notification ids; required when enabled.
+      required: [enabled]
+
+    ReportConfig:
+      allOf:
+        - $ref: "#/components/schemas/ReportConfigInput"
+        - type: object
+          properties:
+            updated_at:
+              type: string
+              format: date-time
+              nullable: true
+            updated_by:
+              type: string
+            error:
+              type: string
+              description: Set when the stored settings no longer validate; the report is then off.
+            default_schedule:
+              type: string
+            next_run:
+              type: string
+              format: date-time
+              nullable: true
+            notification_ids:
+              type: array
+              items:
+                type: string
+          required: [schedule, notifications, updated_by, default_schedule, notification_ids]

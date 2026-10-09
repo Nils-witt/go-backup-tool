@@ -127,7 +127,7 @@ func TestHandleReceiverStatusIncludesStaleness(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers", nil)
 	rec := httptest.NewRecorder()
 
-	handleReceiverStatus(receivers, store, discardLogger)(rec, req)
+	handleReceiverStatus(backup.NewReceiverRegistry(receivers), store, discardLogger)(rec, req)
 
 	var snapshots []backup.ReceiverSnapshot
 	if err := json.Unmarshal(rec.Body.Bytes(), &snapshots); err != nil {
@@ -157,7 +157,7 @@ func TestHandleReceiverStatusFreshFileIsNotStale(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers", nil)
 	rec := httptest.NewRecorder()
 
-	handleReceiverStatus(receivers, store, discardLogger)(rec, req)
+	handleReceiverStatus(backup.NewReceiverRegistry(receivers), store, discardLogger)(rec, req)
 
 	var snapshots []backup.ReceiverSnapshot
 	if err := json.Unmarshal(rec.Body.Bytes(), &snapshots); err != nil {
@@ -178,7 +178,7 @@ func TestHandleReceiverStatusWithoutStaleAfterOmitsStaleness(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers", nil)
 	rec := httptest.NewRecorder()
 
-	handleReceiverStatus(receivers, store, discardLogger)(rec, req)
+	handleReceiverStatus(backup.NewReceiverRegistry(receivers), store, discardLogger)(rec, req)
 
 	var snapshots []backup.ReceiverSnapshot
 	if err := json.Unmarshal(rec.Body.Bytes(), &snapshots); err != nil {
@@ -195,7 +195,7 @@ func TestHandleRetryFailedTargetsUnknownJobReturns404(t *testing.T) {
 
 	statusStore, job := newTestStore()
 	jobs := map[string]*config.Config{job.Name: job}
-	runner := pipeline.NewRunner(discardLogger, statusStore, nil, nil, nil)
+	runner := pipeline.NewRunner(discardLogger, statusStore, nil, nil, nil, nil)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/jobs/nope/retry", nil)
 	req.SetPathValue("name", "nope")
@@ -214,7 +214,7 @@ func TestHandleRetryFailedTargetsNoFailedTargetsReturns409(t *testing.T) {
 
 	statusStore, job := newTestStore()
 	jobs := map[string]*config.Config{job.Name: job}
-	runner := pipeline.NewRunner(discardLogger, statusStore, nil, nil, nil)
+	runner := pipeline.NewRunner(discardLogger, statusStore, nil, nil, nil, nil)
 
 	// No run has happened yet, so every target is idle, not failed.
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/jobs/test/retry", nil)
@@ -259,7 +259,7 @@ func TestHandleRetryFailedTargetsKicksOffRetry(t *testing.T) {
 	statusStore.Finished(job.Name, context.DeadlineExceeded, 0)
 
 	jobs := map[string]*config.Config{job.Name: job}
-	runner := pipeline.NewRunner(discardLogger, statusStore, nil, nil, nil)
+	runner := pipeline.NewRunner(discardLogger, statusStore, nil, nil, nil, nil)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/jobs/test/retry", nil)
 	req.SetPathValue("name", job.Name)
@@ -295,7 +295,7 @@ func TestStartWebUIWithoutOIDCIsLocked(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, discardLogger, nil, nil, config.OIDCSettings{}, nil, false, false, "", nil, nil)
+	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, nil, nil, discardLogger, nil, nil, config.OIDCSettings{}, nil, false, false, "", nil, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}
@@ -353,7 +353,7 @@ func TestHandleReceiverFilesServesJSON(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleReceiverFiles(receivers, discardLogger)(rec, req)
+	handleReceiverFiles(backup.NewReceiverRegistry(receivers), discardLogger)(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -377,7 +377,7 @@ func TestHandleReceiverFilesUnknownID(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleReceiverFiles(map[string]config.ResolvedReceiver{}, discardLogger)(rec, req)
+	handleReceiverFiles(backup.NewReceiverRegistry(nil), discardLogger)(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
@@ -390,7 +390,7 @@ func TestStartWebUIBadAddrReturnsNil(t *testing.T) {
 	store, _ := newTestStore()
 
 	// Port 0 is valid (means "pick one"); an unparseable address is not.
-	srv := StartWebUI("not-a-valid-address", store, nil, nil, nil, nil, discardLogger, nil, nil, config.OIDCSettings{}, nil, false, false, "", nil, nil)
+	srv := StartWebUI("not-a-valid-address", store, nil, nil, nil, nil, nil, nil, discardLogger, nil, nil, config.OIDCSettings{}, nil, false, false, "", nil, nil)
 	if srv != nil {
 		t.Cleanup(srv.Shutdown)
 		t.Fatal("StartWebUI() with an invalid address = non-nil, want nil")
@@ -418,7 +418,7 @@ func TestHandleDownloadFileServesContent(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleDownloadFile(receivers, discardLogger, nil, tickets, false, nil)(rec, req)
+	handleDownloadFile(backup.NewReceiverRegistry(receivers), discardLogger, nil, tickets, false, nil)(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -447,7 +447,7 @@ func TestHandleDownloadFileRejectsMissingTicket(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleDownloadFile(receivers, discardLogger, nil, newDownloadTicketStore(), false, nil)(rec, req)
+	handleDownloadFile(backup.NewReceiverRegistry(receivers), discardLogger, nil, newDownloadTicketStore(), false, nil)(rec, req)
 
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
@@ -701,7 +701,7 @@ func TestHandleDownloadFileRecordsDownloadEvents(t *testing.T) {
 	req.SetPathValue("key", "backup.gpg")
 	req.RemoteAddr = "198.51.100.1:4321"
 
-	handleDownloadFile(receivers, discardLogger, db, tickets, false, nil)(httptest.NewRecorder(), req)
+	handleDownloadFile(backup.NewReceiverRegistry(receivers), discardLogger, db, tickets, false, nil)(httptest.NewRecorder(), req)
 
 	req = httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/missing.gpg", nil)
 	req.SetPathValue("id", "a")
@@ -719,7 +719,7 @@ func TestHandleDownloadFileRecordsDownloadEvents(t *testing.T) {
 
 	req.URL.RawQuery = "ticket=" + ticket2
 
-	handleDownloadFile(receivers, discardLogger, db, tickets, false, nil)(httptest.NewRecorder(), req)
+	handleDownloadFile(backup.NewReceiverRegistry(receivers), discardLogger, db, tickets, false, nil)(httptest.NewRecorder(), req)
 
 	events, err := db.ListDownloadEvents(t.Context(), 10)
 	if err != nil {
@@ -774,7 +774,7 @@ func TestHandleDownloadFileFiresDownloadWebhookOnSuccess(t *testing.T) {
 	writeFile(t, filepath.Join(root, "backup.gpg"), "secret data")
 
 	receivers := map[string]config.ResolvedReceiver{
-		"a": {ID: "a", Path: root, DownloadNotifications: []notify.Notification{{ID: "test", Webhook: &notify.Webhook{URL: srv.URL, Method: http.MethodPost}}}},
+		"a": {ID: "a", Path: root, DownloadNotifications: []string{"test"}, Notifications: notify.NewRegistry(map[string]notify.Notification{"test": {ID: "test", Webhook: &notify.Webhook{URL: srv.URL, Method: http.MethodPost}}})},
 	}
 
 	tickets := newDownloadTicketStore()
@@ -788,7 +788,7 @@ func TestHandleDownloadFileFiresDownloadWebhookOnSuccess(t *testing.T) {
 	req.SetPathValue("id", "a")
 	req.SetPathValue("key", "backup.gpg")
 
-	handleDownloadFile(receivers, discardLogger, nil, tickets, false, nil)(httptest.NewRecorder(), req)
+	handleDownloadFile(backup.NewReceiverRegistry(receivers), discardLogger, nil, tickets, false, nil)(httptest.NewRecorder(), req)
 
 	select {
 	case got := <-calls:
@@ -822,7 +822,7 @@ func TestHandleDownloadFileDoesNotFireDownloadWebhookOnFailure(t *testing.T) {
 	root := t.TempDir()
 
 	receivers := map[string]config.ResolvedReceiver{
-		"a": {ID: "a", Path: root, DownloadNotifications: []notify.Notification{{ID: "test", Webhook: &notify.Webhook{URL: srv.URL, Method: http.MethodPost}}}},
+		"a": {ID: "a", Path: root, DownloadNotifications: []string{"test"}, Notifications: notify.NewRegistry(map[string]notify.Notification{"test": {ID: "test", Webhook: &notify.Webhook{URL: srv.URL, Method: http.MethodPost}}})},
 	}
 
 	tickets := newDownloadTicketStore()
@@ -837,7 +837,7 @@ func TestHandleDownloadFileDoesNotFireDownloadWebhookOnFailure(t *testing.T) {
 	req.SetPathValue("key", "missing.gpg")
 
 	rec := httptest.NewRecorder()
-	handleDownloadFile(receivers, discardLogger, nil, tickets, false, nil)(rec, req)
+	handleDownloadFile(backup.NewReceiverRegistry(receivers), discardLogger, nil, tickets, false, nil)(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)

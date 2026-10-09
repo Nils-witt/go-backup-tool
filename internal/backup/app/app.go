@@ -22,6 +22,8 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
+	"nilswitt.dev/go-backup-tool/internal/backup/report"
+	"nilswitt.dev/go-backup-tool/internal/backup/settings"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 	"nilswitt.dev/go-backup-tool/internal/backup/webui"
 	"nilswitt.dev/go-backup-tool/internal/version"
@@ -84,30 +86,54 @@ func Run(args []string, stderr io.Writer) int {
 // receiver.MonitorStaleReceivers) and the per-receiver retention sweep (see
 // receiver.MonitorReceiverRetention). It returns nil, doing nothing else,
 // when rc.Listen is unset. queue lets a download/stale notification email
-// that fails to send be retried later (see notify.Queue).
-func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, statusStore *backup.StatusStore, stateDB *store.Store, logs *webui.LogRingBuffer, serverIdentity *identity.ServerIdentity, runner *pipeline.Runner, queue *notify.Queue, log *slog.Logger) *webui.Server {
+// that fails to send be retried later (see notify.Queue). receivers,
+// receiverStore and receiverManager are the live receiver set, its
+// dashboard status, and the web UI's way of changing it (see
+// newReceivers).
+func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, statusStore *backup.StatusStore, stateDB *store.Store, logs *webui.LogRingBuffer, serverIdentity *identity.ServerIdentity, runner *pipeline.Runner, queue *notify.Queue, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, receiverManager *receiver.Manager, settingsManager *settings.Manager, log *slog.Logger) *webui.Server {
 	if rc.Listen == "" {
 		return nil
 	}
 
-	// Shared between the dashboard's read-only receiver views (served by
-	// webui.StartWebUI) and the receiver API's write path (served by
-	// receiver.RegisterRoutes on the same mux), so a write is reflected
-	// in the dashboard immediately.
-	receiverStore := backup.NewReceiverStatusStore(rc.Receivers)
-	if stateDB != nil {
-		receiver.SeedReceiverStatusFromState(ctx, stateDB, rc.Receivers, receiverStore, log)
-	}
+	go receiver.MonitorReceiverRetention(ctx, stateDB, receivers, log)
 
-	go receiver.MonitorReceiverRetention(ctx, stateDB, rc.Receivers, log)
-
-	srv := webui.StartWebUI(rc.Listen, statusStore, rc.Jobs, runner, rc.Receivers, receiverStore, log, stateDB, logs, rc.OIDC, serverIdentity, rc.TrustProxyHeaders, rc.DevMode, rc.ServerName, func(mux *http.ServeMux) {
-		receiver.RegisterRoutes(mux, rc.Receivers, receiverStore, log, stateDB)
+	srv := webui.StartWebUI(rc.Listen, statusStore, rc.Jobs, runner, receivers, receiverStore, receiverManager, settingsManager, log, stateDB, logs, rc.OIDC, serverIdentity, rc.TrustProxyHeaders, rc.DevMode, rc.ServerName, func(mux *http.ServeMux) {
+		receiver.RegisterRoutes(mux, receivers, receiverStore, log, stateDB)
 	}, queue)
 
-	go receiver.MonitorStaleReceivers(ctx, rc.Receivers, queue, log)
+	go receiver.MonitorStaleReceivers(ctx, receivers, queue, log)
 
 	return srv
+}
+
+// newReceivers loads every receiver (see receiver.Manager.Load, which also
+// imports the config file's deprecated receivers: into the state db) into a
+// fresh registry and status store — shared between the dashboard's receiver
+// views, the receiver API's write path, the monitors, and the report, so a
+// write or a web UI edit is reflected everywhere immediately.
+// notifications must already be loaded (see newSettings), since receivers
+// are checked against it.
+func newReceivers(ctx context.Context, rc *config.RunConfig, stateDB *store.Store, notifications *notify.Registry, log *slog.Logger) (*backup.ReceiverRegistry, *backup.ReceiverStatusStore, *receiver.Manager) {
+	registry := backup.NewReceiverRegistry(nil)
+	status := backup.NewReceiverStatusStore(nil)
+	manager := receiver.NewManager(stateDB, registry, status, notifications, rc.ServerName, rc.ReceiversBaseDir, log)
+	manager.Load(ctx, rc.FileReceivers)
+
+	return registry, status, manager
+}
+
+// newSettings loads every notification and the report settings (see
+// settings.Manager.Load, which also imports the config file's deprecated
+// notifications:/report: into the state db) into a fresh live registry and
+// report holder — read by every job failure, receiver, and report trigger
+// at fire time, so a web UI edit applies without a restart.
+func newSettings(ctx context.Context, rc *config.RunConfig, stateDB *store.Store, log *slog.Logger) (*notify.Registry, *report.Live, *settings.Manager) {
+	notifications := notify.NewRegistry(nil)
+	live := report.NewLive(report.Settings{})
+	manager := settings.NewManager(stateDB, notifications, live, rc.SMTP, rc.GPG, rc.Jobs, log)
+	manager.Load(ctx, rc.FileNotifications, rc.FileReport)
+
+	return notifications, live, manager
 }
 
 // runWithContext is Run's implementation, taking an externally supplied base
@@ -193,19 +219,23 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	mailQueue := notify.NewQueue()
 	go mailQueue.Run(ctx, log)
 
-	r := pipeline.NewRunner(log, statusStore, stateDB, serverIdentity, mailQueue)
+	notifications, reportSettings, settingsManager := newSettings(ctx, rc, stateDB, log)
+
+	r := pipeline.NewRunner(log, statusStore, stateDB, serverIdentity, mailQueue, notifications)
 
 	// Keeps retrying any target upload that failed during a run, every
 	// pipeline.TargetUploadRetryInterval, until it succeeds — see
 	// pipeline.Runner.RunOutstandingUploadRetries.
 	go r.RunOutstandingUploadRetries(ctx, rc.Jobs)
 
+	receivers, receiverStore, receiverManager := newReceivers(ctx, rc, stateDB, notifications, log)
+
 	// Independent of the web UI: a daily report is useful for anyone
 	// monitoring receivers by inbox, not just those watching the dashboard.
-	// RunReportLoop itself no-ops when report.enabled isn't set.
-	go pipeline.RunReportLoop(ctx, rc, stateDB, mailQueue, log)
+	// RunReportLoop idles while the report is disabled.
+	go pipeline.RunReportLoop(ctx, rc, reportSettings, notifications, receivers, stateDB, mailQueue, log)
 
-	srv := startWebUIIfConfigured(ctx, rc, statusStore, stateDB, logs, serverIdentity, r, mailQueue, log)
+	srv := startWebUIIfConfigured(ctx, rc, statusStore, stateDB, logs, serverIdentity, r, mailQueue, receivers, receiverStore, receiverManager, settingsManager, log)
 
 	var wg sync.WaitGroup
 

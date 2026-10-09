@@ -28,18 +28,25 @@ import (
 // receiver API's handlers can serve any request.
 func SeedReceiverStatusFromState(ctx context.Context, db *store.Store, receivers map[string]config.ResolvedReceiver, statusStore *backup.ReceiverStatusStore, log *slog.Logger) {
 	for id := range receivers {
-		ev, ok, err := db.GetLastReceiverEvent(ctx, id)
-		if err != nil {
-			log.Warn("reading last receiver event from state db", "id", id, "err", err)
-			continue
-		}
-
-		if !ok {
-			continue
-		}
-
-		statusStore.SeedLastEvent(id, ev.Key, ev.At, ev.Success, ev.Error)
+		seedReceiverStatus(ctx, db, id, statusStore, log)
 	}
+}
+
+// seedReceiverStatus is SeedReceiverStatusFromState for a single receiver
+// id, also used when a receiver is created in the web UI (see
+// Manager.Create), since an id that existed before may have history.
+func seedReceiverStatus(ctx context.Context, db *store.Store, id string, statusStore *backup.ReceiverStatusStore, log *slog.Logger) {
+	ev, ok, err := db.GetLastReceiverEvent(ctx, id)
+	if err != nil {
+		log.Warn("reading last receiver event from state db", "id", id, "err", err)
+		return
+	}
+
+	if !ok {
+		return
+	}
+
+	statusStore.SeedLastEvent(id, ev.Key, ev.At, ev.Success, ev.Error)
 }
 
 // recordReceiverEventBestEffort appends a receiver_events row for one
@@ -76,15 +83,16 @@ const receiverRetentionSweepInterval = time.Minute
 // stopped hearing from its sender would never get swept again) and made
 // every write pay for a sweep it usually didn't need. It sweeps once
 // immediately, then every receiverRetentionSweepInterval, until ctx is
-// done. A nil db (retention tracking unavailable this run) or no receiver
-// with retention: set is a no-op.
-func MonitorReceiverRetention(ctx context.Context, db *store.Store, receivers map[string]config.ResolvedReceiver, log *slog.Logger) {
-	if db == nil || !anyReceiverHasRetention(receivers) {
+// done. Receivers are read from the registry on every sweep, so ones added
+// or edited in the web UI are picked up. A nil db (retention tracking
+// unavailable this run) is a no-op.
+func MonitorReceiverRetention(ctx context.Context, db *store.Store, receivers *backup.ReceiverRegistry, log *slog.Logger) {
+	if db == nil {
 		return
 	}
 
 	backup.RunPeriodically(ctx, receiverRetentionSweepInterval, true, func() {
-		sweepAllReceivers(ctx, db, receivers, log)
+		sweepAllReceivers(ctx, db, receivers.Snapshot(), log)
 	})
 }
 
@@ -108,18 +116,6 @@ func sweepAllReceivers(ctx context.Context, db *store.Store, receivers map[strin
 	}
 }
 
-// anyReceiverHasRetention reports whether any entry in receivers has
-// retention: set, i.e. whether MonitorReceiverRetention has anything to do.
-func anyReceiverHasRetention(receivers map[string]config.ResolvedReceiver) bool {
-	for _, recv := range receivers {
-		if recv.Retention > 0 {
-			return true
-		}
-	}
-
-	return false
-}
-
 // staleReceiverCheckInterval is how often MonitorStaleReceivers re-checks
 // every receiver with stale-after: set.
 const staleReceiverCheckInterval = time.Minute
@@ -138,6 +134,20 @@ type staleReceiverMonitor struct {
 // marked as notified.
 func newStaleReceiverMonitor() *staleReceiverMonitor {
 	return &staleReceiverMonitor{notified: make(map[string]bool)}
+}
+
+// forgetMissing drops the notified state of every receiver no longer in
+// current (deleted in the web UI), so one re-created under the same id
+// starts with a clean slate.
+func (m *staleReceiverMonitor) forgetMissing(current map[string]config.ResolvedReceiver) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for id := range m.notified {
+		if _, ok := current[id]; !ok {
+			delete(m.notified, id)
+		}
+	}
 }
 
 // check evaluates recv's current staleness — nothing received within
@@ -235,13 +245,13 @@ func renderStaleWebhookPayload(tmpl string, recv config.ResolvedReceiver, lastSe
 }
 
 // notifyStaleReceiver sends recv's current staleness to every one of
-// recv.StaleNotifications, logging (rather than returning) any failure: a
+// recv.StaleNotifications (looked up in recv.Notifications), logging (rather than returning) any failure: a
 // notification delivery problem shouldn't affect anything else this process
 // is doing, and there's no caller to report it to — MonitorStaleReceivers
 // already marked this gap as notified before calling this, so a failed
 // delivery isn't retried until the gap clears and reopens.
 func notifyStaleReceiver(recv config.ResolvedReceiver, lastSeen time.Time, queue *notify.Queue, log *slog.Logger) {
-	for _, n := range recv.StaleNotifications {
+	for _, n := range recv.Notifications.Resolve(recv.StaleNotifications, log, "receiver", recv.ID) {
 		if n.Webhook != nil {
 			notifyStaleReceiverWebhook(recv, *n.Webhook, lastSeen, log)
 		}
@@ -310,32 +320,20 @@ func notifyStaleReceiverEmail(recv config.ResolvedReceiver, email notify.Email, 
 // up, not one that never started. It checks once immediately, then every
 // staleReceiverCheckInterval, until ctx is done; a receiver's notifications
 // fire once per gap (see staleReceiverMonitor), not on every check, so a
-// sender that stays down doesn't spam them indefinitely. A no-op if no
-// receiver has stale-after: set.
-func MonitorStaleReceivers(ctx context.Context, receivers map[string]config.ResolvedReceiver, queue *notify.Queue, log *slog.Logger) {
-	if !anyReceiverHasStaleAfter(receivers) {
-		return
-	}
-
+// sender that stays down doesn't spam them indefinitely. Receivers are read
+// from the registry on every check, so ones added, edited, or deleted in
+// the web UI are picked up.
+func MonitorStaleReceivers(ctx context.Context, receivers *backup.ReceiverRegistry, queue *notify.Queue, log *slog.Logger) {
 	monitor := newStaleReceiverMonitor()
 
 	checkAll := func() {
-		for _, recv := range receivers {
+		current := receivers.Snapshot()
+		monitor.forgetMissing(current)
+
+		for _, recv := range current {
 			monitor.check(recv, queue, log)
 		}
 	}
 
 	backup.RunPeriodically(ctx, staleReceiverCheckInterval, true, checkAll)
-}
-
-// anyReceiverHasStaleAfter reports whether any entry in receivers has
-// stale-after: set, i.e. whether MonitorStaleReceivers has anything to do.
-func anyReceiverHasStaleAfter(receivers map[string]config.ResolvedReceiver) bool {
-	for _, recv := range receivers {
-		if recv.StaleAfter > 0 {
-			return true
-		}
-	}
-
-	return false
 }

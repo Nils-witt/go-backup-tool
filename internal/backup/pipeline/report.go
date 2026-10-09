@@ -13,30 +13,45 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	reportpkg "nilswitt.dev/go-backup-tool/internal/backup/report"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
-// RunReportLoop sends rc's receiver/job report on rc.Report's configured
-// cron schedule, evaluated in UTC (see report.ResolveSettings), until ctx is
-// done. A
-// no-op if the report isn't enabled. db may be nil (the state db couldn't be
-// opened at startup); the report is still sent, just without any
-// receiver_events/job_runs history (see buildReport).
-func RunReportLoop(ctx context.Context, rc *config.RunConfig, db *store.Store, queue *notify.Queue, log *slog.Logger) {
-	if !rc.Report.Enabled {
-		return
-	}
-
+// RunReportLoop sends the receiver/job report on the schedule in live (see
+// reportpkg.Settings), evaluated in UTC (see reportpkg.ResolveSettings), until ctx
+// is done, idling while the report is disabled. A change to live (the
+// report edited in the web UI) reschedules immediately. db may be nil (the
+// state db couldn't be opened at startup); the report is still sent, just
+// without any receiver_events/job_runs history (see buildReport).
+// Receivers and notifications are read from their live registries at each
+// send, so ones managed in the web UI are included.
+func RunReportLoop(ctx context.Context, rc *config.RunConfig, live *reportpkg.Live, notifications *notify.Registry, receivers *backup.ReceiverRegistry, db *store.Store, queue *notify.Queue, log *slog.Logger) {
 	log = log.With("component", "report")
 
 	var prev time.Time // zero until the first report in this process has been sent
 
 	for {
-		next := rc.Report.Schedule.Next(time.Now().UTC())
+		changed := live.Changed()
+		settings := live.Get()
+
+		if !settings.Enabled {
+			select {
+			case <-ctx.Done():
+				return
+			case <-changed:
+				continue
+			}
+		}
+
+		next := settings.Schedule.Next(time.Now().UTC())
 		log.Debug("scheduled next report", "at", next)
 
-		if !waitUntil(ctx, next) {
+		switch waitUntilOrChanged(ctx, next, changed) {
+		case waitDone:
 			return
+		case waitChanged:
+			continue
+		case waitReached:
 		}
 
 		start := prev
@@ -44,8 +59,33 @@ func RunReportLoop(ctx context.Context, rc *config.RunConfig, db *store.Store, q
 			start = next.Add(-24 * time.Hour)
 		}
 
-		sendReport(ctx, rc, db, start, next, queue, log)
+		sendReport(ctx, rc, notifications.Resolve(settings.Notifications, log), receivers.Snapshot(), db, start, next, queue, log)
 		prev = next
+	}
+}
+
+// waitResult is how waitUntilOrChanged returned.
+type waitResult int
+
+const (
+	waitReached waitResult = iota // the target time arrived
+	waitChanged                   // changed was closed first
+	waitDone                      // ctx was done first
+)
+
+// waitUntilOrChanged blocks until t, until changed is closed, or until ctx
+// is done, whichever comes first.
+func waitUntilOrChanged(ctx context.Context, t time.Time, changed <-chan struct{}) waitResult {
+	timer := time.NewTimer(time.Until(t))
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return waitDone
+	case <-changed:
+		return waitChanged
+	case <-timer.C:
+		return waitReached
 	}
 }
 
@@ -101,16 +141,16 @@ type reportContent struct {
 // query failure is logged and leaves that section empty rather than failing
 // the whole report — a partial report is better than none, matching this
 // codebase's usual failure handling.
-func buildReport(ctx context.Context, rc *config.RunConfig, db *store.Store, start, end time.Time, log *slog.Logger) reportContent {
+func buildReport(ctx context.Context, rc *config.RunConfig, receivers map[string]config.ResolvedReceiver, db *store.Store, start, end time.Time, log *slog.Logger) reportContent {
 	report := reportContent{start: start, end: end, serverName: rc.ServerName}
 
-	report.receivers, report.stale, report.errors = buildReceiverReport(ctx, rc, db, start, end, log)
+	report.receivers, report.stale, report.errors = buildReceiverReport(ctx, receivers, db, start, end, log)
 	report.jobs, report.jobErrors = buildJobReport(ctx, rc, db, start, end, log)
 
 	return report
 }
 
-// buildReceiverReport summarizes rc's configured receivers' activity in the
+// buildReceiverReport summarizes receivers' activity in the
 // window from start to end: files received and errors from receiver_events
 // (db, skipped if nil), and current staleness read live from disk (see
 // backup.LastReceivedAt), mirroring the dashboard's own
@@ -118,9 +158,9 @@ func buildReport(ctx context.Context, rc *config.RunConfig, db *store.Store, sta
 // logged and leaves that section empty rather than failing the whole
 // report — a partial report is better than none, matching this codebase's
 // usual failure handling.
-func buildReceiverReport(ctx context.Context, rc *config.RunConfig, db *store.Store, start, end time.Time, log *slog.Logger) ([]receiverReportLine, []staleReceiverLine, []store.ReceiverErrorEvent) {
-	ids := make([]string, 0, len(rc.Receivers))
-	for id := range rc.Receivers {
+func buildReceiverReport(ctx context.Context, receivers map[string]config.ResolvedReceiver, db *store.Store, start, end time.Time, log *slog.Logger) ([]receiverReportLine, []staleReceiverLine, []store.ReceiverErrorEvent) {
+	ids := make([]string, 0, len(receivers))
+	for id := range receivers {
 		ids = append(ids, id)
 	}
 
@@ -148,17 +188,17 @@ func buildReceiverReport(ctx context.Context, rc *config.RunConfig, db *store.St
 		}
 	}
 
-	var receivers []receiverReportLine
+	var lines []receiverReportLine
 
 	var stale []staleReceiverLine
 
 	for _, id := range ids {
 		s := byID[id]
-		receivers = append(receivers, receiverReportLine{
+		lines = append(lines, receiverReportLine{
 			id: id, filesReceived: s.FilesReceived, bytesReceived: s.BytesReceived, errors: s.Errors,
 		})
 
-		recv := rc.Receivers[id]
+		recv := receivers[id]
 		if recv.StaleAfter <= 0 {
 			continue
 		}
@@ -174,7 +214,7 @@ func buildReceiverReport(ctx context.Context, rc *config.RunConfig, db *store.St
 		}
 	}
 
-	return receivers, stale, errs
+	return lines, stale, errs
 }
 
 // buildJobReport summarizes rc's configured jobs' activity in the window
@@ -378,16 +418,16 @@ func reportWebhookBody(wh notify.Webhook, report reportContent) ([]byte, error) 
 }
 
 // sendReport builds rc's receiver/job report for the window from start to
-// end and sends it to every notification in rc.Report.Notifications,
+// end and sends it to every one of notifications,
 // logging (rather than returning) any failure: like a receiver's stale/
 // download notifications, a delivery problem here shouldn't affect anything
 // else this process is doing, and there's no caller to report it to — the
 // next scheduled report gets another chance.
-func sendReport(ctx context.Context, rc *config.RunConfig, db *store.Store, start, end time.Time, queue *notify.Queue, log *slog.Logger) {
-	report := buildReport(ctx, rc, db, start, end, log)
+func sendReport(ctx context.Context, rc *config.RunConfig, notifications []notify.Notification, receivers map[string]config.ResolvedReceiver, db *store.Store, start, end time.Time, queue *notify.Queue, log *slog.Logger) {
+	report := buildReport(ctx, rc, receivers, db, start, end, log)
 	body := renderReportBody(report)
 
-	for _, n := range rc.Report.Notifications {
+	for _, n := range notifications {
 		if n.Email != nil {
 			sendReportEmail(ctx, n.Email, report, body, queue, log)
 		}

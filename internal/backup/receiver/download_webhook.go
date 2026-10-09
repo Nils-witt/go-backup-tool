@@ -77,15 +77,15 @@ func renderDownloadWebhookPayload(tmpl string, recv config.ResolvedReceiver, ev 
 	return replacer.Replace(tmpl)
 }
 
-// NotifyDownload sends ev to every one of recv.DownloadNotifications (a
-// no-op if there are none). Logs, rather than returns, any failure: a
+// NotifyDownload sends ev to every one of recv.DownloadNotifications,
+// looked up in recv.Notifications (a no-op if there are none). Logs, rather than returns, any failure: a
 // notification delivery problem shouldn't affect anything else this process
 // is doing, and there's no caller waiting on the result — handleDownloadFile
 // calls this from its own goroutine so a slow or unreachable destination
 // never delays the file already being streamed to the browser. queue, if
 // non-nil, retries a failed email later instead of losing it.
 func NotifyDownload(recv config.ResolvedReceiver, ev DownloadWebhookEvent, queue *notify.Queue, log *slog.Logger) {
-	for _, n := range recv.DownloadNotifications {
+	for _, n := range recv.Notifications.Resolve(recv.DownloadNotifications, log, "receiver", recv.ID) {
 		if n.Webhook != nil {
 			notifyDownloadWebhook(recv, *n.Webhook, ev, log)
 		}

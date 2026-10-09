@@ -149,3 +149,80 @@ export interface MetaJSON {
 export interface DownloadTicketJSON {
   ticket: string;
 }
+
+// ReceiverConfigJSON mirrors receiverConfigJSON in
+// internal/backup/webui/receivers_config.go: one stored receiver as entered,
+// plus error when it no longer resolves and so isn't currently active.
+export interface ReceiverConfigJSON {
+  id: string;
+  public_key: string;
+  path: string;
+  retention: string;
+  stale_after: string;
+  stale_notifications: string[];
+  download_notifications: string[];
+  created_at: string;
+  created_by: string;
+  updated_at: string;
+  updated_by: string;
+  error?: string;
+}
+
+// ReceiverConfigListJSON mirrors receiverConfigListJSON (GET
+// /api/receiver-configs).
+export interface ReceiverConfigListJSON {
+  base_dir: string;
+  notifications: string[];
+  receivers: ReceiverConfigJSON[];
+}
+
+// WebhookConfigJSON mirrors webhookConfigJSON in
+// internal/backup/webui/settings_config.go. Header values are write-only:
+// always null when read; send null back to keep a header's stored value.
+export interface WebhookConfigJSON {
+  url: string;
+  method: string;
+  headers: Record<string, string | null>;
+  body: string;
+}
+
+export interface EmailConfigJSON {
+  to: string[];
+  from: string;
+  subject: string;
+  body: string;
+  encrypt?: { recipients: string[] } | null;
+}
+
+// NotificationConfigJSON mirrors notificationConfigJSON.
+export interface NotificationConfigJSON {
+  id: string;
+  webhook: WebhookConfigJSON | null;
+  email: EmailConfigJSON | null;
+  created_at: string;
+  created_by: string;
+  updated_at: string;
+  updated_by: string;
+  error?: string;
+  used_by: string[];
+}
+
+// NotificationConfigListJSON mirrors notificationConfigListJSON (GET
+// /api/notification-configs).
+export interface NotificationConfigListJSON {
+  smtp_configured: boolean;
+  notifications: NotificationConfigJSON[];
+}
+
+// ReportConfigJSON mirrors reportConfigJSON (GET /api/report-config).
+export interface ReportConfigJSON {
+  enabled: boolean;
+  schedule: string;
+  notifications: string[];
+  updated_at: string | null;
+  updated_by: string;
+  error?: string;
+  default_schedule: string;
+  next_run: string | null;
+  notification_ids: string[];
+}

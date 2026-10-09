@@ -20,10 +20,10 @@ import (
 // webhook receiver (PagerDuty, Slack, ...) already understands, using that
 // trigger's {placeholder} syntax.
 type FileWebhook struct {
-	URL     string            `yaml:"url"`
-	Method  string            `yaml:"method"`
-	Headers map[string]string `yaml:"headers"`
-	Body    string            `yaml:"body"`
+	URL     string            `yaml:"url" json:"url"`
+	Method  string            `yaml:"method" json:"method"`
+	Headers map[string]string `yaml:"headers" json:"headers,omitempty"`
+	Body    string            `yaml:"body" json:"body"`
 }
 
 // FileEmail is a notification's email: block. To is required; From defaults
@@ -31,16 +31,16 @@ type FileWebhook struct {
 // own text — set them to override with the same {placeholder} syntax that
 // trigger's webhook.body accepts.
 type FileEmail struct {
-	To      []string `yaml:"to"`
-	From    string   `yaml:"from"`
-	Subject string   `yaml:"subject"`
-	Body    string   `yaml:"body"`
+	To      []string `yaml:"to" json:"to"`
+	From    string   `yaml:"from" json:"from"`
+	Subject string   `yaml:"subject" json:"subject"`
+	Body    string   `yaml:"body" json:"body"`
 
 	// Encrypt, if set, GPG-encrypts this email's body (as OpenPGP/MIME, RFC
 	// 3156) before it's sent, so the notification's contents aren't readable
 	// in transit or at rest in a mail provider's inbox. The subject line
 	// itself is never encrypted (SMTP headers are always plaintext).
-	Encrypt *FileEmailEncrypt `yaml:"encrypt"`
+	Encrypt *FileEmailEncrypt `yaml:"encrypt" json:"encrypt,omitempty"`
 }
 
 // FileEmailEncrypt is a notification's email.encrypt: block. Recipients
@@ -50,7 +50,7 @@ type FileEmail struct {
 // gpg binary and keyring backups are encrypted with, so importing a key
 // once with `gpg --import` serves both.
 type FileEmailEncrypt struct {
-	Recipients []string `yaml:"recipients"`
+	Recipients []string `yaml:"recipients" json:"recipients"`
 }
 
 // FileNotification is one top-level notifications: entry: a named
@@ -59,9 +59,9 @@ type FileEmailEncrypt struct {
 // Email must be set; both may be set, firing both channels when this
 // notification is referenced.
 type FileNotification struct {
-	ID      string       `yaml:"id"`
-	Webhook *FileWebhook `yaml:"webhook"`
-	Email   *FileEmail   `yaml:"email"`
+	ID      string       `yaml:"id" json:"id"`
+	Webhook *FileWebhook `yaml:"webhook" json:"webhook"`
+	Email   *FileEmail   `yaml:"email" json:"email"`
 }
 
 // FileSMTP is the top-level smtp: entry, describing how to reach the
@@ -266,36 +266,55 @@ func Build(fileNotifications []FileNotification, smtp SMTPSettings, gpg GPGSetti
 			return nil, fmt.Errorf("notifications[%d]: duplicate notification id %q", i, id)
 		}
 
-		if fn.Webhook == nil && fn.Email == nil {
-			return nil, fmt.Errorf("notification %q: at least one of webhook or email must be set", id)
+		n, err := ResolveNotification(fn, smtp, gpg)
+		if err != nil {
+			return nil, fmt.Errorf("notification %q: %w", id, err)
 		}
 
-		var webhook *Webhook
-
-		if fn.Webhook != nil {
-			resolved, err := resolveWebhook(fn.Webhook)
-			if err != nil {
-				return nil, fmt.Errorf("notification %q: webhook: %w", id, err)
-			}
-
-			webhook = &resolved
-		}
-
-		var email *Email
-
-		if fn.Email != nil {
-			resolved, err := resolveEmail(fn.Email, smtp, gpg)
-			if err != nil {
-				return nil, fmt.Errorf("notification %q: email: %w", id, err)
-			}
-
-			email = &resolved
-		}
-
-		notifications[id] = Notification{ID: id, Webhook: webhook, Email: email}
+		notifications[id] = n
 	}
 
 	return notifications, nil
+}
+
+// ResolveNotification validates one notification definition — from the
+// config file's notifications: or from the state db's notifications table,
+// managed in the web UI — requiring a non-empty id and at least one of
+// webhook/email, resolving an email against smtp and gpg (see Build).
+// Errors don't name the notification; callers add that context.
+func ResolveNotification(fn FileNotification, smtp SMTPSettings, gpg GPGSettings) (Notification, error) {
+	id := strings.TrimSpace(fn.ID)
+	if id == "" {
+		return Notification{}, errors.New("id is required")
+	}
+
+	if fn.Webhook == nil && fn.Email == nil {
+		return Notification{}, errors.New("at least one of webhook or email must be set")
+	}
+
+	var webhook *Webhook
+
+	if fn.Webhook != nil {
+		resolved, err := resolveWebhook(fn.Webhook)
+		if err != nil {
+			return Notification{}, fmt.Errorf("webhook: %w", err)
+		}
+
+		webhook = &resolved
+	}
+
+	var email *Email
+
+	if fn.Email != nil {
+		resolved, err := resolveEmail(fn.Email, smtp, gpg)
+		if err != nil {
+			return Notification{}, fmt.Errorf("email: %w", err)
+		}
+
+		email = &resolved
+	}
+
+	return Notification{ID: id, Webhook: webhook, Email: email}, nil
 }
 
 // resolveWebhook validates and resolves fw (a notification's webhook:

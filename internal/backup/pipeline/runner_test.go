@@ -293,6 +293,8 @@ func TestRunOnceFiresFailureNotificationOnFailure(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
+	notifications := testWebhookRegistry(notify.Webhook{URL: srv.URL, Method: http.MethodPost})
+
 	job := &config.Config{
 		Name:                 "test",
 		Cmd:                  "echo hi",
@@ -300,14 +302,14 @@ func TestRunOnceFiresFailureNotificationOnFailure(t *testing.T) {
 		Recipients:           []string{testGPGRecipient},
 		GPGBin:               "gpg",
 		GPGHomedir:           homedir,
-		FailureNotifications: jobFailureWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost}),
+		FailureNotifications: []string{"test"},
 		Targets: []config.Target{
 			{ServerName: "bad", Kind: config.ServerKindLocal, Bucket: "blocked/sub", LocalPath: dir},
 		},
 	}
 
 	statusStore := backup.NewStatusStore([]*config.Config{job})
-	r := &Runner{log: discardLogger, store: statusStore}
+	r := &Runner{log: discardLogger, store: statusStore, notifications: notifications}
 
 	r.runOnce(context.Background(), job)
 
@@ -345,6 +347,8 @@ func TestRunOnceNoFailureNotificationOnSuccess(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
+	notifications := testWebhookRegistry(notify.Webhook{URL: srv.URL, Method: http.MethodPost})
+
 	job := &config.Config{
 		Name:                 "test",
 		Cmd:                  "echo hi",
@@ -352,14 +356,14 @@ func TestRunOnceNoFailureNotificationOnSuccess(t *testing.T) {
 		Recipients:           []string{testGPGRecipient},
 		GPGBin:               "gpg",
 		GPGHomedir:           homedir,
-		FailureNotifications: jobFailureWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost}),
+		FailureNotifications: []string{"test"},
 		Targets: []config.Target{
 			{ServerName: "good", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir},
 		},
 	}
 
 	statusStore := backup.NewStatusStore([]*config.Config{job})
-	r := &Runner{log: discardLogger, store: statusStore}
+	r := &Runner{log: discardLogger, store: statusStore, notifications: notifications}
 
 	r.runOnce(context.Background(), job)
 
@@ -586,16 +590,18 @@ func TestRetryFailedTargetsFiresFailureNotificationOnFailure(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
+	notifications := testWebhookRegistry(notify.Webhook{URL: srv.URL, Method: http.MethodPost})
+
 	job := &config.Config{
 		Name:                 "test",
-		FailureNotifications: jobFailureWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost}),
+		FailureNotifications: []string{"test"},
 		Targets: []config.Target{
 			{ServerName: "good", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: t.TempDir()},
 		},
 	}
 
 	statusStore := backup.NewStatusStore([]*config.Config{job})
-	r := &Runner{log: discardLogger, store: statusStore}
+	r := &Runner{log: discardLogger, store: statusStore, notifications: notifications}
 
 	// RetryFailedTargets itself returns an error before running the
 	// pipeline when no named target matches the job — this doesn't

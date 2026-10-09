@@ -13,12 +13,6 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 )
 
-// downloadWebhookNotifications wraps wh as the single download-notifications:
-// entry a test's config.ResolvedReceiver fixture needs.
-func downloadWebhookNotifications(wh notify.Webhook) []notify.Notification {
-	return []notify.Notification{{ID: "test", Webhook: &wh}}
-}
-
 func TestRenderDownloadWebhookPayload(t *testing.T) {
 	t.Parallel()
 
@@ -104,7 +98,7 @@ func TestNotifyDownloadWebhookDefaultJSONPayload(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	recv := config.ResolvedReceiver{ID: "recv-a", Path: "/mnt/a", DownloadNotifications: downloadWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
+	recv := config.ResolvedReceiver{ID: "recv-a", Path: "/mnt/a", DownloadNotifications: []string{"test"}, Notifications: testWebhookRegistry(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
 	NotifyDownload(recv, DownloadWebhookEvent{Username: "alice", Key: "daily/backup.gpg", At: time.Now()}, nil, discardLogger)
 
@@ -152,7 +146,7 @@ func TestNotifyDownloadWebhookUsesCustomMethodHeadersAndBody(t *testing.T) {
 
 	recv := config.ResolvedReceiver{
 		ID: "recv-a", Path: "/mnt/a",
-		DownloadNotifications: downloadWebhookNotifications(notify.Webhook{
+		DownloadNotifications: []string{"test"}, Notifications: testWebhookRegistry(notify.Webhook{
 			URL:     srv.URL,
 			Method:  http.MethodPut,
 			Headers: map[string]string{"Authorization": "Bearer tok"},
@@ -191,7 +185,7 @@ func TestNotifyDownloadWebhookNonSuccessStatusIsLoggedNotReturned(t *testing.T) 
 	}))
 	t.Cleanup(srv.Close)
 
-	recv := config.ResolvedReceiver{ID: "a", Path: "/mnt/a", DownloadNotifications: downloadWebhookNotifications(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
+	recv := config.ResolvedReceiver{ID: "a", Path: "/mnt/a", DownloadNotifications: []string{"test"}, Notifications: testWebhookRegistry(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
 	// NotifyDownloadWebhook returns nothing to assert on failure; this just
 	// exercises the non-2xx path without panicking.

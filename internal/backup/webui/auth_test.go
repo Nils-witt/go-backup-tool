@@ -18,6 +18,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 
+	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 )
@@ -249,7 +250,7 @@ func startSSOWebUI(t *testing.T, idp *testIDP, receivers map[string]config.Resol
 	store, _ := newTestStore()
 	db := openTestStateDB(t)
 
-	srv := StartWebUI("127.0.0.1:0", store, nil, nil, receivers, nil, discardLogger, db, nil, idp.settings(), nil, false, false, "", nil, nil)
+	srv := StartWebUI("127.0.0.1:0", store, nil, nil, backup.NewReceiverRegistry(receivers), nil, nil, nil, discardLogger, db, nil, idp.settings(), nil, false, false, "", nil, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}
@@ -369,7 +370,7 @@ func TestSSOLoginRecordsLoginEvents(t *testing.T) {
 	store, _ := newTestStore()
 	db := openTestStateDB(t)
 
-	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, discardLogger, db, nil, idp.settings(), nil, false, false, "", nil, nil)
+	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, nil, nil, discardLogger, db, nil, idp.settings(), nil, false, false, "", nil, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil")
 	}

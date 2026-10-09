@@ -16,6 +16,9 @@ import { DownloadLogPage } from "./pages/DownloadLogPage";
 import { ReceiverLogPage } from "./pages/ReceiverLogPage";
 import { IdentityPage } from "./pages/IdentityPage";
 import { TokensPage } from "./pages/TokensPage";
+import { ReceiverSettingsPage } from "./pages/ReceiverSettingsPage";
+import { NotificationSettingsPage } from "./pages/NotificationSettingsPage";
+import { ReportSettingsPage } from "./pages/ReportSettingsPage";
 
 // AuthGate holds the client-side redirect rules: signed-out access to
 // anything but /login bounces to /login?next=..., and being signed in on
@@ -58,6 +61,9 @@ function AuthGate() {
       <Route element={me ? <Layout /> : null}>
         <Route index element={<DashboardPage />} />
         <Route path="receivers" element={<ReceiversPage />} />
+        <Route path="receiver-settings" element={<ReceiverSettingsPage />} />
+        <Route path="notification-settings" element={<NotificationSettingsPage />} />
+        <Route path="report-settings" element={<ReportSettingsPage />} />
         <Route path="identity" element={<IdentityPage />} />
         <Route path="tokens" element={<TokensPage />} />
         <Route path="logs" element={<LiveLogsPage />} />

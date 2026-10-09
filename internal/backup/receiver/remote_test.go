@@ -25,8 +25,8 @@ func newReceiverMux(receivers map[string]config.ResolvedReceiver) *http.ServeMux
 	status := backup.NewReceiverStatusStore(receivers)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(receivers, status, discardLogger, nil))
-	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", HandleDeleteObject(receivers, status, discardLogger, nil))
+	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(backup.NewReceiverRegistry(receivers), status, discardLogger, nil))
+	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", HandleDeleteObject(backup.NewReceiverRegistry(receivers), status, discardLogger, nil))
 
 	return mux
 }
@@ -279,8 +279,8 @@ func newReceiverMuxWithDB(receivers map[string]config.ResolvedReceiver, db *stor
 	status := backup.NewReceiverStatusStore(receivers)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(receivers, status, discardLogger, db))
-	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", HandleDeleteObject(receivers, status, discardLogger, db))
+	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(backup.NewReceiverRegistry(receivers), status, discardLogger, db))
+	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", HandleDeleteObject(backup.NewReceiverRegistry(receivers), status, discardLogger, db))
 
 	return mux
 }

@@ -11,7 +11,6 @@ import (
 	"github.com/coder/websocket/wsjson"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
-	"nilswitt.dev/go-backup-tool/internal/backup/config"
 )
 
 const (
@@ -142,7 +141,7 @@ func handleMintLiveTicket(tickets *liveTicketStore) http.HandlerFunc {
 // trustProxyHeaders set, the browser's Origin is checked against the Host a
 // reverse proxy reports in Forwarded/X-Forwarded-Host (see forwardedHost),
 // since a proxy that rewrites Host would otherwise never match it.
-func handleLive(baseCtx context.Context, statusStore *backup.StatusStore, receivers map[string]config.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, tickets *liveTicketStore, devMode, trustProxyHeaders bool, log *slog.Logger) http.HandlerFunc {
+func handleLive(baseCtx context.Context, statusStore *backup.StatusStore, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, tickets *liveTicketStore, devMode, trustProxyHeaders bool, log *slog.Logger) http.HandlerFunc {
 	var opts websocket.AcceptOptions
 	if devMode {
 		// Matches corsMiddleware: let a frontend dev server on another
@@ -191,7 +190,7 @@ func handleLive(baseCtx context.Context, statusStore *backup.StatusStore, receiv
 
 // streamLiveStatus sends liveStatusJSON messages on conn until ctx ends or a
 // write fails (see handleLive).
-func streamLiveStatus(ctx context.Context, conn *websocket.Conn, statusStore *backup.StatusStore, receivers map[string]config.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger) {
+func streamLiveStatus(ctx context.Context, conn *websocket.Conn, statusStore *backup.StatusStore, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, log *slog.Logger) {
 	ticker := time.NewTicker(livePingInterval)
 	defer ticker.Stop()
 

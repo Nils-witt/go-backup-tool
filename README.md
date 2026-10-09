@@ -10,8 +10,8 @@ go-backup-tool runs a shell command, encrypts its output with GPG, and sends the
   - `remote`: uploads to another instance's receiver API. Each instance creates its own RSA key pair and UUID on first run and signs requests with it, so no shared secrets are needed.
 - **Scheduling**: jobs run once, or repeat on an `interval`, optionally anchored to a `start-time` (UTC). The last successful run is stored in a SQLite state database, so missed runs are caught up once on startup.
 - **Retention**: objects older than a configured age (`7d`, `168h`, …) are deleted automatically, per server, target, or receiver. Only objects the tool wrote itself are ever deleted.
-- **Receivers**: an instance can accept backups from trusted senders (verified by public key). It can also alert when a sender stops delivering (`stale-after`).
-- **Notifications and hooks**: webhook and email notifications (optionally GPG-encrypted) for job failures, stale receivers, downloads, and scheduled cron reports. `on-error` / `on-recover` shell commands can run per target.
+- **Receivers**: an instance can accept backups from trusted senders (verified by public key). It can also alert when a sender stops delivering (`stale-after`). Receivers are managed by admins in the web dashboard (stored in the state database, applied without a restart); their paths are restricted to `webui.receivers-base-dir`.
+- **Notifications and hooks**: webhook and email notifications (optionally GPG-encrypted) for job failures, stale receivers, downloads, and scheduled cron reports. Notifications and the report are managed by admins in the web dashboard (stored in the state database, applied without a restart); the SMTP server stays in the config file. `on-error` / `on-recover` shell commands can run per target.
 - **Web dashboard** (optional): a React SPA embedded in the binary that shows live job, target, and receiver status, run history, logs, and file downloads. Login is via OIDC SSO, with permissions mapped from the provider's groups.
 - **Windows service**: on Windows, the binary can install and run itself as a service (`-service=install|start|stop|uninstall`).
 

@@ -19,7 +19,7 @@ import (
 // parameter). status is the live receiver status store, shared with
 // whatever also displays it (e.g. the dashboard's /api/receivers), so a
 // write here is reflected there immediately.
-func RegisterRoutes(mux *http.ServeMux, receivers map[string]config.ResolvedReceiver, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) {
+func RegisterRoutes(mux *http.ServeMux, receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) {
 	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(receivers, status, log, db))
 	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", HandleDeleteObject(receivers, status, log, db))
 }
@@ -40,7 +40,7 @@ func RegisterRoutes(mux *http.ServeMux, receivers map[string]config.ResolvedRece
 // (backup.SetObjectModTime) so the dashboard's file listing agrees with it.
 // Every attempt is recorded to status, win or lose, so /api/receivers
 // reflects it.
-func HandleReceiveObject(receivers map[string]config.ResolvedReceiver, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
+func HandleReceiveObject(receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, cfg, t, key, ok := resolveReceiverRequest(w, r, receivers, db)
 		if !ok {
@@ -94,7 +94,7 @@ func HandleReceiveObject(receivers map[string]config.ResolvedReceiver, status *b
 // receiver API's client-facing counterpart to pipeline's deleteRemoteObject.
 // Every attempt is recorded to status, win or lose, so /api/receivers
 // reflects it.
-func HandleDeleteObject(receivers map[string]config.ResolvedReceiver, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
+func HandleDeleteObject(receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, cfg, t, key, ok := resolveReceiverRequest(w, r, receivers, db)
 		if !ok {
@@ -127,8 +127,8 @@ func HandleDeleteObject(receivers map[string]config.ResolvedReceiver, status *ba
 // backup.VerifyRemoteAuthToken/backup.SignRemoteAuthToken), writing an
 // error response and returning ok=false if either the id is unknown or the
 // token doesn't verify.
-func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers map[string]config.ResolvedReceiver) (recv config.ResolvedReceiver, ok bool) {
-	recv, exists := receivers[r.PathValue("id")]
+func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry) (recv config.ResolvedReceiver, ok bool) {
+	recv, exists := receivers.Get(r.PathValue("id"))
 	if !exists {
 		http.Error(w, "unknown receiver id", http.StatusNotFound)
 		return config.ResolvedReceiver{}, false
@@ -151,7 +151,7 @@ func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers map[str
 // WriteLocalObject/DeleteLocalObject as a type: local target would (see
 // backup.ReceiverTarget). Shared by both handlers, which otherwise duplicate
 // this exact preamble.
-func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers map[string]config.ResolvedReceiver, db *store.Store) (recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, key string, ok bool) {
+func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry, db *store.Store) (recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, key string, ok bool) {
 	recv, ok = authorizeReceiver(w, r, receivers)
 	if !ok {
 		return config.ResolvedReceiver{}, nil, nil, "", false
