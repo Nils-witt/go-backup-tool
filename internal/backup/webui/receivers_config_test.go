@@ -77,7 +77,7 @@ func startReceiverConfigWebUI(t *testing.T, idp *testIDP) (*Server, *backup.Rece
 	manager := receiver.NewManager(db, registry, status, notifications, trustManager.Registry(), "", baseDir, discardLogger)
 	statusStore, _ := newTestStore()
 
-	srv := StartWebUI("127.0.0.1:0", statusStore, nil, nil, nil, registry, status, manager, nil, trustManager, discardLogger, db, nil, idp.settings(), nil, false, false, 0, "", nil, nil)
+	srv := StartWebUI("127.0.0.1:0", statusStore, nil, nil, nil, registry, status, manager, nil, trustManager, discardLogger, db, nil, idp.settings(), nil, false, false, 0, nil, "", nil, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -305,6 +306,11 @@ type RunConfig struct {
 	// origin can call this instance's API directly — see fileWebUI.DevMode.
 	DevMode bool
 
+	// CORSGetOrigins mirrors fileWebUI.CORSGetOrigins: the origins (or
+	// "*") allowed to read the web UI's GET /api/... endpoints cross-origin.
+	// Empty adds no such CORS headers.
+	CORSGetOrigins []string
+
 	// OIDC is the web UI's only login method: the SPA runs the OpenID
 	// Connect login itself as a public client, and every /api/... request
 	// carries the provider's access token — see auth.go in
@@ -574,6 +580,17 @@ type fileWebUI struct {
 	// browser that also holds a valid bearer token for this instance.
 	DevMode bool `yaml:"dev-mode"`
 
+	// CORSGetOrigins enables CORS for the web UI's GET /api/... endpoints
+	// only: a request from one of these origins (scheme://host[:port], e.g.
+	// "https://status.example.com"), or from any origin if the list holds
+	// "*", gets an Access-Control-Allow-Origin response header, and its
+	// preflight is answered allowing GET/HEAD with an Authorization header.
+	// Every other method stays same-origin only, so another site can read
+	// (with its own bearer token) but never change anything. Unset/empty
+	// (the default) adds no CORS headers. webui.dev-mode:, when also set,
+	// takes precedence with its permissive all-method CORS.
+	CORSGetOrigins []string `yaml:"cors-get-origins"`
+
 	// ReceiversBaseDir is the directory every receiver path set from the
 	// web UI must lie inside (see ValidateReceiverPath), so an admin can't
 	// point a receiver at an arbitrary location on this machine. Must be
@@ -758,6 +775,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		EventLogLimit:     webUI.eventLogLimit,
 		TrustProxyHeaders: fileCfg.WebUI.TrustProxyHeaders,
 		DevMode:           fileCfg.WebUI.DevMode,
+		CORSGetOrigins:    webUI.corsGetOrigins,
 		OIDC:              webUI.oidc,
 		FileReport:        fileCfg.Report,
 		ServerName:        fileCfg.ServerName,
@@ -897,6 +915,7 @@ type webUISettings struct {
 	oidc             OIDCSettings
 	receiversBaseDir string
 	eventLogLimit    int
+	corsGetOrigins   []string
 }
 
 // resolveWebUISettings resolves cfg (the config file's webui: entry) into
@@ -929,7 +948,44 @@ func resolveWebUISettings(cfg fileWebUI) (webUISettings, error) {
 		return webUISettings{}, err
 	}
 
-	return webUISettings{listen: listen, oidc: oidc, receiversBaseDir: baseDir, eventLogLimit: limit}, nil
+	corsGetOrigins, err := resolveCORSGetOrigins(cfg.CORSGetOrigins)
+	if err != nil {
+		return webUISettings{}, err
+	}
+
+	return webUISettings{listen: listen, oidc: oidc, receiversBaseDir: baseDir, eventLogLimit: limit, corsGetOrigins: corsGetOrigins}, nil
+}
+
+// resolveCORSGetOrigins validates webui.cors-get-origins: (see
+// fileWebUI.CORSGetOrigins): each entry must be "*" or a bare origin —
+// http(s)://host[:port] with no path, query, fragment or userinfo, since a
+// browser's Origin header never carries any of those and so could never
+// match. Entries are trimmed, a trailing "/" is dropped, and the scheme and
+// host lowercased to match how browsers send Origin.
+func resolveCORSGetOrigins(origins []string) ([]string, error) {
+	if len(origins) == 0 {
+		return nil, nil
+	}
+
+	resolved := make([]string, 0, len(origins))
+
+	for _, o := range origins {
+		o = strings.TrimSuffix(strings.TrimSpace(o), "/")
+		if o == "*" {
+			resolved = append(resolved, o)
+			continue
+		}
+
+		u, err := url.Parse(o)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+			u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+			return nil, fmt.Errorf("webui.cors-get-origins: %q is not \"*\" or an origin like https://example.com[:port]", o)
+		}
+
+		resolved = append(resolved, strings.ToLower(u.Scheme)+"://"+strings.ToLower(u.Host))
+	}
+
+	return resolved, nil
 }
 
 // maxEventLogLimit bounds webui.event-log-limit:, since every entry it

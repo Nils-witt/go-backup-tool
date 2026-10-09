@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -56,7 +57,7 @@ type Server struct {
 // StartWebUI starts the -listen web UI dashboard and returns a Server the
 // caller can shut down with Server.Shutdown. Returns nil if the server
 // fails to start.
-func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.Manager, gpgKeyring *gpgkeys.Keyring, runner *pipeline.Runner, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, receiverManager *receiver.Manager, settingsManager *settings.Manager, trustManager *trust.Manager, log *slog.Logger, db *store.Store, logs *LogRingBuffer, oidcSettings config.OIDCSettings, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, eventLogLimit int, instanceName string, registerExtraRoutes func(*http.ServeMux), queue *notify.Queue) *Server {
+func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.Manager, gpgKeyring *gpgkeys.Keyring, runner *pipeline.Runner, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, receiverManager *receiver.Manager, settingsManager *settings.Manager, trustManager *trust.Manager, log *slog.Logger, db *store.Store, logs *LogRingBuffer, oidcSettings config.OIDCSettings, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, eventLogLimit int, corsGetOrigins []string, instanceName string, registerExtraRoutes func(*http.ServeMux), queue *notify.Queue) *Server {
 	lookupJob := pipeline.StaticJobs(nil)
 	if jobsManager != nil {
 		lookupJob = jobsManager.Get
@@ -157,6 +158,8 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.
 	var handler http.Handler = mux
 	if devMode {
 		handler = corsMiddleware(handler)
+	} else if len(corsGetOrigins) > 0 {
+		handler = getCORSMiddleware(corsGetOrigins, handler)
 	}
 
 	srv := &Server{
@@ -219,6 +222,59 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// getCORSMiddleware enables CORS for read-only API access only
+// (webui.cors-get-origins:, see StartWebUI): a GET/HEAD request to /api/...
+// whose Origin is in allowed — or any Origin, if allowed holds "*" — gets
+// an Access-Control-Allow-Origin header, and a preflight (OPTIONS) for such
+// a request is answered here allowing GET/HEAD with an Authorization header,
+// since mux has no OPTIONS routes. Any other method, path or origin passes
+// through without CORS headers, so a browser keeps refusing cross-origin
+// writes. No Access-Control-Allow-Credentials is sent: the API authorizes by
+// bearer token, never by cookie.
+func getCORSMiddleware(allowed []string, next http.Handler) http.Handler {
+	anyOrigin := slices.Contains(allowed, "*")
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		w.Header().Add("Vary", "Origin")
+
+		origin := r.Header.Get("Origin")
+		if origin == "" || (!anyOrigin && !slices.Contains(allowed, origin)) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		allowOrigin := origin
+		if anyOrigin {
+			allowOrigin = "*"
+		}
+
+		switch r.Method {
+		case http.MethodGet, http.MethodHead:
+			w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
+		case http.MethodOptions:
+			reqMethod := r.Header.Get("Access-Control-Request-Method")
+			if reqMethod != http.MethodGet && reqMethod != http.MethodHead {
+				break
+			}
+
+			w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization")
+			w.Header().Set("Access-Control-Max-Age", "600")
+			w.WriteHeader(http.StatusNoContent)
+
 			return
 		}
 

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -625,6 +626,68 @@ jobs:
 
 			if rc.EventLogLimit != tt.want {
 				t.Errorf("rc.EventLogLimit = %d, want %d", rc.EventLogLimit, tt.want)
+			}
+		})
+	}
+}
+
+// TestParseFlagsCORSGetOrigins covers webui.cors-get-origins: accepting
+// "*" and bare origins (normalized), and rejecting anything a browser's
+// Origin header could never match.
+func TestParseFlagsCORSGetOrigins(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		setting string
+		want    []string
+		wantErr bool
+	}{
+		{name: "unset", setting: "", want: nil},
+		{name: "wildcard", setting: `cors-get-origins: ["*"]`, want: []string{"*"}},
+		{name: "origins normalized", setting: `cors-get-origins: [" HTTPS://Status.Example.com/ ", "http://localhost:5173"]`, want: []string{"https://status.example.com", "http://localhost:5173"}},
+		{name: "path rejected", setting: `cors-get-origins: ["https://example.com/app"]`, wantErr: true},
+		{name: "missing scheme rejected", setting: `cors-get-origins: ["example.com"]`, wantErr: true},
+		{name: "other scheme rejected", setting: `cors-get-origins: ["ftp://example.com"]`, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := writeConfigFile(t, `
+webui:
+  enabled: true
+  listen: ":0"
+  `+tt.setting+`
+
+servers:
+  - name: s
+    type: local
+    path: /mnt/backups
+
+jobs:
+  - name: test
+    cmd: "echo hi"
+    targets: [{server: s, bucket: b}]
+    recipients: [me@example.com]
+`)
+
+			rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("ParseFlags() error = nil, want an error")
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("ParseFlags() unexpected error: %v", err)
+			}
+
+			if !slices.Equal(rc.CORSGetOrigins, tt.want) {
+				t.Errorf("rc.CORSGetOrigins = %q, want %q", rc.CORSGetOrigins, tt.want)
 			}
 		})
 	}

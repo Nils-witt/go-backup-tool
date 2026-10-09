@@ -195,6 +195,15 @@ servers:
 #   # holds a valid bearer token for this instance.
 #   dev-mode: true
 #
+#   # cors-get-origins enables CORS for the read-only GET /api/... endpoints
+#   # only, so another site's JavaScript (e.g. a status page) can read this
+#   # instance's API with its own bearer token (an API token from the
+#   # dashboard). List bare origins (scheme://host[:port]) or "*" for any
+#   # origin. POST/PUT/DELETE stay same-origin only. Unset (the default)
+#   # adds no CORS headers; dev-mode, if set, takes precedence.
+#   cors-get-origins:
+#     - "https://status.example.com"
+#
 #   # receivers-base-dir is the directory every receiver path set from the
 #   # web UI (Receiver settings) must lie inside, so a dashboard admin can't
 #   # point a receiver at an arbitrary location on this machine; symlinks
