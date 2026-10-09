@@ -1367,6 +1367,76 @@ paths:
         "503":
           $ref: "#/components/responses/StateDBUnavailable"
 
+  /api/gpg-keys:
+    get:
+      tags: [admin]
+      summary: List GPG public keys
+      operationId: listGPGKeys
+      description: >
+        Every public key in the keyring jobs encrypt to (the config file's
+        top-level gpg-bin/gpg-homedir), as gpg reports it. Requires the
+        `admin` permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: The keyring's public keys
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GPGKeyList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [admin]
+      summary: Add GPG public keys
+      operationId: importGPGKeys
+      description: >
+        Imports the ASCII-armored public key(s) in the body into that
+        keyring. Private keys are refused. Since a key carrying a job
+        recipient's email address could receive that job's backups, this
+        requires `webui.job-editing: true` as well as the `admin`
+        permission; the response warns about every email address now on
+        more than one usable key.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                armored:
+                  type: string
+                  description: "-----BEGIN PGP PUBLIC KEY BLOCK----- ..."
+              required: [armored]
+      responses:
+        "201":
+          description: Keys imported
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fingerprints:
+                    type: array
+                    items:
+                      type: string
+                  warnings:
+                    type: array
+                    items:
+                      type: string
+                required: [fingerprints, warnings]
+        "400":
+          $ref: "#/components/responses/InvalidSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForbiddenOrEditingDisabled"
+
   /api/v1/objects/{id}/{key}:
     put:
       tags: [receiver-api]
@@ -2386,3 +2456,53 @@ components:
           items:
             $ref: "#/components/schemas/CommandConfig"
       required: [editing, commands]
+
+    GPGKey:
+      type: object
+      properties:
+        fingerprint:
+          type: string
+        key_id:
+          type: string
+        algorithm:
+          type: string
+          description: e.g. "RSA" or "EdDSA ed25519".
+        length:
+          type: integer
+        created:
+          type: string
+          format: date-time
+        expires:
+          type: string
+          format: date-time
+          description: Absent when the key doesn't expire.
+        user_ids:
+          type: array
+          items:
+            type: string
+          description: Its user IDs, revoked ones left out.
+        revoked:
+          type: boolean
+        expired:
+          type: boolean
+        disabled:
+          type: boolean
+        can_encrypt:
+          type: boolean
+          description: Whether the key (or a subkey) can currently encrypt, as a job recipient needs.
+      required: [fingerprint, key_id, algorithm, length, created, user_ids, revoked, expired, disabled, can_encrypt]
+
+    GPGKeyList:
+      type: object
+      properties:
+        homedir:
+          type: string
+          description: The keyring's gpg-homedir; empty for gpg's default.
+        editing:
+          type: boolean
+          description: Whether keys may be added (`webui.job-editing`).
+        keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/GPGKey"
+      required: [homedir, editing, keys]

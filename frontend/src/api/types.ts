@@ -362,3 +362,33 @@ export interface CommandConfigListJSON {
   editing: boolean;
   commands: CommandConfigJSON[];
 }
+
+// GPGKeyJSON mirrors gpgkeys.Key: one public key in the keyring jobs
+// encrypt to.
+export interface GPGKeyJSON {
+  fingerprint: string;
+  key_id: string;
+  algorithm: string;
+  length: number;
+  created: string;
+  expires?: string;
+  user_ids: string[];
+  revoked: boolean;
+  expired: boolean;
+  disabled: boolean;
+  can_encrypt: boolean;
+}
+
+// GPGKeyListJSON mirrors gpgKeyListJSON (GET /api/gpg-keys). homedir is ""
+// for gpg's default keyring.
+export interface GPGKeyListJSON {
+  homedir: string;
+  editing: boolean;
+  keys: GPGKeyJSON[];
+}
+
+// GPGKeyImportResultJSON mirrors gpgkeys.ImportResult (POST /api/gpg-keys).
+export interface GPGKeyImportResultJSON {
+  fingerprints: string[];
+  warnings: string[];
+}

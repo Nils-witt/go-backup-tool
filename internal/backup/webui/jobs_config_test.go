@@ -6,6 +6,7 @@ import (
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/gpgkeys"
 	"nilswitt.dev/go-backup-tool/internal/backup/jobs"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
@@ -14,6 +15,14 @@ import (
 // startJobsWebUI starts an SSO-enabled web UI whose jobs, servers, and
 // commands are managed by a fresh jobs.Manager over its own state db.
 func startJobsWebUI(t *testing.T, idp *testIDP, editing bool) (*Server, *jobs.Manager) {
+	t.Helper()
+
+	return startJobsWebUIWithKeyring(t, idp, editing, nil)
+}
+
+// startJobsWebUIWithKeyring is startJobsWebUI also serving keyring's GPG
+// keys.
+func startJobsWebUIWithKeyring(t *testing.T, idp *testIDP, editing bool, keyring *gpgkeys.Keyring) (*Server, *jobs.Manager) {
 	t.Helper()
 
 	db := openTestStateDB(t)
@@ -26,7 +35,7 @@ func startJobsWebUI(t *testing.T, idp *testIDP, editing bool) (*Server, *jobs.Ma
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	srv := StartWebUI("127.0.0.1:0", status, manager, runner, nil, nil, nil, nil, nil, discardLogger, db, nil, idp.settings(), nil, false, false, "", nil, nil)
+	srv := StartWebUI("127.0.0.1:0", status, manager, keyring, runner, nil, nil, nil, nil, nil, discardLogger, db, nil, idp.settings(), nil, false, false, "", nil, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}

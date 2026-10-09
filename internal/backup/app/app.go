@@ -18,6 +18,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/gpgkeys"
 	"nilswitt.dev/go-backup-tool/internal/backup/jobs"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
@@ -99,7 +100,7 @@ func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, statusSto
 
 	go receiver.MonitorReceiverRetention(ctx, stateDB, receivers, log)
 
-	srv := webui.StartWebUI(rc.Listen, statusStore, jobsManager, runner, receivers, receiverStore, receiverManager, settingsManager, trustManager, log, stateDB, logs, rc.OIDC, serverIdentity, rc.TrustProxyHeaders, rc.DevMode, rc.ServerName, func(mux *http.ServeMux) {
+	srv := webui.StartWebUI(rc.Listen, statusStore, jobsManager, gpgkeys.New(rc.GPG), runner, receivers, receiverStore, receiverManager, settingsManager, trustManager, log, stateDB, logs, rc.OIDC, serverIdentity, rc.TrustProxyHeaders, rc.DevMode, rc.ServerName, func(mux *http.ServeMux) {
 		receiver.RegisterRoutes(mux, receivers, receiverStore, log, stateDB)
 	}, queue)
 

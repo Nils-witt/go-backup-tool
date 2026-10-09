@@ -205,6 +205,9 @@ servers:
 #   # and a local server's path is written to, so enabling this lets every
 #   # admin run arbitrary commands as this process's user — only enable it
 #   # if that's acceptable for everyone granted "admin".
+#   # It also lets admins add public keys to the GPG keyring (Settings >
+#   # GPG keys; listing them is always allowed): a key carrying a
+#   # recipient's email address could otherwise receive that job's backups.
 #   job-editing: true
 #
 #   # oidc configures single sign-on via an OpenID Connect provider

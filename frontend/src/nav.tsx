@@ -16,6 +16,7 @@ import VerifiedUserIcon from "@mui/icons-material/VerifiedUser";
 import ScheduleIcon from "@mui/icons-material/Schedule";
 import DnsIcon from "@mui/icons-material/Dns";
 import CodeIcon from "@mui/icons-material/Code";
+import EnhancedEncryptionIcon from "@mui/icons-material/EnhancedEncryption";
 import type { AuthState } from "./auth/useAuth";
 
 export interface NavItem {
@@ -66,6 +67,12 @@ export const NAV_GROUPS: NavGroup[] = [
         to: "/command-settings",
         label: "Commands",
         icon: <CodeIcon />,
+        visible: (s) => s.canManageJobs,
+      },
+      {
+        to: "/gpg-keys",
+        label: "GPG keys",
+        icon: <EnhancedEncryptionIcon />,
         visible: (s) => s.canManageJobs,
       },
       {

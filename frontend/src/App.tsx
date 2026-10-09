@@ -23,6 +23,7 @@ import { TrustedServersPage } from "./pages/TrustedServersPage";
 import { JobSettingsPage } from "./pages/JobSettingsPage";
 import { ServerSettingsPage } from "./pages/ServerSettingsPage";
 import { CommandSettingsPage } from "./pages/CommandSettingsPage";
+import { GPGKeysPage } from "./pages/GPGKeysPage";
 
 // AuthGate holds the client-side redirect rules: signed-out access to
 // anything but /login bounces to /login?next=..., and being signed in on
@@ -68,6 +69,7 @@ function AuthGate() {
         <Route path="job-settings" element={<JobSettingsPage />} />
         <Route path="server-settings" element={<ServerSettingsPage />} />
         <Route path="command-settings" element={<CommandSettingsPage />} />
+        <Route path="gpg-keys" element={<GPGKeysPage />} />
         <Route path="receiver-settings" element={<ReceiverSettingsPage />} />
         <Route path="trusted-servers" element={<TrustedServersPage />} />
         <Route path="notification-settings" element={<NotificationSettingsPage />} />

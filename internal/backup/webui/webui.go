@@ -27,6 +27,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/gpgkeys"
 	"nilswitt.dev/go-backup-tool/internal/backup/jobs"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
@@ -54,7 +55,7 @@ type Server struct {
 // StartWebUI starts the -listen web UI dashboard and returns a Server the
 // caller can shut down with Server.Shutdown. Returns nil if the server
 // fails to start.
-func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.Manager, runner *pipeline.Runner, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, receiverManager *receiver.Manager, settingsManager *settings.Manager, trustManager *trust.Manager, log *slog.Logger, db *store.Store, logs *LogRingBuffer, oidcSettings config.OIDCSettings, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, instanceName string, registerExtraRoutes func(*http.ServeMux), queue *notify.Queue) *Server {
+func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.Manager, gpgKeyring *gpgkeys.Keyring, runner *pipeline.Runner, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, receiverManager *receiver.Manager, settingsManager *settings.Manager, trustManager *trust.Manager, log *slog.Logger, db *store.Store, logs *LogRingBuffer, oidcSettings config.OIDCSettings, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, instanceName string, registerExtraRoutes func(*http.ServeMux), queue *notify.Queue) *Server {
 	lookupJob := pipeline.StaticJobs(nil)
 	if jobsManager != nil {
 		lookupJob = jobsManager.Get
@@ -146,6 +147,7 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.
 	mux.HandleFunc("GET /api/report-config", admin(handleGetReportConfig(settingsManager, log)))
 	mux.HandleFunc("PUT /api/report-config", admin(handleUpdateReportConfig(settingsManager, log)))
 	registerJobConfigRoutes(mux, jobsManager, admin, log)
+	registerGPGKeyRoutes(mux, gpgKeyring, jobsManager != nil && jobsManager.Editing(), admin, log)
 
 	if registerExtraRoutes != nil {
 		registerExtraRoutes(mux)
