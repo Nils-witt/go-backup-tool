@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import { apiFetchJSON, apiFetchOK } from "../api/client";
 import type { TrustedServerJSON, TrustedServerListJSON } from "../api/types";
 import { StatusChip } from "./StatusChip";
@@ -25,6 +25,7 @@ import Typography from "@mui/material/Typography";
 import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
+import UploadFileIcon from "@mui/icons-material/UploadFile";
 
 // ServerForm is the create/edit dialog's state, as sent to POST/PUT
 // /api/trusted-servers.
@@ -40,6 +41,32 @@ const MONO = { fontFamily: "monospace", fontSize: ".8rem" };
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+// parseIdentityFile reads an identity file exported from another instance's
+// Identity page (see IdentitySection's exportIdentity), throwing when it
+// isn't one.
+function parseIdentityFile(text: string): ServerForm {
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error("The file isn't valid JSON.");
+  }
+
+  const d = data as Partial<Record<keyof ServerForm, unknown>>;
+  if (
+    typeof d !== "object" ||
+    d === null ||
+    typeof d.id !== "string" ||
+    typeof d.public_key !== "string" ||
+    !d.id.trim() ||
+    !d.public_key.trim()
+  ) {
+    throw new Error("The file isn't an exported server identity: it needs an id and public_key.");
+  }
+
+  return { id: d.id, name: typeof d.name === "string" ? d.name : "", public_key: d.public_key };
 }
 
 function ServerDialog({
@@ -61,6 +88,31 @@ function ServerDialog({
 }) {
   const set = (patch: Partial<ServerForm>) => onChange({ ...form, ...patch });
   const canSave = !!form.id.trim() && !!form.name.trim() && !!form.public_key.trim();
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+
+  function importFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    // Reset so picking the same file again still fires a change.
+    e.target.value = "";
+    if (!file) return;
+
+    file
+      .text()
+      .then((text) => {
+        const imported = parseIdentityFile(text);
+        // An existing server's ID can't change, so its file must match.
+        if (editing && imported.id !== editing.id) {
+          throw new Error(
+            `The file is for server ${imported.id}, not ${editing.id}. Create a new trusted server for it instead.`,
+          );
+        }
+        // Keep a name already typed when the file has none.
+        onChange({ ...imported, name: imported.name || form.name });
+        setImportError(null);
+      })
+      .catch((err: unknown) => setImportError(errorText(err)));
+  }
 
   return (
     <Dialog open onClose={onCancel} fullWidth maxWidth="sm">
@@ -70,6 +122,27 @@ function ServerDialog({
       <DialogContent>
         <Stack spacing={2} sx={{ pt: 1 }}>
           {error ? <Alert severity="error">{error}</Alert> : null}
+          <Stack direction="row" spacing={1.5} sx={{ alignItems: "center" }}>
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<UploadFileIcon />}
+              onClick={() => fileInput.current?.click()}
+            >
+              Import from file
+            </Button>
+            <Typography variant="caption" color="text.secondary">
+              An identity file exported from the sending instance's Identity page.
+            </Typography>
+            <input
+              ref={fileInput}
+              type="file"
+              accept=".json,application/json"
+              hidden
+              onChange={importFile}
+            />
+          </Stack>
+          {importError ? <Alert severity="error">{importError}</Alert> : null}
           <TextField
             label="Server ID"
             value={form.id}
