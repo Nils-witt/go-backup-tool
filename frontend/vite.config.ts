@@ -15,7 +15,8 @@ export default defineConfig({
       // Lets `npm run dev` drive a real `go run ./cmd/go-backup-tool -listen
       // 127.0.0.1:8080` backend with no CORS handling needed — the browser
       // only ever talks to the Vite dev server's own origin.
-      "/api": "http://localhost:8080",
+      // ws: true also proxies the /api/live WebSocket upgrade.
+      "/api": { target: "http://localhost:8080", ws: true },
     },
   },
 });

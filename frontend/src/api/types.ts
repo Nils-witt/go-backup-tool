@@ -39,6 +39,14 @@ export interface ReceiverSnapshot {
   stale?: boolean;
 }
 
+// One message on the /api/live WebSocket (liveStatusJSON in
+// internal/backup/webui/live.go): the full current job and receiver state.
+export interface LiveStatusMessage {
+  type: "status";
+  jobs: JobSnapshot[];
+  receivers: ReceiverSnapshot[];
+}
+
 export interface ReceiverFile {
   key: string;
   size: number;

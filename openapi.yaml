@@ -109,8 +109,9 @@ paths:
       summary: Current job/target statuses
       operationId: getStatus
       description: >
-        Snapshot of every configured backup job and its targets, polled by
-        the dashboard. Requires the `view` permission.
+        Snapshot of every configured backup job and its targets. The
+        dashboard follows `/api/live` instead and only polls this as a
+        fallback. Requires the `view` permission.
       security:
         - webUIBearer: []
       responses:
@@ -200,6 +201,70 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /api/live/ticket:
+    post:
+      tags: [dashboard]
+      summary: Mint a one-time ticket for the live status WebSocket
+      operationId: mintLiveTicket
+      description: >
+        Mints a short-lived (60s), single-use ticket for opening
+        `GET /api/live`, since a browser can't attach an `Authorization`
+        header to a WebSocket handshake. Requires the `view` permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Live status ticket
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ticket:
+                    type: string
+                required: [ticket]
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/live:
+    get:
+      tags: [dashboard]
+      summary: Live job/target/receiver status (WebSocket)
+      operationId: getLiveStatus
+      description: >
+        Upgrades to a WebSocket that pushes a `LiveStatus` JSON text message
+        once on connect, whenever a job, target or receiver changes state
+        (bursts are merged into one message), and at least every 30s.
+        Each message carries the full current state — the same data as
+        `/api/status` and `/api/receivers` — so clients simply replace what
+        they have. Clients must not send data messages; one closes the
+        connection. Authorized by a one-time ticket from
+        `POST /api/live/ticket` rather than a bearer token. The server
+        closes the socket with status 1001 (going away) when it shuts down.
+      security: []
+      parameters:
+        - name: ticket
+          in: query
+          required: true
+          description: A ticket minted by `POST /api/live/ticket`.
+          schema:
+            type: string
+      responses:
+        "101":
+          description: Switching to the WebSocket protocol; messages are `LiveStatus` objects.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LiveStatus"
+        "403":
+          description: Missing, invalid, expired, or already-used live status ticket
+          content:
+            text/plain:
+              schema:
+                type: string
+
   /api/job-runs:
     get:
       tags: [dashboard]
@@ -259,8 +324,8 @@ paths:
         Kicks off a re-run of the named job's pipeline for whichever of its
         targets `/api/status` currently reports as failed (re-running the
         whole pipeline, not just re-uploading). Starts the retry in the
-        background and returns immediately; poll `/api/status` for
-        progress. Requires the `admin` permission.
+        background and returns immediately; follow `/api/live` (or poll
+        `/api/status`) for progress. Requires the `admin` permission.
       security:
         - webUIBearer: []
       parameters:
@@ -646,6 +711,22 @@ components:
             type: string
 
   schemas:
+    LiveStatus:
+      type: object
+      description: One message on the `/api/live` WebSocket.
+      properties:
+        type:
+          type: string
+          enum: [status]
+        jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/JobSnapshot"
+        receivers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReceiverSnapshot"
+      required: [type, jobs, receivers]
     Permission:
       type: string
       description: >

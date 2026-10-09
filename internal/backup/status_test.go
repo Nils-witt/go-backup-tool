@@ -474,3 +474,48 @@ func TestStatusStoreSnapshotIsIndependentCopy(t *testing.T) {
 		t.Error("mutating a snapshot's target slice leaked back into the store")
 	}
 }
+
+// assertClosed fails the test unless ch is closed, i.e. the store reported a
+// change since ch was handed out.
+func assertClosed(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+
+	select {
+	case <-ch:
+	default:
+		t.Errorf("%s: Changed() channel not closed, want a change notification", what)
+	}
+}
+
+func TestStatusStoreChangedFiresOnEveryMutation(t *testing.T) {
+	t.Parallel()
+
+	s, _ := newTestStore()
+
+	mutations := []struct {
+		name string
+		fn   func()
+	}{
+		{"Starting", func() { s.Starting("test") }},
+		{"TargetDone", func() { s.TargetDone("test", 0, errors.New("boom")) }},
+		{"SetNextRun", func() { s.SetNextRun("test", time.Now()) }},
+		{"Finished", func() { s.Finished("test", nil, 1) }},
+		{"RefreshJobState", func() { s.RefreshJobState("test") }},
+		{"RetryStarting", func() { s.RetryStarting("test", []string{"sibling"}) }},
+		{"SeedLastRun", func() { s.SeedLastRun("test", time.Now(), time.Now(), StateOK, "", 1) }},
+		{"SeedTargetRun", func() { s.SeedTargetRun("test", "nas", StateOK, "") }},
+	}
+
+	for _, m := range mutations {
+		ch := s.Changed()
+
+		m.fn()
+		assertClosed(t, ch, m.name)
+
+		select {
+		case <-s.Changed():
+			t.Errorf("%s: Changed() after the notification is already closed, want a fresh channel", m.name)
+		default:
+		}
+	}
+}

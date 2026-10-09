@@ -41,6 +41,11 @@ type Server struct {
 	http *http.Server
 	done chan struct{}
 	addr string // the listener's actual bound address, e.g. resolved from ":0"
+
+	// stopLive cancels the context every open live status WebSocket (see
+	// handleLive) watches, since http.Server.Shutdown leaves hijacked
+	// connections alone.
+	stopLive context.CancelFunc
 }
 
 // StartWebUI starts the -listen web UI dashboard and returns a Server the
@@ -69,6 +74,8 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 	}
 
 	downloadTickets := newDownloadTicketStore()
+	liveTickets := newLiveTicketStore()
+	liveCtx, stopLive := context.WithCancel(context.Background())
 
 	tokens := newAPITokens(context.Background(), db, log)
 	auth := newAuthenticator(oidcSettings, tokens, db, log, trustProxyHeaders)
@@ -107,6 +114,8 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 	mux.HandleFunc("GET /api/logs", api(handleLogs(logs)))
 	mux.HandleFunc("GET /api/identity", api(handleIdentity(identity)))
 	mux.HandleFunc("GET /api/receivers", api(handleReceiverStatus(receivers, receiverStore, log)))
+	mux.HandleFunc("POST /api/live/ticket", api(handleMintLiveTicket(liveTickets)))
+	mux.HandleFunc("GET /api/live", handleLive(liveCtx, statusStore, receivers, receiverStore, liveTickets, devMode, log))
 	mux.HandleFunc("GET /api/job-runs", apiJobRunLog(handleJobRunEvents(db, log)))
 	mux.HandleFunc("GET /api/target-runs", apiTargetRunLog(handleTargetRunEvents(db, log)))
 	mux.HandleFunc("POST /api/jobs/{name}/retry", admin(handleRetryFailedTargets(jobsByName, statusStore, runner, log)))
@@ -130,9 +139,10 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 	}
 
 	srv := &Server{
-		http: &http.Server{Handler: logRequests(log, handler, trustProxyHeaders), ReadHeaderTimeout: 10 * time.Second},
-		done: make(chan struct{}),
-		addr: ln.Addr().String(),
+		http:     &http.Server{Handler: logRequests(log, handler, trustProxyHeaders), ReadHeaderTimeout: 10 * time.Second},
+		done:     make(chan struct{}),
+		addr:     ln.Addr().String(),
+		stopLive: stopLive,
 	}
 
 	go func() {
@@ -271,10 +281,19 @@ func (w *statusWriter) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
+// Unwrap exposes the wrapped ResponseWriter, so http.ResponseController and
+// the WebSocket upgrade in handleLive (which needs http.Hijacker) can reach
+// it through this wrapper.
+func (w *statusWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 // Shutdown gracefully stops the web UI server, waiting for it to finish.
 func (s *Server) Shutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	s.stopLive()
 
 	_ = s.http.Shutdown(ctx)
 
@@ -300,8 +319,9 @@ func handleStatus(store *backup.StatusStore) http.HandlerFunc {
 //
 // The retry runs in the background: this handler only starts it and
 // returns immediately, since a backup can take far longer than an HTTP
-// client wants to wait for a response. The dashboard's existing 2s
-// /api/status poll picks up the retry's progress instead.
+// client wants to wait for a response. The dashboard's live status
+// WebSocket (see handleLive), or its /api/status polling fallback, picks up
+// the retry's progress instead.
 // context.WithoutCancel detaches the retry from this request's own
 // context, so it isn't cut short the moment the response is written.
 func handleRetryFailedTargets(jobs map[string]*config.Config, statusStore *backup.StatusStore, runner *pipeline.Runner, log *slog.Logger) http.HandlerFunc {
@@ -349,14 +369,21 @@ func writeJSON(w http.ResponseWriter, v any) {
 // set.
 func handleReceiverStatus(receivers map[string]config.ResolvedReceiver, store *backup.ReceiverStatusStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
-		snapshots := store.Snapshot()
-
-		for i := range snapshots {
-			annotateReceiverStaleness(&snapshots[i], receivers[snapshots[i].ID], log)
-		}
-
-		writeJSON(w, snapshots)
+		writeJSON(w, receiverSnapshots(receivers, store, log))
 	}
+}
+
+// receiverSnapshots returns store's current receiver statuses, each
+// annotated with its live staleness (see annotateReceiverStaleness). Shared
+// by handleReceiverStatus and the live status WebSocket (see handleLive).
+func receiverSnapshots(receivers map[string]config.ResolvedReceiver, store *backup.ReceiverStatusStore, log *slog.Logger) []backup.ReceiverSnapshot {
+	snapshots := store.Snapshot()
+
+	for i := range snapshots {
+		annotateReceiverStaleness(&snapshots[i], receivers[snapshots[i].ID], log)
+	}
+
+	return snapshots
 }
 
 // identityJSON is serverIdentity's wire shape for handleIdentity, matching
@@ -827,9 +854,9 @@ func randomTicketID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// downloadTicketJSON is a freshly minted download ticket's wire shape (see
-// handleMintDownloadTicket).
-type downloadTicketJSON struct {
+// ticketJSON is a freshly minted download or live status ticket's wire
+// shape (see handleMintDownloadTicket and handleMintLiveTicket).
+type ticketJSON struct {
 	Ticket string `json:"ticket"`
 }
 
@@ -864,7 +891,7 @@ func handleMintDownloadTicket(receivers map[string]config.ResolvedReceiver, tick
 			return
 		}
 
-		writeJSON(w, downloadTicketJSON{Ticket: ticket})
+		writeJSON(w, ticketJSON{Ticket: ticket})
 	}
 }
 

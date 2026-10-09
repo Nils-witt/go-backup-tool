@@ -438,7 +438,7 @@ func TestDownloadTicketAttributedToSSOUser(t *testing.T) {
 
 	admin := idp.token(t, "dave", map[string]any{"groups": []string{"admins"}})
 
-	var ticket downloadTicketJSON
+	var ticket ticketJSON
 	if code := doJSON(t, srv, http.MethodPost, "/api/receivers/a/download/backup.gpg", admin, &ticket); code != http.StatusOK || ticket.Ticket == "" {
 		t.Fatalf("mint = (%d, %+v), want a ticket", code, ticket)
 	}

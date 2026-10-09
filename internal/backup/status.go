@@ -56,12 +56,44 @@ type StatusStore struct {
 	mu    sync.Mutex
 	jobs  map[string]*JobSnapshot
 	order []string // job names in config order, for stable UI listing
+	changeNotifier
+}
+
+// changeNotifier lets any number of watchers (see the web UI's live status
+// WebSocket, live.go) wait for the next change to the store it's embedded
+// in: Changed hands out the current channel, and every mutation closes it —
+// waking every watcher at once — and replaces it with a fresh one. The
+// embedding store guards changed with its own mu.
+type changeNotifier struct {
+	changed chan struct{}
+}
+
+func newChangeNotifier() changeNotifier {
+	return changeNotifier{changed: make(chan struct{})}
+}
+
+// notifyLocked wakes every watcher currently waiting on Changed's channel.
+// Mutators defer it right after deferring mu.Unlock, so it runs first —
+// still under the lock — once the change is fully applied.
+func (n *changeNotifier) notifyLocked() {
+	close(n.changed)
+	n.changed = make(chan struct{})
+}
+
+// Changed returns a channel that is closed on the store's next change.
+// Watchers should re-read the store's Snapshot after it fires, then call
+// Changed again for the change after that.
+func (s *StatusStore) Changed() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.changed
 }
 
 // NewStatusStore builds a StatusStore with one idle entry per job in jobs,
 // preserving their config-file order.
 func NewStatusStore(jobs []*config.Config) *StatusStore {
-	s := &StatusStore{jobs: make(map[string]*JobSnapshot, len(jobs))}
+	s := &StatusStore{jobs: make(map[string]*JobSnapshot, len(jobs)), changeNotifier: newChangeNotifier()}
 
 	for _, j := range jobs {
 		targets := make([]TargetSnapshot, len(j.Targets))
@@ -154,6 +186,7 @@ func setSizeIfSucceeded(dst *string, state RunState, size int64) {
 func (s *StatusStore) Starting(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.notifyLocked()
 
 	j, ok := s.jobs[name]
 	if !ok {
@@ -175,6 +208,7 @@ func (s *StatusStore) Starting(name string) {
 func (s *StatusStore) TargetDone(name string, index int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.notifyLocked()
 
 	j, ok := s.jobs[name]
 	if !ok || index < 0 || index >= len(j.Targets) {
@@ -190,6 +224,7 @@ func (s *StatusStore) TargetDone(name string, index int, err error) {
 func (s *StatusStore) SetNextRun(name string, next time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.notifyLocked()
 
 	j, ok := s.jobs[name]
 	if !ok {
@@ -218,6 +253,7 @@ func (s *StatusStore) SetNextRun(name string, next time.Time) {
 func (s *StatusStore) Finished(name string, err error, size int64) RunState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.notifyLocked()
 
 	j, ok := s.jobs[name]
 	if !ok {
@@ -270,6 +306,7 @@ func overallState(targets []TargetSnapshot) RunState {
 func (s *StatusStore) RefreshJobState(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.notifyLocked()
 
 	j, ok := s.jobs[name]
 	if !ok {
@@ -291,6 +328,7 @@ func (s *StatusStore) RefreshJobState(name string) {
 func (s *StatusStore) SeedLastRun(name string, start, end time.Time, state RunState, errText string, size int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.notifyLocked()
 
 	j, ok := s.jobs[name]
 	if !ok {
@@ -315,6 +353,7 @@ func (s *StatusStore) SeedLastRun(name string, start, end time.Time, state RunSt
 func (s *StatusStore) SeedTargetRun(name, target string, state RunState, errText string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.notifyLocked()
 
 	j, ok := s.jobs[name]
 	if !ok {
@@ -340,6 +379,7 @@ func (s *StatusStore) SeedTargetRun(name, target string, state RunState, errText
 func (s *StatusStore) RetryStarting(name string, targets []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.notifyLocked()
 
 	j, ok := s.jobs[name]
 	if !ok {

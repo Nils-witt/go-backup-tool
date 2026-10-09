@@ -218,6 +218,7 @@ type ReceiverStatusStore struct {
 	mu    sync.Mutex
 	byID  map[string]*ReceiverSnapshot
 	order []string // receiver ids, sorted, for stable UI listing
+	changeNotifier
 }
 
 // NewReceiverStatusStore builds a receiverStatusStore with one idle entry
@@ -231,7 +232,7 @@ func NewReceiverStatusStore(receivers map[string]config.ResolvedReceiver) *Recei
 
 	sort.Strings(ids)
 
-	s := &ReceiverStatusStore{byID: make(map[string]*ReceiverSnapshot, len(receivers)), order: ids}
+	s := &ReceiverStatusStore{byID: make(map[string]*ReceiverSnapshot, len(receivers)), order: ids, changeNotifier: newChangeNotifier()}
 
 	for _, id := range ids {
 		recv := receivers[id]
@@ -248,6 +249,7 @@ func NewReceiverStatusStore(receivers map[string]config.ResolvedReceiver) *Recei
 func (s *ReceiverStatusStore) Record(id, key string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.notifyLocked()
 
 	r, ok := s.byID[id]
 	if !ok {
@@ -270,6 +272,7 @@ func (s *ReceiverStatusStore) Record(id, key string, err error) {
 func (s *ReceiverStatusStore) SeedLastEvent(id, key string, at time.Time, success bool, errText string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.notifyLocked()
 
 	r, ok := s.byID[id]
 	if !ok {
@@ -288,6 +291,15 @@ func (s *ReceiverStatusStore) SeedLastEvent(id, key string, at time.Time, succes
 
 	r.State = StateFailed
 	r.Error = errText
+}
+
+// Changed returns a channel that is closed on the store's next change (see
+// changeNotifier).
+func (s *ReceiverStatusStore) Changed() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.changed
 }
 
 // Snapshot returns every receiver's current status, in id order, each a copy

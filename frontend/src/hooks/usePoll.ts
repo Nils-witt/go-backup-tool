@@ -15,8 +15,9 @@ export interface PollState<T> {
 // usePoll fetches url immediately and then every intervalMs for as long as
 // the calling component stays mounted — each page now polls only the
 // resource(s) it actually renders, rather than one combined poll running
-// everywhere.
-export function usePoll<T>(url: string, intervalMs = 2000): PollState<T> {
+// everywhere. With enabled false it doesn't poll at all (pages that follow
+// the live status WebSocket only poll while it's down — see useLiveStatus).
+export function usePoll<T>(url: string, intervalMs = 2000, enabled = true): PollState<T> {
   const [data, setData] = useState<T[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -34,10 +35,12 @@ export function usePoll<T>(url: string, intervalMs = 2000): PollState<T> {
   }, [url]);
 
   useEffect(() => {
+    if (!enabled) return;
+
     refresh();
     const id = setInterval(refresh, intervalMs);
     return () => clearInterval(id);
-  }, [refresh, intervalMs]);
+  }, [refresh, intervalMs, enabled]);
 
   return { data, loaded, error, refreshNow: refresh };
 }

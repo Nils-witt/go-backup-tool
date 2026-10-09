@@ -296,3 +296,17 @@ func TestReceiverStatusStoreSeedLastEventUnknownReceiverIsNoop(t *testing.T) {
 		t.Errorf("snapshot() = %+v, want none", snap)
 	}
 }
+
+func TestReceiverStatusStoreChangedFiresOnRecord(t *testing.T) {
+	t.Parallel()
+
+	s := NewReceiverStatusStore(map[string]config.ResolvedReceiver{"a": {ID: "a", Path: t.TempDir()}})
+
+	ch := s.Changed()
+	s.Record("a", "backup.gpg", nil)
+	assertClosed(t, ch, "Record")
+
+	ch = s.Changed()
+	s.SeedLastEvent("a", "backup.gpg", time.Now(), true, "")
+	assertClosed(t, ch, "SeedLastEvent")
+}
