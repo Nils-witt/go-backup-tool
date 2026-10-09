@@ -45,26 +45,30 @@ type ServerConfig struct {
 // the web UI, kept as entered and validated (config.ResolveCommand) on every
 // load.
 type commandModel struct {
-	ID        string    `gorm:"column:id;primaryKey"`
-	Cmd       string    `gorm:"column:cmd;not null"`
-	Timeout   string    `gorm:"column:timeout;not null;default:''"`
-	CreatedAt time.Time `gorm:"column:created_at;not null"`
-	CreatedBy string    `gorm:"column:created_by;not null"`
-	UpdatedAt time.Time `gorm:"column:updated_at;not null"`
-	UpdatedBy string    `gorm:"column:updated_by;not null"`
+	ID            string    `gorm:"column:id;primaryKey"`
+	Cmd           string    `gorm:"column:cmd;not null"`
+	Timeout       string    `gorm:"column:timeout;not null;default:''"`
+	Container     string    `gorm:"column:container;not null;default:''"`
+	ContainerUser string    `gorm:"column:container_user;not null;default:''"`
+	CreatedAt     time.Time `gorm:"column:created_at;not null"`
+	CreatedBy     string    `gorm:"column:created_by;not null"`
+	UpdatedAt     time.Time `gorm:"column:updated_at;not null"`
+	UpdatedBy     string    `gorm:"column:updated_by;not null"`
 }
 
 func (commandModel) TableName() string { return "commands" }
 
 // CommandConfig is one stored command (see commandModel).
 type CommandConfig struct {
-	ID        string
-	Cmd       string
-	Timeout   string
-	CreatedAt time.Time
-	CreatedBy string
-	UpdatedAt time.Time
-	UpdatedBy string
+	ID            string
+	Cmd           string
+	Timeout       string
+	Container     string
+	ContainerUser string
+	CreatedAt     time.Time
+	CreatedBy     string
+	UpdatedAt     time.Time
+	UpdatedBy     string
 }
 
 // JobTarget is one of a stored job's targets, as entered: a server name and
@@ -109,6 +113,8 @@ type jobModel struct {
 	StartTime            string      `gorm:"column:start_time;not null;default:''"`
 	StagingDir           string      `gorm:"column:staging_dir;not null;default:''"`
 	FailureNotifications []string    `gorm:"column:failure_notifications;serializer:json"`
+	Container            string      `gorm:"column:container;not null;default:''"`
+	ContainerUser        string      `gorm:"column:container_user;not null;default:''"`
 	CreatedAt            time.Time   `gorm:"column:created_at;not null"`
 	CreatedBy            string      `gorm:"column:created_by;not null"`
 	UpdatedAt            time.Time   `gorm:"column:updated_at;not null"`
@@ -131,6 +137,8 @@ type JobConfig struct {
 	StartTime            string
 	StagingDir           string
 	FailureNotifications []string
+	Container            string
+	ContainerUser        string
 	CreatedAt            time.Time
 	CreatedBy            string
 	UpdatedAt            time.Time
@@ -240,7 +248,7 @@ func (s *Store) UpdateCommandConfig(ctx context.Context, c CommandConfig) error 
 	c.UpdatedAt = c.UpdatedAt.UTC()
 	m := commandModel(c)
 
-	return updateRow(ctx, s.db, &m, "id", c.ID, []string{"cmd", "timeout"}, "command", ErrCommandNotFound)
+	return updateRow(ctx, s.db, &m, "id", c.ID, []string{"cmd", "timeout", "container", "container_user"}, "command", ErrCommandNotFound)
 }
 
 // DeleteCommandConfig removes the stored command id, returning
@@ -307,7 +315,7 @@ func (s *Store) UpdateJobConfig(ctx context.Context, c JobConfig) error {
 
 	return updateRow(ctx, s.db, &m, "name", c.Name, []string{
 		"cmd", "key", "targets", "recipients", "armor", "gpg_bin", "gpg_homedir",
-		"interval", "start_time", "staging_dir", "failure_notifications",
+		"interval", "start_time", "staging_dir", "failure_notifications", "container", "container_user",
 	}, "job", ErrJobNotFound)
 }
 

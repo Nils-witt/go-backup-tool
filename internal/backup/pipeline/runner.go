@@ -41,6 +41,10 @@ type Runner struct {
 	// simplicity (see the on-error/on-recover feature's design notes).
 	targetFailureMu sync.Mutex
 	targetFailures  map[targetKey]int
+
+	// dockerHost is the Docker daemon a job's or command's container: runs
+	// through (see UseDocker); copied onto each run's config.
+	dockerHost string
 }
 
 // targetKey identifies one (job, target) pair for Runner.targetFailures.
@@ -57,6 +61,12 @@ type targetKey struct {
 // every job scheduled through it in this run.
 func NewRunner(log *slog.Logger, statusStore *backup.StatusStore, stateDB *store.Store, identity *identity.ServerIdentity, queue *notify.Queue, notifications *notify.Registry) *Runner {
 	return &Runner{log: log, store: statusStore, stateDB: stateDB, identity: identity, queue: queue, notifications: notifications, targetFailures: make(map[targetKey]int)}
+}
+
+// UseDocker sets the Docker daemon address (see dockerexec.New) that jobs
+// and commands with a container: run through. Call it before any job runs.
+func (r *Runner) UseDocker(host string) {
+	r.dockerHost = host
 }
 
 // Failed reports whether any job run has failed so far.
@@ -330,6 +340,7 @@ func (r *Runner) runOnce(ctx context.Context, job *config.Config) {
 	run.CreatedAt = now
 	run.StateDB = r.stateDB
 	run.Identity = r.identity
+	run.DockerHost = r.dockerHost
 
 	log := r.log.With("job", job.Name, "key", run.Key)
 
@@ -405,6 +416,7 @@ func (r *Runner) RetryFailedTargets(ctx context.Context, job *config.Config, tar
 	run.CreatedAt = now
 	run.StateDB = r.stateDB
 	run.Identity = r.identity
+	run.DockerHost = r.dockerHost
 	run.Targets = make([]config.Target, len(indices))
 
 	for i, idx := range indices {
@@ -520,7 +532,7 @@ func (r *Runner) handleTargetOutcome(ctx context.Context, jobName string, t *con
 		r.targetFailureMu.Unlock()
 
 		if t.OnRecoverCommand != nil && streak > 0 {
-			fireTargetCommand(ctx, "on-recover", jobName, t, *t.OnRecoverCommand, streak, nil, log)
+			fireTargetCommand(ctx, r.dockerHost, "on-recover", jobName, t, *t.OnRecoverCommand, streak, nil, log)
 		}
 
 		return
@@ -535,17 +547,17 @@ func (r *Runner) handleTargetOutcome(ctx context.Context, jobName string, t *con
 		return
 	}
 
-	fireTargetCommand(ctx, "on-error", jobName, t, *t.OnErrorCommand, streak, terr, log)
+	fireTargetCommand(ctx, r.dockerHost, "on-error", jobName, t, *t.OnErrorCommand, streak, terr, log)
 }
 
 // fireTargetCommand runs cmd via runTargetCommand under a context detached
 // from ctx's cancellation (the triggering run has already finished) and
 // bounded by cmd.Timeout.
-func fireTargetCommand(ctx context.Context, kind, jobName string, t *config.Target, cmd config.Command, streak int, terr error, log *slog.Logger) {
+func fireTargetCommand(ctx context.Context, dockerHost, kind, jobName string, t *config.Target, cmd config.Command, streak int, terr error, log *slog.Logger) {
 	cmdCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cmd.Timeout)
 	defer cancel()
 
-	runTargetCommand(cmdCtx, kind, jobName, t, cmd, streak, terr, log)
+	runTargetCommand(cmdCtx, dockerHost, kind, jobName, t, cmd, streak, terr, log)
 }
 
 // RunOutstandingUploadRetries retries every target upload recorded as
@@ -627,6 +639,7 @@ func (r *Runner) retryOutstandingUpload(ctx context.Context, lookup JobLookup, r
 	run.CreatedAt = row.CreatedAt
 	run.StateDB = r.stateDB
 	run.Identity = r.identity
+	run.DockerHost = r.dockerHost
 
 	if err := uploadTargetAttempt(ctx, &run, &run.Targets[index], row.FileName, log); err != nil {
 		log.Warn("outstanding target upload retry failed", "err", err)

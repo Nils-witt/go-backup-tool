@@ -27,6 +27,13 @@ services:
       # A "local" target's path (see config.yaml's servers:) also needs to be
       # mounted, e.g.:
       # - /mnt/backups:/mnt/backups
+      # Jobs or commands with a container: run through the Docker socket.
+      # Mounting it grants root-equivalent control of the host; the image
+      # runs as a non-root user, so also add the socket's group (its gid on
+      # the host, see `stat -c %g /var/run/docker.sock`) under group_add:.
+      # - /var/run/docker.sock:/var/run/docker.sock
+    # group_add:
+    #   - "999"
     # Only needed if config.yaml sets listen: (enables the dashboard/receiver
     # API); leave commented out otherwise.
     ports:

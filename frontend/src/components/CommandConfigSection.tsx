@@ -27,7 +27,13 @@ import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
 
-const EMPTY_FORM: CommandDefinitionJSON = { id: "", cmd: "", timeout: "" };
+const EMPTY_FORM: CommandDefinitionJSON = {
+  id: "",
+  cmd: "",
+  timeout: "",
+  container: "",
+  container_user: "",
+};
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -78,6 +84,25 @@ function CommandDialog({
             minRows={2}
             slotProps={{ htmlInput: { spellCheck: false, style: { fontFamily: "monospace" } } }}
           />
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+            <TextField
+              label="Container"
+              value={form.container}
+              onChange={(e) => set({ container: e.target.value })}
+              helperText="Run inside this running container (name or ID) through the Docker socket. Empty runs it here."
+              slotProps={{ htmlInput: { spellCheck: false } }}
+              sx={{ flex: 2 }}
+            />
+            <TextField
+              label="Container user"
+              value={form.container_user}
+              onChange={(e) => set({ container_user: e.target.value })}
+              helperText="user[:group]. Empty uses the container's default."
+              disabled={!form.container.trim()}
+              slotProps={{ htmlInput: { spellCheck: false } }}
+              sx={{ flex: 1 }}
+            />
+          </Stack>
           <TextField
             label="Timeout"
             value={form.timeout}
@@ -122,7 +147,17 @@ export function CommandConfigSection() {
   }, [refresh]);
 
   function openDialog(editing: CommandConfigJSON | null) {
-    setForm(editing ? { id: editing.id, cmd: editing.cmd, timeout: editing.timeout } : EMPTY_FORM);
+    setForm(
+      editing
+        ? {
+            id: editing.id,
+            cmd: editing.cmd,
+            timeout: editing.timeout,
+            container: editing.container ?? "",
+            container_user: editing.container_user ?? "",
+          }
+        : EMPTY_FORM,
+    );
     setSaveError(null);
     setDialog({ editing });
   }
@@ -223,6 +258,16 @@ export function CommandConfigSection() {
                   </TableCell>
                   <TableCell sx={{ overflowWrap: "anywhere" }}>
                     <code>{c.cmd}</code>
+                    {c.container ? (
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ display: "block" }}
+                      >
+                        in container {c.container}
+                        {c.container_user ? ` as ${c.container_user}` : ""}
+                      </Typography>
+                    ) : null}
                   </TableCell>
                   <TableCell>{c.timeout || "30s"}</TableCell>
                   <TableCell sx={{ overflowWrap: "anywhere" }}>

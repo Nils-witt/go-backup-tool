@@ -145,9 +145,9 @@ func handleListCommandConfigs(m *jobs.Manager, log *slog.Logger) http.HandlerFun
 		for i, mc := range list {
 			cc := mc.CommandConfig
 			out.Commands[i] = commandConfigJSON{
-				ID: cc.ID, Cmd: cc.Cmd, Timeout: cc.Timeout,
-				auditJSON: audit(cc.CreatedAt, cc.CreatedBy, cc.UpdatedAt, cc.UpdatedBy),
-				UsedBy:    nonNil(mc.UsedBy), Error: mc.Error,
+				FileCommand: jobs.FileCommandFrom(cc),
+				auditJSON:   audit(cc.CreatedAt, cc.CreatedBy, cc.UpdatedAt, cc.UpdatedBy),
+				UsedBy:      nonNil(mc.UsedBy), Error: mc.Error,
 			}
 		}
 

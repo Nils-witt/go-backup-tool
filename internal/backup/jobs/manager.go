@@ -346,7 +346,7 @@ func (m *Manager) readStoredLocked(ctx context.Context) {
 	}
 
 	for _, cc := range commands {
-		m.commandDefs[cc.ID] = fromStoreCommand(cc)
+		m.commandDefs[cc.ID] = FileCommandFrom(cc)
 	}
 
 	jobs, err := m.db.ListJobConfigs(ctx)

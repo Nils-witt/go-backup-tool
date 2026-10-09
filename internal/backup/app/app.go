@@ -18,6 +18,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/dockerexec"
 	"nilswitt.dev/go-backup-tool/internal/backup/gpgkeys"
 	"nilswitt.dev/go-backup-tool/internal/backup/jobs"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
@@ -244,6 +245,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	notifications, reportSettings, settingsManager := newSettings(ctx, rc, stateDB, log)
 
 	r := pipeline.NewRunner(log, statusStore, stateDB, serverIdentity, mailQueue, notifications)
+	r.UseDocker(dockerexec.ResolveHost(rc.DockerSocket))
 
 	jobsManager, err := newJobs(ctx, rc, stateDB, statusStore, r, notifications, log)
 	if err != nil {

@@ -23,6 +23,7 @@ import (
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/dockerexec"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -154,7 +155,7 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger, onTa
 		uploadErr = uploadStagedToTargets(ctx, cfg, stagingPath, onTargetDone, log)
 	}
 
-	return bytesWritten, firstPipelineError(cfg.Cmd, sourceErr, gpgErr, stageErr, uploadErr)
+	return bytesWritten, firstPipelineError(sourceLabel(cfg), sourceErr, gpgErr, stageErr, uploadErr)
 }
 
 // newSourceCommand builds the (not yet started) command that runs cmd
@@ -170,6 +171,22 @@ func newSourceCommand(ctx context.Context, cmd string) *exec.Cmd {
 	return exec.CommandContext(ctx, "sh", "-c", cmd) //nolint:gosec // cfg.Cmd is operator-supplied CLI config, not untrusted input; see runPipeline's doc comment
 }
 
+// sourceProcess is the running backup source command: an *exec.Cmd, or a
+// command running inside a container (see startContainerPipeline).
+type sourceProcess interface {
+	Wait() error
+}
+
+// sourceLabel names cfg's source command in errors, with its container
+// when it runs in one.
+func sourceLabel(cfg *config.Config) string {
+	if cfg.Container != "" {
+		return fmt.Sprintf("command %q in container %q", cfg.Cmd, cfg.Container)
+	}
+
+	return fmt.Sprintf("command %q", cfg.Cmd)
+}
+
 // startEncryptingPipeline starts cfg.Cmd piped into gpg (sourceCmd's stdout
 // wired to gpgCmd's stdin) and returns both commands, already started, plus
 // gpgOut: gpg's stdout, ready for the caller to drain (e.g. via stageBackup)
@@ -177,8 +194,12 @@ func newSourceCommand(ctx context.Context, cmd string) *exec.Cmd {
 // commands once gpgOut has been fully read, per exec.Cmd.StdoutPipe's
 // documented contract — gpgCmd first, since sourceCmd's exit only matters
 // once gpg (its downstream reader) is done with it.
-func startEncryptingPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (sourceCmd, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
-	sourceCmd = newSourceCommand(ctx, cfg.Cmd)
+func startEncryptingPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (source sourceProcess, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
+	if cfg.Container != "" {
+		return startContainerPipeline(ctx, cfg, log)
+	}
+
+	sourceCmd := newSourceCommand(ctx, cfg.Cmd)
 	sourceCmd.Stderr = &logWriter{log: log, msg: "command stderr"}
 
 	sourceOut, err := sourceCmd.StdoutPipe()
@@ -208,6 +229,81 @@ func startEncryptingPipeline(ctx context.Context, cfg *config.Config, log *slog.
 	}
 
 	return sourceCmd, gpgCmd, gpgOut, nil
+}
+
+// containerSource is a source command running inside a container (see
+// startContainerPipeline); Wait returns its outcome once it has exited and
+// all of its output has been handed to gpg.
+type containerSource struct {
+	done chan error
+}
+
+func (c *containerSource) Wait() error { return <-c.done }
+
+// startContainerPipeline is startEncryptingPipeline for a job with a
+// container: cfg.Cmd runs inside it through the Docker daemon (via "sh -c",
+// as it would locally), and its demultiplexed stdout is written into an OS
+// pipe gpg reads as stdin. gpg starts first, and this process closes its
+// own copy of the pipe's read end once gpg holds one, so gpg exiting early
+// fails the next write (EPIPE) and ends the exec stream instead of leaving
+// it blocked.
+func startContainerPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (source sourceProcess, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
+	client, err := dockerexec.New(cfg.DockerHost)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("creating command output pipe: %w", err)
+	}
+
+	gpgCmd = buildGPGCommand(ctx, cfg)
+	gpgCmd.Stdin = pr
+	gpgCmd.Stderr = &logWriter{log: log, msg: "gpg stderr"}
+
+	gpgOut, err = gpgCmd.StdoutPipe()
+	if err == nil {
+		log.Debug("starting gpg", "args", gpgCmd.Args)
+		err = gpgCmd.Start()
+	}
+
+	_ = pr.Close()
+
+	if err != nil {
+		_ = pw.Close()
+		return nil, nil, nil, fmt.Errorf("starting gpg: %w", err)
+	}
+
+	log.Debug("starting source command in container", "cmd", cfg.Cmd, "container", cfg.Container, "docker_host", cfg.DockerHost)
+
+	src := &containerSource{done: make(chan error, 1)}
+
+	go func() {
+		err := client.Run(ctx, dockerexec.Exec{
+			Container: cfg.Container,
+			User:      cfg.ContainerUser,
+			Cmd:       []string{"sh", "-c", cfg.Cmd},
+			Stdout:    pw,
+			Stderr:    &logWriter{log: log, msg: "command stderr"},
+		})
+		// Closing the write end is gpg's EOF.
+		_ = pw.Close()
+
+		src.done <- err
+	}()
+
+	return src, gpgCmd, gpgOut, nil
+}
+
+// runInContainer runs e through the Docker daemon at dockerHost.
+func runInContainer(ctx context.Context, dockerHost string, e dockerexec.Exec) error {
+	client, err := dockerexec.New(dockerHost)
+	if err != nil {
+		return err
+	}
+
+	return client.Run(ctx, e)
 }
 
 // logWriter adapts a *slog.Logger into an io.Writer, line-buffering writes
@@ -282,12 +378,12 @@ func targetLabel(t *config.Target) string {
 
 // firstPipelineError reports the first failure among the pipeline's stages,
 // in source -> gpg -> staging -> upload order.
-func firstPipelineError(cmd string, sourceErr, gpgErr, stageErr, uploadErr error) error {
+func firstPipelineError(source string, sourceErr, gpgErr, stageErr, uploadErr error) error {
 	stages := [...]struct {
 		err   error
 		label string
 	}{
-		{sourceErr, fmt.Sprintf("command %q failed", cmd)},
+		{sourceErr, source + " failed"},
 		{gpgErr, "gpg failed"},
 		{stageErr, "staging encrypted backup"},
 		{uploadErr, "uploading to targets"},

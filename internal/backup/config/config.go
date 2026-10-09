@@ -43,7 +43,19 @@ func (s *stringSlice) Set(v string) error {
 type Config struct {
 	Name string // job name, from its jobs: entry; always set
 	Cmd  string
-	Key  string // may still contain the {time} placeholder; resolved fresh per run
+
+	// Container, when set, runs Cmd inside that already-running container
+	// (name or id) through the Docker daemon at DockerHost, instead of on
+	// this machine — see pipeline.startEncryptingPipeline. ContainerUser
+	// (user[:group]) overrides the container's default user.
+	Container     string
+	ContainerUser string
+
+	// DockerHost is the Docker daemon address (see dockerexec.New), set on
+	// each run's own copy of its job's config by the runner, the same way
+	// StateDB is. Only used when Container is set.
+	DockerHost string
+	Key        string // may still contain the {time} placeholder; resolved fresh per run
 
 	// CreatedAt is when this run's backup content was actually produced, set
 	// once per run by runner.runOnce/RetryFailedTargets from the same
@@ -207,6 +219,12 @@ type Command struct {
 	ID      string
 	Cmd     string
 	Timeout time.Duration
+
+	// Container, when set, runs Cmd inside that already-running container
+	// through the Docker daemon (see pipeline.runTargetCommand), as
+	// ContainerUser when that's set.
+	Container     string
+	ContainerUser string
 }
 
 // RunConfig is the result of ParseFlags: one or more jobs to run, plus the
@@ -240,12 +258,17 @@ type RunConfig struct {
 	// shown read-only.
 	JobEditing bool
 
-	Timeout    time.Duration
-	Listen     string // empty disables the web UI; see resolveWebUIListen
-	ConfigPath string // where the config file was loaded from; state db lives alongside it
-	LogLevel   slog.Level
-	LogFile    string                      // empty disables file logging; otherwise log output is also appended here
-	Receivers  map[string]ResolvedReceiver // the config file's (deprecated) receivers: entries, keyed by id; imported into the state db at startup, see receiver.Manager
+	Timeout time.Duration
+	Listen  string // empty disables the web UI; see resolveWebUIListen
+
+	// DockerSocket is the config file's docker-socket:, the Docker daemon
+	// that a job's or command's container: runs through. Empty falls back
+	// to DOCKER_HOST, then the default socket (see dockerexec.ResolveHost).
+	DockerSocket string
+	ConfigPath   string // where the config file was loaded from; state db lives alongside it
+	LogLevel     slog.Level
+	LogFile      string                      // empty disables file logging; otherwise log output is also appended here
+	Receivers    map[string]ResolvedReceiver // the config file's (deprecated) receivers: entries, keyed by id; imported into the state db at startup, see receiver.Manager
 
 	// FileReceivers are the config file's receivers: entries as written,
 	// already validated into Receivers above, kept raw so receiver.Manager
@@ -374,9 +397,18 @@ const (
 // servers only), overriding the server's for that job's writes to that
 // target — see FileJobTarget.
 type FileJob struct {
-	Name       string          `yaml:"name" json:"name"`
-	Cmd        string          `yaml:"cmd" json:"cmd"`
-	Key        string          `yaml:"key" json:"key"`
+	Name string `yaml:"name" json:"name"`
+	Cmd  string `yaml:"cmd" json:"cmd"`
+	Key  string `yaml:"key" json:"key"`
+
+	// Container, when set, runs Cmd inside that already-running container
+	// (name or id) through the Docker daemon (see fileConfig.DockerSocket)
+	// rather than on this machine, via "sh -c" — so the container needs a
+	// sh. Its stdout is the backup, exactly as for a local cmd:.
+	// ContainerUser (user[:group]) overrides the container's default user.
+	Container     string `yaml:"container" json:"container"`
+	ContainerUser string `yaml:"container-user" json:"container_user"`
+
 	Targets    []FileJobTarget `yaml:"targets" json:"targets"`
 	Recipients []string        `yaml:"recipients" json:"recipients"`
 	Armor      bool            `yaml:"armor" json:"armor"`
@@ -462,11 +494,14 @@ type FileServer struct {
 // by id" shape as notify.FileNotification. Cmd is run through the platform
 // shell, the same way a job's own cmd: is (see pipeline.newSourceCommand).
 // Timeout (optional) bounds how long one firing may run; defaults to
-// defaultOnErrorCommandTimeout when unset.
+// defaultOnErrorCommandTimeout when unset. Container/ContainerUser run Cmd
+// inside a container instead, the same way a job's own container: does.
 type FileCommand struct {
-	ID      string `yaml:"id" json:"id"`
-	Cmd     string `yaml:"cmd" json:"cmd"`
-	Timeout string `yaml:"timeout" json:"timeout"`
+	ID            string `yaml:"id" json:"id"`
+	Cmd           string `yaml:"cmd" json:"cmd"`
+	Timeout       string `yaml:"timeout" json:"timeout"`
+	Container     string `yaml:"container" json:"container"`
+	ContainerUser string `yaml:"container-user" json:"container_user"`
 }
 
 // fileConfig is the top-level shape of the YAML config file. Its embedded
@@ -510,6 +545,13 @@ type fileConfig struct {
 	// the same "define
 	// once, reference by id" shape as Notifications.
 	Commands []FileCommand `yaml:"commands"`
+
+	// DockerSocket is the Docker daemon a job's or command's container:
+	// runs through: a Unix socket path (optionally as unix://<path>) or a
+	// plain-HTTP tcp://<host>:<port>. Unset falls back to DOCKER_HOST, then
+	// /var/run/docker.sock. Mounting the socket into this tool's own
+	// container grants it root-equivalent control of the host.
+	DockerSocket string `yaml:"docker-socket"`
 
 	Receivers []FileReceiver    `yaml:"receivers"`
 	WebUI     fileWebUI         `yaml:"webui"`
@@ -761,6 +803,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		JobEditing:        fileCfg.WebUI.JobEditing,
 		Timeout:           timeout,
 		Listen:            listen,
+		DockerSocket:      strings.TrimSpace(fileCfg.DockerSocket),
 		ConfigPath:        configPath,
 		LogLevel:          level,
 		LogFile:           strings.TrimSpace(fileCfg.LogFile),
@@ -884,7 +927,10 @@ func ResolveCommand(fc FileCommand) (Command, error) {
 		return Command{}, fmt.Errorf("command %q: %w", id, err)
 	}
 
-	return Command{ID: id, Cmd: cmd, Timeout: timeout}, nil
+	return Command{
+		ID: id, Cmd: cmd, Timeout: timeout,
+		Container: strings.TrimSpace(fc.Container), ContainerUser: strings.TrimSpace(fc.ContainerUser),
+	}, nil
 }
 
 // parseOnErrorCommandTimeout parses a commands: entry's timeout: string,
@@ -1663,6 +1709,8 @@ func flattenFileJob(defaults, fj FileJob) FileJob {
 		def string
 	}{
 		{&out.Cmd, defaults.Cmd},
+		{&out.Container, defaults.Container},
+		{&out.ContainerUser, defaults.ContainerUser},
 		{&out.Key, defaults.Key},
 		{&out.Interval, defaults.Interval},
 		{&out.StartTime, defaults.StartTime},
@@ -1781,6 +1829,8 @@ func newJobTargetRef(t FileJobTarget) (jobTargetRef, error) {
 // Config.FailureNotifications).
 func applyFileJob(cfg *Config, fj *FileJob) error {
 	applyString(&cfg.Cmd, fj.Cmd)
+	applyString(&cfg.Container, strings.TrimSpace(fj.Container))
+	applyString(&cfg.ContainerUser, strings.TrimSpace(fj.ContainerUser))
 	applyString(&cfg.Key, fj.Key)
 	applyString(&cfg.GPGBin, fj.GPGBin)
 	applyString(&cfg.GPGHomedir, fj.GPGHomedir)

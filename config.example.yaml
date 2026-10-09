@@ -271,6 +271,17 @@ servers:
 jobs:
   - name: database
     cmd: "mysqldump --single-transaction mydb | gzip"
+    # container (optional) runs cmd inside that already-running container
+    # (name or id) through the Docker daemon (see docker-socket: below)
+    # instead of on this machine — e.g. to dump a database whose client
+    # tools only exist in its own image. cmd runs via "sh -c" there, so the
+    # container needs a sh; its stdout is the backup, as for a local cmd:.
+    # container-user (optional, user[:group]) overrides the container's
+    # default user. Canceling a run (the config file's timeout:) stops
+    # reading the output, but Docker can't kill an exec'd process: it keeps
+    # running inside the container until it exits.
+    # container: mariadb
+    # container-user: mysql
     key: "db-{time}.gpg"
     targets:
       - server: nas
@@ -474,6 +485,16 @@ jobs:
 #       url: "https://hooks.slack.com/services/replace-with-your-webhook-path"
 #       body: '{"text":"{user} downloaded {file} from {receiver} at {time}"}'
 
+# docker-socket is the Docker daemon a job's or command's container: runs
+# through: a Unix socket path (optionally written unix:///path) or a
+# plain-HTTP tcp://host:port (TLS-protected daemons aren't supported).
+# Unset falls back to the DOCKER_HOST environment variable, then
+# /var/run/docker.sock. Podman's Docker-compatible socket works too. Access
+# to the Docker socket is root-equivalent on that host — a socket proxy that
+# only allows the exec endpoints (POST /containers/{id}/exec, POST
+# /exec/{id}/start, GET /exec/{id}/json) narrows that.
+# docker-socket: /var/run/docker.sock
+
 # commands: are named, reusable shell commands, referenced by id from a job
 # target's on-error.command or on-recover.command (see targets: above) — the
 # same "define once, reference by id" shape as notifications: above. id is
@@ -481,7 +502,9 @@ jobs:
 # platform shell exactly like a job's own cmd: (sh -c on Linux/macOS, cmd /C on Windows) — it's
 # operator-supplied config, not sanitized in any way. timeout (optional,
 # same duration syntax as retention:) bounds how long one firing may run;
-# defaults to 30s.
+# defaults to 30s. container/container-user (optional) run cmd inside a
+# container instead, exactly like a job's own container: does; the GBT_*
+# variables below are then added to the container's environment.
 #
 # Context is passed to the command via environment variables (never
 # interpolated into the command string, so you never have to worry about an
@@ -497,6 +520,9 @@ jobs:
 #     timeout: 15s
 #   - id: page-oncall
 #     cmd: "curl -fsS -X POST https://events.example.com/trigger -d \"target=$GBT_TARGET&error=$GBT_ERROR\""
+#   - id: restart-app
+#     cmd: "kill -HUP 1"
+#     container: my-app
 #   - id: resolve-oncall
 #     cmd: "curl -fsS -X POST https://events.example.com/resolve -d \"target=$GBT_TARGET&failures=$GBT_CONSECUTIVE_FAILURES\""
 

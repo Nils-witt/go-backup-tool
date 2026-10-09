@@ -278,6 +278,10 @@ export interface JobTargetJSON {
 export interface JobDefinitionJSON {
   name: string;
   cmd: string;
+  // container, when set, runs cmd inside that running container through
+  // the Docker socket; container_user overrides its default user.
+  container: string;
+  container_user: string;
   key: string;
   targets: JobTargetJSON[];
   recipients: string[];
@@ -347,6 +351,8 @@ export interface CommandDefinitionJSON {
   id: string;
   cmd: string;
   timeout: string;
+  container: string;
+  container_user: string;
 }
 
 // CommandConfigJSON mirrors commandConfigJSON: one stored command, the jobs

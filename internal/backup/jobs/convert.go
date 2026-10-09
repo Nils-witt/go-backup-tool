@@ -24,13 +24,15 @@ func normalizeCommand(fc config.FileCommand) config.FileCommand {
 	fc.ID = strings.TrimSpace(fc.ID)
 	fc.Cmd = strings.TrimSpace(fc.Cmd)
 	fc.Timeout = strings.TrimSpace(fc.Timeout)
+	fc.Container = strings.TrimSpace(fc.Container)
+	fc.ContainerUser = strings.TrimSpace(fc.ContainerUser)
 
 	return fc
 }
 
 // normalizeJob trims fj's fields and drops empty list entries.
 func normalizeJob(fj config.FileJob) config.FileJob {
-	for _, f := range []*string{&fj.Name, &fj.Cmd, &fj.Key, &fj.GPGBin, &fj.GPGHomedir, &fj.Interval, &fj.StartTime, &fj.StagingDir} {
+	for _, f := range []*string{&fj.Name, &fj.Cmd, &fj.Key, &fj.GPGBin, &fj.GPGHomedir, &fj.Interval, &fj.StartTime, &fj.StagingDir, &fj.Container, &fj.ContainerUser} {
 		*f = strings.TrimSpace(*f)
 	}
 
@@ -82,11 +84,13 @@ func fromStoreServer(sc store.ServerConfig) config.FileServer {
 }
 
 func toStoreCommand(fc config.FileCommand) store.CommandConfig {
-	return store.CommandConfig{ID: fc.ID, Cmd: fc.Cmd, Timeout: fc.Timeout}
+	return store.CommandConfig{ID: fc.ID, Cmd: fc.Cmd, Timeout: fc.Timeout, Container: fc.Container, ContainerUser: fc.ContainerUser}
 }
 
-func fromStoreCommand(cc store.CommandConfig) config.FileCommand {
-	return config.FileCommand{ID: cc.ID, Cmd: cc.Cmd, Timeout: cc.Timeout}
+// FileCommandFrom converts a stored command back into the definition it
+// was entered as, the way FileJobFrom does for a job.
+func FileCommandFrom(cc store.CommandConfig) config.FileCommand {
+	return config.FileCommand{ID: cc.ID, Cmd: cc.Cmd, Timeout: cc.Timeout, Container: cc.Container, ContainerUser: cc.ContainerUser}
 }
 
 func toStoreJob(fj config.FileJob) store.JobConfig {
@@ -98,7 +102,7 @@ func toStoreJob(fj config.FileJob) store.JobConfig {
 	return store.JobConfig{
 		Name: fj.Name, Cmd: fj.Cmd, Key: fj.Key, Targets: targets, Recipients: slices.Clone(fj.Recipients), Armor: fj.Armor,
 		GPGBin: fj.GPGBin, GPGHomedir: fj.GPGHomedir, Interval: fj.Interval, StartTime: fj.StartTime, StagingDir: fj.StagingDir,
-		FailureNotifications: slices.Clone(fj.FailureNotifications),
+		FailureNotifications: slices.Clone(fj.FailureNotifications), Container: fj.Container, ContainerUser: fj.ContainerUser,
 	}
 }
 
@@ -122,8 +126,8 @@ func FileJobFrom(jc store.JobConfig) config.FileJob {
 	fj := config.FileJob{
 		Name: jc.Name, Cmd: jc.Cmd, Key: jc.Key, Recipients: slices.Clone(jc.Recipients), Armor: jc.Armor,
 		GPGBin: jc.GPGBin, GPGHomedir: jc.GPGHomedir, Interval: jc.Interval, StartTime: jc.StartTime, StagingDir: jc.StagingDir,
-		FailureNotifications: slices.Clone(jc.FailureNotifications),
-		Targets:              make([]config.FileJobTarget, len(jc.Targets)),
+		FailureNotifications: slices.Clone(jc.FailureNotifications), Container: jc.Container, ContainerUser: jc.ContainerUser,
+		Targets: make([]config.FileJobTarget, len(jc.Targets)),
 	}
 
 	for i, t := range jc.Targets {

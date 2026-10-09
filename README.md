@@ -5,6 +5,7 @@ go-backup-tool runs a shell command, encrypts its output with GPG, and sends the
 ## Core functionality
 
 - **Backup jobs**: each job runs a command (e.g. `mysqldump … | gzip`), encrypts its output for the configured GPG recipients, stages the result locally, and then uploads it to every target independently. A failed command never reaches a target, and a failing target does not affect the others.
+- **Commands in containers**: a job's command, or an `on-error`/`on-recover` command, can run inside an already-running Docker container instead (`container:`, optionally `container-user:`). It is exec'd through the Docker socket (`docker-socket:`, else `DOCKER_HOST`, else `/var/run/docker.sock`), so no Docker CLI is needed; e.g. dump a database with the client tools in its own image.
 - **Targets**
   - `local`: writes to `path/bucket/key` on the filesystem (NAS mount, external disk, …).
   - `remote`: uploads to another instance's receiver API. Each instance creates its own RSA key pair and UUID on first run and signs requests with it, so no shared secrets are needed.

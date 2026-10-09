@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/dockerexec"
 )
 
 // runTargetCommand runs cmd (a target's resolved on-error.command or
@@ -33,33 +34,54 @@ import (
 // GBT_CONSECUTIVE_FAILURES (for on-recover, the length of the streak that
 // just ended), GBT_TIME (RFC 3339), and GBT_ERROR (only when terr is
 // non-nil, i.e. never for on-recover).
-func runTargetCommand(ctx context.Context, kind, job string, t *config.Target, cmd config.Command, streak int, terr error, log *slog.Logger) {
-	var c *exec.Cmd
-	if runtime.GOOS == "windows" {
-		c = exec.CommandContext(ctx, "cmd", "/C", cmd.Cmd) //nolint:gosec // cmd.Cmd is operator-supplied CLI config, not untrusted input; see newSourceCommand
-	} else {
-		c = exec.CommandContext(ctx, "sh", "-c", cmd.Cmd) //nolint:gosec // cmd.Cmd is operator-supplied CLI config, not untrusted input; see newSourceCommand
+//
+// A command with a container: runs inside it instead, through the Docker
+// daemon at dockerHost, with the same GBT_* variables added to the
+// container's own environment (this process's environment isn't passed in).
+func runTargetCommand(ctx context.Context, dockerHost, kind, job string, t *config.Target, cmd config.Command, streak int, terr error, log *slog.Logger) {
+	env := []string{
+		"GBT_EVENT=" + strings.TrimPrefix(kind, "on-"),
+		"GBT_JOB=" + job,
+		"GBT_TARGET=" + t.Bucket,
+		"GBT_SERVER=" + t.ServerName,
+		"GBT_CONSECUTIVE_FAILURES=" + strconv.Itoa(streak),
+		"GBT_TIME=" + time.Now().UTC().Format(time.RFC3339),
 	}
-
-	c.Env = append(os.Environ(),
-		"GBT_EVENT="+strings.TrimPrefix(kind, "on-"),
-		"GBT_JOB="+job,
-		"GBT_TARGET="+t.Bucket,
-		"GBT_SERVER="+t.ServerName,
-		"GBT_CONSECUTIVE_FAILURES="+strconv.Itoa(streak),
-		"GBT_TIME="+time.Now().UTC().Format(time.RFC3339),
-	)
 
 	if terr != nil {
-		c.Env = append(c.Env, "GBT_ERROR="+terr.Error())
+		env = append(env, "GBT_ERROR="+terr.Error())
 	}
 
-	c.Stdout = &logWriter{log: log, msg: kind + " command output"}
-	c.Stderr = &logWriter{log: log, msg: kind + " command output"}
+	output := &logWriter{log: log, msg: kind + " command output"}
 
-	log.Info(kind+" command firing", "job", job, "target", targetLabel(t), "command_id", cmd.ID, "streak", streak)
+	log.Info(kind+" command firing", "job", job, "target", targetLabel(t), "command_id", cmd.ID, "container", cmd.Container, "streak", streak)
 
-	if err := c.Run(); err != nil {
+	var err error
+
+	if cmd.Container != "" {
+		err = runInContainer(ctx, dockerHost, dockerexec.Exec{
+			Container: cmd.Container,
+			User:      cmd.ContainerUser,
+			Cmd:       []string{"sh", "-c", cmd.Cmd},
+			Env:       env,
+			Stdout:    output,
+			Stderr:    output,
+		})
+	} else {
+		var c *exec.Cmd
+		if runtime.GOOS == "windows" {
+			c = exec.CommandContext(ctx, "cmd", "/C", cmd.Cmd) //nolint:gosec // cmd.Cmd is operator-supplied CLI config, not untrusted input; see newSourceCommand
+		} else {
+			c = exec.CommandContext(ctx, "sh", "-c", cmd.Cmd) //nolint:gosec // cmd.Cmd is operator-supplied CLI config, not untrusted input; see newSourceCommand
+		}
+
+		c.Env = append(os.Environ(), env...)
+		c.Stdout = output
+		c.Stderr = output
+		err = c.Run()
+	}
+
+	if err != nil {
 		log.Warn(kind+" command failed", "job", job, "target", targetLabel(t), "command_id", cmd.ID, "err", err)
 		return
 	}

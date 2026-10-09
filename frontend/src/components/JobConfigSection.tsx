@@ -58,6 +58,8 @@ const EMPTY_TARGET: JobTargetJSON = {
 const EMPTY_FORM: JobForm = {
   name: "",
   cmd: "",
+  container: "",
+  container_user: "",
   key: "",
   targets: [EMPTY_TARGET],
   recipients: "",
@@ -74,6 +76,8 @@ function formFrom(j: JobConfigJSON): JobForm {
   return {
     name: j.name,
     cmd: j.cmd,
+    container: j.container ?? "",
+    container_user: j.container_user ?? "",
     key: j.key,
     targets: j.targets.length ? j.targets : [EMPTY_TARGET],
     recipients: j.recipients.join("\n"),
@@ -322,6 +326,25 @@ function JobDialog({
             minRows={2}
             slotProps={{ htmlInput: { spellCheck: false, style: { fontFamily: "monospace" } } }}
           />
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+            <TextField
+              label="Container"
+              value={form.container}
+              onChange={(e) => set({ container: e.target.value })}
+              helperText="Run inside this running container (name or ID) through the Docker socket. Empty runs it here."
+              slotProps={{ htmlInput: { spellCheck: false } }}
+              sx={{ flex: 2 }}
+            />
+            <TextField
+              label="Container user"
+              value={form.container_user}
+              onChange={(e) => set({ container_user: e.target.value })}
+              helperText="user[:group]. Empty uses the container's default."
+              disabled={!form.container.trim()}
+              slotProps={{ htmlInput: { spellCheck: false } }}
+              sx={{ flex: 1 }}
+            />
+          </Stack>
           <TextField
             label="Key"
             value={form.key}
@@ -583,6 +606,16 @@ export function JobConfigSection() {
                   </TableCell>
                   <TableCell sx={{ overflowWrap: "anywhere", maxWidth: 280 }}>
                     <code>{j.cmd}</code>
+                    {j.container ? (
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ display: "block" }}
+                      >
+                        in container {j.container}
+                        {j.container_user ? ` as ${j.container_user}` : ""}
+                      </Typography>
+                    ) : null}
                   </TableCell>
                   <TableCell>{scheduleText(j)}</TableCell>
                   <TableCell sx={{ overflowWrap: "anywhere" }}>
