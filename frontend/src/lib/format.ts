@@ -43,3 +43,27 @@ export function encodePathKey(key: string): string {
     .map((seg) => encodeURIComponent(seg))
     .join("/");
 }
+
+// fmtRelative formats a timestamp relative to now ("3h ago", "in 12m"),
+// using the largest whole unit; "never" for the Go zero time.
+export function fmtRelative(s?: string | null, now = Date.now()): string {
+  if (!hasTime(s)) return "never";
+
+  const diff = new Date(s as string).getTime() - now;
+  const abs = Math.abs(diff);
+  const units: [number, string][] = [
+    [86400000, "d"],
+    [3600000, "h"],
+    [60000, "m"],
+  ];
+
+  let text = "just now";
+  for (const [ms, unit] of units) {
+    if (abs >= ms) {
+      text = Math.floor(abs / ms) + unit;
+      break;
+    }
+  }
+  if (text === "just now") return abs < 5000 ? text : diff < 0 ? "<1m ago" : "in <1m";
+  return diff < 0 ? text + " ago" : "in " + text;
+}

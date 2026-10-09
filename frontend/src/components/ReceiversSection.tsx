@@ -156,7 +156,7 @@ export function ReceiversCard({
           >
             <Typography sx={{ fontWeight: 600 }}>{receiver.id}</Typography>
             <Stack direction="row" spacing={0.5}>
-              <StatusChip state={receiver.state} />
+              <StatusChip state={receiver.state} error={receiver.error} />
               {receiver.stale ? <StatusChip state="failed" label="stale" /> : null}
             </Stack>
           </Stack>
@@ -176,11 +176,6 @@ export function ReceiversCard({
               {lastSeen}
             </Typography>
           </Stack>
-          {receiver.error ? (
-            <Typography variant="body2" color="error" sx={{ overflowWrap: "anywhere" }}>
-              {receiver.error}
-            </Typography>
-          ) : null}
           <Button size="small" variant="outlined" onClick={() => setOpenFilesFor(receiver.id)}>
             Show files
           </Button>

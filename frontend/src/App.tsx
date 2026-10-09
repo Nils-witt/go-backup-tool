@@ -7,7 +7,6 @@ import { Layout } from "./Layout";
 import { LoginPage } from "./pages/LoginPage";
 import { SsoCallbackPage } from "./pages/SsoCallbackPage";
 import { DashboardPage } from "./pages/DashboardPage";
-import { ReceiversPage } from "./pages/ReceiversPage";
 import { LiveLogsPage } from "./pages/LiveLogsPage";
 import { JobRunsPage } from "./pages/JobRunsPage";
 import { TargetRunsPage } from "./pages/TargetRunsPage";
@@ -65,7 +64,6 @@ function AuthGate() {
           render nothing rather than a dashboard whose every call would 401. */}
       <Route element={me ? <Layout /> : null}>
         <Route index element={<DashboardPage />} />
-        <Route path="receivers" element={<ReceiversPage />} />
         <Route path="job-settings" element={<JobSettingsPage />} />
         <Route path="server-settings" element={<ServerSettingsPage />} />
         <Route path="command-settings" element={<CommandSettingsPage />} />

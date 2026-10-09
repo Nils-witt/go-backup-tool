@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
 import DashboardIcon from "@mui/icons-material/SpaceDashboard";
-import StorageIcon from "@mui/icons-material/Storage";
 import TerminalIcon from "@mui/icons-material/Terminal";
 import LoginIcon from "@mui/icons-material/Login";
 import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
@@ -38,7 +37,6 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     items: [
       { to: "/", label: "Dashboard", icon: <DashboardIcon /> },
-      { to: "/receivers", label: "Receivers", icon: <StorageIcon /> },
       { to: "/identity", label: "Identity", icon: <VpnKeyIcon /> },
       {
         to: "/tokens",

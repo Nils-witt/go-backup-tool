@@ -1,21 +1,163 @@
-import type { JobSnapshot } from "../api/types";
+import { useMemo, type ReactNode } from "react";
+import type { JobRunEventJSON, JobSnapshot, ReceiverSnapshot, RunState } from "../api/types";
 import { usePoll } from "../hooks/usePoll";
+import { usePermissionPoll } from "../hooks/usePermissionPoll";
 import { useLiveStatus } from "../hooks/useLiveStatus";
 import { useAuth } from "../auth/useAuth";
 import { JobsGrid } from "../components/JobsGrid";
 import { PageHeader } from "../components/PageHeader";
+import { ReceiversSection } from "../components/ReceiversSection";
+import { SummaryTile } from "../components/StatusSummary";
+import { countStates } from "../lib/status";
+import { fmtRelative, fmtTime, hasTime } from "../lib/format";
+import Grid from "@mui/material/Grid";
+import Stack from "@mui/material/Stack";
+import Typography from "@mui/material/Typography";
+
+// Run history changes only when a job finishes, so it's polled far less
+// often than the live job state.
+const runHistoryPollMs = 15000;
+
+// receiverState folds a receiver's staleness into its state for the summary
+// bar: a stale receiver counts as "incomplete", labelled "stale".
+function receiverState(r: ReceiverSnapshot): RunState {
+  return r.stale ? "incomplete" : r.state;
+}
+
+function SectionHeader({ title, action }: { title: string; action?: ReactNode }) {
+  return (
+    <Stack
+      direction="row"
+      sx={{ alignItems: "baseline", justifyContent: "space-between", mt: 4, mb: 1.5 }}
+    >
+      <Typography variant="h6" sx={{ fontWeight: 600 }}>
+        {title}
+      </Typography>
+      {action}
+    </Stack>
+  );
+}
 
 export function DashboardPage() {
   const session = useAuth();
   const live = useLiveStatus();
   // Polling only runs while the live status socket is down.
   const poll = usePoll<JobSnapshot>("/api/status", 2000, !live.live);
+  const receiverPoll = usePoll<ReceiverSnapshot>("/api/receivers", 2000, !live.live);
   const jobs = live.live ? live.jobs : poll.data;
+  const receivers = live.live ? live.receivers : receiverPoll.data;
+
+  const runs = usePermissionPoll<JobRunEventJSON>(
+    "/api/job-runs",
+    session.canViewJobRunLog,
+    runHistoryPollMs,
+  );
+  const runsByJob = useMemo(() => {
+    if (!session.canViewJobRunLog) return undefined;
+    const m = new Map<string, JobRunEventJSON[]>();
+    for (const r of runs) {
+      const list = m.get(r.job_name);
+      if (list) list.push(r);
+      else m.set(r.job_name, [r]);
+    }
+    return m;
+  }, [runs, session.canViewJobRunLog]);
+
+  const targets = jobs.flatMap((j) => j.targets || []);
+  const jobCounts = countStates(jobs.map((j) => j.state));
+  const targetCounts = countStates(targets.map((t) => t.state));
+  const receiverCounts = countStates(receivers.map(receiverState));
+  const attention = (jobCounts.failed ?? 0) + (jobCounts.incomplete ?? 0);
+  const targetsOk = targetCounts.ok ?? 0;
+
+  const nextJob = jobs
+    .filter((j) => hasTime(j.next_run))
+    .sort((a, b) => new Date(a.next_run).getTime() - new Date(b.next_run).getTime())[0];
 
   return (
     <>
-      <PageHeader title="Dashboard" subtitle="Backup jobs and their most recent run." />
-      <JobsGrid jobs={jobs} canRetry={session.canRetry} refreshNow={poll.refreshNow} />
+      <PageHeader
+        title="Dashboard"
+        subtitle="Backup jobs, their recent runs, and the receivers accepting backups from other instances."
+      />
+
+      <Grid container spacing={2} sx={{ mb: 3 }}>
+        <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+          <SummaryTile
+            title="Jobs"
+            value={jobs.length}
+            caption={
+              !jobs.length
+                ? "none configured"
+                : attention
+                  ? `${attention} need${attention === 1 ? "s" : ""} attention`
+                  : "all healthy"
+            }
+            counts={jobCounts}
+          />
+        </Grid>
+        <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+          <SummaryTile
+            title="Targets"
+            value={
+              <>
+                {targetsOk}
+                <Typography component="span" variant="h6" color="text.secondary">
+                  {" "}
+                  / {targets.length}
+                </Typography>
+              </>
+            }
+            caption="succeeded on last run"
+            counts={targetCounts}
+          />
+        </Grid>
+        <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+          <SummaryTile
+            title="Receivers"
+            value={receivers.length}
+            caption={
+              !receivers.length
+                ? "none configured"
+                : receiverCounts.incomplete
+                  ? `${receiverCounts.incomplete} stale`
+                  : "all receiving"
+            }
+            counts={receiverCounts}
+            labels={{ incomplete: "stale" }}
+          />
+        </Grid>
+        <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+          <SummaryTile
+            title="Next run"
+            value={nextJob ? fmtRelative(nextJob.next_run) : "—"}
+            caption={
+              nextJob ? (
+                <>
+                  {nextJob.name} · {fmtTime(nextJob.next_run)}
+                </>
+              ) : (
+                "nothing scheduled"
+              )
+            }
+          />
+        </Grid>
+      </Grid>
+
+      <SectionHeader title="Jobs" />
+      <JobsGrid
+        jobs={jobs}
+        canRetry={session.canRetry}
+        refreshNow={poll.refreshNow}
+        runsByJob={runsByJob}
+      />
+
+      {receivers.length ? (
+        <>
+          <SectionHeader title="Receivers" />
+          <ReceiversSection receivers={receivers} canDownload={session.canDownload} />
+        </>
+      ) : null}
     </>
   );
 }
