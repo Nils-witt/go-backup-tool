@@ -15,6 +15,7 @@ import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
 import DialogTitle from "@mui/material/DialogTitle";
 import IconButton from "@mui/material/IconButton";
+import InputAdornment from "@mui/material/InputAdornment";
 import MenuItem from "@mui/material/MenuItem";
 import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
@@ -32,7 +33,8 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
 
 // ReceiverForm is the create/edit dialog's state: a receiver's editable
-// fields, as sent to POST/PUT /api/receiver-configs.
+// fields, as sent to POST/PUT /api/receiver-configs — except path, which is
+// relative to the base dir here (see joinPath).
 interface ReceiverForm {
   id: string;
   allowed_servers: string[];
@@ -55,12 +57,30 @@ const EMPTY_FORM: ReceiverForm = {
   download_notifications: [],
 };
 
-function formFrom(r: ReceiverConfigJSON): ReceiverForm {
+// basePrefix is baseDir with exactly one trailing slash.
+function basePrefix(baseDir: string): string {
+  return baseDir.replace(/\/+$/, "") + "/";
+}
+
+// relativePath returns path relative to baseDir, or null when it isn't
+// inside it (e.g. a receiver imported from the config file).
+function relativePath(baseDir: string, path: string): string | null {
+  const prefix = basePrefix(baseDir);
+  return baseDir && path.startsWith(prefix) ? path.slice(prefix.length) : null;
+}
+
+// joinPath turns the dialog's relative path back into the absolute path the
+// API expects. The server cleans it and rejects anything escaping baseDir.
+function joinPath(baseDir: string, rel: string): string {
+  return basePrefix(baseDir) + rel.trim().replace(/^\/+/, "");
+}
+
+function formFrom(r: ReceiverConfigJSON, baseDir: string): ReceiverForm {
   return {
     id: r.id,
     allowed_servers: r.allowed_servers,
     public_key: r.public_key,
-    path: r.path,
+    path: relativePath(baseDir, r.path) ?? "",
     retention: r.retention,
     stale_after: r.stale_after,
     stale_notifications: r.stale_notifications,
@@ -139,10 +159,13 @@ function ReceiverDialog({
   onSave: () => void;
 }) {
   const set = (patch: Partial<ReceiverForm>) => onChange({ ...form, ...patch });
+  // outsidePath is the edited receiver's stored path when it isn't inside
+  // baseDir; leaving the path empty keeps it.
+  const outsidePath = editing && relativePath(baseDir, editing.path) === null ? editing.path : null;
   const canSave =
     !!form.id.trim() &&
     (form.allowed_servers.length > 0 || !!form.public_key.trim()) &&
-    !!form.path.trim();
+    (!!form.path.trim() || outsidePath !== null);
 
   return (
     <Dialog open onClose={onCancel} fullWidth maxWidth="sm">
@@ -209,12 +232,22 @@ function ReceiverDialog({
             value={form.path}
             onChange={(e) => set({ path: e.target.value })}
             helperText={
-              baseDir
-                ? `Directory incoming objects are written to; must be inside ${baseDir}.`
-                : "Directory incoming objects are written to."
+              outsidePath !== null
+                ? `Currently ${outsidePath}, outside the base dir. Leave empty to keep it.`
+                : "Directory incoming objects are written to, inside the base dir."
             }
-            required
-            slotProps={{ htmlInput: { spellCheck: false } }}
+            required={outsidePath === null}
+            disabled={!baseDir}
+            slotProps={{
+              htmlInput: { spellCheck: false },
+              input: {
+                startAdornment: baseDir ? (
+                  <InputAdornment position="start">
+                    <code>{basePrefix(baseDir)}</code>
+                  </InputAdornment>
+                ) : undefined,
+              },
+            }}
           />
           <TextField
             label="Retention"
@@ -280,7 +313,7 @@ export function ReceiverConfigSection() {
   }, [refresh]);
 
   function openDialog(editing: ReceiverConfigJSON | null) {
-    setForm(editing ? formFrom(editing) : EMPTY_FORM);
+    setForm(editing ? formFrom(editing, baseDir) : EMPTY_FORM);
     setSaveError(null);
     setDialog({ editing });
   }
@@ -288,6 +321,9 @@ export function ReceiverConfigSection() {
   async function save() {
     if (!dialog) return;
     const editing = dialog.editing;
+    // An empty path while editing keeps a stored path outside the base dir
+    // (the dialog only allows that case).
+    const path = form.path.trim() ? joinPath(baseDir, form.path) : (editing?.path ?? "");
 
     setSaving(true);
     setSaveError(null);
@@ -299,7 +335,7 @@ export function ReceiverConfigSection() {
         {
           method: editing ? "PUT" : "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...form, id: form.id.trim() }),
+          body: JSON.stringify({ ...form, id: form.id.trim(), path }),
         },
         "saving receiver failed",
       );
