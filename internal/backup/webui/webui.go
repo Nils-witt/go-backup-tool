@@ -51,7 +51,7 @@ type Server struct {
 // StartWebUI starts the -listen web UI dashboard and returns a Server the
 // caller can shut down with Server.Shutdown. Returns nil if the server
 // fails to start.
-func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Config, runner *pipeline.Runner, receivers map[string]config.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store, logs *LogRingBuffer, oidcSettings config.OIDCSettings, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, registerExtraRoutes func(*http.ServeMux), queue *notify.Queue) *Server {
+func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Config, runner *pipeline.Runner, receivers map[string]config.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store, logs *LogRingBuffer, oidcSettings config.OIDCSettings, identity *identity.ServerIdentity, trustProxyHeaders, devMode bool, instanceName string, registerExtraRoutes func(*http.ServeMux), queue *notify.Queue) *Server {
 	jobsByName := make(map[string]*config.Config, len(jobs))
 	for _, j := range jobs {
 		jobsByName[j.Name] = j
@@ -106,7 +106,7 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", handleDashboard(dashboardIndexHTML))
 	mux.Handle("GET /assets/", http.StripPrefix("/assets/", cacheForever(http.FileServerFS(dashboardAssetsFS))))
-	mux.HandleFunc("GET /api/meta", handleMeta())
+	mux.HandleFunc("GET /api/meta", handleMeta(instanceName))
 	mux.HandleFunc("GET /api/sso/status", handleSSOStatus(oidcSettings))
 	mux.HandleFunc("GET /api/me", requireUser(auth, handleMe()))
 	mux.HandleFunc("POST /api/sso/login", requireUser(auth, handleSSOLogin(auth)))
@@ -448,17 +448,29 @@ type metaJSON struct {
 
 // instanceNameEnv names the environment variable holding an optional,
 // free-form label for this instance (e.g. "prod" or "nas-01"), shown on the
-// login page and in the dashboard's app bar to tell instances apart.
+// login page and in the dashboard's app bar to tell instances apart. Only a
+// fallback: the config file's top-level server-name: takes precedence (see
+// resolveInstanceName).
 const instanceNameEnv = "INSTANCE_NAME"
+
+// resolveInstanceName returns configured (the config file's server-name:)
+// trimmed, falling back to instanceNameEnv when it's empty.
+func resolveInstanceName(configured string) string {
+	if name := strings.TrimSpace(configured); name != "" {
+		return name
+	}
+
+	return strings.TrimSpace(os.Getenv(instanceNameEnv))
+}
 
 // handleMeta serves GET /api/meta: always public/unauthenticated, since the
 // footer it feeds is shown on the login page too. Leaks nothing the
 // binary's own --version doesn't already report.
-func handleMeta() http.HandlerFunc {
+func handleMeta(instanceName string) http.HandlerFunc {
 	meta := metaJSON{
 		Version:      version.Version,
 		Commit:       version.Commit,
-		InstanceName: strings.TrimSpace(os.Getenv(instanceNameEnv)),
+		InstanceName: resolveInstanceName(instanceName),
 	}
 
 	return func(w http.ResponseWriter, _ *http.Request) {

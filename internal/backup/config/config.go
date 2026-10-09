@@ -421,7 +421,10 @@ type fileConfig struct {
 	// pipeline.renderReportSubject), is available in every notification
 	// webhook.body/email.subject/email.body — handy for telling which
 	// go-backup-tool instance a notification came from when several share
-	// the same webhook/inbox. Unset (the default) substitutes as "".
+	// the same webhook/inbox. Unset (the default) substitutes as "". Also
+	// the web UI's displayed instance name, which falls back to the
+	// INSTANCE_NAME environment variable when this is unset (see
+	// webui.resolveInstanceName).
 	ServerName string `yaml:"server-name"`
 
 	// SMTP is the outgoing mail server used by any notifications: entry with

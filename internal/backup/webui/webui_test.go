@@ -71,23 +71,39 @@ func TestHandleStatusServesJSON(t *testing.T) {
 	}
 }
 
-// handleMeta reports INSTANCE_NAME (trimmed) so the SPA can show it on the
-// login page and in the app bar.
+// handleMeta reports the configured instance name (trimmed), falling back to
+// INSTANCE_NAME, so the SPA can show it on the login page and in the app bar.
 func TestHandleMetaIncludesInstanceName(t *testing.T) {
-	t.Setenv(instanceNameEnv, "  prod-nas  ")
-
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/meta", nil)
-	rec := httptest.NewRecorder()
-
-	handleMeta()(rec, req)
-
-	var meta metaJSON
-	if err := json.Unmarshal(rec.Body.Bytes(), &meta); err != nil {
-		t.Fatalf("decoding response body: %v", err)
+	tests := []struct {
+		name       string
+		configured string
+		env        string
+		want       string
+	}{
+		{name: "env fallback", configured: "", env: "  prod-nas  ", want: "prod-nas"},
+		{name: "config wins over env", configured: "  primary  ", env: "prod-nas", want: "primary"},
+		{name: "blank config falls back", configured: "   ", env: "prod-nas", want: "prod-nas"},
+		{name: "neither set", configured: "", env: "", want: ""},
 	}
 
-	if meta.InstanceName != "prod-nas" {
-		t.Errorf("InstanceName = %q, want %q", meta.InstanceName, "prod-nas")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(instanceNameEnv, tt.env)
+
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/meta", nil)
+			rec := httptest.NewRecorder()
+
+			handleMeta(tt.configured)(rec, req)
+
+			var meta metaJSON
+			if err := json.Unmarshal(rec.Body.Bytes(), &meta); err != nil {
+				t.Fatalf("decoding response body: %v", err)
+			}
+
+			if meta.InstanceName != tt.want {
+				t.Errorf("InstanceName = %q, want %q", meta.InstanceName, tt.want)
+			}
+		})
 	}
 }
 
@@ -279,7 +295,7 @@ func TestStartWebUIWithoutOIDCIsLocked(t *testing.T) {
 
 	store, _ := newTestStore()
 
-	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, discardLogger, nil, nil, config.OIDCSettings{}, nil, false, false, nil, nil)
+	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, discardLogger, nil, nil, config.OIDCSettings{}, nil, false, false, "", nil, nil)
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}
@@ -374,7 +390,7 @@ func TestStartWebUIBadAddrReturnsNil(t *testing.T) {
 	store, _ := newTestStore()
 
 	// Port 0 is valid (means "pick one"); an unparseable address is not.
-	srv := StartWebUI("not-a-valid-address", store, nil, nil, nil, nil, discardLogger, nil, nil, config.OIDCSettings{}, nil, false, false, nil, nil)
+	srv := StartWebUI("not-a-valid-address", store, nil, nil, nil, nil, discardLogger, nil, nil, config.OIDCSettings{}, nil, false, false, "", nil, nil)
 	if srv != nil {
 		t.Cleanup(srv.Shutdown)
 		t.Fatal("StartWebUI() with an invalid address = non-nil, want nil")

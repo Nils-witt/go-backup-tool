@@ -14,7 +14,8 @@ services:
     restart: unless-stopped
     # environment:
     #   # Optional label shown on the dashboard's login page and app bar, to
-    #   # tell multiple instances apart.
+    #   # tell multiple instances apart. Only used when config.yaml doesn't
+    #   # set server-name:, which takes precedence.
     #   INSTANCE_NAME: prod-nas
     volumes:
       - ./config.yaml:/data/config.yaml:ro

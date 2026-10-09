@@ -118,7 +118,10 @@ servers:
 # notification's other placeholders or a report notification's, is
 # available in every notification webhook.body/email.subject/email.body.
 # Handy for telling which go-backup-tool instance a notification came from
-# when several instances share the same webhook/inbox. Omit to leave it "".
+# when several instances share the same webhook/inbox. It's also shown on
+# the web UI's login page and app bar (see webui: below) to tell instances
+# apart; if unset there, the dashboard falls back to the INSTANCE_NAME
+# environment variable. Omit to leave it "".
 # server-name: primary-backup-host
 
 # webui: configures the optional web UI dashboard (http://host:port/),

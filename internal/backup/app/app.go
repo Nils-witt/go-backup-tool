@@ -101,7 +101,7 @@ func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, statusSto
 
 	go receiver.MonitorReceiverRetention(ctx, stateDB, rc.Receivers, log)
 
-	srv := webui.StartWebUI(rc.Listen, statusStore, rc.Jobs, runner, rc.Receivers, receiverStore, log, stateDB, logs, rc.OIDC, serverIdentity, rc.TrustProxyHeaders, rc.DevMode, func(mux *http.ServeMux) {
+	srv := webui.StartWebUI(rc.Listen, statusStore, rc.Jobs, runner, rc.Receivers, receiverStore, log, stateDB, logs, rc.OIDC, serverIdentity, rc.TrustProxyHeaders, rc.DevMode, rc.ServerName, func(mux *http.ServeMux) {
 		receiver.RegisterRoutes(mux, rc.Receivers, receiverStore, log, stateDB)
 	}, queue)
 
