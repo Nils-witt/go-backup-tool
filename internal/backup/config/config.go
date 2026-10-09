@@ -235,7 +235,8 @@ type RunConfig struct {
 	// TrustProxyHeaders, when set, makes the web UI derive the client
 	// address it records (login/download logs, access log) from
 	// proxy-supplied headers rather than the raw TCP connection — see
-	// fileWebUI.TrustProxyHeaders and clientAddr in webui.go.
+	// fileWebUI.TrustProxyHeaders and clientAddr in webui.go — and lets the
+	// live status WebSocket accept the proxy-reported host as its origin.
 	TrustProxyHeaders bool
 
 	// DevMode mirrors fileWebUI.DevMode: when set, the web UI adds
@@ -478,7 +479,10 @@ type fileWebUI struct {
 	// itself sets these headers and strips any client-supplied copies
 	// first — otherwise any client can spoof its own logged address by
 	// sending these headers itself. Unset/false (the default) always uses
-	// the TCP connection's own address.
+	// the TCP connection's own address. It also makes the live status
+	// WebSocket check the browser's Origin against the host a proxy reports
+	// in Forwarded host=/X-Forwarded-Host (see forwardedHost in webui.go),
+	// for a proxy that rewrites the Host header.
 	TrustProxyHeaders bool `yaml:"trust-proxy-headers"`
 
 	// OIDC configures Single Sign-On via an OpenID Connect provider, the

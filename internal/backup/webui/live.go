@@ -138,8 +138,11 @@ func handleMintLiveTicket(tickets *liveTicketStore) http.HandlerFunc {
 // data message from one closes the connection. baseCtx is cancelled by
 // Server.Shutdown, which (unlike ordinary requests) http.Server.Shutdown
 // neither waits for nor closes once the connection has been hijacked.
-// receiverStore may be nil, which streams an empty receiver list.
-func handleLive(baseCtx context.Context, statusStore *backup.StatusStore, receivers map[string]config.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, tickets *liveTicketStore, devMode bool, log *slog.Logger) http.HandlerFunc {
+// receiverStore may be nil, which streams an empty receiver list. With
+// trustProxyHeaders set, the browser's Origin is checked against the Host a
+// reverse proxy reports in Forwarded/X-Forwarded-Host (see forwardedHost),
+// since a proxy that rewrites Host would otherwise never match it.
+func handleLive(baseCtx context.Context, statusStore *backup.StatusStore, receivers map[string]config.ResolvedReceiver, receiverStore *backup.ReceiverStatusStore, tickets *liveTicketStore, devMode, trustProxyHeaders bool, log *slog.Logger) http.HandlerFunc {
 	var opts websocket.AcceptOptions
 	if devMode {
 		// Matches corsMiddleware: let a frontend dev server on another
@@ -152,6 +155,15 @@ func handleLive(baseCtx context.Context, statusStore *backup.StatusStore, receiv
 		if !ok {
 			http.Error(w, "missing or expired live status ticket", http.StatusForbidden)
 			return
+		}
+
+		if trustProxyHeaders {
+			if host, ok := forwardedHost(r); ok {
+				// websocket.Accept compares Origin against r.Host; give it
+				// the client-facing host on a shallow copy.
+				r = r.WithContext(r.Context())
+				r.Host = host
+			}
 		}
 
 		conn, err := websocket.Accept(w, r, &opts)

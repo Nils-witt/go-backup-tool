@@ -154,7 +154,9 @@ servers:
 #   # front of every request and itself sets these headers (stripping any
 #   # client-supplied copies first) — otherwise a client can spoof its own
 #   # logged address. Unset (the default) always uses the TCP connection's
-#   # own address.
+#   # own address. It also makes the live status WebSocket accept the
+#   # public host from Forwarded host=/X-Forwarded-Host as its origin, for a
+#   # proxy that rewrites Host (e.g. to 127.0.0.1:8086).
 #   trust-proxy-headers: true
 #
 #   # dev-mode adds permissive CORS response headers (Access-Control-Allow-

@@ -115,7 +115,7 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobs []*config.Con
 	mux.HandleFunc("GET /api/identity", api(handleIdentity(identity)))
 	mux.HandleFunc("GET /api/receivers", api(handleReceiverStatus(receivers, receiverStore, log)))
 	mux.HandleFunc("POST /api/live/ticket", api(handleMintLiveTicket(liveTickets)))
-	mux.HandleFunc("GET /api/live", handleLive(liveCtx, statusStore, receivers, receiverStore, liveTickets, devMode, log))
+	mux.HandleFunc("GET /api/live", handleLive(liveCtx, statusStore, receivers, receiverStore, liveTickets, devMode, trustProxyHeaders, log))
 	mux.HandleFunc("GET /api/job-runs", apiJobRunLog(handleJobRunEvents(db, log)))
 	mux.HandleFunc("GET /api/target-runs", apiTargetRunLog(handleTargetRunEvents(db, log)))
 	mux.HandleFunc("POST /api/jobs/{name}/retry", admin(handleRetryFailedTargets(jobsByName, statusStore, runner, log)))
@@ -223,7 +223,7 @@ func clientAddr(req *http.Request, trustProxyHeaders bool) string {
 	}
 
 	if fwd := req.Header.Get("Forwarded"); fwd != "" {
-		if addr, ok := forwardedFor(fwd); ok {
+		if addr, ok := forwardedParam(fwd, "for"); ok {
 			return addr
 		}
 	}
@@ -241,19 +241,41 @@ func clientAddr(req *http.Request, trustProxyHeaders bool) string {
 	return req.RemoteAddr
 }
 
-// forwardedFor extracts the for= parameter naming the originating client
-// from the first (nearest-client) element of a Forwarded header value, e.g.
-// "for=192.0.2.60:4711;proto=http" or, quoted as RFC 7239 requires whenever
-// the value itself contains reserved characters like an IPv6 literal's
-// brackets and colons, `for="[2001:db8:cafe::17]:4711"`. Further elements
-// after a comma, if any, were each prepended by the proxy in front of it, so
-// the first is the one closest to the original client.
-func forwardedFor(header string) (string, bool) {
+// forwardedHost returns the Host the client originally requested, as
+// reported by a reverse proxy that rewrites the Host header on its way to
+// this instance (e.g. to 127.0.0.1:8086): the standard Forwarded header's
+// host= parameter (RFC 7239), else X-Forwarded-Host. Like clientAddr, only
+// call it when trust-proxy-headers is set, since a client could otherwise
+// send these headers itself.
+func forwardedHost(req *http.Request) (string, bool) {
+	if fwd := req.Header.Get("Forwarded"); fwd != "" {
+		if host, ok := forwardedParam(fwd, "host"); ok {
+			return host, true
+		}
+	}
+
+	if xfh := req.Header.Get("X-Forwarded-Host"); xfh != "" {
+		if host := strings.TrimSpace(strings.Split(xfh, ",")[0]); host != "" {
+			return host, true
+		}
+	}
+
+	return "", false
+}
+
+// forwardedParam extracts parameter key (e.g. "for", naming the originating
+// client, or "host") from the first (nearest-client) element of a Forwarded
+// header value, e.g. "for=192.0.2.60:4711;proto=http" or, quoted as RFC 7239
+// requires whenever the value itself contains reserved characters like an
+// IPv6 literal's brackets and colons, `for="[2001:db8:cafe::17]:4711"`.
+// Further elements after a comma, if any, were each prepended by the proxy
+// in front of it, so the first is the one closest to the original client.
+func forwardedParam(header, key string) (string, bool) {
 	first, _, _ := strings.Cut(header, ",")
 
 	for part := range strings.SplitSeq(first, ";") {
-		key, value, ok := strings.Cut(part, "=")
-		if !ok || !strings.EqualFold(strings.TrimSpace(key), "for") {
+		k, value, ok := strings.Cut(part, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(k), key) {
 			continue
 		}
 
