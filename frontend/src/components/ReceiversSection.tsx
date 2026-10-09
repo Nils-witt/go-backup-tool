@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { apiFetch, apiFetchJSON } from "../api/client";
 import type { ReceiverFile, ReceiverSnapshot } from "../api/types";
 import { StatusChip } from "./StatusChip";
+import { Fact } from "./Fact";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { encodePathKey, fmtSize, fmtTime, hasTime } from "../lib/format";
+import { encodePathKey, fmtRelative, fmtSize, fmtTime, hasTime } from "../lib/format";
 import { sourcedKey, type Sourced } from "../lib/status";
 import AppBar from "@mui/material/AppBar";
 import Box from "@mui/material/Box";
@@ -23,6 +24,7 @@ import TableHead from "@mui/material/TableHead";
 import TableRow from "@mui/material/TableRow";
 import Toolbar from "@mui/material/Toolbar";
 import Typography from "@mui/material/Typography";
+import { useTheme } from "@mui/material/styles";
 
 interface ReceiversSectionProps {
   // receivers may come from several instances (see Sourced); remote ones
@@ -141,24 +143,30 @@ export function ReceiversCard({
   receiver: Sourced<ReceiverSnapshot>;
   canDownload: boolean;
 }) {
-  const lastSeen = hasTime(receiver.last_seen)
-    ? "last received: " + fmtTime(receiver.last_seen)
-    : "no objects received yet";
+  const theme = useTheme();
+  // A stale receiver is accented like an incomplete run, matching how the
+  // summary bar counts it.
+  const accent = theme.palette.status[receiver.stale ? "incomplete" : receiver.state];
 
   const [openFilesFor, setOpenFilesFor] = useState<string | null>(null);
   const [pendingDownload, setPendingDownload] = useState<{ id: string; key: string } | null>(null);
 
   return (
     <>
-      <Card variant="outlined" sx={{ height: "100%" }}>
+      <Card
+        variant="outlined"
+        sx={{ height: "100%", borderLeft: 4, borderLeftColor: accent ?? theme.palette.status.idle }}
+      >
         <CardContent>
           <Stack
             direction="row"
             spacing={1}
-            sx={{ alignItems: "baseline", justifyContent: "space-between", mb: 0.5 }}
+            sx={{ alignItems: "center", justifyContent: "space-between", mb: 1.5 }}
           >
             <Box sx={{ minWidth: 0 }}>
-              <Typography sx={{ fontWeight: 600 }}>{receiver.id}</Typography>
+              <Typography sx={{ fontWeight: 600, overflowWrap: "anywhere" }}>
+                {receiver.id}
+              </Typography>
               {receiver.source ? (
                 <Typography variant="caption" color="text.secondary">
                   {receiver.source}
@@ -166,30 +174,53 @@ export function ReceiversCard({
               ) : null}
             </Box>
             <Stack direction="row" spacing={0.5}>
+              {receiver.stale ? <StatusChip state="incomplete" label="stale" /> : null}
               <StatusChip state={receiver.state} error={receiver.error} />
-              {receiver.stale ? <StatusChip state="failed" label="stale" /> : null}
             </Stack>
           </Stack>
-          <Stack direction={"column"} spacing={1}>
-            <Typography variant="body2" color="text.secondary">
-              {receiver.path}
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Retention: {receiver.retention}
-            </Typography>
-            {receiver.stale_after && (
-              <Typography variant="body2" color="text.secondary">
-                Stale after: {receiver.stale_after}
+
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))",
+              gap: 1,
+              mb: 1.5,
+            }}
+          >
+            <Fact
+              label="Last received"
+              title={hasTime(receiver.last_seen) ? fmtTime(receiver.last_seen) : undefined}
+            >
+              {fmtRelative(receiver.last_seen)}
+            </Fact>
+            <Fact label="Retention">{receiver.retention || "—"}</Fact>
+            {receiver.stale_after ? <Fact label="Stale after">{receiver.stale_after}</Fact> : null}
+          </Box>
+
+          <Typography variant="caption" color="text.secondary">
+            Path
+          </Typography>
+          <Typography variant="body2" sx={{ mt: 0.5, overflowWrap: "anywhere" }}>
+            {receiver.path}
+          </Typography>
+
+          {receiver.last_key ? (
+            <>
+              <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 1 }}>
+                Last object
               </Typography>
-            )}
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-              {lastSeen}
-            </Typography>
-          </Stack>
+              <Typography variant="body2" sx={{ mt: 0.5, overflowWrap: "anywhere" }}>
+                {receiver.last_key}
+              </Typography>
+            </>
+          ) : null}
+
           {receiver.remote ? null : (
-            <Button size="small" variant="outlined" onClick={() => setOpenFilesFor(receiver.id)}>
-              Show files
-            </Button>
+            <Box sx={{ mt: 1.5 }}>
+              <Button size="small" variant="outlined" onClick={() => setOpenFilesFor(receiver.id)}>
+                Show files
+              </Button>
+            </Box>
           )}
         </CardContent>
       </Card>

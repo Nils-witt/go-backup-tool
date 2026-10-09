@@ -1,7 +1,8 @@
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { apiFetch } from "../api/client";
 import type { JobRunEventJSON, JobSnapshot } from "../api/types";
 import { StatusChip } from "./StatusChip";
+import { Fact } from "./Fact";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { RunHistoryStrip } from "./RunHistoryStrip";
 import { fmtRelative, fmtTime, hasTime } from "../lib/format";
@@ -13,7 +14,6 @@ import CardContent from "@mui/material/CardContent";
 import Grid from "@mui/material/Grid";
 import LinearProgress from "@mui/material/LinearProgress";
 import Stack from "@mui/material/Stack";
-import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import { useTheme } from "@mui/material/styles";
 
@@ -26,29 +26,6 @@ interface JobsGridProps {
   // runsByJob holds each job's recent runs, newest first; undefined hides
   // the run history (the viewer lacks the job run log permission).
   runsByJob?: Map<string, JobRunEventJSON[]>;
-}
-
-function Fact({ label, children, title }: { label: string; children: ReactNode; title?: string }) {
-  const value = (
-    <Typography variant="body2" sx={{ fontVariantNumeric: "tabular-nums" }}>
-      {children}
-    </Typography>
-  );
-
-  return (
-    <Box>
-      <Typography variant="caption" color="text.secondary">
-        {label}
-      </Typography>
-      {title ? (
-        <Tooltip title={title} arrow>
-          {value}
-        </Tooltip>
-      ) : (
-        value
-      )}
-    </Box>
-  );
 }
 
 export function JobsGrid({ jobs, canRetry, refreshNow, runsByJob }: JobsGridProps) {
