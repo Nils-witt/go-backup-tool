@@ -33,7 +33,8 @@ updates:
 
   # GitHub Actions
   - package-ecosystem: github-actions
-    directory: /
+    # The composite actions under .github/actions pin actions too.
+    directories: ["/", "/.github/actions/*"]
     schedule:
       interval: weekly
     labels: ["dependencies", "ci"]

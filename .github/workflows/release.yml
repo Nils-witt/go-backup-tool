@@ -27,6 +27,14 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: stable
+          cache: false
+
+      # Tag-scoped caches are unreadable by later tags, so only restore —
+      # the lint job's cache from main (modules, plus a stable-Go build cache).
+      - uses: ./.github/actions/go-cache
+        with:
+          name: lint
+          save: "false"
 
       # GoReleaser's before.hooks (.goreleaser.yaml) build frontend/ itself
       # before the Go builds run — this just puts npm on PATH for that hook.

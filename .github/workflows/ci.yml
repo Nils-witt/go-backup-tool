@@ -31,7 +31,24 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - run: npm ci
+      # Restoring node_modules outright skips npm ci on an unchanged lockfile
+      # (the npm cache above only saves the downloads). Saved right after
+      # npm ci, so the build's tsbuildinfo/vite caches never get persisted.
+      - name: Restore node_modules
+        id: node-modules
+        uses: actions/cache/restore@v6
+        with:
+          path: frontend/node_modules
+          key: node-modules-${{ runner.os }}-${{ runner.arch }}-node22-${{ hashFiles('frontend/package-lock.json') }}
+
+      - if: steps.node-modules.outputs.cache-hit != 'true'
+        run: npm ci
+
+      - if: steps.node-modules.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: frontend/node_modules
+          key: ${{ steps.node-modules.outputs.cache-primary-key }}
 
       # `build` is `tsc -b && vite build`: type-checks and bundles.
       - run: npm run build
@@ -54,6 +71,11 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
+          cache: false
+
+      - uses: ./.github/actions/go-cache
+        with:
+          name: test
 
       - uses: ./.github/actions/stub-frontend
 
@@ -87,6 +109,11 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: stable
+          cache: false
+
+      - uses: ./.github/actions/go-cache
+        with:
+          name: lint
 
       - uses: ./.github/actions/stub-frontend
 

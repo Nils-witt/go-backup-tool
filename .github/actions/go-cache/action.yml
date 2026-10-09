@@ -1,0 +1,45 @@
+name: Go cache
+description: >
+  Caches the Go module and build caches under a per-job key. Use with
+  actions/setup-go's own cache turned off: its key is only the Go version
+  and go.sum hash, so every job on the same Go version shares one entry and
+  whichever finishes first (e.g. govulncheck, with a near-empty build cache)
+  wins the save, leaving the test/lint jobs to rebuild everything.
+inputs:
+  name:
+    description: Cache name; jobs that build differently (-race, lint) need their own.
+    required: true
+  save:
+    description: Set to 'false' to only restore (e.g. on tag refs, whose caches no later run can read).
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - id: env
+      shell: bash
+      run: |
+        {
+          echo "gomodcache=$(go env GOMODCACHE)"
+          echo "gocache=$(go env GOCACHE)"
+          echo "goversion=$(go env GOVERSION)"
+        } >> "$GITHUB_OUTPUT"
+
+    - if: inputs.save != 'false'
+      uses: actions/cache@v6
+      with:
+        path: |
+          ${{ steps.env.outputs.gomodcache }}
+          ${{ steps.env.outputs.gocache }}
+        key: go-${{ inputs.name }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.env.outputs.goversion }}-${{ hashFiles('go.sum') }}
+        restore-keys: |
+          go-${{ inputs.name }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.env.outputs.goversion }}-
+
+    - if: inputs.save == 'false'
+      uses: actions/cache/restore@v6
+      with:
+        path: |
+          ${{ steps.env.outputs.gomodcache }}
+          ${{ steps.env.outputs.gocache }}
+        key: go-${{ inputs.name }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.env.outputs.goversion }}-${{ hashFiles('go.sum') }}
+        restore-keys: |
+          go-${{ inputs.name }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.env.outputs.goversion }}-

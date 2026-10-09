@@ -24,6 +24,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Set up Go (and the cache) ahead of the action, which would otherwise
+      # use setup-go's shared cache key (see .github/actions/go-cache).
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          check-latest: true
+          cache: false
+
+      - uses: ./.github/actions/go-cache
+        with:
+          name: govulncheck
+
       - uses: ./.github/actions/stub-frontend
 
       # The action sets up Go itself (latest stable by default, so stdlib
@@ -33,6 +45,7 @@ jobs:
         uses: golang/govulncheck-action@v1
         with:
           repo-checkout: false
+          cache: false
 
   gosec:
     name: gosec
@@ -50,8 +63,20 @@ jobs:
 
       - uses: ./.github/actions/stub-frontend
 
+      # gosec runs in a container, so it can't share the runner's Go caches;
+      # point its module cache into the (mounted) workspace instead. The
+      # leading dot keeps it out of ./... .
+      - name: Cache gosec Go modules
+        uses: actions/cache@v6
+        with:
+          path: .gomodcache
+          key: gosec-gomod-${{ hashFiles('go.sum') }}
+          restore-keys: gosec-gomod-
+
       - name: Run gosec
         uses: securego/gosec@v2.29.0
+        env:
+          GOMODCACHE: /github/workspace/.gomodcache
         with:
           args: -no-fail -fmt sarif -out gosec-results.sarif ./...
 
