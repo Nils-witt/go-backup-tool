@@ -114,9 +114,10 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.
 
 	// change gates an admin endpoint that changes this instance's stored
 	// configuration (or acts on a job), recording each request in the audit
-	// log (see recordChange).
+	// log, along with the fields it changed (see recordChange).
+	auditRes := auditResources(db, gpgKeyring)
 	change := func(h http.HandlerFunc) http.HandlerFunc {
-		return admin(recordChange(db, log, trustProxyHeaders, h))
+		return admin(recordChange(db, auditRes, log, trustProxyHeaders, h))
 	}
 
 	mux := http.NewServeMux()

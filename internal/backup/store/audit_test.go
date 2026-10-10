@@ -66,3 +66,29 @@ func TestPruneEventsRemovesOldAuditEvents(t *testing.T) {
 		t.Errorf("ListAuditEvents() after prune = %+v, want 1 event", got)
 	}
 }
+
+func TestSaveListAuditEventChanges(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := context.Background()
+
+	for _, changes := range [][]AuditChange{{{Field: "path", New: "/srv/a"}}, nil} {
+		if err := db.SaveAuditEvent(ctx, AuditEvent{At: time.Now(), Username: "erin", Action: "update", Resource: "receiver-configs", Changes: changes}); err != nil {
+			t.Fatalf("SaveAuditEvent() error: %v", err)
+		}
+	}
+
+	got, err := db.ListAuditEvents(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListAuditEvents() error: %v", err)
+	}
+
+	if got[0].Changes == nil || len(got[0].Changes) != 0 {
+		t.Errorf("ListAuditEvents()[0].Changes = %#v, want empty, not nil", got[0].Changes)
+	}
+
+	if len(got[1].Changes) != 1 || got[1].Changes[0] != (AuditChange{Field: "path", New: "/srv/a"}) {
+		t.Errorf("ListAuditEvents()[1].Changes = %+v", got[1].Changes)
+	}
+}

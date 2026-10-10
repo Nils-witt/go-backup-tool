@@ -84,6 +84,15 @@ export interface AuditEventJSON {
   success: boolean;
   remote_addr: string;
   detail: string;
+  changes: AuditChangeJSON[];
+}
+
+// AuditChangeJSON is one field an audit event's change set: old is absent
+// when it was unset before (a create), new when it's unset after (a delete).
+export interface AuditChangeJSON {
+  field: string;
+  old?: unknown;
+  new?: unknown;
 }
 
 export interface DownloadEventJSON {

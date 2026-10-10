@@ -26,12 +26,15 @@ const auditDetailLimit = 512
 // recordChange wraps next — a handler that changes this instance's stored
 // configuration, already behind requirePermission — appending one audit
 // event per request to db's audit log (see store.Store.SaveAuditEvent),
-// win or lose: who made it, what it changed (see describeChange), and the
-// response status, plus the error text on failure. The request body itself
-// is never recorded, since it may carry secrets. A write failure there is
+// win or lose: who made it, what it targeted (see describeChange), and the
+// response status, plus the error text on failure. For a successful change
+// to a collection in resources, it also records each field the change
+// made, with its old and new value (see diffSnapshots), from a snapshot of
+// the item taken before and after next ran. The request body itself is
+// never recorded, since it may carry secrets. A write failure there is
 // only logged — a change must never be blocked by an audit-log hiccup. A
 // nil db records nothing, matching StartWebUI's optional db.
-func recordChange(db *store.Store, log *slog.Logger, trustProxyHeaders bool, next http.HandlerFunc) http.HandlerFunc {
+func recordChange(db *store.Store, resources map[string]auditResource, log *slog.Logger, trustProxyHeaders bool, next http.HandlerFunc) http.HandlerFunc {
 	if db == nil {
 		return next
 	}
@@ -40,6 +43,24 @@ func recordChange(db *store.Store, log *slog.Logger, trustProxyHeaders bool, nex
 		action, resource, target := describeChange(r)
 		if target == "" && r.Method == http.MethodPost {
 			target = auditTargetFromBody(r)
+		}
+
+		res, tracked := resources[resource]
+
+		var before any
+
+		// A create of a named item starts from nothing: anything already
+		// stored under that name (e.g. an older API token sharing it) isn't
+		// what the create changed. A create with no target (a GPG key
+		// import) changes a collection that does already exist.
+		if tracked && (action != "create" || target == "") {
+			var err error
+
+			if before, _, err = res.snapshot(r.Context(), target); err != nil {
+				log.Warn("web UI: audit snapshot failed", "resource", resource, "target", target, "err", err)
+
+				tracked = false
+			}
 		}
 
 		aw := &auditWriter{ResponseWriter: w, status: http.StatusOK}
@@ -58,15 +79,39 @@ func recordChange(db *store.Store, log *slog.Logger, trustProxyHeaders bool, nex
 			detail = strings.TrimSpace(aw.body.String())
 		}
 
+		var changes []store.AuditChange
+		if tracked && success {
+			changes = auditChanges(context.WithoutCancel(r.Context()), log, res, resource, target, before)
+		}
+
 		ev := store.AuditEvent{
 			At: time.Now(), Username: username, Action: action, Resource: resource, Target: target,
 			Method: r.Method, Path: r.URL.Path, Status: aw.status, Success: success,
-			RemoteAddr: clientAddr(r, trustProxyHeaders), Detail: detail,
+			RemoteAddr: clientAddr(r, trustProxyHeaders), Detail: detail, Changes: changes,
 		}
 		if err := db.SaveAuditEvent(context.WithoutCancel(r.Context()), ev); err != nil {
 			log.Warn("web UI: recording audit event failed", "err", err)
 		}
 	}
+}
+
+// auditChanges snapshots res's target again, now that a change has been
+// applied, and diffs it against before (see diffSnapshots). A failure only
+// logs a warning and records no field changes.
+func auditChanges(ctx context.Context, log *slog.Logger, res auditResource, resource, target string, before any) []store.AuditChange {
+	after, _, err := res.snapshot(ctx, target)
+	if err != nil {
+		log.Warn("web UI: audit snapshot failed", "resource", resource, "target", target, "err", err)
+		return nil
+	}
+
+	changes, err := diffSnapshots(before, after, res.secret)
+	if err != nil {
+		log.Warn("web UI: diffing audit snapshots failed", "resource", resource, "target", target, "err", err)
+		return nil
+	}
+
+	return changes
 }
 
 // describeChange derives an audit event's action, resource, and target from
@@ -176,17 +221,18 @@ func (w *auditWriter) Unwrap() http.ResponseWriter {
 // matching the dashboard's own field naming (snake_case, as every other
 // /api/... endpoint here uses).
 type auditEventJSON struct {
-	At         time.Time `json:"at"`
-	Username   string    `json:"username"`
-	Action     string    `json:"action"`
-	Resource   string    `json:"resource"`
-	Target     string    `json:"target"`
-	Method     string    `json:"method"`
-	Path       string    `json:"path"`
-	Status     int       `json:"status"`
-	Success    bool      `json:"success"`
-	RemoteAddr string    `json:"remote_addr"`
-	Detail     string    `json:"detail"`
+	At         time.Time           `json:"at"`
+	Username   string              `json:"username"`
+	Action     string              `json:"action"`
+	Resource   string              `json:"resource"`
+	Target     string              `json:"target"`
+	Method     string              `json:"method"`
+	Path       string              `json:"path"`
+	Status     int                 `json:"status"`
+	Success    bool                `json:"success"`
+	RemoteAddr string              `json:"remote_addr"`
+	Detail     string              `json:"detail"`
+	Changes    []store.AuditChange `json:"changes"`
 }
 
 // handleAuditEvents serves GET /api/audit-events: the most recently

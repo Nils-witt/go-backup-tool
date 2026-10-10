@@ -573,8 +573,9 @@ paths:
         (up to `webui.event-log-limit:`, default 200), win or lose, newest
         first: creating, updating, or deleting a stored job, server,
         command, receiver, trusted server, notification, report setting,
-        API token, or GPG key, and retrying a job's failed targets. Request
-        bodies are never recorded. Requires the `audit-log` permission,
+        API token, or GPG key, and retrying a job's failed targets. Each
+        successful change lists the fields it changed with their old and
+        new values; request bodies themselves are never recorded. Requires the `audit-log` permission,
         independent of `view`.
       security:
         - webUIBearer: []
@@ -1835,7 +1836,31 @@ components:
         detail:
           type: string
           description: The error response's text; empty on success.
-      required: [at, username, action, resource, target, method, path, status, success, remote_addr, detail]
+        changes:
+          type: array
+          description: >
+            Each field a successful change made to its target, compared
+            before and after (empty for a failed request, or a resource
+            whose items aren't tracked, e.g. a job retry). A secret field
+            (a notification webhook's URL or header values) is listed with
+            its values replaced by `(redacted)`.
+          items:
+            $ref: "#/components/schemas/AuditChange"
+      required: [at, username, action, resource, target, method, path, status, success, remote_addr, detail, changes]
+
+    AuditChange:
+      type: object
+      properties:
+        field:
+          type: string
+          description: >
+            The field's path within the item, e.g. `retention` or
+            `targets[0].bucket`. A list of plain values is one field.
+        old:
+          description: The value before the change; absent if it was unset (e.g. on a create).
+        new:
+          description: The value after the change; absent if it's now unset (e.g. on a delete).
+      required: [field]
 
     RunState:
       type: string

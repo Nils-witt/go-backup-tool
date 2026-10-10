@@ -1,10 +1,15 @@
 import { useMemo, useState } from "react";
-import type { AuditEventJSON } from "../api/types";
+import type { AuditChangeJSON, AuditEventJSON } from "../api/types";
 import { StatusChip } from "./StatusChip";
 import { SortableHeaderCell } from "./SortableHeaderCell";
 import { useSortedRows } from "../hooks/useSortedRows";
 import { fmtTime } from "../lib/format";
+import Box from "@mui/material/Box";
+import Collapse from "@mui/material/Collapse";
+import IconButton from "@mui/material/IconButton";
 import MenuItem from "@mui/material/MenuItem";
+import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
+import KeyboardArrowUpIcon from "@mui/icons-material/KeyboardArrowUp";
 import Paper from "@mui/material/Paper";
 import Select from "@mui/material/Select";
 import Stack from "@mui/material/Stack";
@@ -110,6 +115,7 @@ export function AuditLogSection({ events }: { events: AuditEventJSON[] }) {
         <Table size="small">
           <TableHead>
             <TableRow>
+              <TableCell padding="checkbox" />
               <SortableHeaderCell<SortKey>
                 label="Time"
                 sortKey="at"
@@ -154,51 +160,127 @@ export function AuditLogSection({ events }: { events: AuditEventJSON[] }) {
           <TableBody>
             {sorted.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} align="center" sx={{ color: "text.secondary" }}>
+                <TableCell colSpan={7} align="center" sx={{ color: "text.secondary" }}>
                   No matching events
                 </TableCell>
               </TableRow>
             ) : (
-              sorted.map((ev, i) => (
-                <TableRow key={i}>
-                  <TableCell sx={{ whiteSpace: "nowrap" }}>{fmtTime(ev.at)}</TableCell>
-                  <TableCell>{ev.username || "(unknown)"}</TableCell>
-                  <TableCell sx={{ whiteSpace: "nowrap" }}>{ev.action}</TableCell>
-                  <TableCell sx={{ overflowWrap: "anywhere" }}>
-                    {ev.resource}
-                    {ev.target ? (
-                      <Typography
-                        variant="caption"
-                        color="text.secondary"
-                        sx={{ display: "block" }}
-                      >
-                        {ev.target}
-                      </Typography>
-                    ) : null}
-                  </TableCell>
-                  <TableCell sx={{ whiteSpace: "nowrap" }}>
-                    {ev.success ? (
-                      <StatusChip state="ok" label="success" />
-                    ) : (
-                      <StatusChip state="failed" label={`failed (${ev.status})`} />
-                    )}
-                    {ev.detail ? (
-                      <Typography
-                        variant="caption"
-                        color="error"
-                        sx={{ display: "block", overflowWrap: "anywhere", whiteSpace: "normal" }}
-                      >
-                        {ev.detail}
-                      </Typography>
-                    ) : null}
-                  </TableCell>
-                  <TableCell sx={{ overflowWrap: "anywhere" }}>{ev.remote_addr}</TableCell>
-                </TableRow>
-              ))
+              sorted.map((ev, i) => <AuditRow key={i} ev={ev} />)
             )}
           </TableBody>
         </Table>
       </TableContainer>
     </Stack>
+  );
+}
+
+// AuditRow is one audit event, plus — once expanded — a table of the
+// fields its change set, before and after.
+function AuditRow({ ev }: { ev: AuditEventJSON }) {
+  const [open, setOpen] = useState(false);
+  const changes = ev.changes ?? [];
+
+  return (
+    <>
+      <TableRow sx={open ? { "& > td": { borderBottom: "unset" } } : undefined}>
+        <TableCell padding="checkbox">
+          {changes.length > 0 ? (
+            <IconButton
+              size="small"
+              aria-label={open ? "Hide changes" : "Show changes"}
+              aria-expanded={open}
+              onClick={() => setOpen((o) => !o)}
+            >
+              {open ? <KeyboardArrowUpIcon /> : <KeyboardArrowDownIcon />}
+            </IconButton>
+          ) : null}
+        </TableCell>
+        <TableCell sx={{ whiteSpace: "nowrap" }}>{fmtTime(ev.at)}</TableCell>
+        <TableCell>{ev.username || "(unknown)"}</TableCell>
+        <TableCell sx={{ whiteSpace: "nowrap" }}>
+          {ev.action}
+          {changes.length > 0 ? (
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+              {changes.length} {changes.length === 1 ? "field" : "fields"}
+            </Typography>
+          ) : null}
+        </TableCell>
+        <TableCell sx={{ overflowWrap: "anywhere" }}>
+          {ev.resource}
+          {ev.target ? (
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+              {ev.target}
+            </Typography>
+          ) : null}
+        </TableCell>
+        <TableCell sx={{ whiteSpace: "nowrap" }}>
+          {ev.success ? (
+            <StatusChip state="ok" label="success" />
+          ) : (
+            <StatusChip state="failed" label={`failed (${ev.status})`} />
+          )}
+          {ev.detail ? (
+            <Typography
+              variant="caption"
+              color="error"
+              sx={{ display: "block", overflowWrap: "anywhere", whiteSpace: "normal" }}
+            >
+              {ev.detail}
+            </Typography>
+          ) : null}
+        </TableCell>
+        <TableCell sx={{ overflowWrap: "anywhere" }}>{ev.remote_addr}</TableCell>
+      </TableRow>
+      {changes.length > 0 ? (
+        <TableRow>
+          <TableCell colSpan={7} sx={{ py: 0 }}>
+            <Collapse in={open} timeout="auto" unmountOnExit>
+              <Box sx={{ my: 1.5 }}>
+                <ChangesTable changes={changes} />
+              </Box>
+            </Collapse>
+          </TableCell>
+        </TableRow>
+      ) : null}
+    </>
+  );
+}
+
+function ChangesTable({ changes }: { changes: AuditChangeJSON[] }) {
+  return (
+    <Table size="small">
+      <TableHead>
+        <TableRow>
+          <TableCell>Field</TableCell>
+          <TableCell>Before</TableCell>
+          <TableCell>After</TableCell>
+        </TableRow>
+      </TableHead>
+      <TableBody>
+        {changes.map((c) => (
+          <TableRow key={c.field}>
+            <TableCell sx={{ fontFamily: "monospace", overflowWrap: "anywhere" }}>
+              {c.field}
+            </TableCell>
+            <ChangeValueCell value={c.old} />
+            <ChangeValueCell value={c.new} />
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
+// ChangeValueCell shows one side of a change: an absent value as "unset",
+// a string as-is, anything else (a list, a number) as its JSON.
+function ChangeValueCell({ value }: { value: unknown }) {
+  if (value === undefined || value === null) {
+    return <TableCell sx={{ color: "text.secondary", fontStyle: "italic" }}>unset</TableCell>;
+  }
+
+  return (
+    <TableCell sx={{ fontFamily: "monospace", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+      {typeof value === "string" ? value : JSON.stringify(value)}
+    </TableCell>
   );
 }
