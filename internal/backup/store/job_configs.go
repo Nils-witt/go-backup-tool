@@ -101,8 +101,13 @@ type JobTargetOnRecover struct {
 // (job_runs, target_runs) is keyed by its name, which is why it can't be
 // renamed.
 type jobModel struct {
-	Name                 string      `gorm:"column:name;primaryKey"`
-	Cmd                  string      `gorm:"column:cmd;not null"`
+	Name string `gorm:"column:name;primaryKey"`
+	// Command is the commands: entry (by id) whose stdout is the backup.
+	Command string `gorm:"column:command;not null;default:''"`
+	// LegacyCmd is the job's own inline shell command, from before jobs
+	// named a command; Open moves any still set into a command of its own
+	// (see migrateInlineJobCommands), so it's always "" afterwards.
+	LegacyCmd            string      `gorm:"column:cmd;not null"`
 	Key                  string      `gorm:"column:key;not null;default:''"`
 	Targets              []JobTarget `gorm:"column:targets;serializer:json"`
 	Recipients           []string    `gorm:"column:recipients;serializer:json"`
@@ -113,8 +118,6 @@ type jobModel struct {
 	StartTime            string      `gorm:"column:start_time;not null;default:''"`
 	StagingDir           string      `gorm:"column:staging_dir;not null;default:''"`
 	FailureNotifications []string    `gorm:"column:failure_notifications;serializer:json"`
-	Container            string      `gorm:"column:container;not null;default:''"`
-	ContainerUser        string      `gorm:"column:container_user;not null;default:''"`
 	CreatedAt            time.Time   `gorm:"column:created_at;not null"`
 	CreatedBy            string      `gorm:"column:created_by;not null"`
 	UpdatedAt            time.Time   `gorm:"column:updated_at;not null"`
@@ -126,7 +129,8 @@ func (jobModel) TableName() string { return "jobs" }
 // JobConfig is one stored job (see jobModel).
 type JobConfig struct {
 	Name                 string
-	Cmd                  string
+	Command              string
+	LegacyCmd            string // always "" once Open has migrated it; see jobModel
 	Key                  string
 	Targets              []JobTarget
 	Recipients           []string
@@ -137,8 +141,6 @@ type JobConfig struct {
 	StartTime            string
 	StagingDir           string
 	FailureNotifications []string
-	Container            string
-	ContainerUser        string
 	CreatedAt            time.Time
 	CreatedBy            string
 	UpdatedAt            time.Time
@@ -314,8 +316,8 @@ func (s *Store) UpdateJobConfig(ctx context.Context, c JobConfig) error {
 	m := jobModel(c)
 
 	return updateRow(ctx, s.db, &m, "name", c.Name, []string{
-		"cmd", "key", "targets", "recipients", "armor", "gpg_bin", "gpg_homedir",
-		"interval", "start_time", "staging_dir", "failure_notifications", "container", "container_user",
+		"command", "cmd", "key", "targets", "recipients", "armor", "gpg_bin", "gpg_homedir",
+		"interval", "start_time", "staging_dir", "failure_notifications",
 	}, "job", ErrJobNotFound)
 }
 

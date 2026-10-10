@@ -80,10 +80,10 @@ func removeStagingFileIfUnreferenced(ctx context.Context, db *store.Store, path 
 // Runner.RunOutstandingUploadRetries, which retries it in the background
 // every TargetUploadRetryInterval until it succeeds.
 //
-// cfg.Cmd is run through the platform shell ("sh -c" on every OS but
+// cfg.Source.Cmd is run through the platform shell ("sh -c" on every OS but
 // Windows, "cmd /C" there — see newSourceCommand) deliberately: it lets an
 // operator pass a full shell pipeline (e.g. "mysqldump db | gzip") as the
-// backup source. cfg.Cmd is operator-supplied CLI configuration, not
+// backup source. cfg.Source.Cmd is operator-supplied CLI configuration, not
 // untrusted external input, so this is the intended behavior rather than a
 // command-injection risk.
 //
@@ -165,10 +165,10 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger, onTa
 // runPipeline's doc comment.
 func newSourceCommand(ctx context.Context, cmd string) *exec.Cmd {
 	if runtime.GOOS == "windows" {
-		return exec.CommandContext(ctx, "cmd", "/C", cmd) //nolint:gosec // cfg.Cmd is operator-supplied CLI config, not untrusted input; see runPipeline's doc comment
+		return exec.CommandContext(ctx, "cmd", "/C", cmd) //nolint:gosec // cfg.Source.Cmd is operator-supplied CLI config, not untrusted input; see runPipeline's doc comment
 	}
 
-	return exec.CommandContext(ctx, "sh", "-c", cmd) //nolint:gosec // cfg.Cmd is operator-supplied CLI config, not untrusted input; see runPipeline's doc comment
+	return exec.CommandContext(ctx, "sh", "-c", cmd) //nolint:gosec // cfg.Source.Cmd is operator-supplied CLI config, not untrusted input; see runPipeline's doc comment
 }
 
 // sourceProcess is the running backup source command: an *exec.Cmd, or a
@@ -180,26 +180,70 @@ type sourceProcess interface {
 // sourceLabel names cfg's source command in errors, with its container
 // when it runs in one.
 func sourceLabel(cfg *config.Config) string {
-	if cfg.Container != "" {
-		return fmt.Sprintf("command %q in container %q", cfg.Cmd, cfg.Container)
+	if cfg.Source.Container != "" {
+		return fmt.Sprintf("command %q in container %q", cfg.Source.ID, cfg.Source.Container)
 	}
 
-	return fmt.Sprintf("command %q", cfg.Cmd)
+	return fmt.Sprintf("command %q", cfg.Source.ID)
 }
 
-// startEncryptingPipeline starts cfg.Cmd piped into gpg (sourceCmd's stdout
-// wired to gpgCmd's stdin) and returns both commands, already started, plus
+// startEncryptingPipeline starts cfg.Source piped into gpg (the source's
+// stdout wired to gpgCmd's stdin) and returns both, already started, plus
 // gpgOut: gpg's stdout, ready for the caller to drain (e.g. via stageBackup)
 // into the encrypted backup. The caller is responsible for Wait-ing on both
-// commands once gpgOut has been fully read, per exec.Cmd.StdoutPipe's
-// documented contract — gpgCmd first, since sourceCmd's exit only matters
-// once gpg (its downstream reader) is done with it.
+// once gpgOut has been fully read, per exec.Cmd.StdoutPipe's documented
+// contract — gpgCmd first, since the source's exit only matters once gpg
+// (its downstream reader) is done with it.
+//
+// When the source command sets its own timeout (cfg.Source.TimeoutSet), it
+// bounds the source alone: gpg, staging and uploads only answer to ctx.
 func startEncryptingPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (source sourceProcess, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
-	if cfg.Container != "" {
-		return startContainerPipeline(ctx, cfg, log)
+	srcCtx, cancel := ctx, context.CancelFunc(func() {})
+	if cfg.Source.TimeoutSet {
+		srcCtx, cancel = context.WithTimeout(ctx, cfg.Source.Timeout)
 	}
 
-	sourceCmd := newSourceCommand(ctx, cfg.Cmd)
+	if cfg.Source.Container != "" {
+		source, gpgCmd, gpgOut, err = startContainerPipeline(ctx, srcCtx, cfg, log)
+	} else {
+		source, gpgCmd, gpgOut, err = startLocalPipeline(ctx, srcCtx, cfg, log)
+	}
+
+	if err != nil {
+		cancel()
+		return nil, nil, nil, err
+	}
+
+	timedOut := func() bool { return errors.Is(srcCtx.Err(), context.DeadlineExceeded) }
+
+	return &timedSource{sourceProcess: source, timedOut: timedOut, cancel: cancel, timeout: cfg.Source.Timeout}, gpgCmd, gpgOut, nil
+}
+
+// timedSource releases a source's timeout context once it has exited, and
+// says so when that timeout is what ended it.
+type timedSource struct {
+	sourceProcess
+	timedOut func() bool
+	cancel   context.CancelFunc
+	timeout  time.Duration
+}
+
+func (t *timedSource) Wait() error {
+	err := t.sourceProcess.Wait()
+	if err != nil && t.timedOut() {
+		err = fmt.Errorf("timed out after %s: %w", t.timeout, err)
+	}
+
+	t.cancel()
+
+	return err
+}
+
+// startLocalPipeline is startEncryptingPipeline for a source that runs on
+// this machine, through the platform shell (see newSourceCommand), under
+// srcCtx.
+func startLocalPipeline(ctx, srcCtx context.Context, cfg *config.Config, log *slog.Logger) (source sourceProcess, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
+	sourceCmd := newSourceCommand(srcCtx, cfg.Source.Cmd)
 	sourceCmd.Stderr = &logWriter{log: log, msg: "command stderr"}
 
 	sourceOut, err := sourceCmd.StdoutPipe()
@@ -216,10 +260,10 @@ func startEncryptingPipeline(ctx context.Context, cfg *config.Config, log *slog.
 		return nil, nil, nil, fmt.Errorf("wiring gpg output: %w", err)
 	}
 
-	log.Debug("starting source command", "cmd", cfg.Cmd)
+	log.Debug("starting source command", "command_id", cfg.Source.ID, "cmd", cfg.Source.Cmd)
 
 	if err := sourceCmd.Start(); err != nil {
-		return nil, nil, nil, fmt.Errorf("starting command %q: %w", cfg.Cmd, err)
+		return nil, nil, nil, fmt.Errorf("starting %s: %w", sourceLabel(cfg), err)
 	}
 
 	log.Debug("starting gpg", "args", gpgCmd.Args)
@@ -240,14 +284,14 @@ type containerSource struct {
 
 func (c *containerSource) Wait() error { return <-c.done }
 
-// startContainerPipeline is startEncryptingPipeline for a job with a
-// container: cfg.Cmd runs inside it through the Docker daemon (via "sh -c",
-// as it would locally), and its demultiplexed stdout is written into an OS
-// pipe gpg reads as stdin. gpg starts first, and this process closes its
-// own copy of the pipe's read end once gpg holds one, so gpg exiting early
-// fails the next write (EPIPE) and ends the exec stream instead of leaving
-// it blocked.
-func startContainerPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (source sourceProcess, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
+// startContainerPipeline is startEncryptingPipeline for a source with a
+// container: cfg.Source.Cmd runs inside it through the Docker daemon (via
+// "sh -c", as it would locally) under srcCtx, and its demultiplexed stdout
+// is written into an OS pipe gpg reads as stdin. gpg starts first, and this
+// process closes its own copy of the pipe's read end once gpg holds one, so
+// gpg exiting early fails the next write (EPIPE) and ends the exec stream
+// instead of leaving it blocked.
+func startContainerPipeline(ctx, srcCtx context.Context, cfg *config.Config, log *slog.Logger) (source sourceProcess, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
 	client, err := dockerexec.New(cfg.DockerHost)
 	if err != nil {
 		return nil, nil, nil, err
@@ -275,15 +319,16 @@ func startContainerPipeline(ctx context.Context, cfg *config.Config, log *slog.L
 		return nil, nil, nil, fmt.Errorf("starting gpg: %w", err)
 	}
 
-	log.Debug("starting source command in container", "cmd", cfg.Cmd, "container", cfg.Container, "docker_host", cfg.DockerHost)
+	log.Debug("starting source command in container", "command_id", cfg.Source.ID, "cmd", cfg.Source.Cmd,
+		"container", cfg.Source.Container, "docker_host", cfg.DockerHost)
 
 	src := &containerSource{done: make(chan error, 1)}
 
 	go func() {
-		err := client.Run(ctx, dockerexec.Exec{
-			Container: cfg.Container,
-			User:      cfg.ContainerUser,
-			Cmd:       []string{"sh", "-c", cfg.Cmd},
+		err := client.Run(srcCtx, dockerexec.Exec{
+			Container: cfg.Source.Container,
+			User:      cfg.Source.ContainerUser,
+			Cmd:       []string{"sh", "-c", cfg.Source.Cmd},
 			Stdout:    pw,
 			Stderr:    &logWriter{log: log, msg: "command stderr"},
 		})

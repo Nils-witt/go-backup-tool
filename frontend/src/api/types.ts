@@ -277,11 +277,8 @@ export interface JobTargetJSON {
 // fields, as sent to POST/PUT /api/job-configs.
 export interface JobDefinitionJSON {
   name: string;
-  cmd: string;
-  // container, when set, runs cmd inside that running container through
-  // the Docker socket; container_user overrides its default user.
-  container: string;
-  container_user: string;
+  // command names the commands entry whose stdout is the backup.
+  command: string;
   key: string;
   targets: JobTargetJSON[];
   recipients: string[];
@@ -346,7 +343,10 @@ export interface ServerConfigListJSON {
   servers: ServerConfigJSON[];
 }
 
-// CommandDefinitionJSON mirrors config.FileCommand's JSON form.
+// CommandDefinitionJSON mirrors config.FileCommand's JSON form: a job's
+// backup source, or a job target's on-error/on-recover hook. container, when
+// set, runs cmd inside that running container through the Docker socket;
+// container_user overrides its default user.
 export interface CommandDefinitionJSON {
   id: string;
   cmd: string;

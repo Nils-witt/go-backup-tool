@@ -170,6 +170,13 @@ func newJobs(ctx context.Context, rc *config.RunConfig, stateDB *store.Store, st
 // service (see service_windows.go) drive shutdown from Service Control
 // Manager stop/shutdown requests, which — unlike Ctrl-C/SIGTERM — aren't
 // delivered to a service process the normal OS-signal way.
+// logWarnings logs each of the config file's deprecation warnings.
+func logWarnings(log *slog.Logger, warnings []string) {
+	for _, w := range warnings {
+		log.Warn(w)
+	}
+}
+
 func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	rc, err := config.ParseFlags(args, stderr)
 	if err != nil {
@@ -201,6 +208,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	log, logs := newRunLogger(stderr, rc)
 
 	log.Info("go-backup-tool starting", "version", version.Version, "commit", version.Commit)
+	logWarnings(log, rc.Warnings)
 
 	serverIdentity, err := identity.LoadServerIdentityAtStartup(log, rc.KeysDir)
 	if err != nil {

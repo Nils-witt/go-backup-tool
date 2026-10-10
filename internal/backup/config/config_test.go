@@ -105,9 +105,9 @@ func TestParseFlags(t *testing.T) {
 			yaml: "webui:\n  enabled: true\n  listen: :8080\nservers:\n  - name: s\n    type: local\n    path: /mnt/backups\nrecipients: [me@example.com]\n",
 		},
 		{
-			name:    "missing cmd",
+			name:    "missing command",
 			yaml:    "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\njobs:\n  - name: test\n    targets: [{server: s, bucket: b}]\n    recipients: [me@example.com]\n",
-			wantErr: "cmd is required",
+			wantErr: "command is required",
 		},
 		{
 			name:    "missing targets",
@@ -287,8 +287,8 @@ jobs:
 
 	cfg := singleJob(t, rc)
 
-	if cfg.Cmd != "echo from-file" {
-		t.Errorf("cfg.cmd = %q, want %q", cfg.Cmd, "echo from-file")
+	if cfg.Source.Cmd != "echo from-file" {
+		t.Errorf("cfg.Source.Cmd = %q, want %q", cfg.Source.Cmd, "echo from-file")
 	}
 
 	want := Target{ServerName: "primary", Kind: ServerKindLocal, Bucket: "file-bucket", LocalPath: "/mnt/backups"}
@@ -870,7 +870,7 @@ jobs:
 
 	db, files := rc.Jobs[0], rc.Jobs[1]
 
-	if db.Name != "database" || db.Cmd != "mysqldump db" {
+	if db.Name != "database" || db.Source.Cmd != "mysqldump db" {
 		t.Errorf("db job = %+v", db)
 	}
 
@@ -1485,7 +1485,7 @@ jobs:
 
 	a, b := rc.FileJobs[0], rc.FileJobs[1]
 
-	if a.Cmd != "echo default" || a.Interval != "1h" || !a.Armor || len(a.Targets) != 1 || a.Recipients[0] != "me@example.com" {
+	if a.Command != "job-a" || a.Interval != "1h" || !a.Armor || len(a.Targets) != 1 || a.Recipients[0] != "me@example.com" {
 		t.Errorf("job a = %+v, want the top-level defaults layered in", a)
 	}
 
@@ -1493,7 +1493,7 @@ jobs:
 		t.Errorf("job a GPGBin = %q, want \"\" (top-level gpg-bin stays global)", a.GPGBin)
 	}
 
-	if b.Cmd != "echo b" || b.GPGHomedir != "/keys" || b.Recipients[0] != "other@example.com" {
+	if b.Command != "job-b" || b.GPGHomedir != "/keys" || b.Recipients[0] != "other@example.com" {
 		t.Errorf("job b = %+v, want its own fields kept", b)
 	}
 
@@ -1520,7 +1520,7 @@ func TestResolveJob(t *testing.T) {
 	gpg := notify.GPGSettings{Bin: "gpg", Homedir: "/keys"}
 
 	job, err := ResolveJob(FileJob{
-		Name: " db ", Cmd: "dump", Recipients: []string{"me@example.com"}, Interval: "1h",
+		Name: " db ", Command: "page", Recipients: []string{"me@example.com"}, Interval: "1h",
 		Targets: []FileJobTarget{{Server: "nas", Bucket: "b", OnError: &FileTargetOnError{Command: "page", After: 2}}},
 	}, gpg, servers, commands, "primary")
 	if err != nil {
@@ -1552,10 +1552,11 @@ func TestResolveJobErrors(t *testing.T) {
 		fj   FileJob
 		want string
 	}{
-		{"no name", FileJob{Cmd: "x"}, "name is required"},
-		{"no cmd", FileJob{Name: "x", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "nas", Bucket: "b"}}}, "cmd is required"},
-		{"unknown server", FileJob{Name: "x", Cmd: "x", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "gone", Bucket: "b"}}}, "no server named"},
-		{"unknown command", FileJob{Name: "x", Cmd: "x", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "nas", Bucket: "b", OnRecover: &FileTargetOnRecover{Command: "gone"}}}}, "no command named"},
+		{"no name", FileJob{Command: "x"}, "name is required"},
+		{"no command", FileJob{Name: "x", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "nas", Bucket: "b"}}}, "command is required"},
+		{"unknown job command", FileJob{Name: "x", Command: "gone", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "nas", Bucket: "b"}}}, `no command "gone" defined`},
+		{"unknown server", FileJob{Name: "x", Command: "x", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "gone", Bucket: "b"}}}, "no server named"},
+		{"unknown command", FileJob{Name: "x", Command: "x", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "nas", Bucket: "b", OnRecover: &FileTargetOnRecover{Command: "gone"}}}}, "no command named"},
 	} {
 		if _, err := ResolveJob(tc.fj, gpg, servers, nil, ""); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: ResolveJob() error = %v, want substring %q", tc.name, err, tc.want)
@@ -3010,7 +3011,7 @@ jobs:
 
 	job := singleJob(t, rc)
 
-	want := &Command{ID: "restart-nas", Cmd: "systemctl restart nas", Timeout: 10 * time.Second}
+	want := &Command{ID: "restart-nas", Cmd: "systemctl restart nas", Timeout: 10 * time.Second, TimeoutSet: true}
 	if !reflect.DeepEqual(job.Targets[0].OnErrorCommand, want) {
 		t.Errorf("Targets[0].OnErrorCommand = %+v, want %+v", job.Targets[0].OnErrorCommand, want)
 	}
@@ -3168,7 +3169,7 @@ jobs:
 
 	job := singleJob(t, rc)
 
-	want := &Command{ID: "all-clear", Cmd: "echo recovered", Timeout: 10 * time.Second}
+	want := &Command{ID: "all-clear", Cmd: "echo recovered", Timeout: 10 * time.Second, TimeoutSet: true}
 	if !reflect.DeepEqual(job.Targets[0].OnRecoverCommand, want) {
 		t.Errorf("Targets[0].OnRecoverCommand = %+v, want %+v", job.Targets[0].OnRecoverCommand, want)
 	}

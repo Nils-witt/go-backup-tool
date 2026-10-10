@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -90,6 +91,11 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("migrating job state db %q: %w", path, err)
 	}
 
+	if err := migrateInlineJobCommands(ctx, gdb); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("migrating job state db %q: %w", path, err)
+	}
+
 	return &Store{db: gdb}, nil
 }
 
@@ -145,6 +151,63 @@ var obsoleteTables = []string{
 
 // removeObsoleteTables drops every obsoleteTables entry still present. Safe
 // to call on every startup: once they're gone it's a no-op.
+// migrateInlineJobCommands moves every stored job's inline shell command
+// (the cmd column, from before jobs named a command) into a commands row of
+// its own — id "job-<name>", suffixed "-2", "-3", ... if taken — and points
+// the job's command at it, all in one transaction. Once done, no job row
+// has cmd set, so running it again changes nothing.
+func migrateInlineJobCommands(ctx context.Context, gdb *gorm.DB) error {
+	return gdb.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var jobs []jobModel
+		if err := tx.Where("cmd <> '' AND command = ''").Order("name").Find(&jobs).Error; err != nil {
+			return fmt.Errorf("reading jobs with an inline cmd: %w", err)
+		}
+
+		if len(jobs) == 0 {
+			return nil
+		}
+
+		var ids []string
+		if err := tx.Model(&commandModel{}).Pluck("id", &ids).Error; err != nil {
+			return fmt.Errorf("reading command ids: %w", err)
+		}
+
+		taken := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			taken[id] = true
+		}
+
+		now := time.Now().UTC()
+
+		for _, j := range jobs {
+			id := "job-" + j.Name
+			for n := 2; taken[id]; n++ {
+				id = fmt.Sprintf("job-%s-%d", j.Name, n)
+			}
+
+			taken[id] = true
+
+			c := commandModel{
+				ID: id, Cmd: j.LegacyCmd,
+				CreatedAt: j.CreatedAt, CreatedBy: j.CreatedBy, UpdatedAt: now, UpdatedBy: migrationUser,
+			}
+			if err := tx.Create(&c).Error; err != nil {
+				return fmt.Errorf("creating command %q for job %q: %w", id, j.Name, err)
+			}
+
+			if err := tx.Model(&jobModel{}).Where("name = ?", j.Name).
+				Updates(map[string]any{"command": id, "cmd": ""}).Error; err != nil {
+				return fmt.Errorf("pointing job %q at command %q: %w", j.Name, id, err)
+			}
+		}
+
+		return nil
+	})
+}
+
+// migrationUser is the updated_by recorded on rows a migration writes.
+const migrationUser = "migration"
+
 func removeObsoleteTables(ctx context.Context, gdb *gorm.DB) error {
 	for _, table := range obsoleteTables {
 		if err := gdb.WithContext(ctx).Migrator().DropTable(table); err != nil {

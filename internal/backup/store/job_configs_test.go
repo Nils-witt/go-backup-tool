@@ -16,7 +16,7 @@ func TestJobConfigCreateAndUpdate(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 
 	j := JobConfig{
-		Name: "db", Cmd: "dump", Key: "db-{time}.gpg", Recipients: []string{"me@example.com"}, Armor: true,
+		Name: "db", Command: "dump", Key: "db-{time}.gpg", Recipients: []string{"me@example.com"}, Armor: true,
 		Targets:   []JobTarget{{Server: "nas", Bucket: "b", OnError: &JobTargetOnError{Command: "page", After: 2}}},
 		Interval:  "1h",
 		CreatedAt: now, CreatedBy: "erin", UpdatedAt: now, UpdatedBy: "erin",
@@ -63,11 +63,11 @@ func TestJobConfigImportAndDelete(t *testing.T) {
 	db := openTestStore(t)
 	ctx := t.Context()
 
-	if err := db.CreateJobConfig(ctx, JobConfig{Name: "db", Cmd: "edited"}); err != nil {
+	if err := db.CreateJobConfig(ctx, JobConfig{Name: "db", Command: "edited"}); err != nil {
 		t.Fatalf("CreateJobConfig() error: %v", err)
 	}
 
-	imported, err := db.ImportJobConfigs(ctx, []JobConfig{{Name: "db", Cmd: "other"}, {Name: "files", Cmd: "tar"}})
+	imported, err := db.ImportJobConfigs(ctx, []JobConfig{{Name: "db", Command: "other"}, {Name: "files", Command: "tar"}})
 	if err != nil || !slices.Equal(imported, []string{"files"}) {
 		t.Errorf("ImportJobConfigs() = %v, %v; want [files]", imported, err)
 	}
@@ -81,7 +81,7 @@ func TestJobConfigImportAndDelete(t *testing.T) {
 	}
 
 	all, err := db.ListJobConfigs(ctx)
-	if err != nil || len(all) != 1 || all[0].Name != "files" || all[0].Cmd != "tar" {
+	if err != nil || len(all) != 1 || all[0].Name != "files" || all[0].Command != "tar" {
 		t.Errorf("ListJobConfigs() = %+v, %v", all, err)
 	}
 }

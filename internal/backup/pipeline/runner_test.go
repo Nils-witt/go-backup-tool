@@ -31,7 +31,7 @@ func plainTestJob(t *testing.T, marker string) *config.Config {
 
 	return &config.Config{
 		Name:       "test",
-		Cmd:        `echo run >> "$MARKER_FILE"`,
+		Source:     config.Command{ID: "test", Cmd: `echo run >> "$MARKER_FILE"`},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
@@ -110,7 +110,7 @@ func TestRunOnceRefreshesEachTargetIndependently(t *testing.T) {
 
 	job := &config.Config{
 		Name:       "test",
-		Cmd:        "echo hi",
+		Source:     config.Command{ID: "test", Cmd: "echo hi"},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
@@ -195,7 +195,7 @@ func TestRunOnceReportsIncompleteWhenSomeTargetsFail(t *testing.T) {
 
 	job := &config.Config{
 		Name:       "test",
-		Cmd:        "echo hi",
+		Source:     config.Command{ID: "test", Cmd: "echo hi"},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
@@ -297,7 +297,7 @@ func TestRunOnceFiresFailureNotificationOnFailure(t *testing.T) {
 
 	job := &config.Config{
 		Name:                 "test",
-		Cmd:                  "echo hi",
+		Source:               config.Command{ID: "test", Cmd: "echo hi"},
 		Key:                  "backup-{time}.gpg",
 		Recipients:           []string{testGPGRecipient},
 		GPGBin:               "gpg",
@@ -351,7 +351,7 @@ func TestRunOnceNoFailureNotificationOnSuccess(t *testing.T) {
 
 	job := &config.Config{
 		Name:                 "test",
-		Cmd:                  "echo hi",
+		Source:               config.Command{ID: "test", Cmd: "echo hi"},
 		Key:                  "backup-{time}.gpg",
 		Recipients:           []string{testGPGRecipient},
 		GPGBin:               "gpg",
@@ -397,7 +397,7 @@ func TestRunOnceKeepsStagedFileForRetryWhenTargetFails(t *testing.T) {
 
 	job := &config.Config{
 		Name:       "test",
-		Cmd:        "echo hi",
+		Source:     config.Command{ID: "test", Cmd: "echo hi"},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
@@ -452,7 +452,7 @@ func TestRunOnceDeletesStagedFileOnSuccess(t *testing.T) {
 
 	job := &config.Config{
 		Name:       "test",
-		Cmd:        "echo hi",
+		Source:     config.Command{ID: "test", Cmd: "echo hi"},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
@@ -511,7 +511,7 @@ func TestRetryFailedTargetsRetriesOnlyNamedTargets(t *testing.T) {
 
 	job := &config.Config{
 		Name:       "test",
-		Cmd:        "echo hi",
+		Source:     config.Command{ID: "test", Cmd: "echo hi"},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
@@ -608,7 +608,7 @@ func TestRetryFailedTargetsFiresFailureNotificationOnFailure(t *testing.T) {
 	// exercise notifyJobFailure (there's no run to fail), so instead retry
 	// the job's own "good" target, but with a job Cmd that fails, forcing
 	// the retried run itself to fail.
-	job.Cmd = "false"
+	job.Source.Cmd = "false"
 
 	if err := r.RetryFailedTargets(context.Background(), job, []string{"good"}); err == nil {
 		t.Fatal("RetryFailedTargets() error = nil, want an error since the retried run's cmd always fails")
@@ -824,7 +824,7 @@ func startTimeTestJob(t *testing.T, marker string, startTime time.Time, interval
 
 	return &config.Config{
 		Name:       "test",
-		Cmd:        `echo run >> "$MARKER_FILE"`,
+		Source:     config.Command{ID: "test", Cmd: `echo run >> "$MARKER_FILE"`},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
@@ -948,7 +948,7 @@ func TestRetryOutstandingUploadSucceedsAfterTargetRecovers(t *testing.T) {
 
 	job := &config.Config{
 		Name:       "test",
-		Cmd:        "echo hi",
+		Source:     config.Command{ID: "test", Cmd: "echo hi"},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",

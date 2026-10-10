@@ -69,7 +69,7 @@ function CommandDialog({
             label="ID"
             value={form.id}
             onChange={(e) => set({ id: e.target.value })}
-            helperText="What a job target's on-error/on-recover names. Can't be changed later."
+            helperText="What a job (as its backup source) or a job target's on-error/on-recover names. Can't be changed later."
             disabled={!!editing}
             autoFocus={!editing}
             required
@@ -78,7 +78,7 @@ function CommandDialog({
             label="Command"
             value={form.cmd}
             onChange={(e) => set({ cmd: e.target.value })}
-            helperText="Run through the shell. Context comes in GBT_EVENT, GBT_JOB, GBT_TARGET, GBT_SERVER, GBT_ERROR, GBT_CONSECUTIVE_FAILURES, and GBT_TIME."
+            helperText="Run through the shell. As a job's source, its standard output is the backup. As an on-error/on-recover hook, context comes in GBT_EVENT, GBT_JOB, GBT_TARGET, GBT_SERVER, GBT_ERROR, GBT_CONSECUTIVE_FAILURES, and GBT_TIME."
             required
             multiline
             minRows={2}
@@ -107,7 +107,7 @@ function CommandDialog({
             label="Timeout"
             value={form.timeout}
             onChange={(e) => set({ timeout: e.target.value })}
-            helperText='How long one run may take, e.g. "15s". Empty means 30s.'
+            helperText='How long one run may take, e.g. "15s" or "2h". Empty: no limit as a job source, 30s as a hook.'
           />
         </Stack>
       </DialogContent>

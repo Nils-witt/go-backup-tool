@@ -270,18 +270,11 @@ servers:
 
 jobs:
   - name: database
-    cmd: "mysqldump --single-transaction mydb | gzip"
-    # container (optional) runs cmd inside that already-running container
-    # (name or id) through the Docker daemon (see docker-socket: below)
-    # instead of on this machine — e.g. to dump a database whose client
-    # tools only exist in its own image. cmd runs via "sh -c" there, so the
-    # container needs a sh; its stdout is the backup, as for a local cmd:.
-    # container-user (optional, user[:group]) overrides the container's
-    # default user. Canceling a run (the config file's timeout:) stops
-    # reading the output, but Docker can't kill an exec'd process: it keeps
-    # running inside the container until it exits.
-    # container: mariadb
-    # container-user: mysql
+    # command names the commands: entry (see commands: below) whose
+    # standard output is the backup. A job's own inline cmd: is DEPRECATED:
+    # it still works, but is turned into a commands: entry of its own at
+    # startup (id "job-<name>"), with a warning logged.
+    command: dump-database
     key: "db-{time}.gpg"
     targets:
       - server: nas
@@ -313,7 +306,7 @@ jobs:
     # startup, then resumes the correctly aligned grid — it won't replay
     # every individually missed slot.
   - name: uploads
-    cmd: "tar czf - /srv/uploads"
+    command: dump-uploads
     key: "uploads-{time}.gpg"
     recipients:
       - me@example.com
@@ -485,7 +478,7 @@ jobs:
 #       url: "https://hooks.slack.com/services/replace-with-your-webhook-path"
 #       body: '{"text":"{user} downloaded {file} from {receiver} at {time}"}'
 
-# docker-socket is the Docker daemon a job's or command's container: runs
+# docker-socket is the Docker daemon a command's container: runs
 # through: a Unix socket path (optionally written unix:///path) or a
 # plain-HTTP tcp://host:port (TLS-protected daemons aren't supported).
 # Unset falls back to the DOCKER_HOST environment variable, then
@@ -495,26 +488,45 @@ jobs:
 # /exec/{id}/start, GET /exec/{id}/json) narrows that.
 # docker-socket: /var/run/docker.sock
 
-# commands: are named, reusable shell commands, referenced by id from a job
-# target's on-error.command or on-recover.command (see targets: above) — the
-# same "define once, reference by id" shape as notifications: above. id is
+# commands: are named, reusable shell commands, referenced by id from a
+# job's command: (its backup source) and from a job target's
+# on-error.command or on-recover.command (see targets: above) — the same
+# "define once, reference by id" shape as notifications: above. id is
 # required and must be unique; cmd is required and is run through the
-# platform shell exactly like a job's own cmd: (sh -c on Linux/macOS, cmd /C on Windows) — it's
-# operator-supplied config, not sanitized in any way. timeout (optional,
-# same duration syntax as retention:) bounds how long one firing may run;
-# defaults to 30s. container/container-user (optional) run cmd inside a
-# container instead, exactly like a job's own container: does; the GBT_*
-# variables below are then added to the container's environment.
+# platform shell (sh -c on Linux/macOS, cmd /C on Windows) — it's
+# operator-supplied config, not sanitized in any way. Like jobs, commands
+# are imported into the state db once webui.job-editing is on.
 #
-# Context is passed to the command via environment variables (never
+# timeout (optional, same duration syntax as retention:) bounds how long one
+# run may take. As an on-error/on-recover hook it defaults to 30s; as a
+# job's source, unset means no limit of its own (only the top-level
+# timeout: applies), so set one only if a dump may hang.
+#
+# container (optional) runs cmd inside that already-running container (name
+# or id) through the Docker daemon (see docker-socket: above) instead of on
+# this machine — e.g. to dump a database whose client tools only exist in
+# its own image. cmd runs via "sh -c" there, so the container needs a sh.
+# container-user (optional, user[:group]) overrides the container's default
+# user. A timeout stops reading the output, but Docker can't kill an exec'd
+# process: it keeps running inside the container until it exits.
+#
+# As a hook, context is passed to the command via environment variables (never
 # interpolated into the command string, so you never have to worry about an
 # error message containing shell metacharacters): GBT_EVENT ("error" or
 # "recover"), GBT_JOB, GBT_TARGET (the target's bucket), GBT_SERVER (its
 # server name), GBT_ERROR (on-error only; unset on recovery),
 # GBT_CONSECUTIVE_FAILURES (the streak length that triggered this firing, see
 # on-error.after above — or, for on-recover, the streak that just ended), and
-# GBT_TIME (RFC 3339).
-# commands:
+# GBT_TIME (RFC 3339); inside a container, these are added to its
+# environment.
+commands:
+  - id: dump-database
+    cmd: "mysqldump --single-transaction mydb | gzip"
+    # container: mariadb
+    # container-user: mysql
+    # timeout: 2h
+  - id: dump-uploads
+    cmd: "tar czf - /srv/uploads"
 #   - id: restart-nas-mount
 #     cmd: "ssh nas-host systemctl restart nas-share"
 #     timeout: 15s

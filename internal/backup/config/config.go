@@ -42,18 +42,20 @@ func (s *stringSlice) Set(v string) error {
 // Config holds one backup job's parameters.
 type Config struct {
 	Name string // job name, from its jobs: entry; always set
-	Cmd  string
 
-	// Container, when set, runs Cmd inside that already-running container
-	// (name or id) through the Docker daemon at DockerHost, instead of on
-	// this machine — see pipeline.startEncryptingPipeline. ContainerUser
-	// (user[:group]) overrides the container's default user.
-	Container     string
-	ContainerUser string
+	// Source is the commands: entry the job's command: names, resolved: its
+	// stdout is the backup (see pipeline.startEncryptingPipeline). Its
+	// Timeout bounds the source only when TimeoutSet; otherwise only the
+	// run's overall timeout does.
+	Source Command
+
+	// commandRef is the job's command: id, resolved into Source by
+	// resolveJobSource.
+	commandRef string
 
 	// DockerHost is the Docker daemon address (see dockerexec.New), set on
 	// each run's own copy of its job's config by the runner, the same way
-	// StateDB is. Only used when Container is set.
+	// StateDB is. Only used when Source.Container is set.
 	DockerHost string
 	Key        string // may still contain the {time} placeholder; resolved fresh per run
 
@@ -212,13 +214,19 @@ type Target struct {
 }
 
 // Command is one top-level commands: entry after validation, ready to be
-// run by the pipeline package (see pipeline.runTargetCommand) once a
-// target's consecutive-failure streak reaches its on-error.after threshold,
-// or once a target recovers from a failure streak (on-recover:).
+// run by the pipeline package: as a job's backup source (see
+// Config.Source), or (see pipeline.runTargetCommand) once a target's
+// consecutive-failure streak reaches its on-error.after threshold, or once
+// a target recovers from a failure streak (on-recover:).
 type Command struct {
 	ID      string
 	Cmd     string
 	Timeout time.Duration
+
+	// TimeoutSet reports whether timeout: was given, rather than Timeout
+	// being defaultOnErrorCommandTimeout: only an explicit timeout bounds a
+	// job's source.
+	TimeoutSet bool
 
 	// Container, when set, runs Cmd inside that already-running container
 	// through the Docker daemon (see pipeline.runTargetCommand), as
@@ -281,6 +289,11 @@ type RunConfig struct {
 	// can import them into the state db, where every notification lives
 	// from then on (managed in the web UI).
 	FileNotifications []notify.FileNotification
+
+	// Warnings are deprecation notices found while parsing the config
+	// file (e.g. a job's inline cmd:, see convertInlineJobCommands), for
+	// the caller to log once logging is set up.
+	Warnings []string
 
 	// SMTP is the config file's resolved smtp: entry, and GPG its
 	// gpg-bin/gpg-homedir: what every email notification — including ones
@@ -398,16 +411,16 @@ const (
 // target — see FileJobTarget.
 type FileJob struct {
 	Name string `yaml:"name" json:"name"`
-	Cmd  string `yaml:"cmd" json:"cmd"`
-	Key  string `yaml:"key" json:"key"`
 
-	// Container, when set, runs Cmd inside that already-running container
-	// (name or id) through the Docker daemon (see fileConfig.DockerSocket)
-	// rather than on this machine, via "sh -c" — so the container needs a
-	// sh. Its stdout is the backup, exactly as for a local cmd:.
-	// ContainerUser (user[:group]) overrides the container's default user.
-	Container     string `yaml:"container" json:"container"`
-	ContainerUser string `yaml:"container-user" json:"container_user"`
+	// Command names the commands: entry whose stdout is the backup.
+	Command string `yaml:"command" json:"command"`
+
+	// Cmd is DEPRECATED: a job's own inline shell command. ParseFlags turns
+	// it into a commands: entry of its own (see convertInlineJobCommands),
+	// so it never reaches anything past config parsing.
+	Cmd string `yaml:"cmd" json:"-"`
+
+	Key string `yaml:"key" json:"key"`
 
 	Targets    []FileJobTarget `yaml:"targets" json:"targets"`
 	Recipients []string        `yaml:"recipients" json:"recipients"`
@@ -494,8 +507,11 @@ type FileServer struct {
 // by id" shape as notify.FileNotification. Cmd is run through the platform
 // shell, the same way a job's own cmd: is (see pipeline.newSourceCommand).
 // Timeout (optional) bounds how long one firing may run; defaults to
-// defaultOnErrorCommandTimeout when unset. Container/ContainerUser run Cmd
-// inside a container instead, the same way a job's own container: does.
+// defaultOnErrorCommandTimeout when unset; for a job's source, unset means no
+// limit of its own. Container (an already-running container's name or id)
+// runs Cmd inside it through the Docker daemon (see fileConfig.DockerSocket)
+// instead, via "sh -c" — so the container needs a sh — as ContainerUser
+// (user[:group]) when set.
 type FileCommand struct {
 	ID            string `yaml:"id" json:"id"`
 	Cmd           string `yaml:"cmd" json:"cmd"`
@@ -556,6 +572,10 @@ type fileConfig struct {
 	Receivers []FileReceiver    `yaml:"receivers"`
 	WebUI     fileWebUI         `yaml:"webui"`
 	Report    report.FileReport `yaml:"report"`
+
+	// warnings collects deprecation notices found while resolving the
+	// file (see convertInlineJobCommands), surfaced as RunConfig.Warnings.
+	warnings []string
 }
 
 // fileWebUI is the top-level webui: entry, grouping every setting that
@@ -795,6 +815,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 	}
 
 	return &RunConfig{
+		Warnings:          fileCfg.warnings,
 		Jobs:              jobs,
 		FileJobs:          flattenFileJobs(fileCfg),
 		FileServers:       fileCfg.Servers,
@@ -866,6 +887,13 @@ func resolveNotificationsAndCommands(fileCfg *fileConfig) (resolvedNotifications
 		return resolvedNotifications{}, nil, err
 	}
 
+	// Jobs' inline cmd: become commands: entries first, so they're built
+	// and validated with the rest.
+	fileCfg.warnings, err = convertInlineJobCommands(fileCfg)
+	if err != nil {
+		return resolvedNotifications{}, nil, err
+	}
+
 	commands, err := buildCommands(fileCfg.Commands)
 	if err != nil {
 		return resolvedNotifications{}, nil, err
@@ -928,7 +956,7 @@ func ResolveCommand(fc FileCommand) (Command, error) {
 	}
 
 	return Command{
-		ID: id, Cmd: cmd, Timeout: timeout,
+		ID: id, Cmd: cmd, Timeout: timeout, TimeoutSet: strings.TrimSpace(fc.Timeout) != "",
 		Container: strings.TrimSpace(fc.Container), ContainerUser: strings.TrimSpace(fc.ContainerUser),
 	}, nil
 }
@@ -1296,6 +1324,10 @@ func buildJobsFromFile(fileCfg *fileConfig, commands map[string]Command) ([]*Con
 			return nil, fmt.Errorf("job %q: %w", name, err)
 		}
 
+		if err := resolveJobSource(cfg, commands); err != nil {
+			return nil, fmt.Errorf("job %q: %w", name, err)
+		}
+
 		jobs = append(jobs, cfg)
 	}
 
@@ -1496,6 +1528,89 @@ type ResolvedServer struct {
 // Kind is s's type:.
 func (s ResolvedServer) Kind() ServerKind { return s.kind }
 
+// resolveJobSource resolves cfg's command: id against commands into
+// cfg.Source. A job with no command: is left without a Source; checkJob
+// reports that.
+func resolveJobSource(cfg *Config, commands map[string]Command) error {
+	if cfg.commandRef == "" {
+		return nil
+	}
+
+	c, ok := commands[cfg.commandRef]
+	if !ok {
+		return fmt.Errorf("command: no command %q defined under commands", cfg.commandRef)
+	}
+
+	cfg.Source = c
+
+	return nil
+}
+
+// convertInlineJobCommands turns every job's deprecated inline cmd: (its
+// own, or the top-level default it inherits) into a commands: entry of its
+// own — id "job-<name>", suffixed "-2", "-3", ... if taken — which the job
+// then names as its command:, so everything past config parsing only ever
+// sees command: references. A job's own command: takes precedence over an
+// inherited cmd:, and its own cmd: over an inherited command:; setting both
+// at the same level is an error. It returns one deprecation warning per
+// converted job, for the caller to log.
+func convertInlineJobCommands(fileCfg *fileConfig) ([]string, error) {
+	defaults := &fileCfg.FileJob
+	if strings.TrimSpace(defaults.Cmd) != "" && strings.TrimSpace(defaults.Command) != "" {
+		return nil, errors.New("set either command or the deprecated cmd, not both")
+	}
+
+	taken := make(map[string]bool, len(fileCfg.Commands))
+	for _, fc := range fileCfg.Commands {
+		taken[strings.TrimSpace(fc.ID)] = true
+	}
+
+	var warnings []string
+
+	for i := range fileCfg.Jobs {
+		fj := &fileCfg.Jobs[i]
+		name := strings.TrimSpace(fj.Name)
+
+		cmd := strings.TrimSpace(fj.Cmd)
+
+		switch {
+		case cmd != "" && strings.TrimSpace(fj.Command) != "":
+			return nil, fmt.Errorf("jobs[%d]: set either command or the deprecated cmd, not both", i)
+		case cmd == "" && (strings.TrimSpace(fj.Command) != "" || strings.TrimSpace(defaults.Command) != ""):
+			continue
+		case cmd == "":
+			cmd = strings.TrimSpace(defaults.Cmd)
+		}
+
+		if cmd == "" {
+			continue
+		}
+
+		id := uniqueCommandID("job-"+name, taken)
+		taken[id] = true
+
+		fileCfg.Commands = append(fileCfg.Commands, FileCommand{ID: id, Cmd: cmd})
+		fj.Command, fj.Cmd = id, ""
+
+		warnings = append(warnings, fmt.Sprintf("job %q: cmd: is deprecated; it now runs as commands: entry %q, which the job names as its command:", name, id))
+	}
+
+	defaults.Cmd = ""
+
+	return warnings, nil
+}
+
+// uniqueCommandID returns base, or base with the lowest "-N" suffix (from
+// 2) that isn't in taken.
+func uniqueCommandID(base string, taken map[string]bool) string {
+	id := base
+	for n := 2; taken[id]; n++ {
+		id = fmt.Sprintf("%s-%d", base, n)
+	}
+
+	return id
+}
+
 // resolveJobTargets resolves cfg's raw target references (targetRefs, from
 // targets:) against servers, building cfg.targets, and resolves each ref's
 // on-error.command and on-recover.command (if any) against commands (see
@@ -1635,8 +1750,8 @@ func validateJob(cfg *Config) error {
 // whose caller already knows which job it asked about.
 func checkJob(cfg *Config) error {
 	switch {
-	case strings.TrimSpace(cfg.Cmd) == "":
-		return errors.New("cmd is required")
+	case cfg.Source.ID == "":
+		return errors.New("command is required")
 	case len(cfg.Targets) == 0:
 		return errors.New("at least one target is required (see targets: and servers:)")
 	case len(cfg.Recipients) == 0:
@@ -1677,6 +1792,10 @@ func ResolveJob(fj FileJob, gpg notify.GPGSettings, servers map[string]ResolvedS
 		return nil, err
 	}
 
+	if err := resolveJobSource(cfg, commands); err != nil {
+		return nil, err
+	}
+
 	if err := checkJob(cfg); err != nil {
 		return nil, err
 	}
@@ -1708,9 +1827,7 @@ func flattenFileJob(defaults, fj FileJob) FileJob {
 		dst *string
 		def string
 	}{
-		{&out.Cmd, defaults.Cmd},
-		{&out.Container, defaults.Container},
-		{&out.ContainerUser, defaults.ContainerUser},
+		{&out.Command, defaults.Command},
 		{&out.Key, defaults.Key},
 		{&out.Interval, defaults.Interval},
 		{&out.StartTime, defaults.StartTime},
@@ -1828,9 +1945,7 @@ func newJobTargetRef(t FileJobTarget) (jobTargetRef, error) {
 // startup and looked up there when the job fails (see
 // Config.FailureNotifications).
 func applyFileJob(cfg *Config, fj *FileJob) error {
-	applyString(&cfg.Cmd, fj.Cmd)
-	applyString(&cfg.Container, strings.TrimSpace(fj.Container))
-	applyString(&cfg.ContainerUser, strings.TrimSpace(fj.ContainerUser))
+	applyString(&cfg.commandRef, strings.TrimSpace(fj.Command))
 	applyString(&cfg.Key, fj.Key)
 	applyString(&cfg.GPGBin, fj.GPGBin)
 	applyString(&cfg.GPGHomedir, fj.GPGHomedir)

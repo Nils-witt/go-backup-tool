@@ -57,7 +57,7 @@ func TestJobConfigAPI(t *testing.T) {
 	nas := config.FileServer{Name: "nas", Type: "local", Path: t.TempDir()}
 	page := config.FileCommand{ID: "page", Cmd: "echo page"}
 	job := config.FileJob{
-		Name: "db", Cmd: "exit 1", Recipients: []string{"me@example.com"}, Interval: "1h", StartTime: "2999-01-01T00:00:00Z",
+		Name: "db", Command: "page", Recipients: []string{"me@example.com"}, Interval: "1h", StartTime: "2999-01-01T00:00:00Z",
 		Targets: []config.FileJobTarget{{Server: "nas", Bucket: "b", OnError: &config.FileTargetOnError{Command: "page", After: 1}}},
 	}
 	renamed := job

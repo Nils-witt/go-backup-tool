@@ -57,9 +57,7 @@ const EMPTY_TARGET: JobTargetJSON = {
 
 const EMPTY_FORM: JobForm = {
   name: "",
-  cmd: "",
-  container: "",
-  container_user: "",
+  command: "",
   key: "",
   targets: [EMPTY_TARGET],
   recipients: "",
@@ -75,9 +73,7 @@ const EMPTY_FORM: JobForm = {
 function formFrom(j: JobConfigJSON): JobForm {
   return {
     name: j.name,
-    cmd: j.cmd,
-    container: j.container ?? "",
-    container_user: j.container_user ?? "",
+    command: j.command,
     key: j.key,
     targets: j.targets.length ? j.targets : [EMPTY_TARGET],
     recipients: j.recipients.join("\n"),
@@ -111,31 +107,40 @@ function scheduleText(j: JobDefinitionJSON): string {
   return j.start_time ? `every ${j.interval} from ${fmtTime(j.start_time)}` : `every ${j.interval}`;
 }
 
-// CommandSelect picks one command id, or none ("").
+// CommandSelect picks one command id, or none ("") unless required.
 function CommandSelect({
   label,
   commands,
   value,
   onChange,
+  required,
+  helperText,
 }: {
   label: string;
   commands: string[];
   value: string;
   onChange: (v: string) => void;
+  required?: boolean;
+  helperText?: string;
 }) {
   return (
     <TextField
       select
-      size="small"
+      size={required ? "medium" : "small"}
       label={label}
       value={value}
       onChange={(e) => onChange(e.target.value)}
       disabled={!commands.length && !value}
+      required={required}
+      helperText={helperText}
+      fullWidth={required}
       sx={{ minWidth: 160 }}
     >
-      <MenuItem value="">
-        <em>none</em>
-      </MenuItem>
+      {required ? null : (
+        <MenuItem value="">
+          <em>none</em>
+        </MenuItem>
+      )}
       {commands.map((id) => (
         <MenuItem key={id} value={id}>
           {id}
@@ -297,7 +302,7 @@ function JobDialog({
     set({ targets: form.targets.map((old, j) => (j === i ? t : old)) });
   const canSave =
     !!form.name.trim() &&
-    !!form.cmd.trim() &&
+    !!form.command &&
     !!form.recipients.trim() &&
     form.targets.every((t) => t.server && t.bucket.trim());
 
@@ -316,35 +321,17 @@ function JobDialog({
             autoFocus={!editing}
             required
           />
-          <TextField
+          {!data.commands.length ? (
+            <Alert severity="warning">No commands yet — create one on the Commands page.</Alert>
+          ) : null}
+          <CommandSelect
             label="Command"
-            value={form.cmd}
-            onChange={(e) => set({ cmd: e.target.value })}
-            helperText="Run through the shell; its standard output is the backup, encrypted before upload."
+            commands={data.commands}
+            value={form.command}
+            onChange={(command) => set({ command })}
             required
-            multiline
-            minRows={2}
-            slotProps={{ htmlInput: { spellCheck: false, style: { fontFamily: "monospace" } } }}
+            helperText="Its standard output is the backup, encrypted before upload. Manage commands on the Commands page."
           />
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-            <TextField
-              label="Container"
-              value={form.container}
-              onChange={(e) => set({ container: e.target.value })}
-              helperText="Run inside this running container (name or ID) through the Docker socket. Empty runs it here."
-              slotProps={{ htmlInput: { spellCheck: false } }}
-              sx={{ flex: 2 }}
-            />
-            <TextField
-              label="Container user"
-              value={form.container_user}
-              onChange={(e) => set({ container_user: e.target.value })}
-              helperText="user[:group]. Empty uses the container's default."
-              disabled={!form.container.trim()}
-              slotProps={{ htmlInput: { spellCheck: false } }}
-              sx={{ flex: 1 }}
-            />
-          </Stack>
           <TextField
             label="Key"
             value={form.key}
@@ -605,17 +592,7 @@ export function JobConfigSection() {
                     ) : null}
                   </TableCell>
                   <TableCell sx={{ overflowWrap: "anywhere", maxWidth: 280 }}>
-                    <code>{j.cmd}</code>
-                    {j.container ? (
-                      <Typography
-                        variant="caption"
-                        color="text.secondary"
-                        sx={{ display: "block" }}
-                      >
-                        in container {j.container}
-                        {j.container_user ? ` as ${j.container_user}` : ""}
-                      </Typography>
-                    ) : null}
+                    <code>{j.command}</code>
                   </TableCell>
                   <TableCell>{scheduleText(j)}</TableCell>
                   <TableCell sx={{ overflowWrap: "anywhere" }}>

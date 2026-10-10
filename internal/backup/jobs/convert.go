@@ -32,7 +32,7 @@ func normalizeCommand(fc config.FileCommand) config.FileCommand {
 
 // normalizeJob trims fj's fields and drops empty list entries.
 func normalizeJob(fj config.FileJob) config.FileJob {
-	for _, f := range []*string{&fj.Name, &fj.Cmd, &fj.Key, &fj.GPGBin, &fj.GPGHomedir, &fj.Interval, &fj.StartTime, &fj.StagingDir, &fj.Container, &fj.ContainerUser} {
+	for _, f := range []*string{&fj.Name, &fj.Command, &fj.Key, &fj.GPGBin, &fj.GPGHomedir, &fj.Interval, &fj.StartTime, &fj.StagingDir} {
 		*f = strings.TrimSpace(*f)
 	}
 
@@ -100,9 +100,9 @@ func toStoreJob(fj config.FileJob) store.JobConfig {
 	}
 
 	return store.JobConfig{
-		Name: fj.Name, Cmd: fj.Cmd, Key: fj.Key, Targets: targets, Recipients: slices.Clone(fj.Recipients), Armor: fj.Armor,
+		Name: fj.Name, Command: fj.Command, Key: fj.Key, Targets: targets, Recipients: slices.Clone(fj.Recipients), Armor: fj.Armor,
 		GPGBin: fj.GPGBin, GPGHomedir: fj.GPGHomedir, Interval: fj.Interval, StartTime: fj.StartTime, StagingDir: fj.StagingDir,
-		FailureNotifications: slices.Clone(fj.FailureNotifications), Container: fj.Container, ContainerUser: fj.ContainerUser,
+		FailureNotifications: slices.Clone(fj.FailureNotifications),
 	}
 }
 
@@ -124,10 +124,10 @@ func toStoreTarget(t config.FileJobTarget) store.JobTarget {
 // entered as, e.g. to send it to the web UI's edit form.
 func FileJobFrom(jc store.JobConfig) config.FileJob {
 	fj := config.FileJob{
-		Name: jc.Name, Cmd: jc.Cmd, Key: jc.Key, Recipients: slices.Clone(jc.Recipients), Armor: jc.Armor,
+		Name: jc.Name, Command: jc.Command, Key: jc.Key, Recipients: slices.Clone(jc.Recipients), Armor: jc.Armor,
 		GPGBin: jc.GPGBin, GPGHomedir: jc.GPGHomedir, Interval: jc.Interval, StartTime: jc.StartTime, StagingDir: jc.StagingDir,
-		FailureNotifications: slices.Clone(jc.FailureNotifications), Container: jc.Container, ContainerUser: jc.ContainerUser,
-		Targets: make([]config.FileJobTarget, len(jc.Targets)),
+		FailureNotifications: slices.Clone(jc.FailureNotifications),
+		Targets:              make([]config.FileJobTarget, len(jc.Targets)),
 	}
 
 	for i, t := range jc.Targets {

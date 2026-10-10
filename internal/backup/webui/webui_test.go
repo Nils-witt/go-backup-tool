@@ -244,7 +244,7 @@ func TestHandleRetryFailedTargetsKicksOffRetry(t *testing.T) {
 
 	job := &config.Config{
 		Name:       "test",
-		Cmd:        "echo hi",
+		Source:     config.Command{ID: "test", Cmd: "echo hi"},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",

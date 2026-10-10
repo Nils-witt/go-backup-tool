@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/dockerexec/dockerexectest"
@@ -46,7 +47,7 @@ func TestContainerSourceFeedsGPG(t *testing.T) {
 	})
 
 	cfg := &config.Config{
-		Cmd: "pg_dump app", Container: "db", ContainerUser: "postgres",
+		Source:     config.Command{ID: "dump", Cmd: "pg_dump app", Container: "db", ContainerUser: "postgres"},
 		DockerHost: d.Socket, GPGBin: fakeGPG(t),
 	}
 
@@ -84,7 +85,10 @@ func TestContainerSourceFailureEndsGPGInput(t *testing.T) {
 	skipOnWindows(t)
 
 	d := dockerexectest.Start(t, nil)
-	cfg := &config.Config{Cmd: "pg_dump app", Container: "gone", DockerHost: d.Socket, GPGBin: fakeGPG(t)}
+	cfg := &config.Config{
+		Source:     config.Command{ID: "dump", Cmd: "pg_dump app", Container: "gone"},
+		DockerHost: d.Socket, GPGBin: fakeGPG(t),
+	}
 
 	source, gpgCmd, gpgOut, err := startEncryptingPipeline(context.Background(), cfg, slog.New(slog.DiscardHandler))
 	if err != nil {
@@ -100,7 +104,7 @@ func TestContainerSourceFailureEndsGPGInput(t *testing.T) {
 		t.Fatalf("source err = %v, want the daemon's error", err)
 	}
 
-	if got := firstPipelineError(sourceLabel(cfg), err, nil, nil, nil).Error(); !strings.Contains(got, `in container "gone" failed`) {
+	if got := firstPipelineError(sourceLabel(cfg), err, nil, nil, nil).Error(); !strings.Contains(got, `command "dump" in container "gone" failed`) {
 		t.Errorf("pipeline error %q doesn't name the container", got)
 	}
 }
@@ -137,5 +141,61 @@ func TestRunTargetCommandInContainer(t *testing.T) {
 		if !strings.HasPrefix(kv, "GBT_") {
 			t.Errorf("unexpected env %q passed into the container", kv)
 		}
+	}
+}
+
+func TestSourceTimeoutStopsOnlyTheSource(t *testing.T) {
+	t.Parallel()
+	skipOnWindows(t)
+
+	cfg := &config.Config{
+		Source: config.Command{ID: "slow", Cmd: "exec sleep 5", Timeout: 100 * time.Millisecond, TimeoutSet: true},
+		GPGBin: fakeGPG(t),
+	}
+
+	start := time.Now()
+
+	source, gpgCmd, gpgOut, err := startEncryptingPipeline(context.Background(), cfg, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("startEncryptingPipeline: %v", err)
+	}
+
+	_, _ = io.Copy(io.Discard, gpgOut)
+
+	if err := gpgCmd.Wait(); err != nil {
+		t.Errorf("gpg should finish normally once the source is killed: %v", err)
+	}
+
+	err = source.Wait()
+	if err == nil || !strings.Contains(err.Error(), "timed out after 100ms") {
+		t.Fatalf("source err = %v, want a timeout", err)
+	}
+
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("took %s; the source timeout didn't stop it", d)
+	}
+}
+
+func TestSourceWithoutExplicitTimeoutIsUnbounded(t *testing.T) {
+	t.Parallel()
+	skipOnWindows(t)
+
+	// Timeout holds the hook default, but without TimeoutSet it must not
+	// apply to a job's source.
+	cfg := &config.Config{
+		Source: config.Command{ID: "ok", Cmd: "sleep 0.3; echo done", Timeout: 50 * time.Millisecond},
+		GPGBin: fakeGPG(t),
+	}
+
+	source, gpgCmd, gpgOut, err := startEncryptingPipeline(context.Background(), cfg, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("startEncryptingPipeline: %v", err)
+	}
+
+	out, _ := io.ReadAll(gpgOut)
+	_ = gpgCmd.Wait()
+
+	if err := source.Wait(); err != nil || string(out) != "done\n" {
+		t.Fatalf("source err = %v, output %q", err, out)
 	}
 }

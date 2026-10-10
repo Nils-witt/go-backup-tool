@@ -154,8 +154,8 @@ func (m *Manager) ListCommands(ctx context.Context) ([]ManagedCommand, error) {
 		})
 }
 
-// CommandIDs returns every active command's id, sorted: what a job target's
-// on-error/on-recover may name.
+// CommandIDs returns every active command's id, sorted: what a job's
+// command and a job target's on-error/on-recover may name.
 func (m *Manager) CommandIDs() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -231,7 +231,8 @@ func (m *Manager) UpdateCommand(ctx context.Context, user string, fc config.File
 }
 
 // DeleteCommand removes command id, refusing (ErrInUse, naming the jobs)
-// while a stored job's target runs it on error or recovery. An unknown id
+// while a stored job runs it as its command or a target's on-error/
+// on-recover. An unknown id
 // returns store.ErrCommandNotFound.
 func (m *Manager) DeleteCommand(ctx context.Context, user, id string) error {
 	return deleteReferenced(ctx, m, user, kindCommand, id, m.db.DeleteCommandConfig, m.commandDefs, m.commands)

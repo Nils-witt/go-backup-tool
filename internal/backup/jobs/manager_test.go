@@ -56,11 +56,20 @@ func localServer(name string) config.FileServer {
 	return config.FileServer{Name: name, Type: "local", Path: "/tmp/" + name}
 }
 
+// runCommands is the commands every test manager loads — "run", the source
+// job uses, plus alternatives for tests that switch a job's command — and
+// then extra.
+func runCommands(extra ...config.FileCommand) []config.FileCommand {
+	return append([]config.FileCommand{
+		{ID: "run", Cmd: "exit 1"}, {ID: "new", Cmd: "echo new"}, {ID: "fail2", Cmd: "exit 2"},
+	}, extra...)
+}
+
 // job is a valid job uploading to server, repeating hourly from a start
 // time far in the future, so it never actually runs during a test.
 func job(name, server string) config.FileJob {
 	return config.FileJob{
-		Name: name, Cmd: "exit 1", Recipients: []string{"me@example.com"},
+		Name: name, Command: "run", Recipients: []string{"me@example.com"},
 		Interval: "1h", StartTime: "2999-01-01T00:00:00Z",
 		Targets: []config.FileJobTarget{{Server: server, Bucket: "b"}},
 	}
@@ -90,7 +99,7 @@ func TestLoadImportsConfigFile(t *testing.T) {
 
 	err := m.Load(ctx,
 		[]config.FileServer{localServer("nas"), {Name: "broken", Type: "nope"}},
-		[]config.FileCommand{{ID: "page", Cmd: "echo"}},
+		runCommands(config.FileCommand{ID: "page", Cmd: "echo"}),
 		[]config.FileJob{job("db", "nas"), job("files", "nas"), job("orphan", "broken")},
 	)
 	if err != nil {
@@ -133,8 +142,8 @@ func checkLoadedLists(t *testing.T, m testManager) {
 		t.Errorf("ListServers() = %+v, %v", servers, err)
 	}
 
-	if got := m.CommandIDs(); !slices.Equal(got, []string{"page"}) {
-		t.Errorf("CommandIDs() = %v, want [page]", got)
+	if got := m.CommandIDs(); !slices.Equal(got, []string{"fail2", "new", "page", "run"}) {
+		t.Errorf("CommandIDs() = %v, want [fail2 new page run]", got)
 	}
 }
 
@@ -152,7 +161,7 @@ func TestLoadFromConfigFile(t *testing.T) {
 	}
 
 	m := newTestManager(t, db, Settings{})
-	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, []config.FileCommand{{ID: "page", Cmd: "echo"}}, []config.FileJob{job("db", "nas")}); err != nil {
+	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, runCommands(config.FileCommand{ID: "page", Cmd: "echo"}), []config.FileJob{job("db", "nas")}); err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
 
@@ -196,7 +205,7 @@ func TestLoadJobFilter(t *testing.T) {
 	db := openTestStateDB(t)
 
 	m := newTestManager(t, db, Settings{Filter: "files"})
-	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, nil, []config.FileJob{job("db", "nas"), job("files", "nas")}); err != nil {
+	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, runCommands(), []config.FileJob{job("db", "nas"), job("files", "nas")}); err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
 
@@ -205,7 +214,7 @@ func TestLoadJobFilter(t *testing.T) {
 	}
 
 	m2 := newTestManager(t, db, Settings{Filter: "nope"})
-	if err := m2.Load(ctx, nil, nil, nil); err == nil || !strings.Contains(err.Error(), "no such job") {
+	if err := m2.Load(ctx, nil, runCommands(), nil); err == nil || !strings.Contains(err.Error(), "no such job") {
 		t.Errorf("Load() error = %v, want no such job", err)
 	}
 }
@@ -214,7 +223,7 @@ func TestLoadWithoutStateDB(t *testing.T) {
 	t.Parallel()
 
 	m := newTestManager(t, nil, Settings{Editing: true})
-	if err := m.Load(t.Context(), []config.FileServer{localServer("nas")}, nil, []config.FileJob{job("db", "nas")}); err != nil {
+	if err := m.Load(t.Context(), []config.FileServer{localServer("nas")}, runCommands(), []config.FileJob{job("db", "nas")}); err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
 
@@ -233,7 +242,7 @@ func TestMutationsNeedEditing(t *testing.T) {
 	m := newTestManager(t, openTestStateDB(t), Settings{})
 	ctx := t.Context()
 
-	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, nil, nil); err != nil {
+	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, runCommands(), nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -255,7 +264,7 @@ func TestCreateJobValidates(t *testing.T) {
 	m := newTestManager(t, openTestStateDB(t), Settings{Editing: true})
 	ctx := t.Context()
 
-	if err := m.Load(ctx, nil, nil, nil); err != nil {
+	if err := m.Load(ctx, nil, runCommands(), nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -285,7 +294,7 @@ func TestJobCRUD(t *testing.T) {
 	m := newTestManager(t, openTestStateDB(t), Settings{Editing: true})
 	ctx := t.Context()
 
-	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, nil, nil); err != nil {
+	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, runCommands(), nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -298,13 +307,13 @@ func TestJobCRUD(t *testing.T) {
 	}
 
 	updated := job("db", "nas")
-	updated.Cmd = "echo new"
+	updated.Command = "new"
 
 	if err := m.UpdateJob(ctx, "frank", updated); err != nil {
 		t.Fatalf("UpdateJob() error: %v", err)
 	}
 
-	if got, ok := m.Get("db"); !ok || got.Cmd != "echo new" {
+	if got, ok := m.Get("db"); !ok || got.Source.Cmd != "echo new" {
 		t.Errorf("Get(db) = %+v, %v; want the updated cmd", got, ok)
 	}
 
@@ -319,7 +328,7 @@ func TestDeleteJob(t *testing.T) {
 	m := newTestManager(t, openTestStateDB(t), Settings{Editing: true})
 	ctx := t.Context()
 
-	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, nil, []config.FileJob{job("db", "nas")}); err != nil {
+	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, runCommands(), []config.FileJob{job("db", "nas")}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -350,7 +359,7 @@ func TestServerAndCommandEditsApplyToJobs(t *testing.T) {
 	j.Targets[0].Retention = "30d"
 	j.Targets[0].OnRecover = &config.FileTargetOnRecover{Command: "resolve"}
 
-	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, []config.FileCommand{{ID: "resolve", Cmd: "echo old"}}, []config.FileJob{j}); err != nil {
+	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, runCommands(config.FileCommand{ID: "resolve", Cmd: "echo old"}), []config.FileJob{j}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -379,9 +388,31 @@ func TestServerAndCommandEditsApplyToJobs(t *testing.T) {
 		t.Errorf("DeleteCommand(in use) error = %v, want ErrInUse", err)
 	}
 
+	checkCommandUsers(t, m)
+}
+
+// checkCommandUsers checks that job db counts as using both the command it
+// runs and its target's hook, and that the former can't be deleted.
+func checkCommandUsers(t *testing.T, m testManager) {
+	t.Helper()
+
+	ctx := t.Context()
+
 	commands, err := m.ListCommands(ctx)
-	if err != nil || len(commands) != 1 || !slices.Equal(commands[0].UsedBy, []string{"job db"}) {
-		t.Errorf("ListCommands() = %+v, %v", commands, err)
+	if err != nil || len(commands) != 4 {
+		t.Fatalf("ListCommands() = %+v, %v", commands, err)
+	}
+
+	// "resolve" is db's target hook and "run" its own command: both count.
+	for _, c := range commands {
+		want := c.ID == "resolve" || c.ID == "run"
+		if got := slices.Equal(c.UsedBy, []string{"job db"}); got != want {
+			t.Errorf("command %s UsedBy = %v", c.ID, c.UsedBy)
+		}
+	}
+
+	if err := m.DeleteCommand(ctx, "erin", "run"); !errors.Is(err, ErrInUse) {
+		t.Errorf("DeleteCommand(job's own command) error = %v, want ErrInUse", err)
 	}
 }
 
@@ -393,7 +424,7 @@ func TestScheduling(t *testing.T) {
 	m := newTestManager(t, openTestStateDB(t), Settings{Editing: true})
 	ctx := t.Context()
 
-	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, nil, nil); err != nil {
+	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, runCommands(), nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -408,7 +439,7 @@ func TestScheduling(t *testing.T) {
 
 	first := waitForRun(t, m.status, "db", time.Time{})
 
-	j.Cmd = "exit 2"
+	j.Command = "fail2"
 	if err := m.UpdateJob(ctx, "erin", j); err != nil {
 		t.Fatalf("UpdateJob() error: %v", err)
 	}
