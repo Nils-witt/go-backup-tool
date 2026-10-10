@@ -75,7 +75,9 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
           else
-            echo "VERSION=" >> "$GITHUB_ENV"
+            # An empty build-arg would override the Dockerfile's default
+            # and stamp an empty version into the binary.
+            echo "VERSION=dev-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
           fi
 
       - name: Extract image metadata

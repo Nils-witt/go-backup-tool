@@ -125,8 +125,8 @@ export function TokensSection() {
     <Stack spacing={2}>
       <Stack direction="row" sx={{ justifyContent: "space-between", alignItems: "center" }}>
         <Typography variant="body2" color="text.secondary">
-          Tokens grant read-only access (view only, no downloads, no audit logs). Send one as{" "}
-          <code>Authorization: Bearer &lt;token&gt;</code>.
+          Tokens grant read-only access (view and job run history; no downloads or other audit
+          logs). Send one as <code>Authorization: Bearer &lt;token&gt;</code>.
         </Typography>
         <Button variant="contained" startIcon={<AddIcon />} onClick={openCreate}>
           New token

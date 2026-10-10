@@ -19,13 +19,14 @@ import { useTheme } from "@mui/material/styles";
 
 interface JobsGridProps {
   // jobs may come from several instances (see Sourced); remote ones never
-  // offer a retry or show run history, which their API token can't reach.
+  // offer a retry, which their API token can't reach.
   jobs: Sourced<JobSnapshot>[];
   canRetry: boolean;
   refreshNow: () => void;
-  // runsByJob holds each job's recent runs, newest first; undefined hides
-  // the run history (the viewer lacks the job run log permission).
-  runsByJob?: Map<string, JobRunEventJSON[]>;
+  // runsByJob holds each job's recent runs, newest first, keyed by
+  // sourcedKey(source, name); a job without an entry shows no run history
+  // (its instance's job run log isn't readable).
+  runsByJob: Map<string, JobRunEventJSON[]>;
 }
 
 export function JobsGrid({ jobs, canRetry, refreshNow, runsByJob }: JobsGridProps) {
@@ -53,6 +54,7 @@ export function JobsGrid({ jobs, canRetry, refreshNow, runsByJob }: JobsGridProp
           const targets = j.targets || [];
           const hasFailedTarget = targets.some((t) => t.state === "failed");
           const accent = theme.palette.status[j.state] ?? theme.palette.status.idle;
+          const runs = runsByJob.get(sourcedKey(j.source, j.name));
 
           return (
             <Grid key={sourcedKey(j.source, j.name)} size={{ xs: 12, sm: 6, md: 4 }}>
@@ -119,9 +121,9 @@ export function JobsGrid({ jobs, canRetry, refreshNow, runsByJob }: JobsGridProp
                     {j.size ? <Fact label="Size">{j.size}</Fact> : null}
                   </Box>
 
-                  {runsByJob && !j.remote ? (
+                  {runs ? (
                     <Box sx={{ mb: 1.5 }}>
-                      <RunHistoryStrip runs={runsByJob.get(j.name) ?? []} />
+                      <RunHistoryStrip runs={runs} />
                     </Box>
                   ) : null}
 

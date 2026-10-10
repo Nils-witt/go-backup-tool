@@ -27,7 +27,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -39,7 +39,7 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: frontend/node_modules
-          key: node-modules-${{ runner.os }}-${{ runner.arch }}-node22-${{ hashFiles('frontend/package-lock.json') }}
+          key: node-modules-${{ runner.os }}-${{ runner.arch }}-node-${{ hashFiles('frontend/.nvmrc', 'frontend/package-lock.json') }}
 
       - if: steps.node-modules.outputs.cache-hit != 'true'
         run: npm ci
@@ -53,7 +53,9 @@ jobs:
       # `build` is `tsc -b && vite build`: type-checks and bundles.
       - run: npm run build
 
-      - run: npx oxlint
+      - run: npx oxlint --deny-warnings
+
+      - run: npm run format:check
 
   test:
     name: Test (Go ${{ matrix.go }})
@@ -90,6 +92,14 @@ jobs:
       - name: Run tests
         run: go test -race -shuffle=on -coverprofile=coverage.out ./...
 
+      # Releases ship windows and darwin binaries too, and some files only
+      # build there (e.g. internal/backup/app/service_windows.go).
+      - name: Cross-compile
+        if: matrix.go == 'stable'
+        run: |
+          GOOS=windows GOARCH=amd64 go build ./...
+          GOOS=darwin GOARCH=arm64 go build ./...
+
       - name: Upload coverage
         if: matrix.go == 'stable'
         uses: codecov/codecov-action@v7
@@ -123,6 +133,7 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           # Pinned so a new linter release can't break CI unannounced;
-          # bump deliberately (matches the version the pre-commit hook uses).
+          # bump deliberately. (The pre-commit hook uses whatever
+          # golangci-lint is on PATH, so keep a local install close to this.)
           version: v2.14.0
           args: --timeout 5m

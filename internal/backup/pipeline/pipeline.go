@@ -641,6 +641,7 @@ func doAuthenticatedRemoteRequest(ctx context.Context, cfg *config.Config, t *co
 	}
 
 	req.Header.Set("Authorization", auth)
+	setFileContentLength(req, body)
 
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
@@ -657,6 +658,34 @@ func doAuthenticatedRemoteRequest(ctx context.Context, cfg *config.Config, t *co
 	}
 
 	return nil
+}
+
+// setFileContentLength sets req's ContentLength when body is a regular
+// *os.File (the staged backup UploadToRemote streams), so the upload is
+// sent with a Content-Length instead of chunked encoding, letting the
+// receiving instance see the object's size up front. Still streamed from
+// the file, never buffered. Any other body (or a Stat/Seek failure) keeps
+// net/http's default of an unknown length.
+func setFileContentLength(req *http.Request, body io.Reader) {
+	f, ok := body.(*os.File)
+	if !ok {
+		return
+	}
+
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return
+	}
+
+	off, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return
+	}
+
+	req.ContentLength = info.Size() - off
+	if req.ContentLength == 0 {
+		req.Body = http.NoBody
+	}
 }
 
 // remoteResponseError builds an error from a non-2xx response, including a

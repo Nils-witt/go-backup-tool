@@ -3,11 +3,13 @@ package webui
 import (
 	"context"
 	"encoding/json"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -429,8 +431,26 @@ func TestHandleDownloadFileServesContent(t *testing.T) {
 		t.Errorf("body = %q, want %q", rec.Body.String(), "secret data")
 	}
 
-	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, `filename="backup.gpg"`) {
+	cd := rec.Header().Get("Content-Disposition")
+	if _, params, err := mime.ParseMediaType(cd); err != nil || params["filename"] != "backup.gpg" {
 		t.Errorf("Content-Disposition = %q, want it to name backup.gpg", cd)
+	}
+
+	if cl := rec.Header().Get("Content-Length"); cl != strconv.Itoa(len("secret data")) {
+		t.Errorf("Content-Length = %q, want %d", cl, len("secret data"))
+	}
+}
+
+func TestAttachmentDispositionEscapesFilename(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{`we"ird.gpg`, "bäckup.gpg", "plain.gpg"} {
+		cd := attachmentDisposition(name)
+
+		_, params, err := mime.ParseMediaType(cd)
+		if err != nil || params["filename"] != name {
+			t.Errorf("attachmentDisposition(%q) = %q, parses back to %q (err %v)", name, cd, params["filename"], err)
+		}
 	}
 }
 

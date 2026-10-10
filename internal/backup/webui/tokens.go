@@ -4,8 +4,9 @@
 // with a key kept in the state db (see store.TokenSigningKey) and carries
 // only its id (jti), issuer and expiry; every request still looks its id up
 // in the state db, so revoking one takes effect immediately. A token's
-// principal is only ever granted permission.PermissionView — never download,
-// admin, or any of the audit logs.
+// principal is only ever granted permission.PermissionView and the job run
+// log (so a remote dashboard can draw each job's run history) — never
+// download, admin, or any of the other audit logs.
 
 package webui
 
@@ -33,8 +34,10 @@ const (
 	apiTokenIssuer = "go-backup-tool"
 
 	// apiTokenPermissions is what every API token grants: read-only
-	// dashboard access, without file downloads.
-	apiTokenPermissions = permission.PermissionView
+	// dashboard access, without file downloads. The job run log is
+	// included so a dashboard merging this instance in as a remote backend
+	// can draw its jobs' run history.
+	apiTokenPermissions = permission.PermissionView | permission.PermissionViewJobRunLog
 
 	// apiTokenUsernamePrefix prefixes an API token's name to form its
 	// principal's username, so it can't be mistaken for an SSO user.

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import AppBar from "@mui/material/AppBar";
 import Box from "@mui/material/Box";
@@ -15,6 +15,7 @@ import LogoutIcon from "@mui/icons-material/Logout";
 import Toolbar from "@mui/material/Toolbar";
 import Typography from "@mui/material/Typography";
 import Button from "@mui/material/Button";
+import LinearProgress from "@mui/material/LinearProgress";
 import { useAuth } from "./auth/useAuth";
 import { Footer } from "./components/Footer";
 import { useMeta } from "./hooks/useMeta";
@@ -127,7 +128,9 @@ export function Layout() {
       <Box component="main" sx={{ flexGrow: 1, width: { sm: `calc(100% - ${DRAWER_WIDTH}px)` } }}>
         <Toolbar />
         <Container sx={{ py: 3 }}>
-          <Outlet />
+          <Suspense fallback={<LinearProgress />}>
+            <Outlet />
+          </Suspense>
         </Container>
         <Footer />
       </Box>

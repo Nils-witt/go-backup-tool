@@ -6,6 +6,10 @@
 .husky
 node_modules
 frontend/node_modules
+# Local GoReleaser/Vite output; the image builds its own frontend.
+frontend/dist
+demoServer
+.env
 internal/backup/webui/dist
 /dist
 data

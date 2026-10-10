@@ -13,7 +13,7 @@ import (
 // (and who's tried and failed) from the web UI.
 type loginEventModel struct {
 	ID         uint      `gorm:"column:id;primaryKey;autoIncrement"`
-	At         time.Time `gorm:"column:at;not null"`
+	At         time.Time `gorm:"column:at;not null;index:idx_login_events_at"`
 	Username   string    `gorm:"column:username;not null"`
 	Method     string    `gorm:"column:method;not null"`
 	Success    bool      `gorm:"column:success;not null"`
@@ -28,7 +28,7 @@ func (loginEventModel) TableName() string { return "login_events" }
 // when.
 type downloadEventModel struct {
 	ID         uint      `gorm:"column:id;primaryKey;autoIncrement"`
-	At         time.Time `gorm:"column:at;not null"`
+	At         time.Time `gorm:"column:at;not null;index:idx_download_events_at"`
 	Username   string    `gorm:"column:username;not null"`
 	ReceiverID string    `gorm:"column:receiver_id;not null"`
 	Key        string    `gorm:"column:key;not null"`
@@ -47,8 +47,8 @@ func (downloadEventModel) TableName() string { return "download_events" }
 // errors it hit, over a given day.
 type receiverEventModel struct {
 	ID         uint      `gorm:"column:id;primaryKey;autoIncrement"`
-	At         time.Time `gorm:"column:at;not null"`
-	ReceiverID string    `gorm:"column:receiver_id;not null"`
+	At         time.Time `gorm:"column:at;not null;index:idx_receiver_events_at"`
+	ReceiverID string    `gorm:"column:receiver_id;not null;index:idx_receiver_events_receiver"`
 	Kind       string    `gorm:"column:kind;not null"`
 	Key        string    `gorm:"column:key;not null"`
 	Size       int64     `gorm:"column:size;not null;default:0"`
@@ -299,4 +299,31 @@ func (s *Store) ListReceiverErrorEvents(ctx context.Context, start, end time.Tim
 	}
 
 	return events, nil
+}
+
+// PruneEvents deletes every login, download, and receiver event recorded
+// before cutoff, returning how many rows it removed in total. These logs
+// are append-only otherwise, so without a periodic prune they'd grow for
+// the life of the install (receiver_events gains a row per receiver
+// request).
+func (s *Store) PruneEvents(ctx context.Context, cutoff time.Time) (int64, error) {
+	var total int64
+
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, m := range []any{&loginEventModel{}, &downloadEventModel{}, &receiverEventModel{}} {
+			res := tx.Where("at < ?", cutoff.UTC()).Delete(m)
+			if res.Error != nil {
+				return res.Error
+			}
+
+			total += res.RowsAffected
+		}
+
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("pruning event logs: %w", err)
+	}
+
+	return total, nil
 }

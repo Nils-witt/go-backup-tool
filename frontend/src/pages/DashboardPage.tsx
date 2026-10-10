@@ -14,7 +14,7 @@ import { RemoteBackendsDialog } from "../components/RemoteBackendsDialog";
 import { StatusChip } from "../components/StatusChip";
 import { SummaryTile } from "../components/StatusSummary";
 import { TopologyChart } from "../components/TopologyChart";
-import { countStates, type Sourced } from "../lib/status";
+import { countStates, sourcedKey, type Sourced } from "../lib/status";
 import { useRemoteBackends } from "../lib/remoteBackends";
 import { fmtRelative, fmtTime, hasTime } from "../lib/format";
 import Button from "@mui/material/Button";
@@ -86,41 +86,80 @@ export function DashboardPage() {
   // With remote backends configured, every job and receiver is tagged with
   // the instance it came from; the summary tiles count across all of them.
   const localName = backends.length ? meta?.instanceName || "this instance" : undefined;
-  const jobs: Sourced<JobSnapshot>[] = [
-    ...localJobs.map((j) => ({ ...j, source: localName })),
-    ...remotes.flatMap((r) => r.jobs.map((j) => ({ ...j, source: r.name, remote: true }))),
-  ];
-  const receivers: Sourced<ReceiverSnapshot>[] = [
-    ...localReceivers.map((r) => ({ ...r, source: localName })),
-    ...remotes.flatMap((r) => r.receivers.map((rcv) => ({ ...rcv, source: r.name, remote: true }))),
-  ];
+  // Memoized so the topology chart's own buildTopology memo (keyed on these
+  // arrays) only re-runs when the underlying data changed.
+  const jobs = useMemo<Sourced<JobSnapshot>[]>(
+    () => [
+      ...localJobs.map((j) => ({ ...j, source: localName })),
+      ...remotes.flatMap((r) => r.jobs.map((j) => ({ ...j, source: r.name, remote: true }))),
+    ],
+    [localJobs, remotes, localName],
+  );
+  const receivers = useMemo<Sourced<ReceiverSnapshot>[]>(
+    () => [
+      ...localReceivers.map((r) => ({ ...r, source: localName })),
+      ...remotes.flatMap((r) =>
+        r.receivers.map((rcv) => ({ ...rcv, source: r.name, remote: true })),
+      ),
+    ],
+    [localReceivers, remotes, localName],
+  );
 
   const runs = usePermissionPoll<JobRunEventJSON>(
     "/api/job-runs",
     session.canViewJobRunLog,
     runHistoryPollMs,
   );
+  // Every job whose instance's run log is readable gets an entry, empty if
+  // it hasn't run yet; the rest show no run history.
   const runsByJob = useMemo(() => {
-    if (!session.canViewJobRunLog) return undefined;
     const m = new Map<string, JobRunEventJSON[]>();
-    for (const r of runs) {
-      const list = m.get(r.job_name);
-      if (list) list.push(r);
-      else m.set(r.job_name, [r]);
+    const readable = new Set<string | undefined>();
+    const add = (source: string | undefined, list: JobRunEventJSON[] | undefined) => {
+      if (!list) return;
+      readable.add(source);
+      for (const r of list) {
+        const key = sourcedKey(source, r.job_name);
+        const existing = m.get(key);
+        if (existing) existing.push(r);
+        else m.set(key, [r]);
+      }
+    };
+    add(localName, session.canViewJobRunLog ? runs : undefined);
+    for (const r of remotes) add(r.name, r.runs);
+
+    for (const j of jobs) {
+      const key = sourcedKey(j.source, j.name);
+      if (readable.has(j.source) && !m.has(key)) m.set(key, []);
     }
     return m;
-  }, [runs, session.canViewJobRunLog]);
+  }, [runs, session.canViewJobRunLog, remotes, localName, jobs]);
 
-  const targets = jobs.flatMap((j) => j.targets || []);
-  const jobCounts = countStates(jobs.map((j) => j.state));
-  const targetCounts = countStates(targets.map((t) => t.state));
-  const receiverCounts = countStates(receivers.map(receiverState));
+  const { jobCounts, targetCounts, targets, nextJob } = useMemo(() => {
+    const allTargets = jobs.flatMap((j) => j.targets || []);
+
+    // The earliest upcoming run, in one pass rather than a sort.
+    let nextJob: Sourced<JobSnapshot> | undefined;
+    let nextAt = Infinity;
+    for (const j of jobs) {
+      if (!hasTime(j.next_run)) continue;
+      const at = Date.parse(j.next_run);
+      if (at < nextAt) {
+        nextAt = at;
+        nextJob = j;
+      }
+    }
+
+    return {
+      jobCounts: countStates(jobs.map((j) => j.state)),
+      targetCounts: countStates(allTargets.map((t) => t.state)),
+      targets: allTargets,
+      nextJob,
+    };
+  }, [jobs]);
+  const receiverCounts = useMemo(() => countStates(receivers.map(receiverState)), [receivers]);
   const attention = (jobCounts.failed ?? 0) + (jobCounts.incomplete ?? 0);
   const targetsOk = targetCounts.ok ?? 0;
-
-  const nextJob = jobs
-    .filter((j) => hasTime(j.next_run))
-    .sort((a, b) => new Date(a.next_run).getTime() - new Date(b.next_run).getTime())[0];
 
   return (
     <>

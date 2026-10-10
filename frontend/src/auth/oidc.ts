@@ -4,25 +4,32 @@
 // verifies the provider-issued access token (a JWT), which client.ts sends as
 // "Authorization: Bearer ..." on every /api/... call (see
 // internal/backup/webui/auth.go).
-import { ErrorResponse, UserManager, WebStorageStateStore } from "oidc-client-ts";
+//
+// oidc-client-ts itself is only loaded (see initOidc) when SSO is enabled, so
+// a password-only install never downloads it.
+import type { UserManager } from "oidc-client-ts";
 import type { SSOStatusJSON } from "../api/types";
 
 export const SSO_CALLBACK_PATH = "/login/sso/callback";
 
 let manager: UserManager | null = null;
+let oidcLib: typeof import("oidc-client-ts") | null = null;
+let onlineListenerAdded = false;
 
 /**
  * Builds the UserManager from the public /api/sso/status settings. Called once
  * on app start (see AuthContext) before the first /api/me, so a token stored
  * in sessionStorage by an earlier page load is attached to it.
  */
-export function initOidc(status: SSOStatusJSON) {
+export async function initOidc(status: SSOStatusJSON) {
   if (!status.enabled || !status.issuerUrl || !status.clientId) {
     manager = null;
     return;
   }
 
-  manager = new UserManager({
+  oidcLib = await import("oidc-client-ts");
+
+  manager = new oidcLib.UserManager({
     authority: status.issuerUrl,
     client_id: status.clientId,
     scope: status.scopes || "openid profile email",
@@ -30,7 +37,7 @@ export function initOidc(status: SSOStatusJSON) {
     redirect_uri: window.location.origin + SSO_CALLBACK_PATH,
     post_logout_redirect_uri: window.location.origin + "/login",
     // sessionStorage: the token survives a reload but not the browser session.
-    userStore: new WebStorageStateStore({ store: window.sessionStorage }),
+    userStore: new oidcLib.WebStorageStateStore({ store: window.sessionStorage }),
     // oidc-client-ts's built-in renewal falls back to loading the provider
     // in a hidden iframe when there's no refresh token, which providers that
     // send X-Frame-Options: deny (e.g. Authentik) refuse. Renewal is done by
@@ -52,9 +59,12 @@ export function initOidc(status: SSOStatusJSON) {
 
   // A refresh that failed while offline is retried as soon as the network
   // is back, rather than waiting out the backoff.
-  window.addEventListener("online", () => {
-    if (retryTimer !== undefined) void renewAccessToken();
-  });
+  if (!onlineListenerAdded) {
+    onlineListenerAdded = true;
+    window.addEventListener("online", () => {
+      if (retryTimer !== undefined) void renewAccessToken();
+    });
+  }
 }
 
 /**
@@ -125,7 +135,7 @@ export function renewAccessToken(rejected = false): Promise<string | null> {
         clearRetry();
         return renewed.access_token;
       } catch (err) {
-        if (err instanceof ErrorResponse) {
+        if (oidcLib !== null && err instanceof oidcLib.ErrorResponse) {
           await endSession();
           return null;
         }

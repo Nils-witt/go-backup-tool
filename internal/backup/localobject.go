@@ -60,6 +60,14 @@ func WriteLocalObject(cfg *config.Config, t *config.Target, r io.Reader) error {
 		return fmt.Errorf("writing %q: %w", tmp.Name(), err)
 	}
 
+	// Flushed before the rename, so a crash right after it can't leave a
+	// zero-length or truncated object at dst that retention then counts as
+	// a good backup.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("syncing %q: %w", tmp.Name(), err)
+	}
+
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("closing %q: %w", tmp.Name(), err)
 	}

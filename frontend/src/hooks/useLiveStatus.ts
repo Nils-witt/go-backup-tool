@@ -27,9 +27,13 @@ export function useLiveStatus(): LiveStatusState {
     let socket: WebSocket | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let backoff = minBackoffMs;
+    // The last message's raw text: the server re-sends the full status on
+    // every ping, and an identical one shouldn't re-render the dashboard.
+    let lastData: string | null = null;
 
     const scheduleReconnect = () => {
       if (stopped) return;
+      lastData = null;
       setState((s) => (s.live ? { ...s, live: false } : s));
       retryTimer = setTimeout(connect, backoff);
       backoff = Math.min(backoff * 2, maxBackoffMs);
@@ -54,9 +58,11 @@ export function useLiveStatus(): LiveStatusState {
       socket = ws;
 
       ws.onmessage = (ev: MessageEvent<string>) => {
+        if (ev.data === lastData) return;
         const msg = JSON.parse(ev.data) as LiveStatusMessage;
         if (msg.type !== "status") return;
         backoff = minBackoffMs;
+        lastData = ev.data;
         setState({ jobs: msg.jobs || [], receivers: msg.receivers || [], live: true });
       };
       ws.onclose = () => {

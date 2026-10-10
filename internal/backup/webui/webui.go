@@ -16,11 +16,13 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -163,7 +165,7 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.
 	}
 
 	srv := &Server{
-		http:     &http.Server{Handler: logRequests(log, handler, trustProxyHeaders), ReadHeaderTimeout: 10 * time.Second},
+		http:     &http.Server{Handler: logRequests(log, handler, trustProxyHeaders), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10},
 		done:     make(chan struct{}),
 		addr:     ln.Addr().String(),
 		stopLive: stopLive,
@@ -453,13 +455,18 @@ func handleRetryFailedTargets(lookupJob pipeline.JobLookup, statusStore *backup.
 
 // writeJSON encodes v as the response body with a JSON content type,
 // writing a 500 if encoding fails. Shared by every simple "serve the
-// current snapshot as JSON" handler in this file.
+// current snapshot as JSON" handler in this file. v is marshaled before
+// anything is written, so a failure can still become a real 500 rather than
+// a 200 with a truncated body.
 func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-
-	if err := json.NewEncoder(w).Encode(v); err != nil {
+	b, err := json.Marshal(v)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_, _ = w.Write(append(b, '\n'))
 }
 
 // handleReceiverStatus serves store's current receiver statuses as JSON,
@@ -575,13 +582,66 @@ func annotateReceiverStaleness(snap *backup.ReceiverSnapshot, recv config.Resolv
 
 	snap.StaleAfter = recv.StaleAfter.String()
 
-	lastSeen, ok, err := backup.LastReceivedAt(recv)
+	lastSeen, ok, err := lastReceived.get(recv, snap.LastSeen)
 	if err != nil {
 		log.Warn("receiver: checking staleness failed", "id", recv.ID, "err", err)
 		return
 	}
 
 	snap.Stale = ok && time.Since(lastSeen) > recv.StaleAfter
+}
+
+// lastReceivedTTL is how long lastReceived reuses one backup.LastReceivedAt
+// walk of a receiver's directory. Staleness is measured against stale-after
+// windows of minutes to days, so a few seconds' lag is invisible, while
+// without it every live-status client walked every stale-after receiver's
+// directory on every push and ping.
+const lastReceivedTTL = 15 * time.Second
+
+// lastReceived is the process-wide lastReceivedCache annotateReceiverStaleness
+// reads through.
+var lastReceived = &lastReceivedCache{byPath: map[string]lastReceivedEntry{}}
+
+// lastReceivedEntry is one cached backup.LastReceivedAt result.
+type lastReceivedEntry struct {
+	at       time.Time
+	ok       bool
+	seen     time.Time // the receiver's LastSeen when this was computed
+	computed time.Time
+}
+
+// lastReceivedCache memoizes backup.LastReceivedAt per receiver path for
+// lastReceivedTTL. An entry is also invalidated as soon as the receiver's
+// in-memory LastSeen moves on, so a fresh receive clears a stale flag on the
+// very next push. Safe for concurrent use.
+type lastReceivedCache struct {
+	mu     sync.Mutex
+	byPath map[string]lastReceivedEntry
+}
+
+// get returns recv's last-received time, from cache when that is younger
+// than lastReceivedTTL and was computed at the same lastSeen.
+func (c *lastReceivedCache) get(recv config.ResolvedReceiver, lastSeen time.Time) (time.Time, bool, error) {
+	now := time.Now()
+
+	c.mu.Lock()
+	e, hit := c.byPath[recv.Path]
+	c.mu.Unlock()
+
+	if hit && e.seen.Equal(lastSeen) && now.Sub(e.computed) < lastReceivedTTL {
+		return e.at, e.ok, nil
+	}
+
+	at, ok, err := backup.LastReceivedAt(recv)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+
+	c.mu.Lock()
+	c.byPath[recv.Path] = lastReceivedEntry{at: at, ok: ok, seen: lastSeen, computed: now}
+	c.mu.Unlock()
+
+	return at, ok, nil
 }
 
 // handleReceiverFiles serves GET /api/receivers/{id}/files: the objects
@@ -1038,7 +1098,10 @@ func handleDownloadFile(receivers *backup.ReceiverRegistry, log *slog.Logger, db
 			}
 
 			ev := store.DownloadEvent{At: time.Now(), Username: username, ReceiverID: recv.ID, Key: key, Success: success, RemoteAddr: clientAddr(r, trustProxyHeaders), Detail: detail}
-			if err := db.SaveDownloadEvent(r.Context(), ev); err != nil {
+			// WithoutCancel: a client that aborted mid-download has
+			// already canceled r's context, but that attempt still
+			// belongs in the log.
+			if err := db.SaveDownloadEvent(context.WithoutCancel(r.Context()), ev); err != nil {
 				log.Warn("download: recording download event failed", "err", err)
 			}
 		}
@@ -1061,16 +1124,37 @@ func handleDownloadFile(receivers *backup.ReceiverRegistry, log *slog.Logger, db
 		defer func() { _ = f.Close() }()
 
 		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(key)+`"`)
+		w.Header().Set("Content-Disposition", attachmentDisposition(filepath.Base(key)))
+
+		if info, err := f.Stat(); err == nil {
+			w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+		}
+
+		// Recorded (and the webhook fired) only once the whole file has
+		// actually been sent, so an aborted transfer isn't logged as a
+		// successful download.
+		if _, err := io.Copy(w, f); err != nil {
+			log.Warn("download: streaming file failed", "id", recv.ID, "key", key, "err", err)
+			record(false, "streaming file failed")
+
+			return
+		}
 
 		record(true, "")
 
 		go receiver.NotifyDownload(recv, receiver.DownloadWebhookEvent{Username: username, Key: key, At: time.Now()}, queue, log)
-
-		if _, err := io.Copy(w, f); err != nil {
-			log.Warn("download: streaming file failed", "id", recv.ID, "key", key, "err", err)
-		}
 	}
+}
+
+// attachmentDisposition builds a Content-Disposition: attachment header
+// value for filename, quoted/encoded as RFC 6266 requires (a bare
+// filename="..." breaks on quotes and non-ASCII names).
+func attachmentDisposition(filename string) string {
+	if v := mime.FormatMediaType("attachment", map[string]string{"filename": filename}); v != "" {
+		return v
+	}
+
+	return "attachment"
 }
 
 // handleDashboard serves the SPA shell (the built dist/index.html), which

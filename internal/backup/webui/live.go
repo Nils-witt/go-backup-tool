@@ -194,6 +194,9 @@ func streamLiveStatus(ctx context.Context, conn *websocket.Conn, statusStore *ba
 	ticker := time.NewTicker(livePingInterval)
 	defer ticker.Stop()
 
+	coalesce := time.NewTimer(liveCoalesceDelay)
+	coalesce.Stop()
+
 	for {
 		// Take the change channels before reading the snapshots, so a
 		// change landing in between is never missed — at worst it's sent
@@ -226,10 +229,13 @@ func streamLiveStatus(ctx context.Context, conn *websocket.Conn, statusStore *ba
 		case <-receiversChanged:
 		}
 
+		coalesce.Reset(liveCoalesceDelay)
+
 		select {
 		case <-ctx.Done():
+			coalesce.Stop()
 			return
-		case <-time.After(liveCoalesceDelay):
+		case <-coalesce.C:
 		}
 	}
 }

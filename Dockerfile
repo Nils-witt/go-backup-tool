@@ -3,6 +3,8 @@
 # Builds the dashboard SPA (see frontend/) into internal/backup/webui/dist,
 # which the Go builder stage below embeds via go:embed — that directive
 # fails to compile without it, since dist/ isn't committed (see .gitignore).
+# Pinned (major/minor) so builds are reproducible and Dependabot can bump
+# them; keep node in step with frontend/.nvmrc.
 FROM node:26-alpine AS frontend-builder
 
 WORKDIR /src/frontend
@@ -13,7 +15,7 @@ RUN --mount=type=cache,target=/root/.npm npm ci
 COPY frontend/ .
 RUN npm run build
 
-FROM golang:alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 WORKDIR /src
 
@@ -33,7 +35,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X nilswitt.dev/go-backup-tool/internal/version.Version=${VERSION} -X nilswitt.dev/go-backup-tool/internal/version.Commit=${COMMIT}" -o /out/go-backup-tool ./cmd/go-backup-tool
 
-FROM alpine:latest
+FROM alpine:3.23
 
 # ca-certificates: TLS to S3-compatible/remote endpoints.
 # gnupg: go-backup-tool shells out to the "gpg" binary to encrypt every backup.

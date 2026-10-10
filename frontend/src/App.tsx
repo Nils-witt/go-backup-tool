@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { lazy, useEffect } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { AuthProvider } from "./auth/AuthContext";
 import { useAuth } from "./auth/useAuth";
@@ -7,22 +7,58 @@ import { Layout } from "./Layout";
 import { LoginPage } from "./pages/LoginPage";
 import { SsoCallbackPage } from "./pages/SsoCallbackPage";
 import { DashboardPage } from "./pages/DashboardPage";
-import { LiveLogsPage } from "./pages/LiveLogsPage";
-import { JobRunsPage } from "./pages/JobRunsPage";
-import { TargetRunsPage } from "./pages/TargetRunsPage";
-import { LoginLogPage } from "./pages/LoginLogPage";
-import { DownloadLogPage } from "./pages/DownloadLogPage";
-import { ReceiverLogPage } from "./pages/ReceiverLogPage";
-import { IdentityPage } from "./pages/IdentityPage";
-import { TokensPage } from "./pages/TokensPage";
-import { ReceiverSettingsPage } from "./pages/ReceiverSettingsPage";
-import { NotificationSettingsPage } from "./pages/NotificationSettingsPage";
-import { ReportSettingsPage } from "./pages/ReportSettingsPage";
-import { TrustedServersPage } from "./pages/TrustedServersPage";
-import { JobSettingsPage } from "./pages/JobSettingsPage";
-import { ServerSettingsPage } from "./pages/ServerSettingsPage";
-import { CommandSettingsPage } from "./pages/CommandSettingsPage";
-import { GPGKeysPage } from "./pages/GPGKeysPage";
+
+// Every page but the dashboard and the login flow is loaded on demand, so
+// the first paint only downloads what it shows; Layout wraps its Outlet in
+// a Suspense boundary for the brief chunk fetch on first navigation.
+const LiveLogsPage = lazy(() =>
+  import("./pages/LiveLogsPage").then((m) => ({ default: m.LiveLogsPage })),
+);
+const JobRunsPage = lazy(() =>
+  import("./pages/JobRunsPage").then((m) => ({ default: m.JobRunsPage })),
+);
+const TargetRunsPage = lazy(() =>
+  import("./pages/TargetRunsPage").then((m) => ({ default: m.TargetRunsPage })),
+);
+const LoginLogPage = lazy(() =>
+  import("./pages/LoginLogPage").then((m) => ({ default: m.LoginLogPage })),
+);
+const DownloadLogPage = lazy(() =>
+  import("./pages/DownloadLogPage").then((m) => ({ default: m.DownloadLogPage })),
+);
+const ReceiverLogPage = lazy(() =>
+  import("./pages/ReceiverLogPage").then((m) => ({ default: m.ReceiverLogPage })),
+);
+const IdentityPage = lazy(() =>
+  import("./pages/IdentityPage").then((m) => ({ default: m.IdentityPage })),
+);
+const TokensPage = lazy(() =>
+  import("./pages/TokensPage").then((m) => ({ default: m.TokensPage })),
+);
+const ReceiverSettingsPage = lazy(() =>
+  import("./pages/ReceiverSettingsPage").then((m) => ({ default: m.ReceiverSettingsPage })),
+);
+const NotificationSettingsPage = lazy(() =>
+  import("./pages/NotificationSettingsPage").then((m) => ({ default: m.NotificationSettingsPage })),
+);
+const ReportSettingsPage = lazy(() =>
+  import("./pages/ReportSettingsPage").then((m) => ({ default: m.ReportSettingsPage })),
+);
+const TrustedServersPage = lazy(() =>
+  import("./pages/TrustedServersPage").then((m) => ({ default: m.TrustedServersPage })),
+);
+const JobSettingsPage = lazy(() =>
+  import("./pages/JobSettingsPage").then((m) => ({ default: m.JobSettingsPage })),
+);
+const ServerSettingsPage = lazy(() =>
+  import("./pages/ServerSettingsPage").then((m) => ({ default: m.ServerSettingsPage })),
+);
+const CommandSettingsPage = lazy(() =>
+  import("./pages/CommandSettingsPage").then((m) => ({ default: m.CommandSettingsPage })),
+);
+const GPGKeysPage = lazy(() =>
+  import("./pages/GPGKeysPage").then((m) => ({ default: m.GPGKeysPage })),
+);
 
 // AuthGate holds the client-side redirect rules: signed-out access to
 // anything but /login bounces to /login?next=..., and being signed in on

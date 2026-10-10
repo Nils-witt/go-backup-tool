@@ -36,12 +36,20 @@ jobs:
           name: lint
           save: "false"
 
+      # A tag only becomes a release if the tests pass on it. The stub
+      # frontend satisfies go:embed here; GoReleaser's before hook below
+      # replaces it with the real build.
+      - uses: ./.github/actions/stub-frontend
+
+      - name: Run tests
+        run: go test -race ./...
+
       # GoReleaser's before.hooks (.goreleaser.yaml) build frontend/ itself
       # before the Go builds run — this just puts npm on PATH for that hook.
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 

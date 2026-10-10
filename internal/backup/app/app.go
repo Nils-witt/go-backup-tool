@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
@@ -240,6 +241,8 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		defer func() { _ = db.Close() }()
 
 		log.Debug("opened job state db", "path", path)
+
+		go pruneEventLogs(ctx, db, log)
 	}
 
 	statusStore := backup.NewStatusStore(nil)
@@ -311,4 +314,24 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	log.Info("run finished")
 
 	return 0
+}
+
+// eventLogRetention is how long the login, download, and receiver event
+// logs keep a row before pruneEventLogs deletes it.
+const eventLogRetention = 90 * 24 * time.Hour
+
+// pruneEventLogs deletes event log rows older than eventLogRetention once at
+// startup and then daily, until ctx is done.
+func pruneEventLogs(ctx context.Context, db *store.Store, log *slog.Logger) {
+	backup.RunPeriodically(ctx, 24*time.Hour, true, func() {
+		n, err := db.PruneEvents(ctx, time.Now().Add(-eventLogRetention))
+		if err != nil {
+			log.Warn("pruning event logs", "err", err)
+			return
+		}
+
+		if n > 0 {
+			log.Info("pruned old event log rows", "rows", n, "retention", eventLogRetention)
+		}
+	})
 }

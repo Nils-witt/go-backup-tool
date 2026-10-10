@@ -74,7 +74,8 @@ func startTokenWebUI(t *testing.T, idp *testIDP) (*Server, *store.Store) {
 }
 
 // checkAPITokenIsReadOnly asserts tok (named "grafana") can view the
-// dashboard but not download, see audit logs, or manage tokens.
+// dashboard and its job run log but not download, see other audit logs, or
+// manage tokens.
 func checkAPITokenIsReadOnly(t *testing.T, srv *Server, tok string) {
 	t.Helper()
 
@@ -83,15 +84,18 @@ func checkAPITokenIsReadOnly(t *testing.T, srv *Server, tok string) {
 		t.Fatalf("GET /api/me with api token = %d, want 200", code)
 	}
 
-	if me.Username != "token:grafana" || me.Admin || !slices.Equal(me.Permissions, []string{"view"}) {
-		t.Errorf("me = %+v, want token:grafana with only view", me)
+	if me.Username != "token:grafana" || me.Admin || !slices.Equal(me.Permissions, []string{"view", "job-run-log"}) {
+		t.Errorf("me = %+v, want token:grafana with only view and job-run-log", me)
 	}
 
 	for path, want := range map[string]int{
 		"/api/status":            http.StatusOK,
 		"/api/receivers/a/files": http.StatusOK,
+		"/api/job-runs":          http.StatusOK,
 		"/api/login-events":      http.StatusForbidden,
 		"/api/download-events":   http.StatusForbidden,
+		"/api/target-runs":       http.StatusForbidden,
+		"/api/receiver-events":   http.StatusForbidden,
 		"/api/tokens":            http.StatusForbidden,
 	} {
 		if got := doJSON(t, srv, http.MethodGet, path, tok, nil); got != want {

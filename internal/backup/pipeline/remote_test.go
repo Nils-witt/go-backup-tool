@@ -4,6 +4,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -153,5 +155,53 @@ func TestDeleteRemoteObjectNotFound(t *testing.T) {
 	err := DeleteRemoteObject(t.Context(), cfg, tgt)
 	if err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("DeleteRemoteObject() error = %v, want it to mention 404", err)
+	}
+}
+
+func TestUploadToRemoteFileSendsContentLength(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotLength   int64
+		gotEncoding []string
+		gotBody     string
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotLength = r.ContentLength
+		gotEncoding = r.TransferEncoding
+
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	path := filepath.Join(t.TempDir(), "staged")
+	if err := os.WriteFile(path, []byte("ciphertext"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := os.Open(path) //nolint:gosec // path is this test's own t.TempDir() file, not untrusted input
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	id, _ := testServerIdentityAndKey(t)
+	cfg := &config.Config{Key: "backup.gpg", Identity: id}
+	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
+
+	if err := UploadToRemote(t.Context(), cfg, tgt, f); err != nil {
+		t.Fatalf("UploadToRemote() unexpected error: %v", err)
+	}
+
+	if gotLength != int64(len("ciphertext")) || len(gotEncoding) != 0 {
+		t.Errorf("ContentLength = %d, TransferEncoding = %v; want %d and none", gotLength, gotEncoding, len("ciphertext"))
+	}
+
+	if gotBody != "ciphertext" {
+		t.Errorf("body = %q, want %q", gotBody, "ciphertext")
 	}
 }
