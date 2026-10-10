@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ApiError, fetchRemoteMeta, remoteErrorMessage, remoteFetchJSON } from "../api/client";
-import type { JobRunEventJSON, JobSnapshot, ReceiverSnapshot } from "../api/types";
+import type { IdentityJSON, JobRunEventJSON, JobSnapshot, ReceiverSnapshot } from "../api/types";
 import type { RemoteBackend } from "../lib/remoteBackends";
 
 // Remote instances are polled, not followed over their live status
@@ -16,6 +16,8 @@ export interface RemoteStatus {
   // name is what the dashboard tags this backend's jobs/receivers with: its
   // label, else its own instance name, else its host.
   name: string;
+  // uuid is the backend's server UUID, once its /api/identity loads.
+  uuid?: string;
   jobs: JobSnapshot[];
   receivers: ReceiverSnapshot[];
   // runs is the backend's job run log, newest first; undefined until it
@@ -28,6 +30,7 @@ export interface RemoteStatus {
 
 interface Polled {
   instanceName?: string;
+  uuid?: string;
   jobs: JobSnapshot[];
   receivers: ReceiverSnapshot[];
   runs?: JobRunEventJSON[];
@@ -49,7 +52,8 @@ function displayName(b: RemoteBackend, instanceName?: string): string {
 
 // useRemoteStatus polls each backend's GET /api/status and /api/receivers
 // every remotePollMs, its /api/job-runs every remoteRunsPollMs, and its
-// /api/meta once for its instance name. A failing backend keeps its last
+// /api/meta and /api/identity once for its instance name and server UUID.
+// A failing backend keeps its last
 // good data alongside the error.
 export function useRemoteStatus(backends: RemoteBackend[]): RemoteStatus[] {
   const [polled, setPolled] = useState<Record<string, Polled>>({});
@@ -87,6 +91,9 @@ export function useRemoteStatus(backends: RemoteBackend[]): RemoteStatus[] {
       fetchRemoteMeta(b)
         .then((m) => update(b.id, { instanceName: m.instanceName }))
         .catch(() => {});
+      remoteFetchJSON<IdentityJSON>(b, "/api/identity")
+        .then((i) => update(b.id, { uuid: i.uuid || undefined }))
+        .catch(() => {});
       refresh(b);
       refreshRuns(b);
     }
@@ -109,6 +116,7 @@ export function useRemoteStatus(backends: RemoteBackend[]): RemoteStatus[] {
         return {
           backend: b,
           name: displayName(b, p.instanceName),
+          uuid: p.uuid,
           jobs: p.jobs,
           receivers: p.receivers,
           runs: p.runs,

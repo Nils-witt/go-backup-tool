@@ -122,7 +122,7 @@ func handleListServerConfigs(m *jobs.Manager, log *slog.Logger) http.HandlerFunc
 		for i, ms := range list {
 			sc := ms.ServerConfig
 			out.Servers[i] = serverConfigJSON{
-				Name: sc.Name, Type: sc.Type, Endpoint: sc.Endpoint, Path: sc.Path, Retention: sc.Retention,
+				Name: sc.Name, Type: sc.Type, Endpoint: sc.Endpoint, ServerUUID: sc.ServerUUID, Path: sc.Path, Retention: sc.Retention,
 				auditJSON: audit(sc.CreatedAt, sc.CreatedBy, sc.UpdatedAt, sc.UpdatedBy),
 				UsedBy:    nonNil(ms.UsedBy), Error: ms.Error,
 			}

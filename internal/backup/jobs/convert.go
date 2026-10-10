@@ -13,6 +13,7 @@ func normalizeServer(fs config.FileServer) config.FileServer {
 	fs.Name = strings.TrimSpace(fs.Name)
 	fs.Type = strings.TrimSpace(fs.Type)
 	fs.Endpoint = strings.TrimSpace(fs.Endpoint)
+	fs.ServerUUID = strings.TrimSpace(fs.ServerUUID)
 	fs.Path = strings.TrimSpace(fs.Path)
 	fs.Retention = strings.TrimSpace(fs.Retention)
 
@@ -76,11 +77,11 @@ func trimAll(ss []string) []string {
 }
 
 func toStoreServer(fs config.FileServer) store.ServerConfig {
-	return store.ServerConfig{Name: fs.Name, Type: fs.Type, Endpoint: fs.Endpoint, Path: fs.Path, Retention: fs.Retention}
+	return store.ServerConfig{Name: fs.Name, Type: fs.Type, Endpoint: fs.Endpoint, ServerUUID: fs.ServerUUID, Path: fs.Path, Retention: fs.Retention}
 }
 
 func fromStoreServer(sc store.ServerConfig) config.FileServer {
-	return config.FileServer{Name: sc.Name, Type: sc.Type, Endpoint: sc.Endpoint, Path: sc.Path, Retention: sc.Retention}
+	return config.FileServer{Name: sc.Name, Type: sc.Type, Endpoint: sc.Endpoint, ServerUUID: sc.ServerUUID, Path: sc.Path, Retention: sc.Retention}
 }
 
 func toStoreCommand(fc config.FileCommand) store.CommandConfig {

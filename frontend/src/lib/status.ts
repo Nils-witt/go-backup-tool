@@ -14,8 +14,10 @@ export function countStates(states: RunState[]): StateCounts {
 // for a dashboard merging this instance with remote backends (see
 // lib/remoteBackends). source is unset when no remote backend is configured;
 // remote marks one read with a view-only API token, so actions that need
-// more (retry, file listing, downloads) are hidden for it.
-export type Sourced<T> = T & { source?: string; remote?: boolean };
+// more (retry, file listing, downloads) are hidden for it. instanceUuid is
+// that instance's server UUID, when known, which a remote target's
+// server_uuid names.
+export type Sourced<T> = T & { source?: string; remote?: boolean; instanceUuid?: string };
 
 // sourcedKey is a React key unique across instances.
 export function sourcedKey(source: string | undefined, id: string): string {

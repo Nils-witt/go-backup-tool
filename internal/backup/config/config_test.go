@@ -1895,6 +1895,57 @@ jobs:
 	}
 }
 
+func TestParseFlagsRemoteServerUUID(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+servers:
+  - name: sibling
+    type: remote
+    endpoint: https://backup2.example.com:8443
+    server-uuid: " 6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b "
+
+jobs:
+  - name: test
+    cmd: echo hi
+    targets: [{server: sibling, bucket: from-primary}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("ParseFlags() error: %v", err)
+	}
+
+	cfg := singleJob(t, rc)
+	if got, want := cfg.Targets[0].ServerUUID, "6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b"; got != want {
+		t.Errorf("cfg.Targets[0].ServerUUID = %q, want %q", got, want)
+	}
+}
+
+func TestResolveServerUUIDValidation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		fs      FileServer
+		wantErr string
+	}{
+		{"invalid uuid", FileServer{Name: "s", Type: "remote", Endpoint: "https://x", ServerUUID: "not-a-uuid"}, "is not a valid UUID"},
+		{"local rejects uuid", FileServer{Name: "s", Type: "local", Path: "/mnt", ServerUUID: "6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b"}, "server-uuid is not valid for type: local"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, err := ResolveServer(tt.fs); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("ResolveServer() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestParseFlagsRemoteServerRequiresEndpoint(t *testing.T) {
 	t.Parallel()
 

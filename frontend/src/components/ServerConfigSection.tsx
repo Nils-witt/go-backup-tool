@@ -32,6 +32,7 @@ const EMPTY_FORM: ServerDefinitionJSON = {
   name: "",
   type: "local",
   endpoint: "",
+  server_uuid: "",
   path: "",
   retention: "",
 };
@@ -45,11 +46,19 @@ function errorText(err: unknown): string {
 function definitionOf(form: ServerDefinitionJSON): ServerDefinitionJSON {
   const name = form.name.trim();
   return form.type === "remote"
-    ? { name, type: "remote", endpoint: form.endpoint.trim(), path: "", retention: "" }
+    ? {
+        name,
+        type: "remote",
+        endpoint: form.endpoint.trim(),
+        server_uuid: form.server_uuid.trim(),
+        path: "",
+        retention: "",
+      }
     : {
         name,
         type: "local",
         endpoint: "",
+        server_uuid: "",
         path: form.path.trim(),
         retention: form.retention.trim(),
       };
@@ -123,14 +132,23 @@ function ServerDialog({
               />
             </>
           ) : (
-            <TextField
-              label="Endpoint"
-              value={form.endpoint}
-              onChange={(e) => set({ endpoint: e.target.value })}
-              helperText="e.g. https://backup2.example.com:8443. This instance signs requests with its own identity."
-              required
-              slotProps={{ htmlInput: { spellCheck: false } }}
-            />
+            <>
+              <TextField
+                label="Endpoint"
+                value={form.endpoint}
+                onChange={(e) => set({ endpoint: e.target.value })}
+                helperText="e.g. https://backup2.example.com:8443. This instance signs requests with its own identity."
+                required
+                slotProps={{ htmlInput: { spellCheck: false } }}
+              />
+              <TextField
+                label="Server ID"
+                value={form.server_uuid}
+                onChange={(e) => set({ server_uuid: e.target.value })}
+                helperText="Optional. The destination instance's UUID, shown on its Identity page."
+                slotProps={{ htmlInput: { spellCheck: false } }}
+              />
+            </>
           )}
         </Stack>
       </DialogContent>
@@ -273,6 +291,15 @@ export function ServerConfigSection() {
                   <TableCell>{s.type}</TableCell>
                   <TableCell sx={{ overflowWrap: "anywhere" }}>
                     <code>{s.type === "remote" ? s.endpoint : s.path}</code>
+                    {s.type === "remote" && s.server_uuid ? (
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ display: "block" }}
+                      >
+                        ID <code>{s.server_uuid}</code>
+                      </Typography>
+                    ) : null}
                   </TableCell>
                   <TableCell>{s.type === "remote" ? "—" : s.retention || "forever"}</TableCell>
                   <TableCell sx={{ overflowWrap: "anywhere" }}>

@@ -1,6 +1,13 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
-import type { JobRunEventJSON, JobSnapshot, ReceiverSnapshot, RunState } from "../api/types";
+import { apiFetchJSON } from "../api/client";
+import type {
+  IdentityJSON,
+  JobRunEventJSON,
+  JobSnapshot,
+  ReceiverSnapshot,
+  RunState,
+} from "../api/types";
 import { usePoll } from "../hooks/usePoll";
 import { usePermissionPoll } from "../hooks/usePermissionPoll";
 import { useLiveStatus } from "../hooks/useLiveStatus";
@@ -86,6 +93,24 @@ export function DashboardPage() {
   // With remote backends configured, every job and receiver is tagged with
   // the instance it came from; the summary tiles count across all of them.
   const localName = backends.length ? meta?.instanceName || "this instance" : undefined;
+
+  // This instance's server UUID tags its own receivers, so the topology can
+  // link a remote target whose server_uuid names this instance. Only needed
+  // once there are other instances in view.
+  const [localUuid, setLocalUuid] = useState<string | undefined>();
+  const hasBackends = backends.length > 0;
+  useEffect(() => {
+    if (!hasBackends || localUuid) return;
+    let cancelled = false;
+    apiFetchJSON<IdentityJSON>("/api/identity")
+      .then((i) => {
+        if (!cancelled) setLocalUuid(i.uuid || undefined);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [hasBackends, localUuid]);
   // Memoized so the topology chart's own buildTopology memo (keyed on these
   // arrays) only re-runs when the underlying data changed.
   const jobs = useMemo<Sourced<JobSnapshot>[]>(
@@ -97,12 +122,12 @@ export function DashboardPage() {
   );
   const receivers = useMemo<Sourced<ReceiverSnapshot>[]>(
     () => [
-      ...localReceivers.map((r) => ({ ...r, source: localName })),
+      ...localReceivers.map((r) => ({ ...r, source: localName, instanceUuid: localUuid })),
       ...remotes.flatMap((r) =>
-        r.receivers.map((rcv) => ({ ...rcv, source: r.name, remote: true })),
+        r.receivers.map((rcv) => ({ ...rcv, source: r.name, remote: true, instanceUuid: r.uuid })),
       ),
     ],
-    [localReceivers, remotes, localName],
+    [localReceivers, remotes, localName, localUuid],
   );
 
   const runs = usePermissionPoll<JobRunEventJSON>(

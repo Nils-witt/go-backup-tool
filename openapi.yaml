@@ -1784,6 +1784,10 @@ components:
       properties:
         server:
           type: string
+        server_uuid:
+          type: string
+          format: uuid
+          description: A remote server's configured server UUID; omitted when unset.
         bucket:
           type: string
         kind:
@@ -2367,6 +2371,10 @@ components:
         endpoint:
           type: string
           description: Remote only; the other instance's base URL.
+        server_uuid:
+          type: string
+          format: uuid
+          description: Remote only, optional; the other instance's server UUID, as shown on its Identity page.
         path:
           type: string
           description: Local only; root directory backups are written under.

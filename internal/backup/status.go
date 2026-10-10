@@ -27,11 +27,14 @@ const (
 // TargetSnapshot is one job target's current status, as reported over
 // /api/status.
 type TargetSnapshot struct {
-	Server string   `json:"server"`
-	Bucket string   `json:"bucket"`
-	Kind   string   `json:"kind"`
-	State  RunState `json:"state"`
-	Error  string   `json:"error,omitempty"`
+	Server string `json:"server"`
+	// ServerUUID is a remote server's configured server-uuid: (the
+	// destination instance's server UUID), omitted when unset.
+	ServerUUID string   `json:"server_uuid,omitempty"`
+	Bucket     string   `json:"bucket"`
+	Kind       string   `json:"kind"`
+	State      RunState `json:"state"`
+	Error      string   `json:"error,omitempty"`
 }
 
 // JobSnapshot is one job's current status, as reported over /api/status.
@@ -116,7 +119,7 @@ func newJobSnapshot(job *config.Config) *JobSnapshot {
 func idleTargets(job *config.Config) []TargetSnapshot {
 	targets := make([]TargetSnapshot, len(job.Targets))
 	for i, t := range job.Targets {
-		targets[i] = TargetSnapshot{Server: t.ServerName, Bucket: t.Bucket, Kind: string(t.Kind), State: StateIdle}
+		targets[i] = TargetSnapshot{Server: t.ServerName, ServerUUID: t.ServerUUID, Bucket: t.Bucket, Kind: string(t.Kind), State: StateIdle}
 	}
 
 	return targets

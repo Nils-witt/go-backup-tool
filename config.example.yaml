@@ -79,6 +79,10 @@ servers:
   - name: sibling-instance
     type: remote
     endpoint: "https://backup2.example.com:8443"
+    # Optional: the destination instance's own server ID (its Identity
+    # page), recorded so the dashboard can tell exactly which instance this
+    # server delivers to. Only valid for type: remote.
+    # server-uuid: "6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b"
     # No auth field here: this instance authenticates to the destination
     # with its own generated identity (see above). Give the destination
     # instance's operator this instance's server ID and public key (both on

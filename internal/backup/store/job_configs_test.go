@@ -114,6 +114,28 @@ func TestServerConfigCRUD(t *testing.T) {
 	}
 }
 
+func TestServerConfigServerUUID(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := t.Context()
+
+	remote := ServerConfig{Name: "sibling", Type: "remote", Endpoint: "https://x", ServerUUID: "6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b"}
+	if err := db.CreateServerConfig(ctx, remote); err != nil {
+		t.Fatalf("CreateServerConfig() error: %v", err)
+	}
+
+	remote.ServerUUID = "0d4e5f6a-7b8c-4d9e-8f0a-1b2c3d4e5f6a"
+	if err := db.UpdateServerConfig(ctx, remote); err != nil {
+		t.Fatalf("UpdateServerConfig() error: %v", err)
+	}
+
+	servers, err := db.ListServerConfigs(ctx)
+	if err != nil || len(servers) != 1 || servers[0].ServerUUID != remote.ServerUUID {
+		t.Errorf("ListServerConfigs() = %+v, %v", servers, err)
+	}
+}
+
 func TestCommandConfigCRUD(t *testing.T) {
 	t.Parallel()
 

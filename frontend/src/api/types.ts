@@ -8,6 +8,9 @@ export type RunState = "idle" | "running" | "ok" | "incomplete" | "failed";
 
 export interface TargetSnapshot {
   server: string;
+  // server_uuid is a remote server's configured server-uuid: the
+  // destination instance's own server UUID. Omitted when unset.
+  server_uuid?: string;
   bucket: string;
   kind: string;
   state: RunState;
@@ -326,6 +329,9 @@ export interface ServerDefinitionJSON {
   name: string;
   type: "local" | "remote" | string;
   endpoint: string;
+  // server_uuid (remote only, optional) is the destination instance's server
+  // UUID, as shown on its Identity page.
+  server_uuid: string;
   path: string;
   retention: string;
 }

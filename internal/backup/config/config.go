@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 
 	appconfig "nilswitt.dev/go-backup-tool/internal/backup/app/config"
@@ -181,6 +182,12 @@ type Target struct {
 	Kind       ServerKind
 	Bucket     string
 	Endpoint   string
+
+	// ServerUUID is a remote server's server-uuid: the destination
+	// instance's own server UUID, "" when not configured (or for a local
+	// server). Informational: it identifies the destination in status
+	// snapshots, not part of authentication.
+	ServerUUID string
 
 	// LocalPath is the local server's root directory (only set when
 	// kind == serverKindLocal). The object is written to
@@ -480,7 +487,9 @@ type FileTargetOnRecover struct {
 // "local" for a directory on the local filesystem, using only path; or
 // "remote" for another go-backup-tool instance's receiver API, using only
 // endpoint — auth is this instance's own identity (see loadServerIdentity),
-// not a config field. type: is required; there is no default.
+// not a config field — plus, optionally, server-uuid: the destination
+// instance's own server UUID (shown on its Identity page), recording which
+// instance the endpoint reaches. type: is required; there is no default.
 // Retention (local only) is a duration string (e.g. "7d" or "168h" for 7
 // days, "30m" for 30 minutes) — like time.ParseDuration but with "d" also
 // accepted for days (parsed by parseDayDuration, since the standard library
@@ -495,11 +504,12 @@ type FileTargetOnRecover struct {
 // the destination instance verifies against the public key configured on
 // its matching receivers: entry's public-key: (see fileReceiver).
 type FileServer struct {
-	Name      string `yaml:"name" json:"name"`
-	Type      string `yaml:"type" json:"type"`
-	Endpoint  string `yaml:"endpoint" json:"endpoint"`
-	Path      string `yaml:"path" json:"path"`           // local only: root directory backups are written under
-	Retention string `yaml:"retention" json:"retention"` // local only: e.g. "7d" or "168h"; unset/"0" keeps objects forever
+	Name       string `yaml:"name" json:"name"`
+	Type       string `yaml:"type" json:"type"`
+	Endpoint   string `yaml:"endpoint" json:"endpoint"`
+	ServerUUID string `yaml:"server-uuid" json:"server_uuid"` // remote only, optional: the destination instance's server UUID
+	Path       string `yaml:"path" json:"path"`               // local only: root directory backups are written under
+	Retention  string `yaml:"retention" json:"retention"`     // local only: e.g. "7d" or "168h"; unset/"0" keeps objects forever
 }
 
 // FileCommand is one top-level commands: entry, defined once and referenced
@@ -1394,6 +1404,10 @@ func buildLocalServer(name string, fs *FileServer) (ResolvedServer, error) {
 		return ResolvedServer{}, fmt.Errorf("server %q: endpoint is not valid for type: local", name)
 	}
 
+	if fs.ServerUUID != "" {
+		return ResolvedServer{}, fmt.Errorf("server %q: server-uuid is not valid for type: local", name)
+	}
+
 	retention, err := parseRetention(fs.Retention)
 	if err != nil {
 		return ResolvedServer{}, fmt.Errorf("server %q: %w", name, err)
@@ -1403,8 +1417,9 @@ func buildLocalServer(name string, fs *FileServer) (ResolvedServer, error) {
 }
 
 // buildRemoteServer validates and builds a ResolvedServer for a type: remote
-// servers: entry, which uses only endpoint — auth is this instance's own
-// identity (see loadServerIdentity), not a config field.
+// servers: entry, which uses only endpoint and the optional server-uuid —
+// auth is this instance's own identity (see loadServerIdentity), not a
+// config field.
 func buildRemoteServer(name string, fs *FileServer) (ResolvedServer, error) {
 	if strings.TrimSpace(fs.Endpoint) == "" {
 		return ResolvedServer{}, fmt.Errorf("server %q: endpoint is required for type: remote", name)
@@ -1414,7 +1429,14 @@ func buildRemoteServer(name string, fs *FileServer) (ResolvedServer, error) {
 		return ResolvedServer{}, fmt.Errorf("server %q: path/retention are not valid for type: remote", name)
 	}
 
-	return ResolvedServer{name: name, kind: ServerKindRemote, endpoint: fs.Endpoint}, nil
+	serverUUID := strings.TrimSpace(fs.ServerUUID)
+	if serverUUID != "" {
+		if _, err := uuid.Parse(serverUUID); err != nil {
+			return ResolvedServer{}, fmt.Errorf("server %q: server-uuid %q is not a valid UUID", name, serverUUID)
+		}
+	}
+
+	return ResolvedServer{name: name, kind: ServerKindRemote, endpoint: fs.Endpoint, serverUUID: serverUUID}, nil
 }
 
 // parseRetention parses a local server's retention: string into a
@@ -1518,11 +1540,12 @@ func parseDayDuration(s string) (time.Duration, error) {
 // ResolvedServer is one servers: entry, ready to be combined with a job's
 // targetRef bucket into a target.
 type ResolvedServer struct {
-	name      string
-	kind      ServerKind
-	endpoint  string
-	path      string        // local only: root directory backups are written under
-	retention time.Duration // local only: 0 means no automatic expiry
+	name       string
+	kind       ServerKind
+	endpoint   string
+	serverUUID string        // remote only: the destination instance's server UUID, "" if not given
+	path       string        // local only: root directory backups are written under
+	retention  time.Duration // local only: 0 means no automatic expiry
 }
 
 // Kind is s's type:.
@@ -1652,6 +1675,7 @@ func resolveJobTargets(cfg *Config, servers map[string]ResolvedServer, commands 
 			Kind:       server.kind,
 			Bucket:     ref.bucket,
 			Endpoint:   server.endpoint,
+			ServerUUID: server.serverUUID,
 			LocalPath:  server.path,
 			Retention:  retention,
 		}

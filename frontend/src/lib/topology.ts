@@ -1,4 +1,4 @@
-import type { JobSnapshot, ReceiverSnapshot, RunState } from "../api/types";
+import type { JobSnapshot, ReceiverSnapshot, RunState, TargetSnapshot } from "../api/types";
 import { sourcedKey, type Sourced } from "./status";
 
 // The topology chart's three columns: jobs on the left, the servers their
@@ -47,11 +47,39 @@ function nodeKey(column: TopologyColumn, source: string | undefined, id: string)
   return column + ":" + sourcedKey(source, id);
 }
 
+// receiversFor picks which of candidates — every receiver in view with the
+// remote target t's bucket as its id — t delivers to. A target whose server
+// names its destination's server_uuid connects only to that instance's
+// receiver; receivers on instances whose UUID is known to differ are never
+// it. Without a match by UUID (no server_uuid configured, or the instance's
+// UUID couldn't be read), the remaining candidates are guessed among,
+// preferring one on an instance named like the server.
+function receiversFor(
+  t: TargetSnapshot,
+  candidates: Sourced<ReceiverSnapshot>[],
+): Sourced<ReceiverSnapshot>[] {
+  const uuid = t.server_uuid?.toLowerCase();
+  if (uuid) {
+    const pinned = candidates.filter((r) => r.instanceUuid?.toLowerCase() === uuid);
+    if (pinned.length) return pinned;
+    candidates = candidates.filter((r) => !r.instanceUuid);
+  }
+
+  if (candidates.length > 1) {
+    const named = candidates.filter(
+      (r) => r.source && r.source.toLowerCase() === t.server.toLowerCase(),
+    );
+    if (named.length) return named;
+  }
+
+  return candidates;
+}
+
 // buildTopology derives the chart's graph from the dashboard's merged job
 // and receiver snapshots. A remote target's bucket is the id of the
-// receiver it delivers to, so a remote server connects to every receiver in
-// view with that id — preferring one on an instance named like the server
-// when several instances have such a receiver.
+// receiver it delivers to, so a remote server connects to the receiver in
+// view with that id on the instance its server_uuid names (see
+// receiversFor), else to every candidate, marked ambiguous when several.
 export function buildTopology(
   jobs: Sourced<JobSnapshot>[],
   receivers: Sourced<ReceiverSnapshot>[],
@@ -134,13 +162,7 @@ export function buildTopology(
 
       if (t.kind !== "remote") continue;
 
-      let matches = receiversById.get(t.bucket) ?? [];
-      if (matches.length > 1) {
-        const named = matches.filter(
-          (r) => r.source && r.source.toLowerCase() === t.server.toLowerCase(),
-        );
-        if (named.length) matches = named;
-      }
+      const matches = receiversFor(t, receiversById.get(t.bucket) ?? []);
       for (const r of matches) {
         addEdge(serverKey, addReceiver(r), t.state, t.bucket, matches.length > 1);
       }
