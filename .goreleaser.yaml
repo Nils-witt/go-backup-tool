@@ -20,6 +20,11 @@ builds:
     goarch:
       - amd64
       - arm64
+    # Reproducible builds: no local paths in the binary, and file times
+    # pinned to the commit rather than the build machine's clock.
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
     ldflags:
       - -s -w
       - -X nilswitt.dev/go-backup-tool/internal/version.Version={{.Version}}
