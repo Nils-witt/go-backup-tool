@@ -83,11 +83,13 @@ export function LogsViewer({ lines }: LogsViewerProps) {
             if (line.indexOf("level=ERROR") !== -1) color = theme.palette.status.failed;
             else if (line.indexOf("level=WARN") !== -1) color = theme.palette.status.running;
 
+            // A plain span rather than Box: every line re-renders on each
+            // poll, and Box's sx would run Emotion's style work per line.
             return (
-              <Box component="span" key={i} sx={color ? { color } : undefined}>
+              <span key={i} style={color ? { color } : undefined}>
                 {line}
                 {i < lines.length - 1 ? "\n" : ""}
-              </Box>
+              </span>
             );
           })}
         </Box>

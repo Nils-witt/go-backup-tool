@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { TargetRunEventJSON } from "../api/types";
 import { StatusChip } from "./StatusChip";
 import { SortableHeaderCell } from "./SortableHeaderCell";
@@ -33,13 +33,19 @@ export function TargetRunLogSection({ events }: { events: TargetRunEventJSON[] }
 
   const jobFilter = job.trim().toLowerCase();
   const targetFilter = target.trim().toLowerCase();
-  const filtered = events.filter((ev) => {
-    if (jobFilter && ev.job_name.toLowerCase().indexOf(jobFilter) === -1) return false;
-    if (targetFilter && ev.target.toLowerCase().indexOf(targetFilter) === -1) return false;
-    if (result === "success" && !ev.success) return false;
-    if (result === "failed" && ev.success) return false;
-    return true;
-  });
+  // Memoized so useSortedRows' sort only re-runs when the rows or a
+  // filter actually changed, not on every render.
+  const filtered = useMemo(
+    () =>
+      events.filter((ev) => {
+        if (jobFilter && ev.job_name.toLowerCase().indexOf(jobFilter) === -1) return false;
+        if (targetFilter && ev.target.toLowerCase().indexOf(targetFilter) === -1) return false;
+        if (result === "success" && !ev.success) return false;
+        if (result === "failed" && ev.success) return false;
+        return true;
+      }),
+    [events, jobFilter, targetFilter, result],
+  );
 
   const { sorted, sortKey, sortDir, toggleSort } = useSortedRows<TargetRunEventJSON, SortKey>(
     filtered,

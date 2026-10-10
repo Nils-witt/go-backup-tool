@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { BrowserRouter } from "react-router-dom";
 import CssBaseline from "@mui/material/CssBaseline";
 import { ThemeProvider } from "@mui/material/styles";
@@ -10,7 +11,7 @@ import { buildTheme } from "./theme";
 // component of its own (React fast refresh needs component-only modules).
 export function Root() {
   const prefersDark = useMediaQuery("(prefers-color-scheme: dark)");
-  const theme = buildTheme(prefersDark ? "dark" : "light");
+  const theme = useMemo(() => buildTheme(prefersDark ? "dark" : "light"), [prefersDark]);
 
   return (
     <ThemeProvider theme={theme}>

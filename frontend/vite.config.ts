@@ -9,6 +9,20 @@ export default defineConfig({
   build: {
     outDir: "../internal/backup/webui/dist",
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        // Long-lived vendor chunks: an app-only change no longer forces
+        // every client to re-download React and MUI.
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (/node_modules\/(@mui|@emotion)\//.test(id)) return "mui";
+          if (/node_modules\/oidc-client-ts\//.test(id)) return "oidc";
+          if (/node_modules\/(react|react-dom|react-router|react-router-dom|scheduler)\//.test(id))
+            return "react";
+          return "vendor";
+        },
+      },
+    },
   },
   server: {
     proxy: {

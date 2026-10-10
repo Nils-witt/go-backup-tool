@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { JobSnapshot, ReceiverSnapshot, RunState } from "../api/types";
 import {
   buildTopology,
@@ -38,7 +38,9 @@ interface Anchors {
   out: Record<string, Point>;
 }
 
-function NodeCard({
+// Memoized: hovering re-renders the chart, but only the cards whose dimmed
+// flag actually flips need to re-render with it.
+const NodeCard = memo(function NodeCard({
   node,
   dimmed,
   onHover,
@@ -47,7 +49,7 @@ function NodeCard({
   node: TopologyNode;
   dimmed: boolean;
   onHover: (key: string | null) => void;
-  nodeRef: (el: HTMLElement | null) => void;
+  nodeRef: (el: HTMLElement | null) => (() => void) | undefined;
 }) {
   const theme = useTheme();
   const color = theme.palette.status[node.state] ?? theme.palette.status.idle;
@@ -56,6 +58,7 @@ function NodeCard({
   const card = (
     <Paper
       ref={nodeRef}
+      data-node-key={node.key}
       variant="outlined"
       tabIndex={0}
       onMouseEnter={() => onHover(node.key)}
@@ -96,6 +99,21 @@ function NodeCard({
   ) : (
     card
   );
+});
+
+// sameAnchors reports whether a and b would draw identical curves, so a
+// re-measure that moved nothing doesn't trigger another render.
+function sameAnchors(a: Anchors | null, b: Anchors): boolean {
+  if (!a || a.width !== b.width || a.height !== b.height) return false;
+  const keys = Object.keys(b.in);
+  if (keys.length !== Object.keys(a.in).length) return false;
+  return keys.every((k) => {
+    const ai = a.in[k],
+      bi = b.in[k],
+      ao = a.out[k],
+      bo = b.out[k];
+    return ai && ao && ai.x === bi.x && ai.y === bi.y && ao.x === bo.x && ao.y === bo.y;
+  });
 }
 
 // TopologyChart draws which job uploads to which server, and which
@@ -110,7 +128,14 @@ export function TopologyChart({
   receivers: Sourced<ReceiverSnapshot>[];
 }) {
   const theme = useTheme();
-  const topology = useMemo(() => buildTopology(jobs, receivers), [jobs, receivers]);
+  const { topology, byColumn, layoutKey } = useMemo(() => {
+    const topology = buildTopology(jobs, receivers);
+    const byColumn: Record<TopologyColumn, TopologyNode[]> = { job: [], server: [], receiver: [] };
+    for (const n of topology.nodes) byColumn[n.column].push(n);
+    // Only the set and order of nodes moves them; their states don't.
+    const layoutKey = topology.nodes.map((n) => n.key).join("\u0002");
+    return { topology, byColumn, layoutKey };
+  }, [jobs, receivers]);
   const [hovered, setHovered] = useState<string | null>(null);
   const highlight = useMemo(
     () => (hovered ? connectedKeys(topology, hovered) : null),
@@ -121,13 +146,17 @@ export function TopologyChart({
   const nodeEls = useRef(new Map<string, HTMLElement>());
   const [anchors, setAnchors] = useState<Anchors | null>(null);
 
-  const refFor = useCallback(
-    (key: string) => (el: HTMLElement | null) => {
-      if (el) nodeEls.current.set(key, el);
-      else nodeEls.current.delete(key);
-    },
-    [],
-  );
+  // One stable ref callback for every node (keyed by its data-node-key),
+  // using React 19's ref cleanup: a fresh callback each render would make
+  // React detach and re-attach every node's ref on every hover.
+  const registerNode = useCallback((el: HTMLElement | null) => {
+    const key = el?.dataset.nodeKey;
+    if (!el || !key) return;
+    nodeEls.current.set(key, el);
+    return () => {
+      nodeEls.current.delete(key);
+    };
+  }, []);
 
   const measure = useCallback(() => {
     const container = containerRef.current;
@@ -140,11 +169,9 @@ export function TopologyChart({
       next.in[key] = { x: r.left - box.left, y };
       next.out[key] = { x: r.right - box.left, y };
     }
-    setAnchors(next);
+    setAnchors((prev) => (sameAnchors(prev, next) ? prev : next));
   }, []);
 
-  // Only the set and order of nodes moves them; their states don't.
-  const layoutKey = topology.nodes.map((n) => n.key).join("\u0002");
   useLayoutEffect(measure, [measure, layoutKey]);
   useLayoutEffect(() => {
     const container = containerRef.current;
@@ -208,7 +235,7 @@ export function TopologyChart({
           ) : null}
 
           {COLUMNS.map(({ column, title, empty }) => {
-            const nodes = topology.nodes.filter((n) => n.column === column);
+            const nodes = byColumn[column];
             return (
               <Box key={column} sx={{ minWidth: 0 }}>
                 <Typography
@@ -227,7 +254,7 @@ export function TopologyChart({
                         node={n}
                         dimmed={highlight !== null && !highlight.has(n.key)}
                         onHover={setHovered}
-                        nodeRef={refFor(n.key)}
+                        nodeRef={registerNode}
                       />
                     ))
                   ) : (

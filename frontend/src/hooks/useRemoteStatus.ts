@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { fetchRemoteMeta, remoteErrorMessage, remoteFetchJSON } from "../api/client";
 import type { JobSnapshot, ReceiverSnapshot } from "../api/types";
 import type { RemoteBackend } from "../lib/remoteBackends";
@@ -77,15 +77,21 @@ export function useRemoteStatus(backends: RemoteBackend[]): RemoteStatus[] {
     };
   }, [backends]);
 
-  return backends.map((b) => {
-    const p = polled[b.id] ?? initial;
-    return {
-      backend: b,
-      name: displayName(b, p.instanceName),
-      jobs: p.jobs,
-      receivers: p.receivers,
-      loaded: p.loaded,
-      error: p.error,
-    };
-  });
+  // Memoized so callers (the dashboard's job/receiver merge, and through it
+  // the topology chart) only recompute when a poll actually lands.
+  return useMemo(
+    () =>
+      backends.map((b) => {
+        const p = polled[b.id] ?? initial;
+        return {
+          backend: b,
+          name: displayName(b, p.instanceName),
+          jobs: p.jobs,
+          receivers: p.receivers,
+          loaded: p.loaded,
+          error: p.error,
+        };
+      }),
+    [backends, polled],
+  );
 }

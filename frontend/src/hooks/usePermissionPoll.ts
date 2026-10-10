@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiFetchJSON } from "../api/client";
+import { startPolling } from "../lib/poll";
 
 // usePermissionPoll polls url every intervalMs while enabled, otherwise
 // reports an empty list — porting loadLoginEvents/loadDownloadEvents'
@@ -8,30 +9,28 @@ import { apiFetchJSON } from "../api/client";
 // Promise.all poll's permission.PermissionView. The effect depends on
 // `enabled` directly (not just a ref) so that a permission becoming known
 // after /api/me resolves triggers an immediate fetch rather than waiting
-// for the next scheduled poll.
+// for the next scheduled poll. Like usePoll, it pauses in a hidden tab and
+// keeps the previous data reference when a response is unchanged.
 export function usePermissionPoll<T>(url: string, enabled: boolean, intervalMs = 2000): T[] {
   const [data, setData] = useState<T[]>([]);
+  const lastText = useRef<string | null>(null);
 
   useEffect(() => {
     if (!enabled) return;
 
-    let cancelled = false;
-
-    function tick() {
-      apiFetchJSON<T[]>(url)
-        .then((d) => {
-          if (!cancelled) setData(d || []);
-        })
-        .catch(() => {});
-    }
-
-    tick();
-    const id = setInterval(tick, intervalMs);
-
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
+    return startPolling(
+      (signal) =>
+        apiFetchJSON<T[]>(url, { signal })
+          .then((d) => {
+            if (signal.aborted) return;
+            const text = JSON.stringify(d ?? []);
+            if (text === lastText.current) return;
+            lastText.current = text;
+            setData(d || []);
+          })
+          .catch(() => {}),
+      intervalMs,
+    );
   }, [url, enabled, intervalMs]);
 
   // Derived rather than reset inside the effect: a disabled poll reports an

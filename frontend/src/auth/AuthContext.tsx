@@ -24,16 +24,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    let unsubscribe = () => {};
+
     void (async () => {
       // SSO settings first: a token stored by an earlier page load must be
       // attached to the very first /api/me (see oidc.ts / client.ts).
       try {
         const status = await fetchSSOStatus();
-        initOidc(status);
+        await initOidc(status);
+        if (cancelled) return;
         if (status.enabled) setSsoLabel(status.buttonLabel || "Sign in with SSO");
         // An SSO session that can't be renewed any more counts as logged
         // out: AuthGate then sends the user to /login?next=<current page>.
-        onSsoSessionEnded(() => setMe(null));
+        unsubscribe = onSsoSessionEnded(() => setMe(null));
       } catch {
         /* SSO status unavailable: the login page says so. */
       }
@@ -43,8 +47,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch {
         /* backend unreachable: treated as signed out. */
       }
-      setReady(true);
+      if (!cancelled) setReady(true);
     })();
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, [refreshMe]);
 
   const logout = useCallback(async () => {

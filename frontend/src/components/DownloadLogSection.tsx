@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { DownloadEventJSON } from "../api/types";
 import { StatusChip } from "./StatusChip";
 import { SortableHeaderCell } from "./SortableHeaderCell";
@@ -36,14 +36,22 @@ export function DownloadLogSection({ events }: { events: DownloadEventJSON[] }) 
   const usernameFilter = username.trim().toLowerCase();
   const receiverFilter = receiver.trim().toLowerCase();
   const keyFilter = key.trim().toLowerCase();
-  const filtered = events.filter((ev) => {
-    if (usernameFilter && ev.username.toLowerCase().indexOf(usernameFilter) === -1) return false;
-    if (receiverFilter && ev.receiver_id.toLowerCase().indexOf(receiverFilter) === -1) return false;
-    if (keyFilter && ev.key.toLowerCase().indexOf(keyFilter) === -1) return false;
-    if (result === "success" && !ev.success) return false;
-    if (result === "failed" && ev.success) return false;
-    return true;
-  });
+  // Memoized so useSortedRows' sort only re-runs when the rows or a
+  // filter actually changed, not on every render.
+  const filtered = useMemo(
+    () =>
+      events.filter((ev) => {
+        if (usernameFilter && ev.username.toLowerCase().indexOf(usernameFilter) === -1)
+          return false;
+        if (receiverFilter && ev.receiver_id.toLowerCase().indexOf(receiverFilter) === -1)
+          return false;
+        if (keyFilter && ev.key.toLowerCase().indexOf(keyFilter) === -1) return false;
+        if (result === "success" && !ev.success) return false;
+        if (result === "failed" && ev.success) return false;
+        return true;
+      }),
+    [events, usernameFilter, receiverFilter, keyFilter, result],
+  );
 
   const { sorted, sortKey, sortDir, toggleSort } = useSortedRows<DownloadEventJSON, SortKey>(
     filtered,
