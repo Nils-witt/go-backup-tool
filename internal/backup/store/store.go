@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -59,9 +60,16 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	// would otherwise print every one of those as a Warn/Error-level log
 	// line — is silenced rather than duplicating that with noise
 	// database/sql never produced.
-	gormConfig := &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)}
+	//
+	// Every write here is a single statement or already runs in an explicit
+	// Transaction, so GORM's implicit per-write transaction is skipped.
+	gormConfig := &gorm.Config{
+		Logger:                 logger.Default.LogMode(logger.Silent),
+		SkipDefaultTransaction: true,
+		PrepareStmt:            true,
+	}
 
-	gdb, err := gorm.Open(glebarezsqlite.Open(path), gormConfig)
+	gdb, err := gorm.Open(glebarezsqlite.Open(withPragmas(path)), gormConfig)
 	if err != nil {
 		return nil, fmt.Errorf("opening job state db %q: %w", path, err)
 	}
@@ -97,6 +105,40 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	}
 
 	return &Store{db: gdb}, nil
+}
+
+// sqlitePragmas are applied to every connection Open makes: WAL so the
+// dashboard's reads don't block behind a job's writes (and vice versa),
+// a busy timeout instead of an immediate SQLITE_BUSY when another process
+// (e.g. a one-off CLI run) holds the lock, and synchronous=NORMAL, which is
+// durable under WAL short of an OS crash.
+var sqlitePragmas = []string{
+	"journal_mode(WAL)",
+	"busy_timeout(5000)",
+	"synchronous(NORMAL)",
+}
+
+// withPragmas appends sqlitePragmas to path as glebarez/sqlite _pragma
+// query parameters, preserving any query string path already carries.
+func withPragmas(path string) string {
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+
+	var b strings.Builder
+
+	b.WriteString(path)
+
+	for _, p := range sqlitePragmas {
+		b.WriteString(sep)
+		b.WriteString("_pragma=")
+		b.WriteString(p)
+
+		sep = "&"
+	}
+
+	return b.String()
 }
 
 // Close closes the underlying database connection.

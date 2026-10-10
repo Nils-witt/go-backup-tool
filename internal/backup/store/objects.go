@@ -18,7 +18,7 @@ import (
 // sweeping under the caller's current retention, exactly as they did before
 // it was added.
 type objectModel struct {
-	Server           string    `gorm:"column:server;not null"`
+	Server           string    `gorm:"column:server;not null;index:idx_objects_server"`
 	Bucket           string    `gorm:"column:bucket;not null"`
 	Path             string    `gorm:"column:path;primaryKey"`
 	WrittenAt        time.Time `gorm:"column:written_at;not null"`
@@ -67,24 +67,39 @@ func (s *Store) DeleteObjectWrite(ctx context.Context, path string) error {
 // used when set (> 0); rows recorded before that column existed have it as
 // 0 and fall back to fallbackRetention (the caller's current retention for
 // server).
+//
+// The filter runs in sqlite rather than loading every row for server: one
+// indexed written_at range query per distinct retention_seconds value
+// (normally just one or two per server), each with its own cutoff.
 func (s *Store) ExpiredObjectPaths(ctx context.Context, server string, now time.Time, fallbackRetention time.Duration) ([]string, error) {
-	var rows []objectModel
+	db := s.db.WithContext(ctx)
 
-	if err := s.db.WithContext(ctx).Where("server = ?", server).Find(&rows).Error; err != nil {
+	var retentions []int64
+
+	if err := db.Model(&objectModel{}).Where("server = ?", server).
+		Distinct().Pluck("retention_seconds", &retentions).Error; err != nil {
 		return nil, fmt.Errorf("reading retention rows: %w", err)
 	}
 
 	var paths []string
 
-	for _, r := range rows {
-		retention := time.Duration(r.RetentionSeconds) * time.Second
+	for _, secs := range retentions {
+		retention := time.Duration(secs) * time.Second
 		if retention <= 0 {
 			retention = fallbackRetention
 		}
 
-		if r.WrittenAt.Add(retention).Before(now) {
-			paths = append(paths, r.Path)
+		var batch []string
+
+		err := db.Model(&objectModel{}).
+			Where("server = ? AND retention_seconds = ? AND written_at < ?", server, secs, now.Add(-retention).UTC()).
+			Order("written_at").
+			Pluck("path", &batch).Error
+		if err != nil {
+			return nil, fmt.Errorf("reading retention rows: %w", err)
 		}
+
+		paths = append(paths, batch...)
 	}
 
 	return paths, nil
