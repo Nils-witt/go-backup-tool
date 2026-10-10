@@ -349,6 +349,8 @@ func (r *Runner) runOnce(ctx context.Context, job *config.Config) {
 	r.store.Starting(job.Name)
 	log.Info("job starting", "targets", len(run.Targets))
 
+	var outcomes targetOutcomes
+
 	onTargetDone := func(index int, terr error) {
 		r.store.TargetDone(job.Name, index, terr)
 
@@ -357,31 +359,90 @@ func (r *Runner) runOnce(ctx context.Context, job *config.Config) {
 		}
 
 		r.persistTargetRun(ctx, job.Name, terr == nil, job.Targets[index].ServerName, terr)
-		r.handleTargetOutcome(ctx, job.Name, &job.Targets[index], terr, log)
+		outcomes.add(&job.Targets[index], terr)
 	}
 
 	bytesWritten, err := runPipeline(ctx, &run, log, onTargetDone)
-	duration := time.Since(start)
 
+	_ = r.finishRun(ctx, job, log, runMessages, start, bytesWritten, err, &outcomes)
+}
+
+// runMessages and retryMessages are the log lines finishRun writes for a
+// scheduled run and a RetryFailedTargets run respectively.
+var (
+	runMessages   = finishMessages{incomplete: "job incomplete: some targets failed", failed: "job failed", finished: "job finished"}
+	retryMessages = finishMessages{incomplete: "retry incomplete: some targets still failing", failed: "retry failed", finished: "retry finished"}
+)
+
+// finishMessages are the outcome log lines finishRun writes.
+type finishMessages struct {
+	incomplete, failed, finished string
+}
+
+// targetOutcome is one target's result from a run, collected by
+// onTargetDone so finishRun can fire its on-error/on-recover command once
+// the run itself is recorded.
+type targetOutcome struct {
+	target *config.Target
+	err    error
+}
+
+// targetOutcomes collects targetOutcome values from runPipeline's
+// concurrent per-target goroutines. Safe for concurrent use.
+type targetOutcomes struct {
+	mu   sync.Mutex
+	list []targetOutcome
+}
+
+func (o *targetOutcomes) add(t *config.Target, err error) {
+	o.mu.Lock()
+	o.list = append(o.list, targetOutcome{target: t, err: err})
+	o.mu.Unlock()
+}
+
+// finishRun is the shared tail of runOnce and RetryFailedTargets: it marks
+// job finished in the status store, logs the outcome, and records the run
+// to the state db first, so the dashboard and state db reflect a finished
+// run immediately. Only then does it fire each target's on-error/on-recover
+// command (concurrently, one per target) and the job's failure
+// notifications, any of which may take up to their own timeouts and used to
+// hold the run open. It returns err wrapped as config.JobError, or nil.
+func (r *Runner) finishRun(ctx context.Context, job *config.Config, log *slog.Logger, msgs finishMessages, start time.Time, bytesWritten int64, err error, outcomes *targetOutcomes) error {
+	duration := time.Since(start)
 	state := r.store.Finished(job.Name, err, bytesWritten)
+
+	var jobErr error
 
 	if err != nil {
 		r.failed.Store(true)
 
+		jobErr = config.JobError(job, err)
+
 		if state == backup.StateIncomplete {
-			log.Warn("job incomplete: some targets failed", "duration", duration, "err", config.JobError(job, err))
+			log.Warn(msgs.incomplete, "duration", duration, "err", jobErr)
 		} else {
-			log.Error("job failed", "duration", duration, "err", config.JobError(job, err))
+			log.Error(msgs.failed, "duration", duration, "err", jobErr)
 		}
 
-		notifyJobFailure(job, r.notifications, err, state, start, duration, r.queue, log)
-		r.recordJobRun(ctx, job.Name, state, false, start, bytesWritten, config.JobError(job, err).Error())
-
-		return
+		r.recordJobRun(ctx, job.Name, state, false, start, bytesWritten, jobErr.Error())
+	} else {
+		log.Info(msgs.finished, "duration", duration, "bytes", bytesWritten)
+		r.recordJobRun(ctx, job.Name, state, true, start, bytesWritten, "")
 	}
 
-	log.Info("job finished", "duration", duration, "bytes", bytesWritten)
-	r.recordJobRun(ctx, job.Name, state, true, start, bytesWritten, "")
+	var wg sync.WaitGroup
+
+	for _, o := range outcomes.list {
+		wg.Go(func() { r.handleTargetOutcome(ctx, job.Name, o.target, o.err, log) })
+	}
+
+	if err != nil {
+		notifyJobFailure(job, r.notifications, err, state, start, duration, r.queue, log)
+	}
+
+	wg.Wait()
+
+	return jobErr
 }
 
 // RetryFailedTargets re-runs job for just the targets in job.Targets whose
@@ -434,6 +495,8 @@ func (r *Runner) RetryFailedTargets(ctx context.Context, job *config.Config, tar
 	// subset); indices[localIndex] maps that back to the target's original
 	// position in job.Targets, which is what the status store and target-run
 	// persistence are keyed on.
+	var outcomes targetOutcomes
+
 	onTargetDone := func(localIndex int, terr error) {
 		if localIndex < 0 || localIndex >= len(indices) {
 			return
@@ -443,31 +506,14 @@ func (r *Runner) RetryFailedTargets(ctx context.Context, job *config.Config, tar
 
 		r.store.TargetDone(job.Name, origIndex, terr)
 		r.persistTargetRun(ctx, job.Name, terr == nil, job.Targets[origIndex].ServerName, terr)
-		r.handleTargetOutcome(ctx, job.Name, &job.Targets[origIndex], terr, log)
+		outcomes.add(&job.Targets[origIndex], terr)
 	}
 
 	bytesWritten, err := runPipeline(ctx, &run, log, onTargetDone)
-	duration := time.Since(start)
 
-	state := r.store.Finished(job.Name, err, bytesWritten)
-
-	if err != nil {
-		r.failed.Store(true)
-
-		if state == backup.StateIncomplete {
-			log.Warn("retry incomplete: some targets still failing", "duration", duration, "err", config.JobError(job, err))
-		} else {
-			log.Error("retry failed", "duration", duration, "err", config.JobError(job, err))
-		}
-
-		notifyJobFailure(job, r.notifications, err, state, start, duration, r.queue, log)
-		r.recordJobRun(ctx, job.Name, state, false, start, bytesWritten, config.JobError(job, err).Error())
-
+	if r.finishRun(ctx, job, log, retryMessages, start, bytesWritten, err, &outcomes) != nil {
 		return err
 	}
-
-	log.Info("retry finished", "duration", duration, "bytes", bytesWritten)
-	r.recordJobRun(ctx, job.Name, state, true, start, bytesWritten, "")
 
 	return nil
 }
