@@ -29,6 +29,9 @@ const DownloadLogPage = lazy(() =>
 const ReceiverLogPage = lazy(() =>
   import("./pages/ReceiverLogPage").then((m) => ({ default: m.ReceiverLogPage })),
 );
+const AuditLogPage = lazy(() =>
+  import("./pages/AuditLogPage").then((m) => ({ default: m.AuditLogPage })),
+);
 const IdentityPage = lazy(() =>
   import("./pages/IdentityPage").then((m) => ({ default: m.IdentityPage })),
 );
@@ -116,6 +119,7 @@ function AuthGate() {
         <Route path="logs/login" element={<LoginLogPage />} />
         <Route path="logs/downloads" element={<DownloadLogPage />} />
         <Route path="logs/receivers" element={<ReceiverLogPage />} />
+        <Route path="logs/audit" element={<AuditLogPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

@@ -259,9 +259,10 @@ servers:
 #     # job/target/receiver status, file listings, and application logs),
 #     # "download" (also pull a file's actual content; implies "view"),
 #     # "login-log", "download-log", "job-run-log", "target-run-log",
-#     # "receiver-log" (each one history view, granted independently of
-#     # "view"), and "admin" (also retry a job's failed targets; implies all
-#     # of the above).
+#     # "receiver-log", "audit-log" (each one history view, granted
+#     # independently of "view"; "audit-log" shows every change made through
+#     # the web UI and who made it), and "admin" (also retry a job's failed
+#     # targets and edit settings; implies all of the above).
 #     #
 #     # default-permissions is granted to every signed-in user. Unset
 #     # defaults to [view, download].
@@ -270,7 +271,7 @@ servers:
 #     # to what its members get on top of default-permissions.
 #     group-permissions:
 #       backup-admins: [admin]
-#       auditors: [login-log, download-log]
+#       auditors: [login-log, download-log, audit-log]
 
 jobs:
   - name: database

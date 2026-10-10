@@ -316,8 +316,8 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	return 0
 }
 
-// eventLogRetention is how long the login, download, and receiver event
-// logs keep a row before pruneEventLogs deletes it.
+// eventLogRetention is how long the login, download, receiver, and audit
+// event logs keep a row before pruneEventLogs deletes it.
 const eventLogRetention = 90 * 24 * time.Hour
 
 // pruneEventLogs deletes event log rows older than eventLogRetention once at

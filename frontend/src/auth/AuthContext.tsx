@@ -85,6 +85,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       canViewJobRunLog: admin || has("job-run-log"),
       canViewTargetRunLog: admin || has("target-run-log"),
       canViewReceiverLog: admin || has("receiver-log"),
+      canViewAuditLog: admin || has("audit-log"),
     };
   }, [ready, me, ssoLabel, refreshMe, logout]);
 

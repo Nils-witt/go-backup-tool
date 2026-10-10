@@ -563,6 +563,35 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /api/audit-events:
+    get:
+      tags: [dashboard]
+      summary: Recent configuration changes
+      operationId: getAuditEvents
+      description: >
+        The most recently recorded changes made through the web UI's API
+        (up to `webui.event-log-limit:`, default 200), win or lose, newest
+        first: creating, updating, or deleting a stored job, server,
+        command, receiver, trusted server, notification, report setting,
+        API token, or GPG key, and retrying a job's failed targets. Request
+        bodies are never recorded. Requires the `audit-log` permission,
+        independent of `view`.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Audit events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditEvent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /api/receiver-configs:
     get:
       tags: [admin]
@@ -1667,6 +1696,7 @@ components:
           job-run-log,
           target-run-log,
           receiver-log,
+          audit-log,
         ]
 
     Meta:
@@ -1770,6 +1800,42 @@ components:
         error:
           type: string
       required: [at, receiver_id, kind, key, size, success]
+
+    AuditEvent:
+      type: object
+      properties:
+        at:
+          type: string
+          format: date-time
+        username:
+          type: string
+          description: The signed-in user that made the change.
+        action:
+          type: string
+          description: >
+            What was done: `create`, `update`, `delete`, or a route's own
+            verb (e.g. `retry`).
+        resource:
+          type: string
+          description: The API collection changed, e.g. `receiver-configs`.
+        target:
+          type: string
+          description: The changed item's id, name, or key; empty if unknown.
+        method:
+          type: string
+        path:
+          type: string
+        status:
+          type: integer
+          description: The HTTP response status.
+        success:
+          type: boolean
+        remote_addr:
+          type: string
+        detail:
+          type: string
+          description: The error response's text; empty on success.
+      required: [at, username, action, resource, target, method, path, status, success, remote_addr, detail]
 
     RunState:
       type: string

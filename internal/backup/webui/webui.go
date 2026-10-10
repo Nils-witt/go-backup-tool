@@ -109,7 +109,15 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.
 	apiJobRunLog := perm(permission.Permission.CanViewJobRunLog)
 	apiTargetRunLog := perm(permission.Permission.CanViewTargetRunLog)
 	apiReceiverLog := perm(permission.Permission.CanViewReceiverLog)
+	apiAuditLog := perm(permission.Permission.CanViewAuditLog)
 	admin := perm(permission.Permission.CanAdmin)
+
+	// change gates an admin endpoint that changes this instance's stored
+	// configuration (or acts on a job), recording each request in the audit
+	// log (see recordChange).
+	change := func(h http.HandlerFunc) http.HandlerFunc {
+		return admin(recordChange(db, log, trustProxyHeaders, h))
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", handleDashboard(dashboardIndexHTML))
@@ -126,32 +134,20 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.
 	mux.HandleFunc("GET /api/live", handleLive(liveCtx, statusStore, receivers, receiverStore, liveTickets, devMode, trustProxyHeaders, log))
 	mux.HandleFunc("GET /api/job-runs", apiJobRunLog(handleJobRunEvents(db, log, eventLogLimit)))
 	mux.HandleFunc("GET /api/target-runs", apiTargetRunLog(handleTargetRunEvents(db, log, eventLogLimit)))
-	mux.HandleFunc("POST /api/jobs/{name}/retry", admin(handleRetryFailedTargets(lookupJob, statusStore, runner, log)))
+	mux.HandleFunc("POST /api/jobs/{name}/retry", change(handleRetryFailedTargets(lookupJob, statusStore, runner, log)))
 	mux.HandleFunc("GET /api/receivers/{id}/files", api(handleReceiverFiles(receivers, log)))
 	mux.HandleFunc("POST /api/receivers/{id}/download/{key...}", apiDownload(handleMintDownloadTicket(receivers, downloadTickets)))
 	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", handleDownloadFile(receivers, log, db, downloadTickets, trustProxyHeaders, queue))
 	mux.HandleFunc("GET /api/login-events", apiLoginLog(handleLoginEvents(db, log, eventLogLimit)))
 	mux.HandleFunc("GET /api/download-events", apiDownloadLog(handleDownloadEvents(db, log, eventLogLimit)))
 	mux.HandleFunc("GET /api/receiver-events", apiReceiverLog(handleReceiverEvents(db, log, eventLogLimit)))
+	mux.HandleFunc("GET /api/audit-events", apiAuditLog(handleAuditEvents(db, log, eventLogLimit)))
 	mux.HandleFunc("GET /api/tokens", admin(handleListAPITokens(tokens, log)))
-	mux.HandleFunc("POST /api/tokens", admin(handleCreateAPIToken(tokens, log)))
-	mux.HandleFunc("DELETE /api/tokens/{id}", admin(handleRevokeAPIToken(tokens, log)))
-	mux.HandleFunc("GET /api/receiver-configs", admin(handleListReceiverConfigs(receiverManager, log)))
-	mux.HandleFunc("POST /api/receiver-configs", admin(handleCreateReceiverConfig(receiverManager, log)))
-	mux.HandleFunc("PUT /api/receiver-configs/{id}", admin(handleUpdateReceiverConfig(receiverManager, log)))
-	mux.HandleFunc("DELETE /api/receiver-configs/{id}", admin(handleDeleteReceiverConfig(receiverManager, log)))
-	mux.HandleFunc("GET /api/trusted-servers", admin(handleListTrustedServers(trustManager, log)))
-	mux.HandleFunc("POST /api/trusted-servers", admin(handleCreateTrustedServer(trustManager, log)))
-	mux.HandleFunc("PUT /api/trusted-servers/{id}", admin(handleUpdateTrustedServer(trustManager, log)))
-	mux.HandleFunc("DELETE /api/trusted-servers/{id}", admin(handleDeleteTrustedServer(trustManager, log)))
-	mux.HandleFunc("GET /api/notification-configs", admin(handleListNotificationConfigs(settingsManager, log)))
-	mux.HandleFunc("POST /api/notification-configs", admin(handleCreateNotificationConfig(settingsManager, log)))
-	mux.HandleFunc("PUT /api/notification-configs/{id}", admin(handleUpdateNotificationConfig(settingsManager, log)))
-	mux.HandleFunc("DELETE /api/notification-configs/{id}", admin(handleDeleteNotificationConfig(settingsManager, log)))
-	mux.HandleFunc("GET /api/report-config", admin(handleGetReportConfig(settingsManager, log)))
-	mux.HandleFunc("PUT /api/report-config", admin(handleUpdateReportConfig(settingsManager, log)))
-	registerJobConfigRoutes(mux, jobsManager, admin, log)
-	registerGPGKeyRoutes(mux, gpgKeyring, jobsManager != nil && jobsManager.Editing(), admin, log)
+	mux.HandleFunc("POST /api/tokens", change(handleCreateAPIToken(tokens, log)))
+	mux.HandleFunc("DELETE /api/tokens/{id}", change(handleRevokeAPIToken(tokens, log)))
+	registerSettingsRoutes(mux, receiverManager, trustManager, settingsManager, admin, change, log)
+	registerJobConfigRoutes(mux, jobsManager, admin, change, log)
+	registerGPGKeyRoutes(mux, gpgKeyring, jobsManager != nil && jobsManager.Editing(), admin, change, log)
 
 	if registerExtraRoutes != nil {
 		registerExtraRoutes(mux)
@@ -182,6 +178,27 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.
 	log.Info("web UI listening", "addr", srv.addr)
 
 	return srv
+}
+
+// registerSettingsRoutes mounts /api/receiver-configs,
+// /api/trusted-servers, /api/notification-configs, and /api/report-config
+// on mux: each listing wrapped in admin, each change in change (admin plus
+// the audit log).
+func registerSettingsRoutes(mux *http.ServeMux, receiverManager *receiver.Manager, trustManager *trust.Manager, settingsManager *settings.Manager, admin, change func(http.HandlerFunc) http.HandlerFunc, log *slog.Logger) {
+	mux.HandleFunc("GET /api/receiver-configs", admin(handleListReceiverConfigs(receiverManager, log)))
+	mux.HandleFunc("POST /api/receiver-configs", change(handleCreateReceiverConfig(receiverManager, log)))
+	mux.HandleFunc("PUT /api/receiver-configs/{id}", change(handleUpdateReceiverConfig(receiverManager, log)))
+	mux.HandleFunc("DELETE /api/receiver-configs/{id}", change(handleDeleteReceiverConfig(receiverManager, log)))
+	mux.HandleFunc("GET /api/trusted-servers", admin(handleListTrustedServers(trustManager, log)))
+	mux.HandleFunc("POST /api/trusted-servers", change(handleCreateTrustedServer(trustManager, log)))
+	mux.HandleFunc("PUT /api/trusted-servers/{id}", change(handleUpdateTrustedServer(trustManager, log)))
+	mux.HandleFunc("DELETE /api/trusted-servers/{id}", change(handleDeleteTrustedServer(trustManager, log)))
+	mux.HandleFunc("GET /api/notification-configs", admin(handleListNotificationConfigs(settingsManager, log)))
+	mux.HandleFunc("POST /api/notification-configs", change(handleCreateNotificationConfig(settingsManager, log)))
+	mux.HandleFunc("PUT /api/notification-configs/{id}", change(handleUpdateNotificationConfig(settingsManager, log)))
+	mux.HandleFunc("DELETE /api/notification-configs/{id}", change(handleDeleteNotificationConfig(settingsManager, log)))
+	mux.HandleFunc("GET /api/report-config", admin(handleGetReportConfig(settingsManager, log)))
+	mux.HandleFunc("PUT /api/report-config", change(handleUpdateReportConfig(settingsManager, log)))
 }
 
 // logRequests wraps next, logging every request it handles at debug level

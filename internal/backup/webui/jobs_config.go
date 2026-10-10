@@ -277,9 +277,10 @@ func writeJobConfigError(w http.ResponseWriter, log *slog.Logger, action, key st
 }
 
 // registerJobConfigRoutes mounts /api/job-configs, /api/server-configs, and
-// /api/command-configs on mux, each wrapped in admin. With no manager (e.g.
-// a test that doesn't need them), nothing is mounted.
-func registerJobConfigRoutes(mux *http.ServeMux, m *jobs.Manager, admin func(http.HandlerFunc) http.HandlerFunc, log *slog.Logger) {
+// /api/command-configs on mux: each listing wrapped in admin, each change
+// in change (admin plus the audit log). With no manager (e.g. a test that
+// doesn't need them), nothing is mounted.
+func registerJobConfigRoutes(mux *http.ServeMux, m *jobs.Manager, admin, change func(http.HandlerFunc) http.HandlerFunc, log *slog.Logger) {
 	if m == nil {
 		return
 	}
@@ -288,13 +289,13 @@ func registerJobConfigRoutes(mux *http.ServeMux, m *jobs.Manager, admin func(htt
 	mux.HandleFunc("GET /api/server-configs", admin(handleListServerConfigs(m, log)))
 	mux.HandleFunc("GET /api/command-configs", admin(handleListCommandConfigs(m, log)))
 
-	registerMutationRoutes(mux, "/api/job-configs", jobMutation, m, admin, log)
-	registerMutationRoutes(mux, "/api/server-configs", serverMutation, m, admin, log)
-	registerMutationRoutes(mux, "/api/command-configs", commandMutation, m, admin, log)
+	registerMutationRoutes(mux, "/api/job-configs", jobMutation, m, change, log)
+	registerMutationRoutes(mux, "/api/server-configs", serverMutation, m, change, log)
+	registerMutationRoutes(mux, "/api/command-configs", commandMutation, m, change, log)
 }
 
-func registerMutationRoutes[T any](mux *http.ServeMux, path string, c configMutation[T], m *jobs.Manager, admin func(http.HandlerFunc) http.HandlerFunc, log *slog.Logger) {
-	mux.HandleFunc("POST "+path, admin(c.handleCreate(m, log)))
-	mux.HandleFunc("PUT "+path+"/{key}", admin(c.handleUpdate(m, log)))
-	mux.HandleFunc("DELETE "+path+"/{key}", admin(c.handleDelete(m, log)))
+func registerMutationRoutes[T any](mux *http.ServeMux, path string, c configMutation[T], m *jobs.Manager, change func(http.HandlerFunc) http.HandlerFunc, log *slog.Logger) {
+	mux.HandleFunc("POST "+path, change(c.handleCreate(m, log)))
+	mux.HandleFunc("PUT "+path+"/{key}", change(c.handleUpdate(m, log)))
+	mux.HandleFunc("DELETE "+path+"/{key}", change(c.handleDelete(m, log)))
 }

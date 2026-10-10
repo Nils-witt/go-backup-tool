@@ -84,7 +84,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err := gdb.WithContext(ctx).AutoMigrate(
 		&jobRunModel{}, &targetRunModel{}, &outstandingTargetUploadModel{},
 		&objectModel{},
-		&loginEventModel{}, &downloadEventModel{}, &receiverEventModel{},
+		&loginEventModel{}, &downloadEventModel{}, &receiverEventModel{}, &auditEventModel{},
 		&apiTokenModel{}, &tokenSigningKeyModel{},
 		&receiverModel{}, &notificationModel{}, &reportSettingsModel{},
 		&trustedServerModel{},

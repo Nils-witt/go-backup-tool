@@ -36,6 +36,7 @@ export interface AuthState {
   canViewJobRunLog: boolean;
   canViewTargetRunLog: boolean;
   canViewReceiverLog: boolean;
+  canViewAuditLog: boolean;
 }
 
 // AuthContext carries the AuthState AuthProvider (AuthContext.tsx) builds.

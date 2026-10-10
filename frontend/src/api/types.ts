@@ -72,6 +72,20 @@ export interface LoginEventJSON {
   detail: string;
 }
 
+export interface AuditEventJSON {
+  at: string;
+  username: string;
+  action: string;
+  resource: string;
+  target: string;
+  method: string;
+  path: string;
+  status: number;
+  success: boolean;
+  remote_addr: string;
+  detail: string;
+}
+
 export interface DownloadEventJSON {
   at: string;
   username: string;

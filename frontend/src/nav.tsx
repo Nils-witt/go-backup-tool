@@ -16,6 +16,7 @@ import ScheduleIcon from "@mui/icons-material/Schedule";
 import DnsIcon from "@mui/icons-material/Dns";
 import CodeIcon from "@mui/icons-material/Code";
 import EnhancedEncryptionIcon from "@mui/icons-material/EnhancedEncryption";
+import ManageHistoryIcon from "@mui/icons-material/ManageHistory";
 import type { AuthState } from "./auth/useAuth";
 
 export interface NavItem {
@@ -132,6 +133,12 @@ export const NAV_GROUPS: NavGroup[] = [
         label: "Receiver log",
         icon: <CloudUploadIcon />,
         visible: (s) => s.canViewReceiverLog,
+      },
+      {
+        to: "/logs/audit",
+        label: "Audit log",
+        icon: <ManageHistoryIcon />,
+        visible: (s) => s.canViewAuditLog,
       },
     ],
   },

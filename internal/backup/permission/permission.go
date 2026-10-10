@@ -1,6 +1,6 @@
 // Package permission defines the web UI dashboard's permission bitmask
 // (view/download/admin/login-log/download-log/job-run-log/target-run-log/
-// receiver-log) and its config-file name parsing.
+// receiver-log/audit-log) and its config-file name parsing.
 package permission
 
 import (
@@ -24,8 +24,9 @@ const (
 	// (PermissionViewLoginLog), viewing the download history
 	// (PermissionViewDownloadLog), viewing the job run log
 	// (PermissionViewJobRunLog), viewing the target run log
-	// (PermissionViewTargetRunLog), and viewing the receiver log
-	// (PermissionViewReceiverLog) — those five are granted separately.
+	// (PermissionViewTargetRunLog), viewing the receiver log
+	// (PermissionViewReceiverLog), and viewing the audit log
+	// (PermissionViewAuditLog) — those six are granted separately.
 	PermissionView Permission = 1 << iota
 
 	// PermissionDownload lets a session mint a download ticket and pull a
@@ -38,10 +39,11 @@ const (
 	// PermissionAdmin lets a session retry a job's failed targets (see
 	// handleRetryFailedTargets in webui.go). It implies PermissionView, PermissionDownload,
 	// PermissionViewLoginLog, PermissionViewDownloadLog,
-	// PermissionViewJobRunLog, PermissionViewTargetRunLog, and
-	// PermissionViewReceiverLog (see
+	// PermissionViewJobRunLog, PermissionViewTargetRunLog,
+	// PermissionViewReceiverLog, and PermissionViewAuditLog (see
 	// CanView/CanDownload/CanViewLoginLog/CanViewDownloadLog/
-	// CanViewJobRunLog/CanViewTargetRunLog/CanViewReceiverLog) — there'd be
+	// CanViewJobRunLog/CanViewTargetRunLog/CanViewReceiverLog/
+	// CanViewAuditLog) — there'd be
 	// reason to grant admin without also granting the rest of the dashboard.
 	PermissionAdmin
 
@@ -81,6 +83,14 @@ const (
 	// so a session holding only PermissionView can't see it; implied by
 	// PermissionAdmin (see CanViewReceiverLog).
 	PermissionViewReceiverLog
+
+	// PermissionViewAuditLog lets a session see the dashboard's audit log
+	// (see handleAuditEvents in webui.go) — every change a signed-in user
+	// made (or tried to make) through the web UI, who made it, and when.
+	// Granted independently of PermissionView, so a session holding only
+	// PermissionView can't see it; implied by PermissionAdmin (see
+	// CanViewAuditLog).
+	PermissionViewAuditLog
 )
 
 // permissionNames maps each individual bit to its wire/config name, in
@@ -99,6 +109,7 @@ var permissionNames = []struct {
 	{PermissionViewJobRunLog, "job-run-log"},
 	{PermissionViewTargetRunLog, "target-run-log"},
 	{PermissionViewReceiverLog, "receiver-log"},
+	{PermissionViewAuditLog, "audit-log"},
 }
 
 // CanView reports whether p includes the ability to view dashboard data —
@@ -152,6 +163,13 @@ func (p Permission) CanViewTargetRunLog() bool {
 // PermissionAdmin.
 func (p Permission) CanViewReceiverLog() bool {
 	return p&(PermissionViewReceiverLog|PermissionAdmin) != 0
+}
+
+// CanViewAuditLog reports whether p includes the ability to see the
+// dashboard's audit log — either granted directly, or implied by
+// PermissionAdmin.
+func (p Permission) CanViewAuditLog() bool {
+	return p&(PermissionViewAuditLog|PermissionAdmin) != 0
 }
 
 // Names returns the individually-granted permission names in p, in

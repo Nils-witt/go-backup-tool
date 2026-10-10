@@ -301,7 +301,7 @@ func (s *Store) ListReceiverErrorEvents(ctx context.Context, start, end time.Tim
 	return events, nil
 }
 
-// PruneEvents deletes every login, download, and receiver event recorded
+// PruneEvents deletes every login, download, receiver, and audit event recorded
 // before cutoff, returning how many rows it removed in total. These logs
 // are append-only otherwise, so without a periodic prune they'd grow for
 // the life of the install (receiver_events gains a row per receiver
@@ -310,7 +310,7 @@ func (s *Store) PruneEvents(ctx context.Context, cutoff time.Time) (int64, error
 	var total int64
 
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		for _, m := range []any{&loginEventModel{}, &downloadEventModel{}, &receiverEventModel{}} {
+		for _, m := range []any{&loginEventModel{}, &downloadEventModel{}, &receiverEventModel{}, &auditEventModel{}} {
 			res := tx.Where("at < ?", cutoff.UTC()).Delete(m)
 			if res.Error != nil {
 				return res.Error

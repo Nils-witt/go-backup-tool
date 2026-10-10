@@ -27,19 +27,20 @@ type gpgKeyImportJSON struct {
 	Armored string `json:"armored"`
 }
 
-// registerGPGKeyRoutes mounts /api/gpg-keys on mux, wrapped in admin.
+// registerGPGKeyRoutes mounts /api/gpg-keys on mux: the listing wrapped in
+// admin, an import in change (admin plus the audit log).
 // Adding a key is only allowed with editing (webui.job-editing): jobs often
 // name a recipient by email and encrypt with --trust-model always, so a new
 // key carrying a recipient's address could receive that job's backups —
 // as much a change to the jobs as editing them. With no keyring (e.g. a
 // test that doesn't need it), nothing is mounted.
-func registerGPGKeyRoutes(mux *http.ServeMux, keyring *gpgkeys.Keyring, editing bool, admin func(http.HandlerFunc) http.HandlerFunc, log *slog.Logger) {
+func registerGPGKeyRoutes(mux *http.ServeMux, keyring *gpgkeys.Keyring, editing bool, admin, change func(http.HandlerFunc) http.HandlerFunc, log *slog.Logger) {
 	if keyring == nil {
 		return
 	}
 
 	mux.HandleFunc("GET /api/gpg-keys", admin(handleListGPGKeys(keyring, editing, log)))
-	mux.HandleFunc("POST /api/gpg-keys", admin(handleImportGPGKey(keyring, editing, log)))
+	mux.HandleFunc("POST /api/gpg-keys", change(handleImportGPGKey(keyring, editing, log)))
 }
 
 // handleListGPGKeys serves GET /api/gpg-keys (admin only).
