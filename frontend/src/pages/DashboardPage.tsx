@@ -14,7 +14,7 @@ import { RemoteBackendsDialog } from "../components/RemoteBackendsDialog";
 import { StatusChip } from "../components/StatusChip";
 import { SummaryTile } from "../components/StatusSummary";
 import { TopologyChart } from "../components/TopologyChart";
-import { countStates, type Sourced } from "../lib/status";
+import { countStates, sourcedKey, type Sourced } from "../lib/status";
 import { useRemoteBackends } from "../lib/remoteBackends";
 import { fmtRelative, fmtTime, hasTime } from "../lib/format";
 import Button from "@mui/material/Button";
@@ -110,16 +110,30 @@ export function DashboardPage() {
     session.canViewJobRunLog,
     runHistoryPollMs,
   );
+  // Every job whose instance's run log is readable gets an entry, empty if
+  // it hasn't run yet; the rest show no run history.
   const runsByJob = useMemo(() => {
-    if (!session.canViewJobRunLog) return undefined;
     const m = new Map<string, JobRunEventJSON[]>();
-    for (const r of runs) {
-      const list = m.get(r.job_name);
-      if (list) list.push(r);
-      else m.set(r.job_name, [r]);
+    const readable = new Set<string | undefined>();
+    const add = (source: string | undefined, list: JobRunEventJSON[] | undefined) => {
+      if (!list) return;
+      readable.add(source);
+      for (const r of list) {
+        const key = sourcedKey(source, r.job_name);
+        const existing = m.get(key);
+        if (existing) existing.push(r);
+        else m.set(key, [r]);
+      }
+    };
+    add(localName, session.canViewJobRunLog ? runs : undefined);
+    for (const r of remotes) add(r.name, r.runs);
+
+    for (const j of jobs) {
+      const key = sourcedKey(j.source, j.name);
+      if (readable.has(j.source) && !m.has(key)) m.set(key, []);
     }
     return m;
-  }, [runs, session.canViewJobRunLog]);
+  }, [runs, session.canViewJobRunLog, remotes, localName, jobs]);
 
   const { jobCounts, targetCounts, targets, nextJob } = useMemo(() => {
     const allTargets = jobs.flatMap((j) => j.targets || []);
