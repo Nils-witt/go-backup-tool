@@ -33,6 +33,10 @@ export interface TopologyEdge {
 export interface Topology {
   nodes: TopologyNode[];
   edges: TopologyEdge[];
+  // paths lists each route a target's uploads actually take — job, server
+  // and, for a remote target, a receiver it delivers to — as the keys of
+  // the nodes and edges along it.
+  paths: string[][];
 }
 
 // Most severe first: an edge or server carrying several targets shows the
@@ -87,22 +91,27 @@ export function buildTopology(
   const nodes = new Map<string, TopologyNode>();
   const edges = new Map<string, TopologyEdge>();
 
+  const paths = new Map<string, string[]>();
+
   const addEdge = (
     from: string,
     to: string,
     state: RunState,
     bucket: string,
     ambiguous = false,
-  ) => {
+  ): string => {
     const key = from + "\u0001" + to;
     const e = edges.get(key);
     if (!e) {
       edges.set(key, { key, from, to, state, label: bucket, ambiguous });
-      return;
+      return key;
     }
     e.state = worstState(e.state, state);
     if (!e.label.split(", ").includes(bucket)) e.label += ", " + bucket;
+    return key;
   };
+
+  const addPath = (keys: string[]) => paths.set(keys.join("\u0001"), keys);
 
   const receiversById = new Map<string, Sourced<ReceiverSnapshot>[]>();
   for (const r of receivers) {
@@ -113,7 +122,7 @@ export function buildTopology(
 
   // Receiver nodes are added in the order their senders reach them, so the
   // columns line up and edges cross as little as possible; receivers
-  // nothing in view sends to follow at the end.
+  // nothing in view sends to follow at the end of their instance's group.
   const receiverNodes = new Map<string, TopologyNode>();
   const addReceiver = (r: Sourced<ReceiverSnapshot>): string => {
     const key = nodeKey("receiver", r.source, r.id);
@@ -158,44 +167,47 @@ export function buildTopology(
           source: j.source,
           state: t.state,
         });
-      addEdge(jobKey, serverKey, t.state, t.bucket);
+      const upload = [jobKey, addEdge(jobKey, serverKey, t.state, t.bucket), serverKey];
 
-      if (t.kind !== "remote") continue;
-
-      const matches = receiversFor(t, receiversById.get(t.bucket) ?? []);
+      const matches = t.kind === "remote" ? receiversFor(t, receiversById.get(t.bucket) ?? []) : [];
+      if (!matches.length) addPath(upload);
       for (const r of matches) {
-        addEdge(serverKey, addReceiver(r), t.state, t.bucket, matches.length > 1);
+        const receiverKey = addReceiver(r);
+        const delivery = addEdge(serverKey, receiverKey, t.state, t.bucket, matches.length > 1);
+        addPath([...upload, delivery, receiverKey]);
       }
     }
   }
 
   for (const r of receivers) addReceiver(r);
 
-  return { nodes: [...nodes.values(), ...receiverNodes.values()], edges: [...edges.values()] };
+  // The chart groups receivers by the instance they run on, so each
+  // instance's receivers are kept together, instances in the order their
+  // first receiver was reached.
+  const bySource = new Map<string | undefined, TopologyNode[]>();
+  for (const n of receiverNodes.values()) {
+    const group = bySource.get(n.source);
+    if (group) group.push(n);
+    else bySource.set(n.source, [n]);
+  }
+
+  return {
+    nodes: [...nodes.values(), ...[...bySource.values()].flat()],
+    edges: [...edges.values()],
+    paths: [...paths.values()],
+  };
 }
 
-// connectedKeys returns every node and edge on a path through key: its
-// upstream senders and downstream destinations, for hover highlighting.
+// connectedKeys returns every node and edge on a path through key, for
+// hover highlighting. Only the routes targets actually take count: a job
+// lights the receivers its own targets deliver to, not every receiver its
+// servers reach for other jobs, and a receiver lights only the jobs
+// delivering to it. A node on no path (a receiver nothing sends to) lights
+// just itself.
 export function connectedKeys(topology: Topology, key: string): Set<string> {
   const seen = new Set<string>([key]);
-  const walk = (start: string, forward: boolean) => {
-    const queue = [start];
-    while (queue.length) {
-      const k = queue.shift()!;
-      for (const e of topology.edges) {
-        const [here, there] = forward ? [e.from, e.to] : [e.to, e.from];
-        if (here !== k) continue;
-        seen.add(e.key);
-        if (!seen.has(there)) {
-          seen.add(there);
-          queue.push(there);
-        }
-      }
-    }
-  };
-
-  walk(key, true);
-  walk(key, false);
-
+  for (const path of topology.paths) {
+    if (path.includes(key)) for (const k of path) seen.add(k);
+  }
   return seen;
 }

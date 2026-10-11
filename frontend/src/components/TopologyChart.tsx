@@ -43,11 +43,15 @@ interface Anchors {
 const NodeCard = memo(function NodeCard({
   node,
   dimmed,
+  hideSource,
   onHover,
   nodeRef,
 }: {
   node: TopologyNode;
   dimmed: boolean;
+  // hideSource omits the instance name, for a card under a group header
+  // that already shows it.
+  hideSource?: boolean;
   onHover: (key: string | null) => void;
   nodeRef: (el: HTMLElement | null) => (() => void) | undefined;
 }) {
@@ -87,7 +91,7 @@ const NodeCard = memo(function NodeCard({
         </Typography>
       </Stack>
       <Typography variant="caption" color="text.secondary" noWrap component="div">
-        {[node.source, node.detail].filter(Boolean).join(" · ") || " "}
+        {[hideSource ? undefined : node.source, node.detail].filter(Boolean).join(" · ") || " "}
       </Typography>
     </Paper>
   );
@@ -116,9 +120,22 @@ function sameAnchors(a: Anchors | null, b: Anchors): boolean {
   });
 }
 
+// groupBySource splits nodes into runs of the same source instance, which
+// buildTopology already keeps adjacent for the receiver column.
+function groupBySource(nodes: TopologyNode[]): { source?: string; nodes: TopologyNode[] }[] {
+  const groups: { source?: string; nodes: TopologyNode[] }[] = [];
+  for (const n of nodes) {
+    const last = groups[groups.length - 1];
+    if (last && last.source === n.source) last.nodes.push(n);
+    else groups.push({ source: n.source, nodes: [n] });
+  }
+  return groups;
+}
+
 // TopologyChart draws which job uploads to which server, and which
 // receiver each remote server delivers to, as three columns joined by
-// curves colored by the state of the targets they carry. Hovering a node
+// curves colored by the state of the targets they carry. Receivers are
+// framed by the instance they run on. Hovering a node
 // highlights every path through it.
 export function TopologyChart({
   jobs,
@@ -180,6 +197,17 @@ export function TopologyChart({
     ro.observe(container);
     return () => ro.disconnect();
   }, [measure]);
+
+  const renderNode = (n: TopologyNode, hideSource = false) => (
+    <NodeCard
+      key={n.key}
+      node={n}
+      dimmed={highlight !== null && !highlight.has(n.key)}
+      hideSource={hideSource}
+      onHover={setHovered}
+      nodeRef={registerNode}
+    />
+  );
 
   if (!topology.nodes.length) {
     return (
@@ -248,15 +276,40 @@ export function TopologyChart({
                 </Typography>
                 <Stack spacing={1.5}>
                   {nodes.length ? (
-                    nodes.map((n) => (
-                      <NodeCard
-                        key={n.key}
-                        node={n}
-                        dimmed={highlight !== null && !highlight.has(n.key)}
-                        onHover={setHovered}
-                        nodeRef={registerNode}
-                      />
-                    ))
+                    column === "receiver" && nodes.some((n) => n.source) ? (
+                      groupBySource(nodes).map((g) => {
+                        const dimmed =
+                          highlight !== null && !g.nodes.some((n) => highlight.has(n.key));
+                        return (
+                          <Box
+                            key={g.source ?? ""}
+                            sx={{
+                              border: 1,
+                              borderColor: "divider",
+                              borderStyle: "dashed",
+                              borderRadius: 1,
+                              p: 1,
+                              pt: 0.5,
+                              opacity: dimmed ? 0.5 : 1,
+                              transition: "opacity .15s",
+                            }}
+                          >
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                              component="div"
+                              noWrap
+                              sx={{ fontWeight: 600, mb: 0.5 }}
+                            >
+                              {g.source ?? "unknown instance"} · {g.nodes.length}
+                            </Typography>
+                            <Stack spacing={1}>{g.nodes.map((n) => renderNode(n, true))}</Stack>
+                          </Box>
+                        );
+                      })
+                    ) : (
+                      nodes.map((n) => renderNode(n))
+                    )
                   ) : (
                     <Typography variant="body2" color="text.secondary">
                       {empty}
