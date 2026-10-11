@@ -8,8 +8,10 @@ import {
 } from "../lib/topology";
 import type { Sourced } from "../lib/status";
 import Box from "@mui/material/Box";
+import FormControlLabel from "@mui/material/FormControlLabel";
 import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
+import Switch from "@mui/material/Switch";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import { useTheme } from "@mui/material/styles";
@@ -21,6 +23,25 @@ const COLUMNS: { column: TopologyColumn; title: string; empty: string }[] = [
 ];
 
 const LEGEND: RunState[] = ["ok", "running", "incomplete", "failed", "idle"];
+
+// Whether the Destinations column is shown is a per-browser preference.
+const showServersKey = "gbt.topologyShowServers";
+
+function loadShowServers(): boolean {
+  try {
+    return localStorage.getItem(showServersKey) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+function saveShowServers(show: boolean) {
+  try {
+    localStorage.setItem(showServersKey, String(show));
+  } catch {
+    // Storage unavailable: the choice simply doesn't persist.
+  }
+}
 
 // The horizontal gap between columns, which the connecting curves span.
 const gutter = 88;
@@ -136,7 +157,8 @@ function groupBySource(nodes: TopologyNode[]): { source?: string; nodes: Topolog
 // receiver each remote server delivers to, as three columns joined by
 // curves colored by the state of the targets they carry. Receivers are
 // framed by the instance they run on. Hovering a node
-// highlights every path through it.
+// highlights every path through it. The Destinations column can be hidden,
+// joining jobs straight to the receivers they deliver to.
 export function TopologyChart({
   jobs,
   receivers,
@@ -145,14 +167,19 @@ export function TopologyChart({
   receivers: Sourced<ReceiverSnapshot>[];
 }) {
   const theme = useTheme();
+  const [showServers, setShowServers] = useState(loadShowServers);
+  const columns = useMemo(
+    () => (showServers ? COLUMNS : COLUMNS.filter((c) => c.column !== "server")),
+    [showServers],
+  );
   const { topology, byColumn, layoutKey } = useMemo(() => {
-    const topology = buildTopology(jobs, receivers);
+    const topology = buildTopology(jobs, receivers, { hideServers: !showServers });
     const byColumn: Record<TopologyColumn, TopologyNode[]> = { job: [], server: [], receiver: [] };
     for (const n of topology.nodes) byColumn[n.column].push(n);
     // Only the set and order of nodes moves them; their states don't.
     const layoutKey = topology.nodes.map((n) => n.key).join("\u0002");
     return { topology, byColumn, layoutKey };
-  }, [jobs, receivers]);
+  }, [jobs, receivers, showServers]);
   const [hovered, setHovered] = useState<string | null>(null);
   const highlight = useMemo(
     () => (hovered ? connectedKeys(topology, hovered) : null),
@@ -219,15 +246,29 @@ export function TopologyChart({
 
   return (
     <>
+      <FormControlLabel
+        control={
+          <Switch
+            size="small"
+            checked={showServers}
+            onChange={(e) => {
+              setShowServers(e.target.checked);
+              saveShowServers(e.target.checked);
+            }}
+          />
+        }
+        label={<Typography variant="body2">Show destinations</Typography>}
+        sx={{ mb: 1 }}
+      />
       <Box sx={{ overflowX: "auto", pb: 1 }}>
         <Box
           ref={containerRef}
           sx={{
             position: "relative",
             display: "grid",
-            gridTemplateColumns: "repeat(3, minmax(180px, 1fr))",
+            gridTemplateColumns: `repeat(${columns.length}, minmax(180px, 1fr))`,
             columnGap: `${gutter}px`,
-            minWidth: 3 * 180 + 2 * gutter,
+            minWidth: columns.length * 180 + (columns.length - 1) * gutter,
           }}
         >
           {anchors ? (
@@ -262,7 +303,7 @@ export function TopologyChart({
             </svg>
           ) : null}
 
-          {COLUMNS.map(({ column, title, empty }) => {
+          {columns.map(({ column, title, empty }) => {
             const nodes = byColumn[column];
             return (
               <Box key={column} sx={{ minWidth: 0 }}>

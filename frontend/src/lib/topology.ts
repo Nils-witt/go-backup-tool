@@ -51,6 +51,13 @@ function nodeKey(column: TopologyColumn, source: string | undefined, id: string)
   return column + ":" + sourcedKey(source, id);
 }
 
+export interface TopologyOptions {
+  // hideServers leaves the server column out: jobs connect straight to the
+  // receivers their remote targets deliver to, and targets reaching no
+  // receiver in view draw no edge.
+  hideServers?: boolean;
+}
+
 // receiversFor picks which of candidates — every receiver in view with the
 // remote target t's bucket as its id — t delivers to. A target whose server
 // names its destination's server_uuid connects only to that instance's
@@ -87,6 +94,7 @@ function receiversFor(
 export function buildTopology(
   jobs: Sourced<JobSnapshot>[],
   receivers: Sourced<ReceiverSnapshot>[],
+  { hideServers = false }: TopologyOptions = {},
 ): Topology {
   const nodes = new Map<string, TopologyNode>();
   const edges = new Map<string, TopologyEdge>();
@@ -154,6 +162,17 @@ export function buildTopology(
     });
 
     for (const t of j.targets || []) {
+      const matches = t.kind === "remote" ? receiversFor(t, receiversById.get(t.bucket) ?? []) : [];
+
+      if (hideServers) {
+        for (const r of matches) {
+          const receiverKey = addReceiver(r);
+          const delivery = addEdge(jobKey, receiverKey, t.state, t.bucket, matches.length > 1);
+          addPath([jobKey, delivery, receiverKey]);
+        }
+        continue;
+      }
+
       // Servers are per instance: two instances may each name one "nas".
       const serverKey = nodeKey("server", j.source, t.server);
       const server = nodes.get(serverKey);
@@ -169,7 +188,6 @@ export function buildTopology(
         });
       const upload = [jobKey, addEdge(jobKey, serverKey, t.state, t.bucket), serverKey];
 
-      const matches = t.kind === "remote" ? receiversFor(t, receiversById.get(t.bucket) ?? []) : [];
       if (!matches.length) addPath(upload);
       for (const r of matches) {
         const receiverKey = addReceiver(r);
