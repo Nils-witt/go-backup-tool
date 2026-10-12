@@ -166,8 +166,8 @@ func (s *Store) ListDownloadEvents(ctx context.Context, limit int) ([]DownloadEv
 }
 
 // ReceiverEventReceive and ReceiverEventDelete are the kind values
-// SaveReceiverEvent records, mirroring the two receiver API operations
-// (receive/delete).
+// SaveReceiverEvent records. The receiver API no longer accepts deletes, so
+// ReceiverEventDelete only appears on events recorded before that.
 const (
 	ReceiverEventReceive = "receive"
 	ReceiverEventDelete  = "delete"

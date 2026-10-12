@@ -179,7 +179,7 @@ func TestReceiverTokenReplayRejected(t *testing.T) {
 		body     string
 		expected int
 	}{
-		{name: "delete", method: http.MethodDelete, path: "db.gpg", expected: http.StatusUnauthorized},
+		{name: "delete", method: http.MethodDelete, path: "db.gpg", expected: http.StatusMethodNotAllowed},
 		{name: "other key", method: http.MethodPut, path: "other.gpg?" + creationTime, body: "genuine", expected: http.StatusUnauthorized},
 		{name: "backdated creation time", method: http.MethodPut, path: "db.gpg?" + backdated, body: "genuine", expected: http.StatusUnauthorized},
 		{name: "different body", method: http.MethodPut, path: "db.gpg?" + creationTime, body: "attacker", expected: http.StatusBadRequest},

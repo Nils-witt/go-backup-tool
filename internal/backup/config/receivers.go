@@ -16,7 +16,7 @@ import (
 
 // FileReceiver is one top-level receivers: entry, defining a path this
 // instance accepts incoming objects into over its receiver API (see
-// webui.go's handleReceiveObject/handleDeleteObject), for pairing with
+// receiver.HandleReceiveObject), for pairing with
 // another go-backup-tool instance's type: remote target. Only reachable
 // when listen: is set, since the receiver API is served by the same HTTP
 // server as the web UI dashboard.

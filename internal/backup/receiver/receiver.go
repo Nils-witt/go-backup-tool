@@ -21,7 +21,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
-// RegisterRoutes mounts the receiver API's PUT/DELETE object endpoints on
+// RegisterRoutes mounts the receiver API's PUT object endpoint on
 // mux, for the composition root to combine onto the same mux/port the web
 // UI dashboard serves from (see webui.StartWebUI's registerExtraRoutes
 // parameter). status is the live receiver status store, shared with
@@ -29,7 +29,6 @@ import (
 // write here is reflected there immediately.
 func RegisterRoutes(mux *http.ServeMux, receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) {
 	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(receivers, status, log, db))
-	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", HandleDeleteObject(receivers, status, log, db))
 }
 
 // HandleReceiveObject serves PUT /api/v1/objects/{id}/{key...}: after
@@ -106,37 +105,6 @@ func HandleReceiveObject(receivers *backup.ReceiverRegistry, status *backup.Rece
 
 		log.Info("receiver: object written", "id", recv.ID, "key", key, "path", backup.LocalObjectPath(cfg, t))
 		w.WriteHeader(http.StatusCreated)
-	}
-}
-
-// HandleDeleteObject serves DELETE /api/v1/objects/{id}/{key...}, the
-// receiver API's client-facing counterpart to pipeline's deleteRemoteObject.
-// Every attempt is recorded to status, win or lose, so /api/receivers
-// reflects it.
-func HandleDeleteObject(receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		recv, cfg, t, key, _, ok := resolveReceiverRequest(w, r, receivers, db, log)
-		if !ok {
-			return
-		}
-
-		if err := backup.DeleteLocalObject(cfg, t); err != nil {
-			log.Warn("receiver: deleting object failed", "id", recv.ID, "key", key, "err", err)
-			status.Record(recv.ID, key, err)
-			recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, store.ReceiverEventDelete, key, 0, err)
-			http.Error(w, "deleting object failed", http.StatusInternalServerError)
-
-			return
-		}
-
-		if err := backup.RemoveRetentionRecord(r.Context(), cfg, t); err != nil {
-			log.Warn("receiver: removing retention record failed", "id", recv.ID, "key", key, "err", err)
-		}
-
-		status.Record(recv.ID, key, nil)
-		recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, store.ReceiverEventDelete, key, 0, nil)
-		log.Info("receiver: object deleted", "id", recv.ID, "key", key, "path", backup.LocalObjectPath(cfg, t))
-		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
@@ -303,11 +271,9 @@ func warnUnboundTokenOnce(receiverID, token string, log *slog.Logger) {
 // resolveReceiverRequest authorizes r against receivers (see
 // authorizeReceiver) and sanitizes its {key} path value (see
 // backup.SanitizeObjectKey), writing an error response and reporting ok as
-// false if either step fails. On success it also builds the cfg/t pair
-// HandleReceiveObject/HandleDeleteObject both need to reuse
-// WriteLocalObject/DeleteLocalObject as a type: local target would (see
-// backup.ReceiverTarget). Shared by both handlers, which otherwise duplicate
-// this exact preamble.
+// false if any step fails. On success it also builds the cfg/t pair
+// HandleReceiveObject needs to reuse WriteLocalObject as a type: local
+// target would (see backup.ReceiverTarget).
 func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry, db *store.Store, log *slog.Logger) (recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, key string, bound remoteAuth.Request, ok bool) {
 	recv, bound, ok = authorizeReceiver(w, r, receivers, log)
 	if !ok {

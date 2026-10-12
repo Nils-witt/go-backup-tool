@@ -1,6 +1,6 @@
 // Package receiver implements go-backup-tool's receiver API: the HTTP
-// endpoints another go-backup-tool instance's type: remote target uploads
-// to and deletes from (see HandleReceiveObject/HandleDeleteObject), plus the
+// endpoint another go-backup-tool instance's type: remote target uploads
+// to (see HandleReceiveObject), plus the
 // background work that keeps a receiver's state current: seeding its live
 // status from persisted history at startup, sweeping expired objects, and
 // notifying a configured webhook once a receiver goes stale.
@@ -50,7 +50,7 @@ func seedReceiverStatus(ctx context.Context, db *store.Store, id string, statusS
 }
 
 // recordReceiverEventBestEffort appends a receiver_events row for one
-// HandleReceiveObject/HandleDeleteObject request, win or lose, so the daily
+// HandleReceiveObject request, win or lose, so the daily
 // report (see pipeline.RunDailyReportLoop) can summarize receiver activity
 // later. A nil db (the state db couldn't be opened at startup) is a no-op,
 // matching every other state-db write; a write failure is logged rather

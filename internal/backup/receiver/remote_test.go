@@ -20,14 +20,13 @@ import (
 
 // newReceiverMux builds the same mux backup.StartWebUI registers the
 // receiver routes on, without a real listener, so an interop test can
-// exercise the client (UploadToRemote/DeleteRemoteObject) against the real
+// exercise the client (UploadToRemote) against the real
 // server-side handlers rather than a hand-rolled stand-in.
 func newReceiverMux(receivers map[string]config.ResolvedReceiver) *http.ServeMux {
 	status := backup.NewReceiverStatusStore(receivers)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(backup.NewReceiverRegistry(receivers), status, discardLogger, nil))
-	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", HandleDeleteObject(backup.NewReceiverRegistry(receivers), status, discardLogger, nil))
 
 	return mux
 }
@@ -60,14 +59,6 @@ func TestRemoteTargetInteropWithReceiver(t *testing.T) {
 
 	if string(got) != content {
 		t.Errorf("received content = %q, want %q", got, content)
-	}
-
-	if err := pipeline.DeleteRemoteObject(t.Context(), cfg, tgt); err != nil {
-		t.Fatalf("pipeline.DeleteRemoteObject() unexpected error: %v", err)
-	}
-
-	if _, err := os.Stat(dir + "/backup-20260101.gpg"); err == nil {
-		t.Error("object still present on the receiver after pipeline.DeleteRemoteObject()")
 	}
 }
 
@@ -273,7 +264,7 @@ func TestRemoteTargetInteropUnknownID(t *testing.T) {
 }
 
 // newReceiverMuxWithDB is newReceiverMux, but wiring db through to
-// HandleReceiveObject/HandleDeleteObject instead of nil, so a
+// HandleReceiveObject instead of nil, so a
 // test can inspect what they recorded to it (retention tracking,
 // receiver_events).
 func newReceiverMuxWithDB(receivers map[string]config.ResolvedReceiver, db *store.Store) *http.ServeMux {
@@ -281,12 +272,11 @@ func newReceiverMuxWithDB(receivers map[string]config.ResolvedReceiver, db *stor
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(backup.NewReceiverRegistry(receivers), status, discardLogger, db))
-	mux.HandleFunc("DELETE /api/v1/objects/{id}/{key...}", HandleDeleteObject(backup.NewReceiverRegistry(receivers), status, discardLogger, db))
 
 	return mux
 }
 
-func TestHandleReceiveAndDeleteObjectRecordReceiverEvents(t *testing.T) {
+func TestHandleReceiveObjectRecordsReceiverEvent(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -313,10 +303,6 @@ func TestHandleReceiveAndDeleteObjectRecordReceiverEvents(t *testing.T) {
 
 	if err := pipeline.UploadToRemote(t.Context(), cfg, tgt, strings.NewReader(content)); err != nil {
 		t.Fatalf("pipeline.UploadToRemote() error: %v", err)
-	}
-
-	if err := pipeline.DeleteRemoteObject(t.Context(), cfg, tgt); err != nil {
-		t.Fatalf("pipeline.DeleteRemoteObject() error: %v", err)
 	}
 
 	summaries, err := db.SummarizeReceiverEvents(t.Context(), time.Now().Add(-time.Hour), time.Now().Add(time.Hour))

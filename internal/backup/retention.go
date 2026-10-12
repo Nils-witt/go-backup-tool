@@ -68,18 +68,6 @@ func RecordObjectWrite(ctx context.Context, cfg *config.Config, t *config.Target
 	return nil
 }
 
-// RemoveRetentionRecord removes any retention record for the object at
-// LocalObjectPath(cfg, t), used when that object's write is rolled back
-// (see handleDeleteObject in webui.go) so the database doesn't go on
-// tracking a file that no longer exists.
-func RemoveRetentionRecord(ctx context.Context, cfg *config.Config, t *config.Target) error {
-	if t.Retention <= 0 || cfg.StateDB == nil {
-		return nil
-	}
-
-	return cfg.StateDB.DeleteObjectWrite(ctx, LocalObjectPath(cfg, t))
-}
-
 // SweepRetentionForTarget sweeps db for t's server, for callers (see
 // sweepStartupRetention/sweepStartupReceiverRetention) that aren't already
 // in the middle of a write. A nil db (the state db couldn't be opened at

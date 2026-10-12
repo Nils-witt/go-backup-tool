@@ -543,7 +543,8 @@ paths:
       summary: Recent receiver API requests
       operationId: getReceiverEvents
       description: >
-        The most recently recorded receiver API requests (PUT or DELETE, up
+        The most recently recorded receiver API requests (PUT; DELETE for
+        events recorded before deletion was removed; up
         to `webui.event-log-limit:`, default 200) across every receiver, win
         or lose, newest first. Requires the `receiver-log` permission,
         independent of `view`.
@@ -1531,43 +1532,6 @@ paths:
             text/plain:
               schema:
                 type: string
-    delete:
-      tags: [receiver-api]
-      summary: Delete an object from a receiver
-      operationId: deleteObject
-      description: The client-facing counterpart to the backup pipeline's remote-delete step.
-      security:
-        - receiverBearer: []
-      parameters:
-        - $ref: "#/components/parameters/ReceiverId"
-        - $ref: "#/components/parameters/ObjectKey"
-      responses:
-        "204":
-          description: Object deleted
-        "400":
-          description: Invalid object key
-          content:
-            text/plain:
-              schema:
-                type: string
-        "401":
-          description: Missing or invalid bearer token
-          content:
-            text/plain:
-              schema:
-                type: string
-        "404":
-          description: Unknown receiver id
-          content:
-            text/plain:
-              schema:
-                type: string
-        "500":
-          description: Deleting the object failed
-          content:
-            text/plain:
-              schema:
-                type: string
 
 components:
   securitySchemes:
@@ -1795,7 +1759,7 @@ components:
           type: string
         kind:
           type: string
-          description: Which receiver API request this was.
+          description: Which receiver API request this was. `delete` only appears on events recorded before the receiver API stopped accepting deletes.
           enum: [receive, delete]
         key:
           type: string

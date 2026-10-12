@@ -242,33 +242,3 @@ func TestSweepRetentionForTargetNilDBIsNoop(t *testing.T) {
 		t.Fatalf("SweepRetentionForTarget() unexpected error: %v", err)
 	}
 }
-
-func TestRemoveRetentionRecord(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	db := openTestRetentionDB(t)
-	cfg := &config.Config{Key: "backup.gpg", StateDB: db}
-	tgt := &config.Target{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
-
-	if err := WriteLocalObject(cfg, tgt, strings.NewReader("data")); err != nil {
-		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
-	}
-
-	if err := RecordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
-		t.Fatalf("RecordLocalWrite() unexpected error: %v", err)
-	}
-
-	path := LocalObjectPath(cfg, tgt)
-	if !hasRetentionRow(t, db, "nas", path) {
-		t.Fatalf("no retention row for %q before removal, want one", path)
-	}
-
-	if err := RemoveRetentionRecord(t.Context(), cfg, tgt); err != nil {
-		t.Fatalf("RemoveRetentionRecord() unexpected error: %v", err)
-	}
-
-	if hasRetentionRow(t, db, "nas", path) {
-		t.Errorf("retention row for %q still present after removal, want none", path)
-	}
-}

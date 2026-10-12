@@ -665,7 +665,7 @@ func (c *lastReceivedCache) get(recv config.ResolvedReceiver, lastSeen time.Time
 // handleReceiverFiles serves GET /api/receivers/{id}/files: the objects
 // currently stored under receiver {id}'s path (see listReceiverFiles), for
 // the web UI dashboard's per-receiver file listing. Unlike the receiver API
-// (HandleReceiveObject/HandleDeleteObject), this is dashboard-only and isn't
+// (receiver.HandleReceiveObject), this is dashboard-only and isn't
 // JWT-authenticated, matching /api/receivers.
 func handleReceiverFiles(receivers *backup.ReceiverRegistry, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

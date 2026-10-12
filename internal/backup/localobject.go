@@ -7,7 +7,6 @@
 package backup
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -86,16 +85,4 @@ func WriteLocalObject(cfg *config.Config, t *config.Target, r io.Reader) error {
 // RecordObjectWrite made for the same write.
 func SetObjectModTime(cfg *config.Config, t *config.Target, at time.Time) error {
 	return os.Chtimes(LocalObjectPath(cfg, t), at, at)
-}
-
-// DeleteLocalObject removes the file at LocalObjectPath(cfg, t), used by the
-// receiver API's DELETE endpoint (see handleDeleteObject in webui.go). A
-// file that's already gone is not an error.
-func DeleteLocalObject(cfg *config.Config, t *config.Target) error {
-	err := os.Remove(LocalObjectPath(cfg, t))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-
-	return nil
 }

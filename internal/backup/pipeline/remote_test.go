@@ -112,52 +112,6 @@ func TestUploadToRemoteUnauthorized(t *testing.T) {
 	}
 }
 
-func TestDeleteRemoteObject(t *testing.T) {
-	t.Parallel()
-
-	var gotMethod, gotPath string
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod = r.Method
-		gotPath = r.URL.Path
-
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer srv.Close()
-
-	cfg := &config.Config{Key: "backup.gpg", Identity: testServerIdentity(t)}
-	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
-
-	if err := DeleteRemoteObject(t.Context(), cfg, tgt); err != nil {
-		t.Fatalf("DeleteRemoteObject() unexpected error: %v", err)
-	}
-
-	if gotMethod != http.MethodDelete {
-		t.Errorf("method = %q, want DELETE", gotMethod)
-	}
-
-	if gotPath != "/api/v1/objects/instance-a/backup.gpg" {
-		t.Errorf("path = %q, want /api/v1/objects/instance-a/backup.gpg", gotPath)
-	}
-}
-
-func TestDeleteRemoteObjectNotFound(t *testing.T) {
-	t.Parallel()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "unknown receiver id", http.StatusNotFound)
-	}))
-	defer srv.Close()
-
-	cfg := &config.Config{Key: "backup.gpg", Identity: testServerIdentity(t)}
-	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "no-such-id"}
-
-	err := DeleteRemoteObject(t.Context(), cfg, tgt)
-	if err == nil || !strings.Contains(err.Error(), "404") {
-		t.Fatalf("DeleteRemoteObject() error = %v, want it to mention 404", err)
-	}
-}
-
 func TestUploadToRemoteFileSendsContentLength(t *testing.T) {
 	t.Parallel()
 

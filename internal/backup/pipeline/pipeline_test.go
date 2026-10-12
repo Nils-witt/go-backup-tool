@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -67,38 +66,6 @@ func TestWriteLocalObjectCreatesMissingDirectories(t *testing.T) {
 
 	if _, err := os.Stat(backup.LocalObjectPath(cfg, tgt)); err != nil {
 		t.Errorf("written file not found: %v", err)
-	}
-}
-
-func TestDeleteLocalObject(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	cfg := &config.Config{Key: "backup.gpg"}
-	tgt := &config.Target{Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir}
-
-	if err := backup.WriteLocalObject(cfg, tgt, strings.NewReader("x")); err != nil {
-		t.Fatalf("backup.WriteLocalObject() unexpected error: %v", err)
-	}
-
-	if err := backup.DeleteLocalObject(cfg, tgt); err != nil {
-		t.Fatalf("backup.DeleteLocalObject() unexpected error: %v", err)
-	}
-
-	if _, err := os.Stat(backup.LocalObjectPath(cfg, tgt)); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("file still exists after backup.DeleteLocalObject(): err = %v", err)
-	}
-}
-
-func TestDeleteLocalObjectMissingFileIsNotError(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	cfg := &config.Config{Key: "backup.gpg"}
-	tgt := &config.Target{Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir}
-
-	if err := backup.DeleteLocalObject(cfg, tgt); err != nil {
-		t.Errorf("backup.DeleteLocalObject() on missing file = %v, want nil", err)
 	}
 }
 

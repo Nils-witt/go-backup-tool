@@ -571,7 +571,7 @@ func uploadTargetAttempt(ctx context.Context, cfg *config.Config, t *config.Targ
 }
 
 // RemoteObjectURL returns the URL a remote target (t.Kind ==
-// config.ServerKindRemote) uploads/deletes key at: t.Endpoint's
+// config.ServerKindRemote) uploads key at: t.Endpoint's
 // /api/v1/objects/{bucket}/{key}, where t.Bucket is the id identifying the
 // destination instance's storage path (see receiver.go) and key is
 // path-escaped since it may contain characters not otherwise safe in a URL
@@ -596,7 +596,7 @@ func remoteObjectURL(t *config.Target, key string, query url.Values) string {
 // RSA key and UUID — see loadServerIdentity) scoped to t.Bucket (the
 // destination instance's receiver id) and bound to req (see
 // remoteAuth.Request), and formats it as an Authorization: Bearer header
-// value, for UploadToRemote/DeleteRemoteObject. Errors if cfg.Identity is
+// value, for UploadToRemote. Errors if cfg.Identity is
 // nil, meaning loadServerIdentity failed at startup.
 func remoteAuthHeader(cfg *config.Config, t *config.Target, req remoteAuth.Request) (string, error) {
 	if cfg.Identity == nil {
@@ -632,24 +632,10 @@ func UploadToRemote(ctx context.Context, cfg *config.Config, t *config.Target, r
 	return doAuthenticatedRemoteRequest(ctx, cfg, t, http.MethodPut, r, "application/octet-stream", query)
 }
 
-// DeleteRemoteObject removes the object at target t's destination instance
-// (bucket as id, cfg.Key as key): the client-side counterpart of the
-// receiver API's DELETE endpoint (see handleDeleteObject in webui.go). The
-// pipeline itself has no caller for this — staging the backup locally
-// before any target upload starts means a failed run never leaves a target
-// with a partial object to clean up — but it remains available (and
-// tested against the real receiver handler, see remote_test.go) as part of
-// the receiver API's client surface.
-func DeleteRemoteObject(ctx context.Context, cfg *config.Config, t *config.Target) error {
-	return doAuthenticatedRemoteRequest(ctx, cfg, t, http.MethodDelete, nil, "", nil)
-}
-
 // doAuthenticatedRemoteRequest signs, sends, and status-checks a method
 // request (with body, whose Content-Type is set only when contentType is
-// non-empty, and an optional query string) to target t's receiver API —
-// shared by UploadToRemote and DeleteRemoteObject, which otherwise
-// duplicate this build/send/check sequence identically apart from method,
-// body, Content-Type, and query.
+// non-empty, and an optional query string) to target t's receiver API, for
+// UploadToRemote.
 func doAuthenticatedRemoteRequest(ctx context.Context, cfg *config.Config, t *config.Target, method string, body io.Reader, contentType string, query url.Values) error {
 	bound := remoteAuth.Request{Method: method, Key: cfg.Key, CreationTime: query.Get("creationTime")}
 

@@ -70,9 +70,8 @@ func SanitizeObjectKey(key string) (string, error) {
 }
 
 // ReceiverTarget builds a synthetic local target for recv, so the receiver
-// API's handlers can reuse WriteLocalObject/RecordLocalWrite/
-// DeleteLocalObject/RemoveRetentionRecord (see pipeline.go and retention.go)
-// exactly as a type: local target does — a receiver is a local target
+// API's handler can reuse WriteLocalObject/RecordLocalWrite (see
+// localobject.go and retention.go) exactly as a type: local target does — a receiver is a local target
 // written to over HTTP with JWT auth, not a distinct storage
 // implementation.
 func ReceiverTarget(recv config.ResolvedReceiver) *config.Target {
@@ -97,7 +96,7 @@ type ReceiverFile struct {
 }
 
 // ListReceiverFiles walks recv.Path and returns every object currently
-// stored there, keyed the same way handleReceiveObject/handleDeleteObject
+// stored there, keyed the same way receiver.HandleReceiveObject
 // address them (the path relative to recv.Path, using "/" separators
 // regardless of OS), sorted by creation time ascending (oldest first). A root
 // directory that doesn't exist yet (nothing has been received) is not an
@@ -223,8 +222,8 @@ type ReceiverSnapshot struct {
 }
 
 // ReceiverStatusStore tracks the live state of every configured receiver,
-// updated as the receiver API's handlers (see handleReceiveObject/
-// handleDeleteObject in webui.go) serve incoming requests, and read by the
+// updated as the receiver API's handler (see receiver.HandleReceiveObject)
+// serves incoming requests, and read by the
 // web UI's HTTP handlers. Safe for concurrent use, since receiver requests
 // can arrive concurrently with each other and with status requests.
 type ReceiverStatusStore struct {

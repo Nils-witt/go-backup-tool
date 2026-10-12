@@ -82,8 +82,8 @@ type Config struct {
 
 	// StateDB is the shared state/retention sqlite database (see the store
 	// package and retention.go), set on each run's own copy of its job's
-	// config by runner.runOnce so RecordLocalWrite/RemoveRetentionRecord
-	// reach it without every function in the upload call chain needing its
+	// config by runner.runOnce so RecordLocalWrite
+	// reaches it without every function in the upload call chain needing its
 	// own db parameter. Nil disables retention tracking for this run (e.g.
 	// the db couldn't be opened at startup) — see RecordLocalWrite.
 	StateDB *store.Store
