@@ -55,12 +55,16 @@ func (targetRunModel) TableName() string { return "target_runs" }
 // static config, since a retry must upload to the exact same object key the
 // run's other targets already succeeded against — recomputing them fresh at
 // retry time would send the retry to a different key.
+//
+// RunAt and FileName are indexed for ListDueOutstandingTargetUploads's
+// due-time range and CountOutstandingTargetUploadsForFile's lookup, the
+// latter run after every pipeline run.
 type outstandingTargetUploadModel struct {
 	ID        uint      `gorm:"column:id;primaryKey;autoIncrement"`
 	JobName   string    `gorm:"column:job_name;not null"`
 	Target    string    `gorm:"column:target;not null"`
-	RunAt     time.Time `gorm:"column:run_at;not null"`
-	FileName  string    `gorm:"column:fileName;not null"`
+	RunAt     time.Time `gorm:"column:run_at;not null;index:idx_outstanding_target_uploads_run_at"`
+	FileName  string    `gorm:"column:fileName;not null;index:idx_outstanding_target_uploads_file"`
 	Key       string    `gorm:"column:key;not null"`
 	CreatedAt time.Time `gorm:"column:createdAt"`
 }
@@ -100,7 +104,7 @@ func (s *Store) SaveJobRun(ctx context.Context, name, state string, success bool
 func (s *Store) GetLastJobSuccess(ctx context.Context, name string) (time.Time, bool, error) {
 	var m jobRunModel
 
-	err := s.db.WithContext(ctx).
+	err := s.read.WithContext(ctx).
 		Where("name = ? AND success = 1", name).
 		Order("endTime DESC").
 		Take(&m).Error
@@ -137,7 +141,7 @@ type LastRun struct {
 func (s *Store) GetLastRun(ctx context.Context, name string) (LastRun, bool, error) {
 	var m jobRunModel
 
-	err := s.db.WithContext(ctx).
+	err := s.read.WithContext(ctx).
 		Where("name = ?", name).
 		Order("endTime DESC").
 		Take(&m).Error
@@ -182,7 +186,7 @@ type JobRunEvent struct {
 func (s *Store) ListJobRunEvents(ctx context.Context, limit int) ([]JobRunEvent, error) {
 	var rows []jobRunModel
 
-	if err := s.db.WithContext(ctx).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+	if err := s.read.WithContext(ctx).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("reading job run events: %w", err)
 	}
 
@@ -227,7 +231,7 @@ func (s *Store) SummarizeJobRuns(ctx context.Context, start, end time.Time) ([]J
 
 	var out []JobRunDaySummary
 
-	if err := s.db.WithContext(ctx).Raw(query, start.UTC(), end.UTC()).Scan(&out).Error; err != nil {
+	if err := s.read.WithContext(ctx).Raw(query, start.UTC(), end.UTC()).Scan(&out).Error; err != nil {
 		return nil, fmt.Errorf("summarizing job runs: %w", err)
 	}
 
@@ -247,7 +251,7 @@ type JobRunErrorEvent struct {
 func (s *Store) ListJobRunErrorEvents(ctx context.Context, start, end time.Time) ([]JobRunErrorEvent, error) {
 	var rows []jobRunModel
 
-	err := s.db.WithContext(ctx).
+	err := s.read.WithContext(ctx).
 		Where("success = 0 AND endTime >= ? AND endTime < ?", start.UTC(), end.UTC()).
 		Order("endTime ASC").
 		Find(&rows).Error
@@ -312,7 +316,7 @@ func (s *Store) ListTargetRuns(ctx context.Context, name string) ([]TargetRun, e
 
 	var out []TargetRun
 
-	if err := s.db.WithContext(ctx).Raw(query, name, name).Scan(&out).Error; err != nil {
+	if err := s.read.WithContext(ctx).Raw(query, name, name).Scan(&out).Error; err != nil {
 		return nil, fmt.Errorf("reading job %q target runs: %w", name, err)
 	}
 
@@ -339,7 +343,7 @@ type TargetRunEvent struct {
 func (s *Store) ListTargetRunEvents(ctx context.Context, limit int) ([]TargetRunEvent, error) {
 	var rows []targetRunModel
 
-	if err := s.db.WithContext(ctx).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+	if err := s.read.WithContext(ctx).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("reading target run events: %w", err)
 	}
 
@@ -384,7 +388,7 @@ type OutstandingTargetUpload struct {
 func (s *Store) ListDueOutstandingTargetUploads(ctx context.Context, now time.Time) ([]OutstandingTargetUpload, error) {
 	var rows []outstandingTargetUploadModel
 
-	if err := s.db.WithContext(ctx).Where("run_at <= ?", now.UTC()).Order("id").Find(&rows).Error; err != nil {
+	if err := s.read.WithContext(ctx).Where("run_at <= ?", now.UTC()).Order("id").Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("reading due outstanding target uploads: %w", err)
 	}
 
@@ -428,7 +432,7 @@ func (s *Store) DeleteOutstandingTargetUpload(ctx context.Context, id uint) erro
 func (s *Store) CountOutstandingTargetUploadsForFile(ctx context.Context, fileName string) (int64, error) {
 	var n int64
 
-	err := s.db.WithContext(ctx).Model(&outstandingTargetUploadModel{}).Where("fileName = ?", fileName).Count(&n).Error
+	err := s.read.WithContext(ctx).Model(&outstandingTargetUploadModel{}).Where("fileName = ?", fileName).Count(&n).Error
 	if err != nil {
 		return 0, fmt.Errorf("counting outstanding target uploads for %q: %w", fileName, err)
 	}

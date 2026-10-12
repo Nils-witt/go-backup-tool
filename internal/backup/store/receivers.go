@@ -62,7 +62,7 @@ var (
 func (s *Store) ListReceiverConfigs(ctx context.Context) ([]ReceiverConfig, error) {
 	var rows []receiverModel
 
-	if err := s.db.WithContext(ctx).Order("id").Find(&rows).Error; err != nil {
+	if err := s.read.WithContext(ctx).Order("id").Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("reading receivers: %w", err)
 	}
 
@@ -79,7 +79,7 @@ func (s *Store) ListReceiverConfigs(ctx context.Context) ([]ReceiverConfig, erro
 func (s *Store) GetReceiverConfig(ctx context.Context, id string) (ReceiverConfig, bool, error) {
 	var m receiverModel
 
-	if err := s.db.WithContext(ctx).Take(&m, "id = ?", id).Error; err != nil {
+	if err := s.read.WithContext(ctx).Take(&m, "id = ?", id).Error; err != nil {
 		if isRecordNotFound(err) {
 			return ReceiverConfig{}, false, nil
 		}

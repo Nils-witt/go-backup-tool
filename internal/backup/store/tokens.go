@@ -94,7 +94,7 @@ func (s *Store) SaveAPIToken(ctx context.Context, t APIToken) error {
 func (s *Store) GetAPIToken(ctx context.Context, id string) (APIToken, bool, error) {
 	var m apiTokenModel
 
-	if err := s.db.WithContext(ctx).Take(&m, "id = ?", id).Error; err != nil {
+	if err := s.read.WithContext(ctx).Take(&m, "id = ?", id).Error; err != nil {
 		if isRecordNotFound(err) {
 			return APIToken{}, false, nil
 		}
@@ -110,7 +110,7 @@ func (s *Store) GetAPIToken(ctx context.Context, id string) (APIToken, bool, err
 func (s *Store) ListAPITokens(ctx context.Context) ([]APIToken, error) {
 	var rows []apiTokenModel
 
-	if err := s.db.WithContext(ctx).Order("created_at DESC").Find(&rows).Error; err != nil {
+	if err := s.read.WithContext(ctx).Order("created_at DESC").Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("reading api tokens: %w", err)
 	}
 

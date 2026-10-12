@@ -101,7 +101,7 @@ func (s *Store) SaveAuditEvent(ctx context.Context, ev AuditEvent) error {
 // events, newest first, for the dashboard's audit log view. Changes is
 // never nil; a row whose changes don't decode lists none.
 func (s *Store) ListAuditEvents(ctx context.Context, limit int) ([]AuditEvent, error) {
-	return listRecentEvents(ctx, s.db, limit, func(m auditEventModel) AuditEvent {
+	return listRecentEvents(ctx, s.read, limit, func(m auditEventModel) AuditEvent {
 		changes := []AuditChange{}
 		if m.Changes != "" {
 			_ = json.Unmarshal([]byte(m.Changes), &changes)

@@ -33,9 +33,22 @@ import (
 // permission comes from the access token's groups (see
 // internal/backup/webui/auth.go). The only web UI credentials kept are the
 // read-only API tokens' metadata and signing key (see tokens.go).
+//
+// It holds two connection pools on the same file: db, a single connection
+// every write (and every read inside a write's transaction) goes through,
+// since sqlite allows one writer at a time anyway; and read, a few
+// query_only connections the pure Get*/List* lookups use, so under WAL the
+// dashboard's reads run alongside a job's writes instead of queuing behind
+// them for the one connection.
 type Store struct {
-	db *gorm.DB
+	db   *gorm.DB
+	read *gorm.DB
 }
+
+// readConns is how many connections Store.read pools. The dashboard's
+// concurrent reads are few (a handful of open pages and API tokens), so a
+// small pool is plenty.
+const readConns = 4
 
 // stateDBName is the sqlite database file Open opens, a sibling of the
 // config file (see StateDBPath).
@@ -50,9 +63,10 @@ func StateDBPath(configPath string) string {
 // Open opens (creating if needed) the state-tracking sqlite database at
 // path, ensuring its schema exists. The caller must Close it.
 //
-// SetMaxOpenConns(1) serializes every access through a single connection:
-// sqlite handles one writer at a time regardless, and the returned *Store is
-// shared across every job's goroutine for the life of the run.
+// Writes go through a single connection (SetMaxOpenConns(1)): sqlite
+// handles one writer at a time regardless, and the returned *Store is
+// shared across every job's goroutine for the life of the run. Pure reads
+// use a separate pool of readConns query_only connections (see Store).
 func Open(ctx context.Context, path string) (*Store, error) {
 	// Every method in this package already wraps and returns query errors
 	// (including the entirely expected "not found" case every Get*
@@ -69,7 +83,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		PrepareStmt:            true,
 	}
 
-	gdb, err := gorm.Open(glebarezsqlite.Open(withPragmas(path)), gormConfig)
+	gdb, err := gorm.Open(glebarezsqlite.Open(withPragmas(path, sqlitePragmas)), gormConfig)
 	if err != nil {
 		return nil, fmt.Errorf("opening job state db %q: %w", path, err)
 	}
@@ -99,15 +113,47 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("migrating job state db %q: %w", path, err)
 	}
 
+	if err := removeObsoleteIndexes(ctx, gdb); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("migrating job state db %q: %w", path, err)
+	}
+
 	if err := migrateInlineJobCommands(ctx, gdb); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("migrating job state db %q: %w", path, err)
 	}
 
-	return &Store{db: gdb}, nil
+	// Opened only once the schema exists: the read pool can't create it.
+	read, err := openReadPool(path, gormConfig)
+	if err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("opening job state db %q for reading: %w", path, err)
+	}
+
+	return &Store{db: gdb, read: read}, nil
 }
 
-// sqlitePragmas are applied to every connection Open makes: WAL so the
+// openReadPool opens Store.read: readConns connections to path, each
+// query_only, so a write misrouted to it fails instead of bypassing the
+// single writer connection.
+func openReadPool(path string, gormConfig *gorm.Config) (*gorm.DB, error) {
+	read, err := gorm.Open(glebarezsqlite.Open(withPragmas(path, readPragmas)), gormConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	sqlDB, err := read.DB()
+	if err != nil {
+		return nil, err
+	}
+
+	sqlDB.SetMaxOpenConns(readConns)
+	sqlDB.SetMaxIdleConns(readConns)
+
+	return read, nil
+}
+
+// sqlitePragmas are applied to Store.db's connection: WAL so the
 // dashboard's reads don't block behind a job's writes (and vice versa),
 // a busy timeout instead of an immediate SQLITE_BUSY when another process
 // (e.g. a one-off CLI run) holds the lock, and synchronous=NORMAL, which is
@@ -118,9 +164,18 @@ var sqlitePragmas = []string{
 	"synchronous(NORMAL)",
 }
 
-// withPragmas appends sqlitePragmas to path as glebarez/sqlite _pragma
-// query parameters, preserving any query string path already carries.
-func withPragmas(path string) string {
+// readPragmas are applied to every connection of Store.read: the same busy
+// timeout as sqlitePragmas, and query_only so it can never write. The
+// database is already in WAL mode by the time it's opened (journal_mode is
+// persistent), which is what lets these readers run alongside the writer.
+var readPragmas = []string{
+	"busy_timeout(5000)",
+	"query_only(1)",
+}
+
+// withPragmas appends pragmas to path as glebarez/sqlite _pragma query
+// parameters, preserving any query string path already carries.
+func withPragmas(path string, pragmas []string) string {
 	sep := "?"
 	if strings.Contains(path, "?") {
 		sep = "&"
@@ -130,7 +185,7 @@ func withPragmas(path string) string {
 
 	b.WriteString(path)
 
-	for _, p := range sqlitePragmas {
+	for _, p := range pragmas {
 		b.WriteString(sep)
 		b.WriteString("_pragma=")
 		b.WriteString(p)
@@ -141,14 +196,23 @@ func withPragmas(path string) string {
 	return b.String()
 }
 
-// Close closes the underlying database connection.
+// Close closes both underlying connection pools.
 func (s *Store) Close() error {
-	sqlDB, err := s.db.DB()
-	if err != nil {
-		return err
+	var errs []error
+
+	for _, gdb := range []*gorm.DB{s.read, s.db} {
+		sqlDB, err := gdb.DB()
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		if err := sqlDB.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
-	return sqlDB.Close()
+	return errors.Join(errs...)
 }
 
 // insertMissing inserts every one of rows whose primary key isn't taken yet,
@@ -254,6 +318,34 @@ func removeObsoleteTables(ctx context.Context, gdb *gorm.DB) error {
 	for _, table := range obsoleteTables {
 		if err := gdb.WithContext(ctx).Migrator().DropTable(table); err != nil {
 			return fmt.Errorf("dropping obsolete table %s: %w", table, err)
+		}
+	}
+
+	return nil
+}
+
+// obsoleteIndexes are indexes a model no longer declares, which AutoMigrate
+// never drops on its own, keyed by the model whose table holds them.
+var obsoleteIndexes = []struct {
+	model any
+	name  string
+}{
+	// Superseded by idx_objects_expiry, whose leading column is the same.
+	{&objectModel{}, "idx_objects_server"},
+}
+
+// removeObsoleteIndexes drops every obsoleteIndexes entry still present.
+// Safe to call on every startup: once they're gone it's a no-op.
+func removeObsoleteIndexes(ctx context.Context, gdb *gorm.DB) error {
+	m := gdb.WithContext(ctx).Migrator()
+
+	for _, idx := range obsoleteIndexes {
+		if !m.HasIndex(idx.model, idx.name) {
+			continue
+		}
+
+		if err := m.DropIndex(idx.model, idx.name); err != nil {
+			return fmt.Errorf("dropping obsolete index %s: %w", idx.name, err)
 		}
 	}
 

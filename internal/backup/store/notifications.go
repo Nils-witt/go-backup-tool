@@ -55,7 +55,7 @@ var (
 func (s *Store) ListNotificationConfigs(ctx context.Context) ([]NotificationConfig, error) {
 	var rows []notificationModel
 
-	if err := s.db.WithContext(ctx).Order("id").Find(&rows).Error; err != nil {
+	if err := s.read.WithContext(ctx).Order("id").Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("reading notifications: %w", err)
 	}
 
@@ -72,7 +72,7 @@ func (s *Store) ListNotificationConfigs(ctx context.Context) ([]NotificationConf
 func (s *Store) GetNotificationConfig(ctx context.Context, id string) (NotificationConfig, bool, error) {
 	var m notificationModel
 
-	if err := s.db.WithContext(ctx).Take(&m, "id = ?", id).Error; err != nil {
+	if err := s.read.WithContext(ctx).Take(&m, "id = ?", id).Error; err != nil {
 		if isRecordNotFound(err) {
 			return NotificationConfig{}, false, nil
 		}

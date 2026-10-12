@@ -173,7 +173,7 @@ var updatedColumns = []string{"updated_at", "updated_by"}
 
 // ListServerConfigs returns every stored server, in name order.
 func (s *Store) ListServerConfigs(ctx context.Context) ([]ServerConfig, error) {
-	rows, err := listRows[serverModel](ctx, s.db, "name", "servers")
+	rows, err := listRows[serverModel](ctx, s.read, "name", "servers")
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +224,7 @@ func (s *Store) ImportServerConfigs(ctx context.Context, cs []ServerConfig) ([]s
 
 // ListCommandConfigs returns every stored command, in id order.
 func (s *Store) ListCommandConfigs(ctx context.Context) ([]CommandConfig, error) {
-	rows, err := listRows[commandModel](ctx, s.db, "id", "commands")
+	rows, err := listRows[commandModel](ctx, s.read, "id", "commands")
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +273,7 @@ func (s *Store) ImportCommandConfigs(ctx context.Context, cs []CommandConfig) ([
 
 // ListJobConfigs returns every stored job, in name order.
 func (s *Store) ListJobConfigs(ctx context.Context) ([]JobConfig, error) {
-	rows, err := listRows[jobModel](ctx, s.db, "name", "jobs")
+	rows, err := listRows[jobModel](ctx, s.read, "name", "jobs")
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +291,7 @@ func (s *Store) ListJobConfigs(ctx context.Context) ([]JobConfig, error) {
 func (s *Store) GetJobConfig(ctx context.Context, name string) (JobConfig, bool, error) {
 	var m jobModel
 
-	if err := s.db.WithContext(ctx).Take(&m, "name = ?", name).Error; err != nil {
+	if err := s.read.WithContext(ctx).Take(&m, "name = ?", name).Error; err != nil {
 		if isRecordNotFound(err) {
 			return JobConfig{}, false, nil
 		}

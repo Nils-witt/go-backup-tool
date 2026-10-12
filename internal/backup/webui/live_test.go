@@ -2,6 +2,7 @@ package webui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"testing"
@@ -233,5 +234,85 @@ func TestLiveStatusOriginBehindProxy(t *testing.T) {
 				t.Fatalf("dialing /api/live = (%d, %v), want 403", status, err)
 			}
 		})
+	}
+}
+
+// getLivePayload calls cache.get, failing the test on error.
+func getLivePayload(t *testing.T, cache *liveStatusCache) (payload []byte, jobsChanged, receiversChanged <-chan struct{}) {
+	t.Helper()
+
+	payload, jobsChanged, receiversChanged, err := cache.get()
+	if err != nil {
+		t.Fatalf("liveStatusCache.get() error: %v", err)
+	}
+
+	return payload, jobsChanged, receiversChanged
+}
+
+// requireClosed fails the test unless ch is closed, i.e. its store has
+// changed since ch was handed out.
+func requireClosed(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+
+	select {
+	case <-ch:
+	default:
+		t.Fatalf("%s change channel returned by get() did not fire", what)
+	}
+}
+
+// samePayload reports whether a and b share their backing array, i.e. b
+// is a reused copy of a rather than a fresh encoding.
+func samePayload(a, b []byte) bool {
+	return &a[0] == &b[0]
+}
+
+func TestLiveStatusCacheSharesPayloadUntilChange(t *testing.T) {
+	t.Parallel()
+
+	statusStore, _ := newTestStore()
+	receivers := map[string]config.ResolvedReceiver{"a": {ID: "a", Path: t.TempDir()}}
+	receiverStore := backup.NewReceiverStatusStore(receivers)
+	cache := &liveStatusCache{statusStore: statusStore, receivers: backup.NewReceiverRegistry(receivers), receiverStore: receiverStore, log: discardLogger}
+
+	first, jobsChanged, receiversChanged := getLivePayload(t, cache)
+
+	if second, _, _ := getLivePayload(t, cache); !samePayload(first, second) {
+		t.Error("get() re-encoded with nothing changed, want the cached payload")
+	}
+
+	statusStore.Starting("test")
+	requireClosed(t, jobsChanged, "job")
+
+	afterJob, _, _ := getLivePayload(t, cache)
+	if samePayload(first, afterJob) {
+		t.Fatal("get() after a job change returned the stale payload")
+	}
+
+	var msg liveStatusJSON
+	if err := json.Unmarshal(afterJob, &msg); err != nil {
+		t.Fatalf("decoding payload: %v", err)
+	}
+
+	if len(msg.Jobs) == 0 || msg.Jobs[0].State != backup.StateRunning {
+		t.Errorf("payload jobs = %+v, want job test running", msg.Jobs)
+	}
+
+	receiverStore.Record("a", "key", nil)
+	requireClosed(t, receiversChanged, "receiver")
+
+	afterReceiver, _, _ := getLivePayload(t, cache)
+	if samePayload(afterJob, afterReceiver) {
+		t.Fatal("get() after a receiver change returned the stale payload")
+	}
+
+	// Past livePayloadMaxAge, an unchanged payload is rebuilt anyway, so
+	// time-based receiver staleness stays current.
+	cache.mu.Lock()
+	cache.builtAt = cache.builtAt.Add(-2 * livePayloadMaxAge)
+	cache.mu.Unlock()
+
+	if aged, _, _ := getLivePayload(t, cache); samePayload(afterReceiver, aged) {
+		t.Error("get() past livePayloadMaxAge returned the old payload, want a rebuild")
 	}
 }

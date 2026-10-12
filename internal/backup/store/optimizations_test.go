@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -19,6 +21,117 @@ func TestOpenEnablesWAL(t *testing.T) {
 
 	if mode != "wal" {
 		t.Errorf("journal_mode = %q, want wal", mode)
+	}
+}
+
+func TestReadPoolIsQueryOnly(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+
+	err := db.read.Exec("INSERT INTO login_events (at, username, method, success, remote_addr) VALUES (?, 'u', 'oidc', 1, '')", time.Now()).Error
+	if err == nil {
+		t.Fatal("write through the read pool succeeded, want it rejected by query_only")
+	}
+}
+
+func TestReadPoolSeesCommittedWrites(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := context.Background()
+	start := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
+
+	// Warm a read connection first, so the check below can't pass just
+	// because the read pool opened its first connection after the write.
+	if _, _, err := db.GetLastRun(ctx, "job"); err != nil {
+		t.Fatalf("GetLastRun() error: %v", err)
+	}
+
+	if err := db.SaveJobRun(ctx, "job", "ok", true, start, start.Add(time.Minute), 42, ""); err != nil {
+		t.Fatalf("SaveJobRun() error: %v", err)
+	}
+
+	run, ok, err := db.GetLastRun(ctx, "job")
+	if err != nil || !ok {
+		t.Fatalf("GetLastRun() = %v, %v, %v; want the run just saved", run, ok, err)
+	}
+
+	if run.Size != 42 {
+		t.Errorf("GetLastRun().Size = %d, want 42", run.Size)
+	}
+}
+
+func TestOpenDropsObsoleteObjectsServerIndex(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open() error: %v", err)
+	}
+
+	// Recreate the index an older version declared on objects.server.
+	if err := db.db.Exec("CREATE INDEX idx_objects_server ON objects(server)").Error; err != nil {
+		t.Fatalf("creating legacy index: %v", err)
+	}
+
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	db, err = Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopening: %v", err)
+	}
+
+	t.Cleanup(func() { _ = db.Close() })
+
+	m := db.db.Migrator()
+
+	if m.HasIndex(&objectModel{}, "idx_objects_server") {
+		t.Error("idx_objects_server still exists after reopening")
+	}
+
+	for _, idx := range []struct {
+		model any
+		name  string
+	}{
+		{&objectModel{}, "idx_objects_expiry"},
+		{&outstandingTargetUploadModel{}, "idx_outstanding_target_uploads_run_at"},
+		{&outstandingTargetUploadModel{}, "idx_outstanding_target_uploads_file"},
+	} {
+		if !m.HasIndex(idx.model, idx.name) {
+			t.Errorf("index %s missing", idx.name)
+		}
+	}
+}
+
+func TestExpiredObjectPathsUsesExpiryIndex(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+
+	var plan []struct {
+		Detail string `gorm:"column:detail"`
+	}
+
+	err := db.read.Raw("EXPLAIN QUERY PLAN SELECT path FROM objects WHERE server = ? AND retention_seconds = ? AND written_at < ? ORDER BY written_at",
+		"a", 0, time.Now()).Scan(&plan).Error
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN error: %v", err)
+	}
+
+	var details []string
+	for _, row := range plan {
+		details = append(details, row.Detail)
+	}
+
+	got := strings.Join(details, "; ")
+	if !strings.Contains(got, "idx_objects_expiry") || strings.Contains(got, "TEMP B-TREE") {
+		t.Errorf("query plan = %q, want an idx_objects_expiry search with no separate sort", got)
 	}
 }
 

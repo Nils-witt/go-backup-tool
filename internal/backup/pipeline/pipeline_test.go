@@ -472,3 +472,35 @@ func TestLogWriterLineBuffering(t *testing.T) {
 		})
 	}
 }
+
+// TestRunPipelineStagingFailureDoesNotHang covers a staging failure (here,
+// a staging dir that doesn't exist) while gpg still has more output than a
+// pipe buffer holds: runPipeline must stop gpg instead of waiting on it
+// forever, even with no timeout on ctx.
+func TestRunPipelineStagingFailureDoesNotHang(t *testing.T) {
+	t.Parallel()
+	skipOnWindows(t)
+
+	cfg := &config.Config{
+		Name:       "stage-fail",
+		Source:     config.Command{ID: "big", Cmd: "head -c 4194304 /dev/zero"},
+		GPGBin:     fakeGPG(t),
+		StagingDir: filepath.Join(t.TempDir(), "missing"),
+	}
+
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := runPipeline(context.Background(), cfg, slog.New(slog.DiscardHandler), func(int, error) {})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("runPipeline() succeeded, want a staging error")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("runPipeline() still blocked 10s after staging failed")
+	}
+}

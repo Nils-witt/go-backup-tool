@@ -40,7 +40,7 @@ type ReportSettings struct {
 func (s *Store) GetReportSettings(ctx context.Context) (ReportSettings, bool, error) {
 	var m reportSettingsModel
 
-	if err := s.db.WithContext(ctx).Take(&m, reportSettingsID).Error; err != nil {
+	if err := s.read.WithContext(ctx).Take(&m, reportSettingsID).Error; err != nil {
 		if isRecordNotFound(err) {
 			return ReportSettings{}, false, nil
 		}

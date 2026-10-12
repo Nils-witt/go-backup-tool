@@ -2,13 +2,13 @@ package webui
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/coder/websocket/wsjson"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 )
@@ -32,6 +32,14 @@ const (
 	// liveWriteTimeout bounds each write or ping, so a stalled client is
 	// dropped instead of holding its handler goroutine forever.
 	liveWriteTimeout = 10 * time.Second
+
+	// livePayloadMaxAge bounds how long liveStatusCache reuses one encoded
+	// message while nothing changes. Every client woken by the same change
+	// asks for it within moments of the others (each after its own
+	// liveCoalesceDelay), so this covers that burst, while a ping-driven
+	// resend, which exists to refresh receivers' time-based staleness,
+	// never gets a message more than this old.
+	livePayloadMaxAge = time.Second
 )
 
 // liveStatusJSON is the one message GET /api/live sends: the same job and
@@ -40,6 +48,61 @@ type liveStatusJSON struct {
 	Type      string                    `json:"type"`
 	Jobs      []backup.JobSnapshot      `json:"jobs"`
 	Receivers []backup.ReceiverSnapshot `json:"receivers"`
+}
+
+// liveStatusCache builds the encoded liveStatusJSON once per change and
+// shares it among every client handleLive streams to, rather than each
+// client taking its own snapshots (including receivers' staleness checks)
+// and marshaling them on every change and ping. receiverStore may be nil,
+// which encodes an empty receiver list. Safe for concurrent use.
+type liveStatusCache struct {
+	statusStore   *backup.StatusStore
+	receivers     *backup.ReceiverRegistry
+	receiverStore *backup.ReceiverStatusStore
+	log           *slog.Logger
+
+	mu sync.Mutex
+	// jobsChanged and receiversChanged are the stores' change channels
+	// payload was built under: while they are still the current ones,
+	// nothing has changed since.
+	jobsChanged      <-chan struct{}
+	receiversChanged <-chan struct{}
+	builtAt          time.Time
+	payload          []byte
+}
+
+// get returns the current encoded message, together with the change
+// channels it's current for, which the caller waits on for the next
+// change. The payload is shared: callers must not modify it.
+func (c *liveStatusCache) get() (payload []byte, jobsChanged, receiversChanged <-chan struct{}, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Take the change channels before reading the snapshots, so a change
+	// landing in between is never missed — at worst it's sent twice.
+	jobsChanged = c.statusStore.Changed()
+	if c.receiverStore != nil {
+		receiversChanged = c.receiverStore.Changed()
+	}
+
+	unchanged := jobsChanged == c.jobsChanged && receiversChanged == c.receiversChanged
+	if c.payload != nil && unchanged && time.Since(c.builtAt) < livePayloadMaxAge {
+		return c.payload, jobsChanged, receiversChanged, nil
+	}
+
+	msg := liveStatusJSON{Type: "status", Jobs: c.statusStore.Snapshot(), Receivers: []backup.ReceiverSnapshot{}}
+	if c.receiverStore != nil {
+		msg.Receivers = receiverSnapshots(c.receivers, c.receiverStore, c.log)
+	}
+
+	payload, err = json.Marshal(msg)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	c.payload, c.jobsChanged, c.receiversChanged, c.builtAt = payload, jobsChanged, receiversChanged, time.Now()
+
+	return payload, jobsChanged, receiversChanged, nil
 }
 
 // liveTicketEntry is one currently valid live-status ticket: who minted it
@@ -142,6 +205,8 @@ func handleMintLiveTicket(tickets *liveTicketStore) http.HandlerFunc {
 // reverse proxy reports in Forwarded/X-Forwarded-Host (see forwardedHost),
 // since a proxy that rewrites Host would otherwise never match it.
 func handleLive(baseCtx context.Context, statusStore *backup.StatusStore, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, tickets *liveTicketStore, devMode, trustProxyHeaders bool, log *slog.Logger) http.HandlerFunc {
+	cache := &liveStatusCache{statusStore: statusStore, receivers: receivers, receiverStore: receiverStore, log: log}
+
 	var opts websocket.AcceptOptions
 	if devMode {
 		// Matches corsMiddleware: let a frontend dev server on another
@@ -184,13 +249,13 @@ func handleLive(baseCtx context.Context, statusStore *backup.StatusStore, receiv
 
 		ctx = conn.CloseRead(ctx)
 
-		streamLiveStatus(ctx, conn, statusStore, receivers, receiverStore, log)
+		streamLiveStatus(ctx, conn, cache, log)
 	}
 }
 
-// streamLiveStatus sends liveStatusJSON messages on conn until ctx ends or a
-// write fails (see handleLive).
-func streamLiveStatus(ctx context.Context, conn *websocket.Conn, statusStore *backup.StatusStore, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, log *slog.Logger) {
+// streamLiveStatus sends cache's liveStatusJSON messages on conn until ctx
+// ends or a write fails (see handleLive).
+func streamLiveStatus(ctx context.Context, conn *websocket.Conn, cache *liveStatusCache, log *slog.Logger) {
 	ticker := time.NewTicker(livePingInterval)
 	defer ticker.Stop()
 
@@ -198,21 +263,13 @@ func streamLiveStatus(ctx context.Context, conn *websocket.Conn, statusStore *ba
 	coalesce.Stop()
 
 	for {
-		// Take the change channels before reading the snapshots, so a
-		// change landing in between is never missed — at worst it's sent
-		// twice.
-		jobsChanged := statusStore.Changed()
-
-		var receiversChanged <-chan struct{}
-
-		msg := liveStatusJSON{Type: "status", Jobs: statusStore.Snapshot(), Receivers: []backup.ReceiverSnapshot{}}
-
-		if receiverStore != nil {
-			receiversChanged = receiverStore.Changed()
-			msg.Receivers = receiverSnapshots(receivers, receiverStore, log)
+		payload, jobsChanged, receiversChanged, err := cache.get()
+		if err != nil {
+			log.Warn("web UI: encoding live status", "err", err)
+			return
 		}
 
-		if !writeWithTimeout(ctx, func(ctx context.Context) error { return wsjson.Write(ctx, conn, msg) }) {
+		if !writeWithTimeout(ctx, func(ctx context.Context) error { return conn.Write(ctx, websocket.MessageText, payload) }) {
 			return
 		}
 

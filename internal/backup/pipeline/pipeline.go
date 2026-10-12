@@ -130,8 +130,16 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger, onTa
 
 	log.Info("backup finished staging", "staging_path", stagingPath, "bytes_written", bytesWritten)
 
-	// gpgOut must be fully drained (which stageBackup does) before Wait, per
-	// exec.Cmd.StdoutPipe's documented contract.
+	// gpgOut must be fully drained (which a successful stageBackup does)
+	// before Wait, per exec.Cmd.StdoutPipe's documented contract. A failed
+	// stageBackup stops reading early, which would leave gpg blocked on a
+	// full pipe and Wait hanging until ctx ends (forever without a
+	// -timeout); closing gpgOut makes gpg's next write fail with EPIPE, so
+	// it exits and the source behind it does too.
+	if stageErr != nil {
+		_ = gpgOut.Close()
+	}
+
 	gpgErr := gpgCmd.Wait()
 	sourceErr := sourceCmd.Wait()
 
@@ -271,6 +279,12 @@ func startLocalPipeline(ctx, srcCtx context.Context, cfg *config.Config, log *sl
 	if err := gpgCmd.Start(); err != nil {
 		return nil, nil, nil, fmt.Errorf("starting gpg: %w", err)
 	}
+
+	// gpg now holds its own copy of the pipe's read end. Closing ours (as
+	// startContainerPipeline does) means gpg exiting early fails the
+	// source's next write with EPIPE instead of leaving it blocked on a
+	// pipe this process would otherwise keep open until sourceCmd.Wait.
+	_ = sourceOut.Close()
 
 	return sourceCmd, gpgCmd, gpgOut, nil
 }

@@ -17,12 +17,17 @@ import (
 // defaults to 0 ("unknown") so rows from before this column existed keep
 // sweeping under the caller's current retention, exactly as they did before
 // it was added.
+//
+// idx_objects_expiry matches ExpiredObjectPaths's queries column for column:
+// its distinct-retention lookup reads only the index, and each per-retention
+// written_at range is a single index seek. It replaces the former
+// server-only idx_objects_server (see obsoleteIndexes), which it covers.
 type objectModel struct {
-	Server           string    `gorm:"column:server;not null;index:idx_objects_server"`
+	Server           string    `gorm:"column:server;not null;index:idx_objects_expiry,priority:1"`
 	Bucket           string    `gorm:"column:bucket;not null"`
 	Path             string    `gorm:"column:path;primaryKey"`
-	WrittenAt        time.Time `gorm:"column:written_at;not null"`
-	RetentionSeconds int64     `gorm:"column:retention_seconds;not null;default:0"`
+	WrittenAt        time.Time `gorm:"column:written_at;not null;index:idx_objects_expiry,priority:3"`
+	RetentionSeconds int64     `gorm:"column:retention_seconds;not null;default:0;index:idx_objects_expiry,priority:2"`
 }
 
 func (objectModel) TableName() string { return "objects" }
@@ -72,7 +77,7 @@ func (s *Store) DeleteObjectWrite(ctx context.Context, path string) error {
 // indexed written_at range query per distinct retention_seconds value
 // (normally just one or two per server), each with its own cutoff.
 func (s *Store) ExpiredObjectPaths(ctx context.Context, server string, now time.Time, fallbackRetention time.Duration) ([]string, error) {
-	db := s.db.WithContext(ctx)
+	db := s.read.WithContext(ctx)
 
 	var retentions []int64
 

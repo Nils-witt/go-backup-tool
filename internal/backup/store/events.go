@@ -93,7 +93,7 @@ func (s *Store) SaveLoginEvent(ctx context.Context, ev LoginEvent) error {
 func (s *Store) ListLoginEvents(ctx context.Context, limit int) ([]LoginEvent, error) {
 	var rows []loginEventModel
 
-	if err := s.db.WithContext(ctx).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+	if err := s.read.WithContext(ctx).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("reading login events: %w", err)
 	}
 
@@ -160,7 +160,7 @@ func listRecentEvents[M, E any](ctx context.Context, db *gorm.DB, limit int, con
 // ListDownloadEvents returns up to limit of the most recently recorded
 // download events, newest first, for the dashboard's download log view.
 func (s *Store) ListDownloadEvents(ctx context.Context, limit int) ([]DownloadEvent, error) {
-	return listRecentEvents(ctx, s.db, limit, func(m downloadEventModel) DownloadEvent {
+	return listRecentEvents(ctx, s.read, limit, func(m downloadEventModel) DownloadEvent {
 		return DownloadEvent{At: m.At, Username: m.Username, ReceiverID: m.ReceiverID, Key: m.Key, Success: m.Success, RemoteAddr: m.RemoteAddr, Detail: m.Detail}
 	}, "reading download events")
 }
@@ -214,7 +214,7 @@ func (s *Store) SaveReceiverEvent(ctx context.Context, ev ReceiverEvent) error {
 func (s *Store) GetLastReceiverEvent(ctx context.Context, id string) (ReceiverEvent, bool, error) {
 	var m receiverEventModel
 
-	err := s.db.WithContext(ctx).Where("receiver_id = ?", id).Order("id DESC").Take(&m).Error
+	err := s.read.WithContext(ctx).Where("receiver_id = ?", id).Order("id DESC").Take(&m).Error
 
 	switch {
 	case isRecordNotFound(err):
@@ -230,7 +230,7 @@ func (s *Store) GetLastReceiverEvent(ctx context.Context, id string) (ReceiverEv
 // receiver API requests (receive or delete, win or lose), newest first, for
 // the dashboard's receiver log view.
 func (s *Store) ListReceiverEvents(ctx context.Context, limit int) ([]ReceiverEvent, error) {
-	return listRecentEvents(ctx, s.db, limit, func(m receiverEventModel) ReceiverEvent {
+	return listRecentEvents(ctx, s.read, limit, func(m receiverEventModel) ReceiverEvent {
 		return ReceiverEvent{At: m.At, ReceiverID: m.ReceiverID, Kind: m.Kind, Key: m.Key, Size: m.Size, Success: m.Success, Error: m.Error}
 	}, "reading receiver events")
 }
@@ -262,7 +262,7 @@ func (s *Store) SummarizeReceiverEvents(ctx context.Context, start, end time.Tim
 
 	var out []ReceiverDaySummary
 
-	err := s.db.WithContext(ctx).Raw(query, ReceiverEventReceive, ReceiverEventReceive, start.UTC(), end.UTC()).Scan(&out).Error
+	err := s.read.WithContext(ctx).Raw(query, ReceiverEventReceive, ReceiverEventReceive, start.UTC(), end.UTC()).Scan(&out).Error
 	if err != nil {
 		return nil, fmt.Errorf("summarizing receiver events: %w", err)
 	}
@@ -285,7 +285,7 @@ type ReceiverErrorEvent struct {
 func (s *Store) ListReceiverErrorEvents(ctx context.Context, start, end time.Time) ([]ReceiverErrorEvent, error) {
 	var rows []receiverEventModel
 
-	err := s.db.WithContext(ctx).
+	err := s.read.WithContext(ctx).
 		Where("success = 0 AND at >= ? AND at < ?", start.UTC(), end.UTC()).
 		Order("at ASC").
 		Find(&rows).Error

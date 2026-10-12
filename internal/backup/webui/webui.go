@@ -122,7 +122,7 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", handleDashboard(dashboardIndexHTML))
-	mux.Handle("GET /assets/", http.StripPrefix("/assets/", cacheForever(http.FileServerFS(dashboardAssetsFS))))
+	mux.Handle("GET /assets/", http.StripPrefix("/assets/", cacheForever(gzipStatic(dashboardAssetsFS, http.FileServerFS(dashboardAssetsFS)))))
 	mux.HandleFunc("GET /api/meta", handleMeta(instanceName))
 	mux.HandleFunc("GET /api/sso/status", handleSSOStatus(oidcSettings))
 	mux.HandleFunc("GET /api/me", requireUser(auth, handleMe()))

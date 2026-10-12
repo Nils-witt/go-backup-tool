@@ -51,7 +51,7 @@ var (
 func (s *Store) ListTrustedServers(ctx context.Context) ([]TrustedServerConfig, error) {
 	var rows []trustedServerModel
 
-	if err := s.db.WithContext(ctx).Order("id").Find(&rows).Error; err != nil {
+	if err := s.read.WithContext(ctx).Order("id").Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("reading trusted servers: %w", err)
 	}
 
