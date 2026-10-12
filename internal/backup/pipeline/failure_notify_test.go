@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -30,12 +31,36 @@ func TestRenderJobFailurePayload(t *testing.T) {
 
 	got := renderJobFailurePayload(
 		"{server_name}: job {job} {state} after {duration} (started {started_at}): {error}",
-		job, errors.New("boom"), backup.StateFailed, start, 5*time.Second,
+		job, errors.New("boom"), backup.StateFailed, start, 5*time.Second, notify.NoEscape,
 	)
 	want := "primary-backup-host: job db-backup failed after 5s (started 2026-01-02T03:04:05Z): boom"
 
 	if got != want {
 		t.Errorf("renderJobFailurePayload() = %q, want %q", got, want)
+	}
+}
+
+// TestJobFailureWebhookBodyEscapesJSON checks a remote receiver's error
+// text, carried in {error}, can't rewrite a JSON body template's fields.
+func TestJobFailureWebhookBodyEscapesJSON(t *testing.T) {
+	t.Parallel()
+
+	job := &config.Config{Name: "db"}
+	jobErr := errors.New(`boom","text":"All backups OK","state":"ok`)
+	wh := notify.Webhook{Body: `{"text":"job {job} {state}: {error}"}`}
+
+	body, err := jobFailureWebhookBody(wh, job, jobErr, backup.StateFailed, time.Now(), time.Second)
+	if err != nil {
+		t.Fatalf("jobFailureWebhookBody() error: %v", err)
+	}
+
+	var got map[string]string
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("body %s is not valid JSON: %v", body, err)
+	}
+
+	if want := "job db failed: " + jobErr.Error(); len(got) != 1 || got["text"] != want {
+		t.Errorf("body = %v, want only text %q", got, want)
 	}
 }
 

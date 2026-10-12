@@ -14,6 +14,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
+	"nilswitt.dev/go-backup-tool/internal/backup/remoteAuth"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -178,7 +179,7 @@ func TestRemoteTargetInteropMalformedCreationTimeRejected(t *testing.T) {
 func putWithRawQuery(t *testing.T, baseURL string, id *identity.ServerIdentity, recvID, key, rawQuery string) *http.Response {
 	t.Helper()
 
-	token, err := id.SignRequest(recvID)
+	token, err := id.SignRequest(recvID, remoteAuth.Request{})
 	if err != nil {
 		t.Fatalf("signing request: %v", err)
 	}

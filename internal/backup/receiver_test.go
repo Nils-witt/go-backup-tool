@@ -25,6 +25,11 @@ func TestSanitizeObjectKey(t *testing.T) {
 		{key: "subdir/../../etc/passwd", wantErr: true},
 		{key: "subdir//double-slash", wantErr: true},
 		{key: ".", wantErr: true},
+		{key: `..\..\state.db`, wantErr: true},
+		{key: `subdir\..\..\x`, wantErr: true},
+		{key: "C:x", wantErr: true},
+		{key: "subdir/C:/x", wantErr: true},
+		{key: "nul\x00byte", wantErr: true},
 	}
 
 	for _, tt := range tests {

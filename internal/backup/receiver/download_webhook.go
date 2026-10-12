@@ -48,7 +48,9 @@ const defaultDownloadBody = "{user} downloaded {file} from receiver {receiver} a
 // downloadWebhookPayload.
 func downloadWebhookBody(wh notify.Webhook, recv config.ResolvedReceiver, ev DownloadWebhookEvent) ([]byte, error) {
 	if wh.Body != "" {
-		return []byte(renderDownloadWebhookPayload(wh.Body, recv, ev)), nil
+		esc := wh.TemplateEscaper(defaultDownloadWebhookContentType)
+
+		return []byte(renderDownloadWebhookPayload(wh.Body, recv, ev, esc)), nil
 	}
 
 	payload := downloadWebhookPayload{User: ev.Username, File: ev.Key, Receiver: recv.ID, Time: ev.At, ServerName: recv.ServerName}
@@ -64,14 +66,16 @@ func downloadWebhookBody(wh notify.Webhook, recv config.ResolvedReceiver, ev Dow
 // config.ResolvedReceiver.ServerName), "" if unset. This lets an operator's
 // webhook receiver (Slack, PagerDuty, a custom endpoint expecting its own
 // JSON/form shape, ...) or email get a body it already understands instead
-// of go-backup-tool's own default shape.
-func renderDownloadWebhookPayload(tmpl string, recv config.ResolvedReceiver, ev DownloadWebhookEvent) string {
+// of go-backup-tool's own default shape. Every value goes through escape
+// first (see notify.Webhook.TemplateEscaper): {file} is a key a remote
+// sender chose.
+func renderDownloadWebhookPayload(tmpl string, recv config.ResolvedReceiver, ev DownloadWebhookEvent, escape func(string) string) string {
 	replacer := strings.NewReplacer(
-		"{user}", ev.Username,
-		"{file}", ev.Key,
-		"{receiver}", recv.ID,
+		"{user}", escape(ev.Username),
+		"{file}", escape(ev.Key),
+		"{receiver}", escape(recv.ID),
 		"{time}", ev.At.UTC().Format(time.RFC3339),
-		"{server_name}", recv.ServerName,
+		"{server_name}", escape(recv.ServerName),
 	)
 
 	return replacer.Replace(tmpl)
@@ -106,17 +110,17 @@ func notifyDownloadWebhook(recv config.ResolvedReceiver, wh notify.Webhook, ev D
 
 	resp, err := notify.PostWebhook(context.Background(), wh, body, defaultDownloadWebhookContentType)
 	if err != nil {
-		log.Warn("download webhook: request failed", "id", recv.ID, "webhook", wh.URL, "err", err)
+		log.Warn("download webhook: request failed", "id", recv.ID, "webhook", wh.RedactedURL(), "err", err)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Warn("download webhook: non-2xx response", "id", recv.ID, "webhook", wh.URL, "status", resp.StatusCode)
+		log.Warn("download webhook: non-2xx response", "id", recv.ID, "webhook", wh.RedactedURL(), "status", resp.StatusCode)
 		return
 	}
 
-	log.Info("download webhook fired", "id", recv.ID, "webhook", wh.URL, "user", ev.Username, "file", ev.Key)
+	log.Info("download webhook fired", "id", recv.ID, "webhook", wh.RedactedURL(), "user", ev.Username, "file", ev.Key)
 }
 
 // notifyDownloadEmail emails ev via email. queue, if non-nil, retries
@@ -132,8 +136,8 @@ func notifyDownloadEmail(recv config.ResolvedReceiver, email notify.Email, ev Do
 		bodyTmpl = defaultDownloadBody
 	}
 
-	subject := renderDownloadWebhookPayload(subjectTmpl, recv, ev)
-	body := renderDownloadWebhookPayload(bodyTmpl, recv, ev)
+	subject := renderDownloadWebhookPayload(subjectTmpl, recv, ev, notify.NoEscape)
+	body := renderDownloadWebhookPayload(bodyTmpl, recv, ev, notify.NoEscape)
 
 	ctx, cancel := context.WithTimeout(context.Background(), notify.Timeout)
 	defer cancel()

@@ -309,7 +309,7 @@ func TestRenderReportSubject(t *testing.T) {
 		jobErrors: []store.JobRunErrorEvent{{}},
 	}
 
-	got := renderReportSubject("{start} to {end}: {receivers} receiver(s), {errors} error(s), {stale} stale, {jobs} job(s), {job-errors} job error(s)", report)
+	got := renderReportSubject("{start} to {end}: {receivers} receiver(s), {errors} error(s), {stale} stale, {jobs} job(s), {job-errors} job error(s)", report, notify.NoEscape)
 
 	want := "2026-08-27 07:00 to 2026-08-28 07:00: 1 receiver(s), 2 error(s), 1 stale, 1 job(s), 1 job error(s)"
 	if got != want {
@@ -324,7 +324,7 @@ func TestRenderReportSubjectDefaultTemplate(t *testing.T) {
 
 	// Mirrors report.defaultReportSubject: reproduces this feature's
 	// original hardcoded subject line when report.subject: is unset.
-	got := renderReportSubject("go-backup-tool report - {end}", report)
+	got := renderReportSubject("go-backup-tool report - {end}", report, notify.NoEscape)
 
 	want := "go-backup-tool report - 2026-08-28 07:00"
 	if got != want {
@@ -337,7 +337,7 @@ func TestRenderReportSubjectServerName(t *testing.T) {
 
 	report := reportContent{serverName: "primary-backup-host"}
 
-	got := renderReportSubject("[{server_name}] report", report)
+	got := renderReportSubject("[{server_name}] report", report, notify.NoEscape)
 
 	want := "[primary-backup-host] report"
 	if got != want {

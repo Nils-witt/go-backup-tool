@@ -1,7 +1,12 @@
 package receiver
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"hash"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -45,7 +50,7 @@ func RegisterRoutes(mux *http.ServeMux, receivers *backup.ReceiverRegistry, stat
 // reflects it.
 func HandleReceiveObject(receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		recv, cfg, t, key, ok := resolveReceiverRequest(w, r, receivers, db, log)
+		recv, cfg, t, key, bound, ok := resolveReceiverRequest(w, r, receivers, db, log)
 		if !ok {
 			return
 		}
@@ -60,10 +65,21 @@ func HandleReceiveObject(receivers *backup.ReceiverRegistry, status *backup.Rece
 
 		cfg.CreatedAt = createdAt
 
-		if err := backup.WriteLocalObject(cfg, t, r.Body); err != nil {
+		var body io.Reader = r.Body
+		if bound.BodySHA256 != "" {
+			body = &digestReader{r: r.Body, h: sha256.New(), want: bound.BodySHA256}
+		}
+
+		if err := backup.WriteLocalObject(cfg, t, body); err != nil {
 			log.Warn("receiver: writing object failed", "id", recv.ID, "key", key, "err", err)
 			status.Record(recv.ID, key, err)
 			recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, store.ReceiverEventReceive, key, 0, err)
+
+			if errors.Is(err, errBodyDigestMismatch) {
+				http.Error(w, errBodyDigestMismatch.Error(), http.StatusBadRequest)
+				return
+			}
+
 			http.Error(w, "writing object failed", http.StatusInternalServerError)
 
 			return
@@ -99,7 +115,7 @@ func HandleReceiveObject(receivers *backup.ReceiverRegistry, status *backup.Rece
 // reflects it.
 func HandleDeleteObject(receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		recv, cfg, t, key, ok := resolveReceiverRequest(w, r, receivers, db, log)
+		recv, cfg, t, key, _, ok := resolveReceiverRequest(w, r, receivers, db, log)
 		if !ok {
 			return
 		}
@@ -127,33 +143,39 @@ func HandleDeleteObject(receivers *backup.ReceiverRegistry, status *backup.Recei
 // authorizeReceiver looks up the receiver named by the request's {id} path
 // value and verifies its Authorization: Bearer <token> header (see
 // verifyReceiverToken), writing an error response and returning ok=false if
-// either the id is unknown or the token doesn't verify.
-func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry, log *slog.Logger) (recv config.ResolvedReceiver, ok bool) {
+// either the id is unknown or the token doesn't verify. bound is the
+// request the token is bound to (see remoteAuth.Request), for the caller
+// to check against r once it has sanitized the key.
+func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry, log *slog.Logger) (recv config.ResolvedReceiver, bound remoteAuth.Request, ok bool) {
 	recv, exists := receivers.Get(r.PathValue("id"))
 	if !exists {
 		http.Error(w, "unknown receiver id", http.StatusNotFound)
-		return config.ResolvedReceiver{}, false
+		return config.ResolvedReceiver{}, remoteAuth.Request{}, false
 	}
 
 	token, hasToken := bearerToken(r)
 	if !hasToken {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return config.ResolvedReceiver{}, false
+		return config.ResolvedReceiver{}, remoteAuth.Request{}, false
 	}
 
-	issuer, err := verifyReceiverToken(recv, token)
+	issuer, bound, err := verifyReceiverToken(recv, token)
 	if err != nil {
 		log.Debug("receiver: rejected request", "id", recv.ID, "err", err)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 
-		return config.ResolvedReceiver{}, false
+		return config.ResolvedReceiver{}, remoteAuth.Request{}, false
 	}
 
 	if issuer == "" {
 		warnLegacyKeyOnce(recv.ID, token, log)
 	}
 
-	return recv, true
+	if bound.IsZero() {
+		warnUnboundTokenOnce(recv.ID, token, log)
+	}
+
+	return recv, bound, true
 }
 
 // verifyReceiverToken verifies token as a request token (see
@@ -161,35 +183,86 @@ func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *backup
 // it was verified as coming from. A token whose issuer is one of recv's
 // allowed servers must verify against that server's current key; any other
 // token is checked against recv's deprecated public-key: instead, if set,
-// returning "" as the issuer on success.
-func verifyReceiverToken(recv config.ResolvedReceiver, token string) (string, error) {
+// returning "" as the issuer on success. Either way it also returns the
+// request the token is bound to (see remoteAuth.Request).
+func verifyReceiverToken(recv config.ResolvedReceiver, token string) (string, remoteAuth.Request, error) {
 	issuer, err := remoteAuth.UnverifiedIssuer(token)
 	if err != nil {
-		return "", err
+		return "", remoteAuth.Request{}, err
 	}
 
 	if slices.Contains(recv.AllowedServers, issuer) {
 		srv, ok := recv.TrustedServers.Get(issuer)
 		if !ok {
-			return "", fmt.Errorf("allowed server %q is no longer trusted", issuer)
+			return "", remoteAuth.Request{}, fmt.Errorf("allowed server %q is no longer trusted", issuer)
 		}
 
-		if err := remoteAuth.VerifyRemoteAuthToken(token, srv.PublicKey, recv.ID, issuer); err != nil {
-			return "", err
+		bound, err := remoteAuth.VerifyRemoteAuthToken(token, srv.PublicKey, recv.ID, issuer)
+		if err != nil {
+			return "", remoteAuth.Request{}, err
 		}
 
-		return issuer, nil
+		return issuer, bound, nil
 	}
 
 	if recv.PublicKey == nil {
-		return "", fmt.Errorf("issuer %q is not an allowed server", issuer)
+		return "", remoteAuth.Request{}, fmt.Errorf("issuer %q is not an allowed server", issuer)
 	}
 
-	if err := remoteAuth.VerifyRemoteAuthToken(token, recv.PublicKey, recv.ID, ""); err != nil {
-		return "", err
+	bound, err := remoteAuth.VerifyRemoteAuthToken(token, recv.PublicKey, recv.ID, "")
+	if err != nil {
+		return "", remoteAuth.Request{}, err
 	}
 
-	return "", nil
+	return "", bound, nil
+}
+
+// errBodyDigestMismatch reports that a PUT's body isn't the one its request
+// token was signed for (see remoteAuth.Request.BodySHA256).
+var errBodyDigestMismatch = errors.New("body does not match the request token's digest")
+
+// checkRequestBinding reports whether r, whose sanitized key is key, is
+// the request bound names: same method, key and creationTime, and — for a
+// PUT — a body digest to verify while it streams (see digestReader). A
+// zero bound (an older sender's unbound token) is accepted as before.
+func checkRequestBinding(r *http.Request, key string, bound remoteAuth.Request) error {
+	if bound.IsZero() {
+		return nil
+	}
+
+	switch {
+	case bound.Method != r.Method:
+		return fmt.Errorf("token is for method %q, not %q", bound.Method, r.Method)
+	case bound.Key != key:
+		return fmt.Errorf("token is for key %q, not %q", bound.Key, key)
+	case bound.CreationTime != r.URL.Query().Get("creationTime"):
+		return errors.New("token is for a different creationTime")
+	case r.Method == http.MethodPut && bound.BodySHA256 == "":
+		return errors.New("token has no body digest for a PUT")
+	}
+
+	return nil
+}
+
+// digestReader passes r through while hashing it into h, failing the final
+// read with errBodyDigestMismatch unless the hex digest equals want — so
+// WriteLocalObject never renames a body the token wasn't signed for into
+// place.
+type digestReader struct {
+	r    io.Reader
+	h    hash.Hash
+	want string
+}
+
+func (d *digestReader) Read(p []byte) (int, error) {
+	n, err := d.r.Read(p)
+	d.h.Write(p[:n])
+
+	if errors.Is(err, io.EOF) && hex.EncodeToString(d.h.Sum(nil)) != d.want {
+		return n, errBodyDigestMismatch
+	}
+
+	return n, err
 }
 
 // legacyKeyWarned records the receiver ids warnLegacyKeyOnce has already
@@ -209,6 +282,24 @@ func warnLegacyKeyOnce(receiverID, token string, log *slog.Logger) {
 		"id", receiverID, "sender_server_id", issuer)
 }
 
+// unboundTokenWarned records the receiver ids warnUnboundTokenOnce has
+// already warned about this run.
+var unboundTokenWarned sync.Map
+
+// warnUnboundTokenOnce logs, once per receiver per run, that recv accepted
+// a token from a sender too old to bind its tokens to their request (see
+// remoteAuth.Request), which leaves such tokens replayable for other
+// methods, keys and bodies until the sender is upgraded.
+func warnUnboundTokenOnce(receiverID, token string, log *slog.Logger) {
+	if _, loaded := unboundTokenWarned.LoadOrStore(receiverID, struct{}{}); loaded {
+		return
+	}
+
+	issuer, _ := remoteAuth.UnverifiedIssuer(token)
+	log.Warn("receiver: accepted a request token not bound to its request; upgrade the sending instance",
+		"id", receiverID, "sender_server_id", issuer)
+}
+
 // resolveReceiverRequest authorizes r against receivers (see
 // authorizeReceiver) and sanitizes its {key} path value (see
 // backup.SanitizeObjectKey), writing an error response and reporting ok as
@@ -217,19 +308,26 @@ func warnLegacyKeyOnce(receiverID, token string, log *slog.Logger) {
 // WriteLocalObject/DeleteLocalObject as a type: local target would (see
 // backup.ReceiverTarget). Shared by both handlers, which otherwise duplicate
 // this exact preamble.
-func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry, db *store.Store, log *slog.Logger) (recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, key string, ok bool) {
-	recv, ok = authorizeReceiver(w, r, receivers, log)
+func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry, db *store.Store, log *slog.Logger) (recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, key string, bound remoteAuth.Request, ok bool) {
+	recv, bound, ok = authorizeReceiver(w, r, receivers, log)
 	if !ok {
-		return config.ResolvedReceiver{}, nil, nil, "", false
+		return config.ResolvedReceiver{}, nil, nil, "", remoteAuth.Request{}, false
 	}
 
 	key, err := backup.SanitizeObjectKey(r.PathValue("key"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
-		return config.ResolvedReceiver{}, nil, nil, "", false
+		return config.ResolvedReceiver{}, nil, nil, "", remoteAuth.Request{}, false
 	}
 
-	return recv, &config.Config{Key: key, StateDB: db}, backup.ReceiverTarget(recv), key, true
+	if err := checkRequestBinding(r, key, bound); err != nil {
+		log.Debug("receiver: rejected request", "id", recv.ID, "key", key, "err", err)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+
+		return config.ResolvedReceiver{}, nil, nil, "", remoteAuth.Request{}, false
+	}
+
+	return recv, &config.Config{Key: key, StateDB: db}, backup.ReceiverTarget(recv), key, bound, true
 }
 
 // bearerToken extracts the token from an "Authorization: Bearer <token>"

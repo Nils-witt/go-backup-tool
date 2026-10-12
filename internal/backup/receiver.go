@@ -44,8 +44,15 @@ func ParseCreationTime(raw string, now time.Time) (time.Time, error) {
 // network and must not be trusted to stay within its receiver's root: this
 // rejects an empty/absolute key or one containing a "." or ".." path
 // segment.
+//
+// Keys are '/'-separated on every platform, so '\' and ':' are rejected
+// outright: on Windows filepath.Join treats '\' as a separator and ':' as a
+// volume marker, which would let "..\..\x" or "C:x" escape the root even
+// though no '/'-separated segment is "..". filepath.IsLocal then applies
+// the host OS's own rules (e.g. Windows reserved names like NUL) as a last
+// check on the exact path the callers join.
 func SanitizeObjectKey(key string) (string, error) {
-	if key == "" || strings.HasPrefix(key, "/") {
+	if key == "" || strings.HasPrefix(key, "/") || strings.ContainsAny(key, `\:`+"\x00") {
 		return "", fmt.Errorf("invalid key %q", key)
 	}
 
@@ -53,6 +60,10 @@ func SanitizeObjectKey(key string) (string, error) {
 		if seg == "" || seg == "." || seg == ".." {
 			return "", fmt.Errorf("invalid key %q", key)
 		}
+	}
+
+	if !filepath.IsLocal(filepath.FromSlash(key)) {
+		return "", fmt.Errorf("invalid key %q", key)
 	}
 
 	return key, nil

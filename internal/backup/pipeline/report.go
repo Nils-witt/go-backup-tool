@@ -349,8 +349,9 @@ const defaultReportSubject = "[{server_name}] report - {end}"
 // {job-errors} are counts of each of report's sections; {server_name} is the
 // config file's top-level server-name: (see config.RunConfig.ServerName),
 // "" if unset. Mirrors receiver.renderDownloadWebhookPayload's
-// {placeholder} substitution style.
-func renderReportSubject(tmpl string, report reportContent) string {
+// {placeholder} substitution style. {server_name}, the only free-text
+// value, goes through escape first (see notify.Webhook.TemplateEscaper).
+func renderReportSubject(tmpl string, report reportContent, escape func(string) string) string {
 	replacer := strings.NewReplacer(
 		"{start}", report.start.UTC().Format(reportTimeFormat),
 		"{end}", report.end.UTC().Format(reportTimeFormat),
@@ -359,7 +360,7 @@ func renderReportSubject(tmpl string, report reportContent) string {
 		"{stale}", strconv.Itoa(len(report.stale)),
 		"{jobs}", strconv.Itoa(len(report.jobs)),
 		"{job-errors}", strconv.Itoa(len(report.jobErrors)),
-		"{server_name}", report.serverName,
+		"{server_name}", escape(report.serverName),
 	)
 
 	return replacer.Replace(tmpl)
@@ -401,7 +402,9 @@ const defaultReportWebhookContentType = "application/json"
 // the default JSON reportWebhookPayload.
 func reportWebhookBody(wh notify.Webhook, report reportContent) ([]byte, error) {
 	if wh.Body != "" {
-		return []byte(renderReportSubject(wh.Body, report)), nil
+		esc := wh.TemplateEscaper(defaultReportWebhookContentType)
+
+		return []byte(renderReportSubject(wh.Body, report, esc)), nil
 	}
 
 	payload := reportWebhookPayload{
@@ -444,7 +447,7 @@ func sendReportEmail(ctx context.Context, email *notify.Email, report reportCont
 		subjectTmpl = defaultReportSubject
 	}
 
-	subject := renderReportSubject(subjectTmpl, report)
+	subject := renderReportSubject(subjectTmpl, report, notify.NoEscape)
 
 	sendCtx, cancel := context.WithTimeout(ctx, reportNotifyTimeout)
 	defer cancel()
@@ -463,23 +466,23 @@ func sendReportEmail(ctx context.Context, email *notify.Email, report reportCont
 func sendReportWebhook(ctx context.Context, wh *notify.Webhook, report reportContent, log *slog.Logger) {
 	body, err := reportWebhookBody(*wh, report)
 	if err != nil {
-		log.Warn("report: encoding webhook payload failed", "webhook", wh.URL, "err", err)
+		log.Warn("report: encoding webhook payload failed", "webhook", wh.RedactedURL(), "err", err)
 		return
 	}
 
 	resp, err := notify.PostWebhook(ctx, *wh, body, defaultReportWebhookContentType)
 	if err != nil {
-		log.Warn("report: webhook request failed", "webhook", wh.URL, "err", err)
+		log.Warn("report: webhook request failed", "webhook", wh.RedactedURL(), "err", err)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Warn("report: webhook non-2xx response", "webhook", wh.URL, "status", resp.StatusCode)
+		log.Warn("report: webhook non-2xx response", "webhook", wh.RedactedURL(), "status", resp.StatusCode)
 		return
 	}
 
-	log.Info("report webhook fired", "webhook", wh.URL,
+	log.Info("report webhook fired", "webhook", wh.RedactedURL(),
 		"receivers", len(report.receivers), "errors", len(report.errors), "stale", len(report.stale),
 		"jobs", len(report.jobs), "jobErrors", len(report.jobErrors))
 }

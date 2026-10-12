@@ -20,7 +20,7 @@ func TestRenderDownloadWebhookPayload(t *testing.T) {
 	ev := DownloadWebhookEvent{Username: "alice", Key: "daily/backup.gpg", At: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)}
 	tmpl := "{user} downloaded {file} from {receiver} at {time}"
 
-	got := renderDownloadWebhookPayload(tmpl, recv, ev)
+	got := renderDownloadWebhookPayload(tmpl, recv, ev, notify.NoEscape)
 	want := "alice downloaded daily/backup.gpg from a at 2026-01-02T03:04:05Z"
 
 	if got != want {
@@ -34,11 +34,43 @@ func TestRenderDownloadWebhookPayloadServerName(t *testing.T) {
 	recv := config.ResolvedReceiver{ID: "a", Path: "/mnt/a", ServerName: "primary-backup-host"}
 	ev := DownloadWebhookEvent{Username: "alice", Key: "k", At: time.Now()}
 
-	got := renderDownloadWebhookPayload("[{server_name}] {user} downloaded {file}", recv, ev)
+	got := renderDownloadWebhookPayload("[{server_name}] {user} downloaded {file}", recv, ev, notify.NoEscape)
 
 	want := "[primary-backup-host] alice downloaded k"
 	if got != want {
 		t.Errorf("renderDownloadWebhookPayload() = %q, want %q", got, want)
+	}
+}
+
+// TestDownloadWebhookBodyEscapesJSON checks a remote sender's object key
+// can't break out of a JSON body template's string and add or override
+// fields, while a non-JSON template still gets the key verbatim.
+func TestDownloadWebhookBodyEscapesJSON(t *testing.T) {
+	t.Parallel()
+
+	recv := config.ResolvedReceiver{ID: "a", Path: "/mnt/a"}
+	ev := DownloadWebhookEvent{Username: "mallory", Key: `db/x","text":"nothing to see","channel":"#general`, At: time.Now()}
+	tmpl := `{"text":"{user} downloaded {file}"}`
+
+	body, err := downloadWebhookBody(notify.Webhook{Body: tmpl}, recv, ev)
+	if err != nil {
+		t.Fatalf("downloadWebhookBody() error: %v", err)
+	}
+
+	var got map[string]string
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("body %s is not valid JSON: %v", body, err)
+	}
+
+	if want := map[string]string{"text": "mallory downloaded " + ev.Key}; len(got) != 1 || got["text"] != want["text"] {
+		t.Errorf("body = %v, want only %v", got, want)
+	}
+
+	plain := notify.Webhook{Body: "{file}", Headers: map[string]string{"content-type": "text/plain"}}
+
+	body, err = downloadWebhookBody(plain, recv, ev)
+	if err != nil || string(body) != ev.Key {
+		t.Errorf("text/plain downloadWebhookBody() = (%q, %v), want the raw key", body, err)
 	}
 }
 

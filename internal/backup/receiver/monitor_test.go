@@ -96,7 +96,7 @@ func TestRenderStaleWebhookPayload(t *testing.T) {
 	tmpl := "{receiver_id} at {path} stale after {stale_after}, last received {last_received}"
 	lastSeen := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
-	got := renderStaleWebhookPayload(tmpl, recv, lastSeen)
+	got := renderStaleWebhookPayload(tmpl, recv, lastSeen, notify.NoEscape)
 	want := "a at /mnt/a stale after 6h0m0s, last received 2026-01-02T03:04:05Z"
 
 	if got != want {
@@ -109,7 +109,7 @@ func TestRenderStaleWebhookPayloadServerName(t *testing.T) {
 
 	recv := config.ResolvedReceiver{ID: "a", Path: "/mnt/a", StaleAfter: time.Hour, ServerName: "primary-backup-host"}
 
-	got := renderStaleWebhookPayload("[{server_name}] {receiver_id} is stale", recv, time.Now())
+	got := renderStaleWebhookPayload("[{server_name}] {receiver_id} is stale", recv, time.Now(), notify.NoEscape)
 
 	want := "[primary-backup-host] a is stale"
 	if got != want {

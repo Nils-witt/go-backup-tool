@@ -42,7 +42,9 @@ const defaultJobFailureBody = "Job {job} {state} after {duration} (started {star
 // jobFailurePayload.
 func jobFailureWebhookBody(wh notify.Webhook, job *config.Config, jobErr error, state backup.RunState, start time.Time, duration time.Duration) ([]byte, error) {
 	if wh.Body != "" {
-		return []byte(renderJobFailurePayload(wh.Body, job, jobErr, state, start, duration)), nil
+		esc := wh.TemplateEscaper(defaultJobFailureWebhookContentType)
+
+		return []byte(renderJobFailurePayload(wh.Body, job, jobErr, state, start, duration, esc)), nil
 	}
 
 	payload := jobFailurePayload{
@@ -61,15 +63,17 @@ func jobFailureWebhookBody(wh notify.Webhook, job *config.Config, jobErr error, 
 // server-name: (see config.Config.ServerName), "" if unset. This lets an
 // operator's webhook receiver (Slack, PagerDuty, a custom endpoint expecting
 // its own JSON/form shape, ...) or email get a body it already understands
-// instead of go-backup-tool's own default shape.
-func renderJobFailurePayload(tmpl string, job *config.Config, jobErr error, state backup.RunState, start time.Time, duration time.Duration) string {
+// instead of go-backup-tool's own default shape. Every value goes through
+// escape first (see notify.Webhook.TemplateEscaper): {error} can carry a
+// remote receiver's response text.
+func renderJobFailurePayload(tmpl string, job *config.Config, jobErr error, state backup.RunState, start time.Time, duration time.Duration, escape func(string) string) string {
 	replacer := strings.NewReplacer(
-		"{job}", job.Name,
-		"{error}", jobErr.Error(),
+		"{job}", escape(job.Name),
+		"{error}", escape(jobErr.Error()),
 		"{state}", string(state),
 		"{duration}", duration.String(),
 		"{started_at}", start.UTC().Format(time.RFC3339),
-		"{server_name}", job.ServerName,
+		"{server_name}", escape(job.ServerName),
 	)
 
 	return replacer.Replace(tmpl)
@@ -105,17 +109,17 @@ func notifyJobFailureWebhook(job *config.Config, wh notify.Webhook, jobErr error
 
 	resp, err := notify.PostWebhook(context.Background(), wh, body, defaultJobFailureWebhookContentType)
 	if err != nil {
-		log.Warn("job failure webhook: request failed", "job", job.Name, "webhook", wh.URL, "err", err)
+		log.Warn("job failure webhook: request failed", "job", job.Name, "webhook", wh.RedactedURL(), "err", err)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Warn("job failure webhook: non-2xx response", "job", job.Name, "webhook", wh.URL, "status", resp.StatusCode)
+		log.Warn("job failure webhook: non-2xx response", "job", job.Name, "webhook", wh.RedactedURL(), "status", resp.StatusCode)
 		return
 	}
 
-	log.Info("job failure webhook fired", "job", job.Name, "webhook", wh.URL, "state", state)
+	log.Info("job failure webhook fired", "job", job.Name, "webhook", wh.RedactedURL(), "state", state)
 }
 
 // notifyJobFailureEmail emails job's just-finished failure via email. queue,
@@ -131,8 +135,8 @@ func notifyJobFailureEmail(job *config.Config, email notify.Email, jobErr error,
 		bodyTmpl = defaultJobFailureBody
 	}
 
-	subject := renderJobFailurePayload(subjectTmpl, job, jobErr, state, start, duration)
-	body := renderJobFailurePayload(bodyTmpl, job, jobErr, state, start, duration)
+	subject := renderJobFailurePayload(subjectTmpl, job, jobErr, state, start, duration, notify.NoEscape)
+	body := renderJobFailurePayload(bodyTmpl, job, jobErr, state, start, duration, notify.NoEscape)
 
 	ctx, cancel := context.WithTimeout(context.Background(), notify.Timeout)
 	defer cancel()

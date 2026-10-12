@@ -350,6 +350,47 @@ func TestPostWebhookCustomHeaders(t *testing.T) {
 	}
 }
 
+func TestWebhookRedactedURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		url      string
+		expected string
+	}{
+		{name: "path token", url: "https://hooks.example.com/services/T0/B0/SECRET", expected: "https://hooks.example.com"},
+		{name: "query and userinfo", url: "http://user:pass@127.0.0.1:8080/h?token=SECRET", expected: "http://127.0.0.1:8080"}, //nolint:gosec // dummy credential the redaction must strip
+		{name: "unparsable", url: "://SECRET", expected: "(redacted)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := (Webhook{URL: tt.url}).RedactedURL(); got != tt.expected {
+				t.Errorf("RedactedURL(%q) = %q, want %q", tt.url, got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestPostWebhookErrorOmitsURL checks a failed send's error, which callers
+// log, doesn't repeat the credential-bearing webhook URL.
+func TestPostWebhookErrorOmitsURL(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{"http://127.0.0.1:1/hooks/SECRET-TOKEN", "http://127.0.0.1:1/%zz/SECRET-TOKEN"} {
+		resp, err := PostWebhook(t.Context(), Webhook{URL: raw, Method: http.MethodPost}, nil, "application/json")
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+
+		if err == nil || strings.Contains(err.Error(), "SECRET-TOKEN") {
+			t.Errorf("PostWebhook(%q) error = %v, want an error without the URL's path", raw, err)
+		}
+	}
+}
+
 // gpgTestUID is the identity every newTestGPGHomedir key is generated for,
 // and so the recipient encryptGPGBody/SendMail are given in these tests.
 const gpgTestUID = "gpg-notify-test@example.com"

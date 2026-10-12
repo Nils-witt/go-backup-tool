@@ -8,6 +8,8 @@ package pipeline
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +26,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/dockerexec"
+	"nilswitt.dev/go-backup-tool/internal/backup/remoteAuth"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -591,15 +594,16 @@ func remoteObjectURL(t *config.Target, key string, query url.Values) string {
 
 // remoteAuthHeader signs a fresh JWT with cfg.Identity (this instance's own
 // RSA key and UUID — see loadServerIdentity) scoped to t.Bucket (the
-// destination instance's receiver id) and formats it as an Authorization:
-// Bearer header value, for UploadToRemote/DeleteRemoteObject. Errors if
-// cfg.Identity is nil, meaning loadServerIdentity failed at startup.
-func remoteAuthHeader(cfg *config.Config, t *config.Target) (string, error) {
+// destination instance's receiver id) and bound to req (see
+// remoteAuth.Request), and formats it as an Authorization: Bearer header
+// value, for UploadToRemote/DeleteRemoteObject. Errors if cfg.Identity is
+// nil, meaning loadServerIdentity failed at startup.
+func remoteAuthHeader(cfg *config.Config, t *config.Target, req remoteAuth.Request) (string, error) {
 	if cfg.Identity == nil {
 		return "", errors.New("no server identity available (see startup log for why loadServerIdentity failed)")
 	}
 
-	token, err := cfg.Identity.SignRequest(t.Bucket)
+	token, err := cfg.Identity.SignRequest(t.Bucket, req)
 	if err != nil {
 		return "", fmt.Errorf("signing request: %w", err)
 	}
@@ -616,6 +620,9 @@ func remoteAuthHeader(cfg *config.Config, t *config.Target) (string, error) {
 // when this run's backup content was actually produced rather than on
 // upload time — see backup.ParseCreationTime. A zero cfg.CreatedAt sends no
 // creationTime at all, matching the receiver's own upload-time fallback.
+// r must also implement io.Seeker (the staged *os.File does): it's read
+// once up front to sign its SHA-256 into the request token (see
+// remoteAuth.Request), then rewound and streamed.
 func UploadToRemote(ctx context.Context, cfg *config.Config, t *config.Target, r io.Reader) error {
 	var query url.Values
 	if !cfg.CreatedAt.IsZero() {
@@ -644,7 +651,18 @@ func DeleteRemoteObject(ctx context.Context, cfg *config.Config, t *config.Targe
 // duplicate this build/send/check sequence identically apart from method,
 // body, Content-Type, and query.
 func doAuthenticatedRemoteRequest(ctx context.Context, cfg *config.Config, t *config.Target, method string, body io.Reader, contentType string, query url.Values) error {
-	auth, err := remoteAuthHeader(cfg, t)
+	bound := remoteAuth.Request{Method: method, Key: cfg.Key, CreationTime: query.Get("creationTime")}
+
+	if body != nil {
+		digest, err := bodySHA256(body)
+		if err != nil {
+			return err
+		}
+
+		bound.BodySHA256 = digest
+	}
+
+	auth, err := remoteAuthHeader(cfg, t, bound)
 	if err != nil {
 		return err
 	}
@@ -672,6 +690,33 @@ func doAuthenticatedRemoteRequest(ctx context.Context, cfg *config.Config, t *co
 	}
 
 	return nil
+}
+
+// bodySHA256 returns the hex SHA-256 of body's remaining content, then
+// rewinds body to where it was, so it can still be streamed as the request
+// body. body must implement io.Seeker; buffering an arbitrarily large
+// backup in memory just to hash it isn't an option.
+func bodySHA256(body io.Reader) (string, error) {
+	seeker, ok := body.(io.ReadSeeker)
+	if !ok {
+		return "", errors.New("remote upload body must be seekable to sign its digest")
+	}
+
+	start, err := seeker.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return "", fmt.Errorf("finding body offset: %w", err)
+	}
+
+	h := sha256.New()
+	if _, err := io.Copy(h, seeker); err != nil {
+		return "", fmt.Errorf("hashing body: %w", err)
+	}
+
+	if _, err := seeker.Seek(start, io.SeekStart); err != nil {
+		return "", fmt.Errorf("rewinding body: %w", err)
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // setFileContentLength sets req's ContentLength when body is a regular

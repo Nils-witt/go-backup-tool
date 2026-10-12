@@ -1508,7 +1508,7 @@ paths:
         "201":
           description: Object written
         "400":
-          description: Invalid object key
+          description: Invalid object key or creationTime, or a body that doesn't match the token's `sha256` claim
           content:
             text/plain:
               schema:
@@ -1594,8 +1594,14 @@ components:
         signature verifies against that server's public key, or — for
         receivers predating trusted servers — when it verifies against the
         receiver's deprecated public_key (see
-        remoteAuth.SignRemoteAuthToken/VerifyRemoteAuthToken). Independent of
-        the dashboard's own SSO auth.
+        remoteAuth.SignRemoteAuthToken/VerifyRemoteAuthToken). The token is
+        also bound to the one request it authorizes, via the claims `htm`
+        (HTTP method), `key` (object key), `ctm` (the `creationTime` query
+        value as sent, empty if none) and, for a PUT, `sha256` (hex SHA-256
+        of the body); a request that doesn't match them is rejected (401, or
+        400 for a body digest mismatch). Tokens from older senders carry
+        none of these claims and are still accepted, with a warning logged
+        once per receiver. Independent of the dashboard's own SSO auth.
 
   parameters:
     ReceiverId:

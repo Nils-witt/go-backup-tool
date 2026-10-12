@@ -211,7 +211,9 @@ const defaultStaleBody = "Receiver {receiver_id} ({path}) has not received a fil
 // staleReceiverPayload.
 func staleWebhookBody(wh notify.Webhook, recv config.ResolvedReceiver, lastSeen time.Time) ([]byte, error) {
 	if wh.Body != "" {
-		return []byte(renderStaleWebhookPayload(wh.Body, recv, lastSeen)), nil
+		esc := wh.TemplateEscaper(defaultStaleWebhookContentType)
+
+		return []byte(renderStaleWebhookPayload(wh.Body, recv, lastSeen, esc)), nil
 	}
 
 	payload := staleReceiverPayload{
@@ -231,14 +233,15 @@ func staleWebhookBody(wh notify.Webhook, recv config.ResolvedReceiver, lastSeen 
 // unset. This lets an operator's webhook receiver (Slack, PagerDuty, a
 // custom endpoint expecting its own JSON/form shape, ...) or email get a
 // body it already understands instead of go-backup-tool's own default
-// shape.
-func renderStaleWebhookPayload(tmpl string, recv config.ResolvedReceiver, lastSeen time.Time) string {
+// shape. Every value goes through escape first (see
+// notify.Webhook.TemplateEscaper).
+func renderStaleWebhookPayload(tmpl string, recv config.ResolvedReceiver, lastSeen time.Time, escape func(string) string) string {
 	replacer := strings.NewReplacer(
-		"{receiver_id}", recv.ID,
-		"{path}", recv.Path,
+		"{receiver_id}", escape(recv.ID),
+		"{path}", escape(recv.Path),
 		"{stale_after}", recv.StaleAfter.String(),
 		"{last_received}", lastSeen.UTC().Format(time.RFC3339),
-		"{server_name}", recv.ServerName,
+		"{server_name}", escape(recv.ServerName),
 	)
 
 	return replacer.Replace(tmpl)
@@ -272,17 +275,17 @@ func notifyStaleReceiverWebhook(recv config.ResolvedReceiver, wh notify.Webhook,
 
 	resp, err := notify.PostWebhook(context.Background(), wh, body, defaultStaleWebhookContentType)
 	if err != nil {
-		log.Warn("stale receiver webhook: request failed", "id", recv.ID, "webhook", wh.URL, "err", err)
+		log.Warn("stale receiver webhook: request failed", "id", recv.ID, "webhook", wh.RedactedURL(), "err", err)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Warn("stale receiver webhook: non-2xx response", "id", recv.ID, "webhook", wh.URL, "status", resp.StatusCode)
+		log.Warn("stale receiver webhook: non-2xx response", "id", recv.ID, "webhook", wh.RedactedURL(), "status", resp.StatusCode)
 		return
 	}
 
-	log.Info("stale receiver webhook fired", "id", recv.ID, "webhook", wh.URL, "stale_after", recv.StaleAfter, "last_received", lastSeen)
+	log.Info("stale receiver webhook fired", "id", recv.ID, "webhook", wh.RedactedURL(), "stale_after", recv.StaleAfter, "last_received", lastSeen)
 }
 
 // notifyStaleReceiverEmail emails recv's current staleness via email. queue,
@@ -298,8 +301,8 @@ func notifyStaleReceiverEmail(recv config.ResolvedReceiver, email notify.Email, 
 		bodyTmpl = defaultStaleBody
 	}
 
-	subject := renderStaleWebhookPayload(subjectTmpl, recv, lastSeen)
-	body := renderStaleWebhookPayload(bodyTmpl, recv, lastSeen)
+	subject := renderStaleWebhookPayload(subjectTmpl, recv, lastSeen, notify.NoEscape)
+	body := renderStaleWebhookPayload(bodyTmpl, recv, lastSeen, notify.NoEscape)
 
 	ctx, cancel := context.WithTimeout(context.Background(), notify.Timeout)
 	defer cancel()

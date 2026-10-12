@@ -101,11 +101,11 @@ func (si *ServerIdentity) PrivateKey() *rsa.PrivateKey {
 }
 
 // SignRequest signs a fresh short-lived JWT (see SignRemoteAuthToken)
-// identifying this instance as issuer and scoped to audience (the
-// destination receiver's id), for uploadToRemote/deleteRemoteObject's
-// Authorization: Bearer header.
-func (si *ServerIdentity) SignRequest(audience string) (string, error) {
-	return remoteAuth.SignRemoteAuthToken(si.privateKey, si.uuid, audience)
+// identifying this instance as issuer, scoped to audience (the destination
+// receiver's id) and bound to req (the one request it authorizes), for
+// uploadToRemote/deleteRemoteObject's Authorization: Bearer header.
+func (si *ServerIdentity) SignRequest(audience string, req remoteAuth.Request) (string, error) {
+	return remoteAuth.SignRemoteAuthToken(si.privateKey, si.uuid, audience, req)
 }
 
 // loadServerPrivateKey reads and parses dir/server.key (written by

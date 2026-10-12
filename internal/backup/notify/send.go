@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/smtp"
+	"net/url"
 	"os/exec"
 	"strings"
 	"time"
@@ -23,18 +25,33 @@ const Timeout = 10 * time.Second
 // request.
 var httpClient = &http.Client{Timeout: Timeout}
 
+// RedactedURL returns wh.URL cut down to its scheme and host, for logging.
+// A webhook URL often embeds its credential (a chat incoming-webhook token
+// in the path or query, or userinfo), and logs are readable by every
+// dashboard user with the view permission (see webui's /api/logs), while
+// the URL itself is admin-only configuration.
+func (wh Webhook) RedactedURL() string {
+	u, err := url.Parse(wh.URL)
+	if err != nil || u.Host == "" {
+		return "(redacted)"
+	}
+
+	return u.Scheme + "://" + u.Host
+}
+
 // PostWebhook sends body to wh, defaulting its Content-Type header to
 // defaultContentType when wh.Headers doesn't set one. The caller owns
 // logging/interpreting the result; a non-nil error means the request
 // couldn't even be built or sent, not a non-2xx response, which the caller
-// checks on the returned *http.Response (and must Close its Body).
+// checks on the returned *http.Response (and must Close its Body). Neither
+// error names the full URL (see RedactedURL), so callers may log it.
 func PostWebhook(ctx context.Context, wh Webhook, body []byte, defaultContentType string) (*http.Response, error) {
 	ctx, cancel := context.WithTimeout(ctx, Timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, wh.Method, wh.URL, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("building request: %w", err)
+		return nil, fmt.Errorf("building request to %s: %w", wh.RedactedURL(), stripURL(err))
 	}
 
 	for k, v := range wh.Headers {
@@ -47,10 +64,20 @@ func PostWebhook(ctx context.Context, wh Webhook, body []byte, defaultContentTyp
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
+		return nil, fmt.Errorf("request to %s failed: %w", wh.RedactedURL(), stripURL(err))
 	}
 
 	return resp, nil
+}
+
+// stripURL unwraps a *url.Error, whose message repeats the full request
+// URL, to just its underlying cause.
+func stripURL(err error) error {
+	if ue, ok := errors.AsType[*url.Error](err); ok {
+		return ue.Err
+	}
+
+	return err
 }
 
 // SendMail sends an email from sender to every address in recipients, via
