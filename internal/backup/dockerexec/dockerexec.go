@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -235,6 +236,63 @@ func (c *Client) exitCode(ctx context.Context, id string) (int, error) {
 	}
 
 	return info.ExitCode, nil
+}
+
+// Container is one running container as the daemon lists it.
+type Container struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`   // without the daemon's leading "/"
+	Image  string `json:"image"`  // as the container was created, e.g. "postgres:16"
+	State  string `json:"state"`  // e.g. "running"
+	Status string `json:"status"` // human-readable, e.g. "Up 2 hours"
+}
+
+// ListContainers lists the daemon's running containers — the ones an Exec
+// can target — sorted by name.
+func (c *Client) ListContainers(ctx context.Context) ([]Container, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/containers/json", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("listing containers: %w", apiError(resp))
+	}
+
+	var listed []struct {
+		ID     string   `json:"Id"`
+		Names  []string `json:"Names"`
+		Image  string   `json:"Image"`
+		State  string   `json:"State"`
+		Status string   `json:"Status"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
+		return nil, fmt.Errorf("listing containers: %w", err)
+	}
+
+	out := make([]Container, 0, len(listed))
+	for _, l := range listed {
+		ct := Container{ID: l.ID, Image: l.Image, State: l.State, Status: l.Status}
+
+		// The daemon names a container "/<name>"; a container with no name
+		// at all (never seen in practice) falls back to its short id.
+		switch {
+		case len(l.Names) > 0:
+			ct.Name = strings.TrimPrefix(l.Names[0], "/")
+		case len(l.ID) > 12:
+			ct.Name = l.ID[:12]
+		default:
+			ct.Name = l.ID
+		}
+
+		out = append(out, ct)
+	}
+
+	slices.SortFunc(out, func(a, b Container) int { return strings.Compare(a.Name, b.Name) })
+
+	return out, nil
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any) (*http.Response, error) {

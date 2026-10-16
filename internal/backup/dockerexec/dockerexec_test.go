@@ -94,6 +94,48 @@ func TestRunReportsDaemonErrors(t *testing.T) {
 	}
 }
 
+func TestListContainers(t *testing.T) {
+	t.Parallel()
+
+	c, _ := newClient(t, map[string]dockerexectest.Container{
+		"web":  {Image: "nginx:1"},
+		"db":   {Image: "postgres:16"},
+		"old":  {Image: "redis:7", Stopped: true},
+		"auth": {Image: "keycloak:26"},
+	})
+
+	got, err := c.ListContainers(context.Background())
+	if err != nil {
+		t.Fatalf("ListContainers: %v", err)
+	}
+
+	want := []dockerexec.Container{
+		{ID: "id-auth", Name: "auth", Image: "keycloak:26", State: "running", Status: "Up 1 minute"},
+		{ID: "id-db", Name: "db", Image: "postgres:16", State: "running", Status: "Up 1 minute"},
+		{ID: "id-web", Name: "web", Image: "nginx:1", State: "running", Status: "Up 1 minute"},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("ListContainers() = %+v, want %+v", got, want)
+	}
+}
+
+func TestListContainersUnreachableDaemon(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix sockets only")
+	}
+
+	c, err := dockerexec.New("unix:///nonexistent/docker.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.ListContainers(context.Background()); err == nil || !strings.Contains(err.Error(), "docker daemon") {
+		t.Errorf("err = %v, want a docker daemon error", err)
+	}
+}
+
 func TestNewRejectsUnknownScheme(t *testing.T) {
 	t.Parallel()
 

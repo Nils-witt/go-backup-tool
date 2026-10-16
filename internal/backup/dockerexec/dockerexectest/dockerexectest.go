@@ -39,8 +39,10 @@ type Daemon struct {
 
 // Container scripts what an exec in it does: it writes Stdout and Stderr
 // (as separate multiplexed frames) and exits with ExitCode. Stopped makes
-// creating an exec fail with a 409, as for a container that isn't running.
+// creating an exec fail with a 409, as for a container that isn't running,
+// and leaves it out of the container list. Image is what the list reports.
 type Container struct {
+	Image    string
 	Stdout   string
 	Stderr   string
 	ExitCode int
@@ -85,6 +87,22 @@ func Start(t *testing.T, containers map[string]Container) *Daemon {
 
 func (d *Daemon) handler() http.Handler {
 	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /v1.41/containers/json", func(w http.ResponseWriter, _ *http.Request) {
+		list := []map[string]any{}
+
+		for name, c := range d.Containers {
+			if c.Stopped {
+				continue
+			}
+
+			list = append(list, map[string]any{
+				"Id": "id-" + name, "Names": []string{"/" + name}, "Image": c.Image, "State": "running", "Status": "Up 1 minute",
+			})
+		}
+
+		_ = json.NewEncoder(w).Encode(list)
+	})
 
 	mux.HandleFunc("POST /v1.41/containers/{name}/exec", func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")

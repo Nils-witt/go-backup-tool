@@ -1,11 +1,18 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiFetchJSON, apiFetchOK } from "../api/client";
-import type { CommandConfigJSON, CommandConfigListJSON, CommandDefinitionJSON } from "../api/types";
+import type {
+  CommandConfigJSON,
+  CommandConfigListJSON,
+  CommandDefinitionJSON,
+  DockerContainerJSON,
+  DockerContainerListJSON,
+} from "../api/types";
 import { StatusChip } from "./StatusChip";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { EditingDisabledNotice } from "./EditingDisabledNotice";
 import { fmtTime } from "../lib/format";
 import Alert from "@mui/material/Alert";
+import Autocomplete from "@mui/material/Autocomplete";
 import Button from "@mui/material/Button";
 import Dialog from "@mui/material/Dialog";
 import DialogActions from "@mui/material/DialogActions";
@@ -39,6 +46,33 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+// useDockerContainers loads the running containers on this instance's Docker
+// daemon for the container picker. error is set when the daemon can't be
+// reached (e.g. Docker isn't installed), which leaves the field free-text.
+function useDockerContainers() {
+  const [containers, setContainers] = useState<DockerContainerJSON[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetchJSON<DockerContainerListJSON>("/api/docker-containers")
+      .then((d) => {
+        if (!cancelled) setContainers(d.containers);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setContainers([]);
+        setError(errorText(err));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return { containers, error };
+}
+
 function CommandDialog({
   editing,
   form,
@@ -58,6 +92,13 @@ function CommandDialog({
 }) {
   const set = (patch: Partial<CommandDefinitionJSON>) => onChange({ ...form, ...patch });
   const canSave = !!form.id.trim() && !!form.cmd.trim();
+  const docker = useDockerContainers();
+  const containersByName = useMemo(
+    () => new Map((docker.containers ?? []).map((c) => [c.name, c])),
+    [docker.containers],
+  );
+  const containerHelp =
+    "Run inside this running container (name or ID) through the Docker socket. Empty runs it here.";
 
   return (
     <Dialog open onClose={onCancel} fullWidth maxWidth="sm">
@@ -85,12 +126,48 @@ function CommandDialog({
             slotProps={{ htmlInput: { spellCheck: false, style: { fontFamily: "monospace" } } }}
           />
           <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-            <TextField
-              label="Container"
-              value={form.container}
-              onChange={(e) => set({ container: e.target.value })}
-              helperText="Run inside this running container (name or ID) through the Docker socket. Empty runs it here."
-              slotProps={{ htmlInput: { spellCheck: false } }}
+            <Autocomplete
+              freeSolo
+              options={[...containersByName.keys()]}
+              loading={docker.containers === null}
+              value={form.container || null}
+              inputValue={form.container}
+              onChange={(_, v) => set({ container: v ?? "" })}
+              onInputChange={(_, v) => set({ container: v })}
+              renderOption={({ key, ...props }, name) => {
+                const c = containersByName.get(name);
+                return (
+                  <li key={key} {...props}>
+                    <span>
+                      {name}
+                      {c ? (
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{ display: "block" }}
+                        >
+                          {c.image} · {c.status}
+                        </Typography>
+                      ) : null}
+                    </span>
+                  </li>
+                );
+              }}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label="Container"
+                  helperText={
+                    docker.error
+                      ? `${containerHelp} Couldn't list containers: ${docker.error}`
+                      : containerHelp
+                  }
+                  slotProps={{
+                    ...params.slotProps,
+                    htmlInput: { ...params.slotProps.htmlInput, spellCheck: false },
+                  }}
+                />
+              )}
               sx={{ flex: 2 }}
             />
             <TextField

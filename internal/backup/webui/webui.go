@@ -148,6 +148,11 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.
 	mux.HandleFunc("DELETE /api/tokens/{id}", change(handleRevokeAPIToken(tokens, log)))
 	registerSettingsRoutes(mux, receiverManager, trustManager, settingsManager, admin, change, log)
 	registerJobConfigRoutes(mux, jobsManager, admin, change, log)
+
+	if runner != nil {
+		mux.HandleFunc("GET /api/docker-containers", admin(handleListDockerContainers(runner, log)))
+	}
+
 	registerGPGKeyRoutes(mux, gpgKeyring, jobsManager != nil && jobsManager.Editing(), admin, change, log)
 
 	if registerExtraRoutes != nil {

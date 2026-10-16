@@ -398,6 +398,22 @@ export interface CommandConfigListJSON {
   commands: CommandConfigJSON[];
 }
 
+// DockerContainerJSON mirrors dockerexec.Container: one running container on
+// the Docker daemon commands with a container run in.
+export interface DockerContainerJSON {
+  id: string;
+  name: string;
+  image: string;
+  state: string;
+  status: string;
+}
+
+// DockerContainerListJSON mirrors dockerContainerListJSON (GET
+// /api/docker-containers).
+export interface DockerContainerListJSON {
+  containers: DockerContainerJSON[];
+}
+
 // GPGKeyJSON mirrors gpgkeys.Key: one public key in the keyring jobs
 // encrypt to.
 export interface GPGKeyJSON {

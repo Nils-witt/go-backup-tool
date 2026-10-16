@@ -1402,6 +1402,35 @@ paths:
         "503":
           $ref: "#/components/responses/StateDBUnavailable"
 
+  /api/docker-containers:
+    get:
+      tags: [admin]
+      summary: List running Docker containers
+      operationId: listDockerContainers
+      description: >
+        The running containers on the Docker daemon that commands with a `container:` run in (`docker-socket:`, else `DOCKER_HOST`, else
+        `/var/run/docker.sock`), sorted by name — what the command dialog offers for its container field.
+        Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Running containers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DockerContainerList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          description: The Docker daemon couldn't be reached or answered with an error; the body says why
+          content:
+            text/plain:
+              schema:
+                type: string
+
   /api/gpg-keys:
     get:
       tags: [admin]
@@ -2529,6 +2558,34 @@ components:
           items:
             $ref: "#/components/schemas/CommandConfig"
       required: [editing, commands]
+
+    DockerContainer:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+          description: The container's name, without the daemon's leading "/".
+        image:
+          type: string
+          example: postgres:16
+        state:
+          type: string
+          example: running
+        status:
+          type: string
+          example: Up 2 hours
+      required: [id, name, image, state, status]
+
+    DockerContainerList:
+      type: object
+      properties:
+        containers:
+          type: array
+          items:
+            $ref: "#/components/schemas/DockerContainer"
+      required: [containers]
 
     GPGKey:
       type: object

@@ -69,6 +69,13 @@ func (r *Runner) UseDocker(host string) {
 	r.dockerHost = host
 }
 
+// DockerHost returns the Docker daemon address set by UseDocker, so other
+// callers (e.g. the dashboard's container list) reach the same daemon jobs
+// run in.
+func (r *Runner) DockerHost() string {
+	return r.dockerHost
+}
+
 // Failed reports whether any job run has failed so far.
 func (r *Runner) Failed() bool {
 	return r.failed.Load()
