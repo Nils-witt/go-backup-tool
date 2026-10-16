@@ -770,6 +770,106 @@ func TestRetryFailedTargetsUnknownTargetNameReturnsError(t *testing.T) {
 	}
 }
 
+// TestRunNowRunsJobInBackground verifies RunNow returns at once and runs
+// the job to completion in the background, releasing its running claim
+// afterwards so the job can run again.
+func TestRunNowRunsJobInBackground(t *testing.T) { //nolint:paralleltest // plainTestJob calls t.Setenv, which is incompatible with t.Parallel
+	marker := filepath.Join(t.TempDir(), "marker")
+	job := plainTestJob(t, marker)
+
+	statusStore := backup.NewStatusStore([]*config.Config{job})
+	r := &Runner{log: discardLogger, store: statusStore}
+
+	if err := r.RunNow(context.Background(), job); err != nil {
+		t.Fatalf("RunNow() error: %v", err)
+	}
+
+	waitForRelease(t, r, job.Name)
+
+	if got := countMarkerRuns(t, marker); got != 1 {
+		t.Errorf("marker recorded %d runs, want 1", got)
+	}
+
+	if state := statusStore.Snapshot()[0].State; state != backup.StateOK {
+		t.Errorf("job state = %q, want ok", state)
+	}
+}
+
+// waitForRelease waits (up to 5s) until job name no longer has a run in
+// flight on r.
+func waitForRelease(t *testing.T, r *Runner, name string) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+
+	for {
+		if _, running := r.running.Load(name); !running {
+			return
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the background run to finish")
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestRunNowRejectsRunningJob verifies RunNow refuses to start a job that
+// already has a run in flight, rather than overlapping it.
+func TestRunNowRejectsRunningJob(t *testing.T) {
+	t.Parallel()
+
+	job := &config.Config{Name: "test"}
+	r := &Runner{log: discardLogger, store: backup.NewStatusStore([]*config.Config{job})}
+
+	r.claim(job.Name)
+
+	if err := r.RunNow(context.Background(), job); !errors.Is(err, ErrJobRunning) {
+		t.Errorf("RunNow() error = %v, want ErrJobRunning", err)
+	}
+}
+
+// TestRetryFailedTargetsRejectsRunningJob verifies RetryFailedTargets
+// refuses to overlap a run already in flight for the same job.
+func TestRetryFailedTargetsRejectsRunningJob(t *testing.T) {
+	t.Parallel()
+
+	job := &config.Config{
+		Name: "test",
+		Targets: []config.Target{
+			{ServerName: "good", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: t.TempDir()},
+		},
+	}
+	r := &Runner{log: discardLogger, store: backup.NewStatusStore([]*config.Config{job})}
+
+	r.claim(job.Name)
+
+	if err := r.RetryFailedTargets(context.Background(), job, []string{"good"}); !errors.Is(err, ErrJobRunning) {
+		t.Errorf("RetryFailedTargets() error = %v, want ErrJobRunning", err)
+	}
+}
+
+// TestScheduleSkipsRunWhileJobIsRunning verifies a scheduled run that comes
+// due while the job is already running (e.g. started by RunNow) is skipped
+// instead of overlapping it.
+func TestScheduleSkipsRunWhileJobIsRunning(t *testing.T) { //nolint:paralleltest // plainTestJob calls t.Setenv, which is incompatible with t.Parallel
+	marker := filepath.Join(t.TempDir(), "marker")
+	job := plainTestJob(t, marker)
+
+	r := &Runner{log: discardLogger, store: backup.NewStatusStore([]*config.Config{job})}
+
+	r.claim(job.Name)
+
+	// job has no interval, so Schedule makes its single immediate run
+	// attempt and returns.
+	r.Schedule(context.Background(), job)
+
+	if got := countMarkerRuns(t, marker); got != 0 {
+		t.Errorf("marker recorded %d runs, want 0 (the scheduled run should have been skipped)", got)
+	}
+}
+
 // TestSeedStatusFromStateAcrossRestart simulates a restart: a first runner
 // (with its own status store) runs a job and persists its outcome; a
 // second, independent status store — standing in for the fresh one a

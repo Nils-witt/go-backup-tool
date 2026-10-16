@@ -17,9 +17,19 @@ import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import { useTheme } from "@mui/material/styles";
 
+// JobAction is a job card's admin action: "run" starts a run right away,
+// "retry" re-runs just the failed targets. Each is also the path segment of
+// its endpoint, POST /api/jobs/{name}/{action}.
+type JobAction = "run" | "retry";
+
+const jobActionPrompts: Record<JobAction, { message: string; confirmLabel: string }> = {
+  run: { message: "Run job", confirmLabel: "Run now" },
+  retry: { message: "Retry failed targets for", confirmLabel: "Retry" },
+};
+
 interface JobsGridProps {
   // jobs may come from several instances (see Sourced); remote ones never
-  // offer a retry, which their API token can't reach.
+  // offer a run or retry, which their API token can't reach.
   jobs: Sourced<JobSnapshot>[];
   canRetry: boolean;
   refreshNow: () => void;
@@ -31,10 +41,10 @@ interface JobsGridProps {
 
 export function JobsGrid({ jobs, canRetry, refreshNow, runsByJob }: JobsGridProps) {
   const theme = useTheme();
-  const [pendingRetry, setPendingRetry] = useState<string | null>(null);
+  const [pending, setPending] = useState<{ name: string; action: JobAction } | null>(null);
 
-  function startRetry(name: string) {
-    apiFetch("/api/jobs/" + encodeURIComponent(name) + "/retry", { method: "POST" })
+  function startAction(name: string, action: JobAction) {
+    apiFetch("/api/jobs/" + encodeURIComponent(name) + "/" + action, { method: "POST" })
       .then(() => refreshNow())
       .catch(() => {});
   }
@@ -171,16 +181,25 @@ export function JobsGrid({ jobs, canRetry, refreshNow, runsByJob }: JobsGridProp
                     ))}
                   </Stack>
 
-                  {hasFailedTarget && canRetry && !j.remote ? (
-                    <Box sx={{ mt: 1.5 }}>
+                  {canRetry && !j.remote && j.state !== "running" ? (
+                    <Stack direction="row" spacing={1} sx={{ mt: 1.5, flexWrap: "wrap" }}>
                       <Button
                         size="small"
                         variant="outlined"
-                        onClick={() => setPendingRetry(j.name)}
+                        onClick={() => setPending({ name: j.name, action: "run" })}
                       >
-                        Retry failed targets
+                        Run now
                       </Button>
-                    </Box>
+                      {hasFailedTarget ? (
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          onClick={() => setPending({ name: j.name, action: "retry" })}
+                        >
+                          Retry failed targets
+                        </Button>
+                      ) : null}
+                    </Stack>
                   ) : null}
                 </CardContent>
               </Card>
@@ -190,18 +209,20 @@ export function JobsGrid({ jobs, canRetry, refreshNow, runsByJob }: JobsGridProp
       </Grid>
 
       <ConfirmDialog
-        open={pendingRetry !== null}
+        open={pending !== null}
         message={
-          <>
-            Retry failed targets for <strong>{pendingRetry}</strong>?
-          </>
+          pending ? (
+            <>
+              {jobActionPrompts[pending.action].message} <strong>{pending.name}</strong>?
+            </>
+          ) : null
         }
-        confirmLabel="Retry"
+        confirmLabel={pending ? jobActionPrompts[pending.action].confirmLabel : ""}
         onConfirm={() => {
-          if (pendingRetry) startRetry(pendingRetry);
-          setPendingRetry(null);
+          if (pending) startAction(pending.name, pending.action);
+          setPending(null);
         }}
-        onCancel={() => setPendingRetry(null)}
+        onCancel={() => setPending(null)}
       />
     </>
   );

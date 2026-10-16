@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -45,7 +46,17 @@ type Runner struct {
 	// dockerHost is the Docker daemon a job's or command's container: runs
 	// through (see UseDocker); copied onto each run's config.
 	dockerHost string
+
+	// running holds the name of every job with a run in flight (job name ->
+	// struct{}), so a scheduled run, a RunNow, and a RetryFailedTargets of
+	// the same job never overlap: they would otherwise clobber each other's
+	// status and staged files. See claim and release.
+	running sync.Map
 }
+
+// ErrJobRunning is returned by RunNow and RetryFailedTargets when the job
+// already has a run in flight.
+var ErrJobRunning = errors.New("pipeline: job is already running")
 
 // targetKey identifies one (job, target) pair for Runner.targetFailures.
 // bucket is included alongside server because a job may list the same
@@ -205,6 +216,13 @@ func (r *Runner) ScheduleLive(runCtx, stop context.Context, job *config.Config, 
 			return false
 		}
 
+		if !r.claim(name) {
+			log.Info("skipping scheduled run: job is already running")
+			return true
+		}
+
+		defer r.release(name)
+
 		r.runOnce(runCtx, cur)
 
 		return true
@@ -334,6 +352,39 @@ func nextGridTime(start time.Time, interval time.Duration, now time.Time) time.T
 	steps := int64(now.Sub(start)/interval) + 1
 
 	return start.Add(interval * time.Duration(steps))
+}
+
+// claim marks job name as running, reporting false if it already was.
+// Every successful claim must be paired with a release.
+func (r *Runner) claim(name string) bool {
+	_, loaded := r.running.LoadOrStore(name, struct{}{})
+	return !loaded
+}
+
+// release ends the run claim took for job name.
+func (r *Runner) release(name string) {
+	r.running.Delete(name)
+}
+
+// RunNow starts a single run of job in the background, outside its
+// schedule, and returns immediately — the web UI's "Run now" action (see
+// handleRunJob in webui.go). It returns ErrJobRunning, without starting
+// anything, if job already has a run in flight. The run doesn't move the
+// job's next scheduled run. ctx is expected to be detached from the
+// triggering HTTP request's own cancellation (see context.WithoutCancel),
+// for the same reason as RetryFailedTargets's.
+func (r *Runner) RunNow(ctx context.Context, job *config.Config) error {
+	if !r.claim(job.Name) {
+		return ErrJobRunning
+	}
+
+	go func() {
+		defer r.release(job.Name)
+
+		r.runOnce(ctx, job)
+	}()
+
+	return nil
 }
 
 // runOnce runs job a single time, resolving a fresh {time} timestamp in its
@@ -472,8 +523,15 @@ func (r *Runner) finishRun(ctx context.Context, job *config.Config, log *slog.Lo
 // (see handleRetryFailedTargets in webui.go); ctx is expected to be
 // detached from the triggering HTTP request's own cancellation (see
 // context.WithoutCancel) so the retry isn't cut short just because that
-// request has already returned its response.
+// request has already returned its response. It returns ErrJobRunning if
+// job already has a run in flight.
 func (r *Runner) RetryFailedTargets(ctx context.Context, job *config.Config, targetNames []string) error {
+	if !r.claim(job.Name) {
+		return ErrJobRunning
+	}
+
+	defer r.release(job.Name)
+
 	indices := make([]int, 0, len(targetNames))
 
 	for i, t := range job.Targets {

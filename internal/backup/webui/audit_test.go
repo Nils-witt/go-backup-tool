@@ -180,6 +180,7 @@ func TestDescribeChange(t *testing.T) {
 		{"PUT /api/job-configs/{key}", http.MethodPut, "/api/job-configs/db", "update", "job-configs", "db"},
 		{"DELETE /api/tokens/{id}", http.MethodDelete, "/api/tokens/t1", "delete", "tokens", "t1"},
 		{"POST /api/jobs/{name}/retry", http.MethodPost, "/api/jobs/db/retry", "retry", "jobs", "db"},
+		{"POST /api/jobs/{name}/run", http.MethodPost, "/api/jobs/db/run", "run", "jobs", "db"},
 		{"PUT /api/report-config", http.MethodPut, "/api/report-config", "update", "report-config", ""},
 	}
 

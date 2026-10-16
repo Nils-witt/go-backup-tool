@@ -358,6 +358,46 @@ paths:
               schema:
                 type: string
 
+  /api/jobs/{name}/run:
+    post:
+      tags: [admin]
+      summary: Run a job now
+      operationId: runJob
+      description: >
+        Starts a run of the named job right away, outside its schedule
+        (which it doesn't move). Starts the run in the background and
+        returns immediately; follow `/api/live` (or poll `/api/status`) for
+        progress. A scheduled run that comes due while it's still going is
+        skipped. Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: Job name, as configured under `jobs:` in the config file.
+          schema:
+            type: string
+      responses:
+        "202":
+          description: Run started
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Unknown job name
+          content:
+            text/plain:
+              schema:
+                type: string
+        "409":
+          description: The job is already running
+          content:
+            text/plain:
+              schema:
+                type: string
+
   /api/receivers/{id}/files:
     get:
       tags: [dashboard]

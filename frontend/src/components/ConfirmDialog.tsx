@@ -15,7 +15,7 @@ interface ConfirmDialogProps {
 }
 
 // ConfirmDialog covers the "do this?" prompts used throughout the admin
-// pages (retry, download, delete user, delete OIDC override, issue token).
+// pages (run now, retry, download, delete user, delete OIDC override, issue token).
 export function ConfirmDialog({
   open,
   message,

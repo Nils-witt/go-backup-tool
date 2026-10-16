@@ -290,6 +290,86 @@ func TestHandleRetryFailedTargetsKicksOffRetry(t *testing.T) {
 	}
 }
 
+func TestHandleRunJobUnknownJobReturns404(t *testing.T) {
+	t.Parallel()
+
+	statusStore, job := newTestStore()
+	jobs := pipeline.StaticJobs([]*config.Config{job})
+	runner := pipeline.NewRunner(discardLogger, statusStore, nil, nil, nil, nil)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/jobs/nope/run", nil)
+	req.SetPathValue("name", "nope")
+
+	rec := httptest.NewRecorder()
+
+	handleRunJob(jobs, runner)(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+// TestHandleRunJobStartsRunAndRejectsOverlap is an end-to-end check (real
+// gpg) that a POST returns 202 immediately and runs the job in the
+// background, that a second POST while that run is still going gets a 409,
+// and that the run completes — verified by polling /api/status, as
+// TestHandleRetryFailedTargetsKicksOffRetry does.
+func TestHandleRunJobStartsRunAndRejectsOverlap(t *testing.T) {
+	homedir := testGPGKeyring(t)
+
+	t.Parallel()
+
+	job := &config.Config{
+		Name: "test",
+		// The sleep keeps the first run in flight while the second POST
+		// arrives.
+		Sources:    []config.JobSource{{ID: "test", Cmd: "sleep 0.5; echo hi", Name: "test.gpg"}},
+		Key:        "backup-{time}.gpg",
+		Recipients: []string{testGPGRecipient},
+		GPGBin:     "gpg",
+		GPGHomedir: homedir,
+		Targets: []config.Target{
+			{ServerName: "good", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: t.TempDir()},
+		},
+	}
+
+	statusStore := backup.NewStatusStore([]*config.Config{job})
+	jobs := pipeline.StaticJobs([]*config.Config{job})
+	runner := pipeline.NewRunner(discardLogger, statusStore, nil, nil, nil, nil)
+
+	post := func() int {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/jobs/test/run", nil)
+		req.SetPathValue("name", job.Name)
+
+		rec := httptest.NewRecorder()
+		handleRunJob(jobs, runner)(rec, req)
+
+		return rec.Code
+	}
+
+	if code := post(); code != http.StatusAccepted {
+		t.Fatalf("first POST status = %d, want 202", code)
+	}
+
+	if code := post(); code != http.StatusConflict {
+		t.Errorf("second POST status = %d, want 409 while the first run is in flight", code)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the background run to finish")
+		}
+
+		if statusStore.Snapshot()[0].State == backup.StateOK {
+			break
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestStartWebUIWithoutOIDCIsLocked checks that a web UI with no SSO
 // configured stays locked rather than open: the public endpoints still
 // answer, every dashboard data endpoint reports 401.

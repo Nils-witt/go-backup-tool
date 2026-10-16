@@ -136,6 +136,7 @@ func StartWebUI(addr string, statusStore *backup.StatusStore, jobsManager *jobs.
 	mux.HandleFunc("GET /api/job-runs", apiJobRunLog(handleJobRunEvents(db, log, eventLogLimit)))
 	mux.HandleFunc("GET /api/target-runs", apiTargetRunLog(handleTargetRunEvents(db, log, eventLogLimit)))
 	mux.HandleFunc("POST /api/jobs/{name}/retry", change(handleRetryFailedTargets(lookupJob, statusStore, runner, log)))
+	mux.HandleFunc("POST /api/jobs/{name}/run", change(handleRunJob(lookupJob, runner)))
 	mux.HandleFunc("GET /api/receivers/{id}/files", api(handleReceiverFiles(receivers, log)))
 	mux.HandleFunc("POST /api/receivers/{id}/download/{key...}", apiDownload(handleMintDownloadTicket(receivers, downloadTickets)))
 	mux.HandleFunc("GET /api/receivers/{id}/download/{key...}", handleDownloadFile(receivers, log, db, downloadTickets, trustProxyHeaders, queue))
@@ -471,6 +472,35 @@ func handleRetryFailedTargets(lookupJob pipeline.JobLookup, statusStore *backup.
 				log.Warn("web UI: retrying failed targets", "job", name, "targets", targets, "err", err)
 			}
 		}()
+
+		w.WriteHeader(http.StatusAccepted)
+	}
+}
+
+// handleRunJob serves POST /api/jobs/{name}/run (see the dashboard's "Run
+// now" button): it starts a run of the named job right away, outside its
+// schedule. Gated on admin for the same reason as handleRetryFailedTargets,
+// and, like it, only starts the run in the background (see
+// pipeline.Runner.RunNow) and returns 202; the live status picks up its
+// progress. A job that's already running gets a 409 instead.
+func handleRunJob(lookupJob pipeline.JobLookup, runner *pipeline.Runner) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		job, ok := lookupJob(r.PathValue("name"))
+		if !ok {
+			http.Error(w, "unknown job", http.StatusNotFound)
+			return
+		}
+
+		err := runner.RunNow(context.WithoutCancel(r.Context()), job)
+		if errors.Is(err, pipeline.ErrJobRunning) {
+			http.Error(w, "job is already running", http.StatusConflict)
+			return
+		}
+
+		if err != nil {
+			http.Error(w, "starting run failed", http.StatusInternalServerError)
+			return
+		}
 
 		w.WriteHeader(http.StatusAccepted)
 	}
