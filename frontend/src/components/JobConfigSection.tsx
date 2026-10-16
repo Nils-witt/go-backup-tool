@@ -200,8 +200,13 @@ function FilesEditor({
         return (
           <Box
             key={i}
-            sx={{ alignItems: { sm: "flex-start" }, display: "flex", flexDirection: { xs: "column", sm: "row" }, gap: 1, width: "100%" }}
-
+            sx={{
+              alignItems: { sm: "flex-start" },
+              display: "flex",
+              flexDirection: { xs: "column", sm: "row" },
+              gap: 1,
+              width: "100%",
+            }}
           >
             <CommandSelect
               label="Command"
