@@ -42,7 +42,7 @@ type ServerConfig struct {
 	UpdatedBy  string
 }
 
-// commandModel is commands: every named shell command a job target's
+// commandModel is commands: every named command — shell or tar — a job or a job target's
 // on-error/on-recover may run (see internal/backup/jobs' Manager), managed in
 // the web UI, kept as entered and validated (config.ResolveCommand) on every
 // load.
@@ -52,6 +52,10 @@ type commandModel struct {
 	Timeout       string    `gorm:"column:timeout;not null;default:''"`
 	Container     string    `gorm:"column:container;not null;default:''"`
 	ContainerUser string    `gorm:"column:container_user;not null;default:''"`
+	Type          string    `gorm:"column:type;not null;default:''"`
+	Path          string    `gorm:"column:path;not null;default:''"`
+	Exclude       []string  `gorm:"column:exclude;serializer:json"`
+	Compress      string    `gorm:"column:compress;not null;default:''"`
 	CreatedAt     time.Time `gorm:"column:created_at;not null"`
 	CreatedBy     string    `gorm:"column:created_by;not null"`
 	UpdatedAt     time.Time `gorm:"column:updated_at;not null"`
@@ -60,13 +64,19 @@ type commandModel struct {
 
 func (commandModel) TableName() string { return "commands" }
 
-// CommandConfig is one stored command (see commandModel).
+// CommandConfig is one stored command (see commandModel). Type, Path,
+// Exclude and Compress are config.FileCommand's; a row stored before they
+// existed reads as an unset type, i.e. a shell command.
 type CommandConfig struct {
 	ID            string
 	Cmd           string
 	Timeout       string
 	Container     string
 	ContainerUser string
+	Type          string
+	Path          string
+	Exclude       []string
+	Compress      string
 	CreatedAt     time.Time
 	CreatedBy     string
 	UpdatedAt     time.Time
@@ -265,7 +275,9 @@ func (s *Store) UpdateCommandConfig(ctx context.Context, c CommandConfig) error 
 	c.UpdatedAt = c.UpdatedAt.UTC()
 	m := commandModel(c)
 
-	return updateRow(ctx, s.db, &m, "id", c.ID, []string{"cmd", "timeout", "container", "container_user"}, "command", ErrCommandNotFound)
+	return updateRow(ctx, s.db, &m, "id", c.ID, []string{
+		"cmd", "timeout", "container", "container_user", "type", "path", "exclude", "compress",
+	}, "command", ErrCommandNotFound)
 }
 
 // DeleteCommandConfig removes the stored command id, returning

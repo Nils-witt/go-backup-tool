@@ -3062,7 +3062,7 @@ jobs:
 
 	job := singleJob(t, rc)
 
-	want := &Command{ID: "restart-nas", Cmd: "systemctl restart nas", Timeout: 10 * time.Second, TimeoutSet: true}
+	want := &Command{ID: "restart-nas", Kind: CommandKindShell, Cmd: "systemctl restart nas", Timeout: 10 * time.Second, TimeoutSet: true}
 	if !reflect.DeepEqual(job.Targets[0].OnErrorCommand, want) {
 		t.Errorf("Targets[0].OnErrorCommand = %+v, want %+v", job.Targets[0].OnErrorCommand, want)
 	}
@@ -3220,7 +3220,7 @@ jobs:
 
 	job := singleJob(t, rc)
 
-	want := &Command{ID: "all-clear", Cmd: "echo recovered", Timeout: 10 * time.Second, TimeoutSet: true}
+	want := &Command{ID: "all-clear", Kind: CommandKindShell, Cmd: "echo recovered", Timeout: 10 * time.Second, TimeoutSet: true}
 	if !reflect.DeepEqual(job.Targets[0].OnRecoverCommand, want) {
 		t.Errorf("Targets[0].OnRecoverCommand = %+v, want %+v", job.Targets[0].OnRecoverCommand, want)
 	}

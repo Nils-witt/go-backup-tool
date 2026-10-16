@@ -335,7 +335,7 @@ jobs:
     # more than one entry under targets:. Every target uploads the same
     # encrypted files (same key), so only the server and bucket differ.
     # A local server works the same way (see "nas" above): the file is
-    # written to /mnt/backups/my-backup-bucket-local/uploads-<time>/dump-uploads.gpg. A
+    # written to /mnt/backups/my-backup-bucket-local/uploads-<time>/dump-uploads.tar.gz.gpg. A
     # remote server (see "sibling-instance" above) sends bucket as the id
     # naming which of the destination instance's receivers: entries to
     # write to.
@@ -509,7 +509,7 @@ jobs:
 # /exec/{id}/start, GET /exec/{id}/json) narrows that.
 # docker-socket: /var/run/docker.sock
 
-# commands: are named, reusable shell commands, referenced by id from a
+# commands: are named, reusable commands, referenced by id from a
 # job's files: (its backup sources) and from a job target's
 # on-error.command or on-recover.command (see targets: above) — the same
 # "define once, reference by id" shape as notifications: above. id is
@@ -540,6 +540,21 @@ jobs:
 # on-error.after above — or, for on-recover, the streak that just ended), and
 # GBT_TIME (RFC 3339); inside a container, these are added to its
 # environment.
+#
+# type: tar (type: shell, running cmd, is the default) archives a file or
+# directory on this machine instead of running anything: no tar binary is
+# needed, so it works on Windows too. It's a job's backup source only — it
+# can't be an on-error/on-recover hook — and sets path instead of cmd (and
+# no container: it only reads this machine's filesystem).
+#   path (required) is absolute; entries are named after its last element,
+#     as "tar -C <parent> <name>" would (a symlinked path is followed, but
+#     symlinks inside it are stored as links). Sockets, devices and named
+#     pipes are skipped with a warning; an unreadable file fails the run.
+#   exclude (optional) lists globs (Go path.Match syntax: *, ?, [a-z]);
+#     an entry is left out when one matches its path relative to path, or
+#     just its name — a directory with everything below it.
+#   compress: gzip (optional) gzip-compresses the archive.
+# Its file defaults to <id>.tar.gpg (<id>.tar.gz.gpg with compress: gzip).
 commands:
   - id: dump-database
     cmd: "mysqldump --single-transaction mydb | gzip"
@@ -549,7 +564,10 @@ commands:
   - id: dump-schema
     cmd: "mysqldump --no-data mydb"
   - id: dump-uploads
-    cmd: "tar czf - /srv/uploads"
+    type: tar
+    path: /srv/uploads
+    exclude: ["*.tmp", "cache"]
+    compress: gzip
 #   - id: restart-nas-mount
 #     cmd: "ssh nas-host systemctl restart nas-share"
 #     timeout: 15s

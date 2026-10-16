@@ -1,7 +1,10 @@
 package pipeline
 
 import (
+	"archive/tar"
 	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +19,7 @@ import (
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/tarball"
 )
 
 func TestWriteLocalObject(t *testing.T) {
@@ -472,4 +476,86 @@ func TestRunPipelineStagingFailureDoesNotHang(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("runPipeline() still blocked 10s after staging failed")
 	}
+}
+
+func TestStageSourceTar(t *testing.T) {
+	t.Parallel()
+	skipOnWindows(t) // fakeGPG is a sh script
+
+	root := filepath.Join(t.TempDir(), "site")
+	if err := os.MkdirAll(filepath.Join(root, "logs"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, content := range map[string]string{"index.html": "<h1>hi</h1>", "logs/access.log": "noise"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := &config.Config{Recipients: []string{"unused@example.com"}, GPGBin: fakeGPG(t), StagingDir: t.TempDir()}
+
+	t.Run("archives the path", func(t *testing.T) {
+		t.Parallel()
+
+		src := &config.JobSource{
+			ID:   "site",
+			Kind: config.CommandKindTar,
+			Tar:  tarball.Options{Root: root, Exclude: []string{"logs"}},
+			Name: "site.tar.gpg",
+		}
+
+		f, err := stageSource(t.Context(), cfg, src, discardLogger)
+		if err != nil {
+			t.Fatalf("stageSource() error: %v", err)
+		}
+
+		t.Cleanup(func() { _ = os.Remove(f.path) })
+
+		staged, err := os.Open(f.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		defer func() { _ = staged.Close() }()
+
+		var names []string
+
+		for tr := tar.NewReader(staged); ; {
+			hdr, err := tr.Next()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			if err != nil {
+				t.Fatalf("reading staged archive: %v", err)
+			}
+
+			names = append(names, hdr.Name)
+		}
+
+		if want := []string{"site/", "site/index.html"}; !slices.Equal(names, want) {
+			t.Errorf("archive entries = %v, want %v", names, want)
+		}
+	})
+
+	t.Run("missing path fails the source", func(t *testing.T) {
+		t.Parallel()
+
+		src := &config.JobSource{
+			ID:   "gone",
+			Kind: config.CommandKindTar,
+			Tar:  tarball.Options{Root: filepath.Join(root, "missing")},
+			Name: "gone.tar.gpg",
+		}
+
+		f, err := stageSource(t.Context(), cfg, src, discardLogger)
+		if err == nil || !strings.Contains(err.Error(), `tar command "gone"`) {
+			t.Errorf("stageSource() error = %v, want it to name the tar command", err)
+		}
+
+		if f.path != "" {
+			t.Errorf("staged path = %q, want none on failure", f.path)
+		}
+	})
 }

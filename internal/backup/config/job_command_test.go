@@ -2,6 +2,8 @@ package config
 
 import (
 	"bytes"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -309,5 +311,140 @@ func TestValidateFileName(t *testing.T) {
 				t.Errorf("ValidateFileName(%q) error = %v, want valid = %v", tt.input, err, tt.isValid)
 			}
 		})
+	}
+}
+
+func TestTarCommand(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix-style absolute tar paths")
+	}
+
+	path := writeConfigFile(t, `
+servers:
+  - name: nas
+    type: local
+    path: /mnt/backups
+
+commands:
+  - id: etc
+    type: tar
+    path: /etc/
+    exclude: ["*.bak", " ", "ssl/private"]
+  - id: www
+    type: tar
+    path: /srv/www
+    compress: gzip
+
+jobs:
+  - name: host
+    files: [{command: etc}, {command: www}, {command: www, name: www-copy.tgz.gpg}]
+    targets: [{server: nas, bucket: host}]
+    recipients: [me@example.com]
+`)
+
+	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("ParseFlags() error: %v", err)
+	}
+
+	sources := singleJob(t, rc).Sources
+	if len(sources) != 3 {
+		t.Fatalf("len(Sources) = %d, want 3", len(sources))
+	}
+
+	etc := sources[0]
+	if etc.Kind != CommandKindTar || etc.Tar.Root != "/etc" || etc.Tar.Gzip ||
+		!slices.Equal(etc.Tar.Exclude, []string{"*.bak", "ssl/private"}) || etc.Name != "etc.tar.gpg" {
+		t.Errorf("Sources[0] = %+v", etc)
+	}
+
+	if www := sources[1]; www.Kind != CommandKindTar || !www.Tar.Gzip || www.Name != "www.tar.gz.gpg" {
+		t.Errorf("Sources[1] = %+v", www)
+	}
+
+	if name := sources[2].Name; name != "www-copy.tgz.gpg" {
+		t.Errorf("Sources[2].Name = %q, want the explicit name", name)
+	}
+}
+
+func TestResolveCommandType(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		fc       FileCommand
+		expected string // substring of the error; "" means valid
+	}{
+		{name: "unset type is shell", fc: FileCommand{ID: "c", Cmd: "true"}},
+		{name: "explicit shell", fc: FileCommand{ID: "c", Type: "shell", Cmd: "true"}},
+		{name: "unknown type", fc: FileCommand{ID: "c", Type: "zip", Cmd: "true"}, expected: `unknown type "zip"`},
+		{name: "shell with path", fc: FileCommand{ID: "c", Cmd: "true", Path: "/etc"}, expected: "only apply to type: tar"},
+		{name: "shell with compress", fc: FileCommand{ID: "c", Cmd: "true", Compress: "gzip"}, expected: "only apply to type: tar"},
+		{name: "tar", fc: FileCommand{ID: "c", Type: "tar", Path: "/etc"}},
+		{name: "tar missing path", fc: FileCommand{ID: "c", Type: "tar"}, expected: "path is required"},
+		{name: "tar relative path", fc: FileCommand{ID: "c", Type: "tar", Path: "etc"}, expected: "must be absolute"},
+		{name: "tar with cmd", fc: FileCommand{ID: "c", Type: "tar", Path: "/etc", Cmd: "true"}, expected: "don't apply to type: tar"},
+		{name: "tar with container", fc: FileCommand{ID: "c", Type: "tar", Path: "/etc", Container: "db"}, expected: "don't apply to type: tar"},
+		{name: "tar bad compress", fc: FileCommand{ID: "c", Type: "tar", Path: "/etc", Compress: "zstd"}, expected: `unknown compress "zstd"`},
+		{name: "tar bad exclude", fc: FileCommand{ID: "c", Type: "tar", Path: "/etc", Exclude: []string{"[a-"}}, expected: "exclude pattern"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if tt.fc.Type == "tar" && runtime.GOOS == "windows" {
+				t.Skip("tar paths in this table are Unix-style absolute paths")
+			}
+
+			_, err := ResolveCommand(tt.fc)
+
+			switch {
+			case tt.expected == "" && err != nil:
+				t.Errorf("ResolveCommand() error: %v", err)
+			case tt.expected != "" && (err == nil || !strings.Contains(err.Error(), tt.expected)):
+				t.Errorf("ResolveCommand() error = %v, want it to contain %q", err, tt.expected)
+			}
+		})
+	}
+}
+
+func TestTarCommandRejectedAsHook(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix-style absolute tar paths")
+	}
+
+	for _, hook := range []string{"on-error: {command: etc, after: 1}", "on-recover: {command: etc}"} {
+		path := writeConfigFile(t, `
+servers:
+  - name: nas
+    type: local
+    path: /mnt/backups
+
+commands:
+  - id: dump
+    cmd: "echo hi"
+  - id: etc
+    type: tar
+    path: /etc
+
+jobs:
+  - name: host
+    files: [{command: dump}]
+    targets:
+      - server: nas
+        bucket: host
+        `+hook+`
+    recipients: [me@example.com]
+`)
+
+		_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "can't be run as a hook") {
+			t.Errorf("%s: ParseFlags() error = %v, want a hook rejection", hook, err)
+		}
 	}
 }

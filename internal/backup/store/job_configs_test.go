@@ -160,3 +160,54 @@ func TestCommandConfigCRUD(t *testing.T) {
 		t.Errorf("DeleteCommandConfig() error: %v", err)
 	}
 }
+
+func TestCommandConfigTarFields(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := t.Context()
+
+	tarCmd := CommandConfig{ID: "etc", Type: "tar", Path: "/etc", Exclude: []string{"*.bak"}, Compress: "gzip"}
+	if err := db.CreateCommandConfig(ctx, tarCmd); err != nil {
+		t.Fatalf("CreateCommandConfig() error: %v", err)
+	}
+
+	// Switching it back to a shell command must clear every tar field.
+	if err := db.UpdateCommandConfig(ctx, CommandConfig{ID: "etc", Cmd: "cat /etc/hosts"}); err != nil {
+		t.Fatalf("UpdateCommandConfig() error: %v", err)
+	}
+
+	if err := db.CreateCommandConfig(ctx, CommandConfig{ID: "www", Type: "tar", Path: "/srv"}); err != nil {
+		t.Fatalf("CreateCommandConfig() error: %v", err)
+	}
+
+	tarCmd.Path = "/etc/nginx"
+	tarCmd.ID = "www"
+
+	if err := db.UpdateCommandConfig(ctx, tarCmd); err != nil {
+		t.Fatalf("UpdateCommandConfig() error: %v", err)
+	}
+
+	commands, err := db.ListCommandConfigs(ctx)
+	if err != nil {
+		t.Fatalf("ListCommandConfigs() error: %v", err)
+	}
+
+	want := []CommandConfig{
+		{ID: "etc", Cmd: "cat /etc/hosts"},
+		{ID: "www", Type: "tar", Path: "/etc/nginx", Exclude: []string{"*.bak"}, Compress: "gzip"},
+	}
+
+	for i := range commands {
+		commands[i].CreatedAt, commands[i].UpdatedAt = time.Time{}, time.Time{}
+	}
+
+	// etc's exclude reads back as JSON null or []; either is "no excludes".
+	if len(commands) > 0 && len(commands[0].Exclude) == 0 {
+		commands[0].Exclude = nil
+	}
+
+	if !reflect.DeepEqual(commands, want) {
+		t.Errorf("ListCommandConfigs() = %+v, want %+v", commands, want)
+	}
+}

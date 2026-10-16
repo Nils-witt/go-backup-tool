@@ -20,13 +20,17 @@ func normalizeServer(fs config.FileServer) config.FileServer {
 	return fs
 }
 
-// normalizeCommand trims fc's single-line fields.
+// normalizeCommand trims fc's single-line fields and drops empty exclude entries.
 func normalizeCommand(fc config.FileCommand) config.FileCommand {
 	fc.ID = strings.TrimSpace(fc.ID)
 	fc.Cmd = strings.TrimSpace(fc.Cmd)
 	fc.Timeout = strings.TrimSpace(fc.Timeout)
 	fc.Container = strings.TrimSpace(fc.Container)
 	fc.ContainerUser = strings.TrimSpace(fc.ContainerUser)
+	fc.Type = strings.TrimSpace(fc.Type)
+	fc.Path = strings.TrimSpace(fc.Path)
+	fc.Compress = strings.TrimSpace(fc.Compress)
+	fc.Exclude = trimAll(fc.Exclude)
 
 	return fc
 }
@@ -92,13 +96,19 @@ func fromStoreServer(sc store.ServerConfig) config.FileServer {
 }
 
 func toStoreCommand(fc config.FileCommand) store.CommandConfig {
-	return store.CommandConfig{ID: fc.ID, Cmd: fc.Cmd, Timeout: fc.Timeout, Container: fc.Container, ContainerUser: fc.ContainerUser}
+	return store.CommandConfig{
+		ID: fc.ID, Type: fc.Type, Cmd: fc.Cmd, Timeout: fc.Timeout, Container: fc.Container, ContainerUser: fc.ContainerUser,
+		Path: fc.Path, Exclude: fc.Exclude, Compress: fc.Compress,
+	}
 }
 
 // FileCommandFrom converts a stored command back into the definition it
 // was entered as, the way FileJobFrom does for a job.
 func FileCommandFrom(cc store.CommandConfig) config.FileCommand {
-	return config.FileCommand{ID: cc.ID, Cmd: cc.Cmd, Timeout: cc.Timeout, Container: cc.Container, ContainerUser: cc.ContainerUser}
+	return config.FileCommand{
+		ID: cc.ID, Type: cc.Type, Cmd: cc.Cmd, Timeout: cc.Timeout, Container: cc.Container, ContainerUser: cc.ContainerUser,
+		Path: cc.Path, Exclude: cc.Exclude, Compress: cc.Compress,
+	}
 }
 
 func toStoreJob(fj config.FileJob) store.JobConfig {

@@ -30,6 +30,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
+	"nilswitt.dev/go-backup-tool/internal/backup/tarball"
 )
 
 type stringSlice []string
@@ -250,7 +251,12 @@ type JobSource struct {
 // consecutive-failure streak reaches its on-error.after threshold, or once
 // a target recovers from a failure streak (on-recover:).
 type Command struct {
-	ID      string
+	ID string
+
+	// Kind is what the command does: run Cmd (CommandKindShell, also what
+	// the zero value means) or archive Tar.Root (CommandKindTar).
+	Kind CommandKind
+
 	Cmd     string
 	Timeout time.Duration
 
@@ -264,6 +270,33 @@ type Command struct {
 	// ContainerUser when that's set.
 	Container     string
 	ContainerUser string
+
+	// Tar is what a CommandKindTar command archives; unused otherwise.
+	Tar tarball.Options
+}
+
+// CommandKind distinguishes a commands: entry's type:.
+type CommandKind string
+
+// The CommandKind values a commands: entry's type: can resolve to.
+const (
+	CommandKindShell CommandKind = "shell" // type: shell, or unset
+	CommandKindTar   CommandKind = "tar"   // type: tar
+)
+
+// compressGzip is the only compress: value a tar command accepts.
+const compressGzip = "gzip"
+
+// parseCommandKind validates a FileCommand's Type field; unset means shell.
+func parseCommandKind(t string) (CommandKind, error) {
+	switch strings.TrimSpace(t) {
+	case "", string(CommandKindShell):
+		return CommandKindShell, nil
+	case string(CommandKindTar):
+		return CommandKindTar, nil
+	default:
+		return "", fmt.Errorf("unknown type %q (want %q or %q)", t, CommandKindShell, CommandKindTar)
+	}
 }
 
 // RunConfig is the result of ParseFlags: one or more jobs to run, plus the
@@ -562,12 +595,23 @@ type FileServer struct {
 // runs Cmd inside it through the Docker daemon (see fileConfig.DockerSocket)
 // instead, via "sh -c" — so the container needs a sh — as ContainerUser
 // (user[:group]) when set.
+//
+// Type selects what the command does: "shell" (the default when unset) runs
+// Cmd as above; "tar" instead archives Path — a file or directory on this
+// machine — in-process (see the tarball package), leaving out entries that
+// match an Exclude glob, gzip-compressed when Compress is "gzip". A tar
+// command sets none of Cmd/Container/ContainerUser, and a shell command none
+// of Path/Exclude/Compress.
 type FileCommand struct {
-	ID            string `yaml:"id" json:"id"`
-	Cmd           string `yaml:"cmd" json:"cmd"`
-	Timeout       string `yaml:"timeout" json:"timeout"`
-	Container     string `yaml:"container" json:"container"`
-	ContainerUser string `yaml:"container-user" json:"container_user"`
+	ID            string   `yaml:"id" json:"id"`
+	Type          string   `yaml:"type" json:"type"`
+	Cmd           string   `yaml:"cmd" json:"cmd"`
+	Timeout       string   `yaml:"timeout" json:"timeout"`
+	Container     string   `yaml:"container" json:"container"`
+	ContainerUser string   `yaml:"container-user" json:"container_user"`
+	Path          string   `yaml:"path" json:"path"`
+	Exclude       []string `yaml:"exclude" json:"exclude"`
+	Compress      string   `yaml:"compress" json:"compress"`
 }
 
 // fileConfig is the top-level shape of the YAML config file. Its embedded
@@ -993,18 +1037,18 @@ func buildCommands(fileCommands []FileCommand) (map[string]Command, error) {
 }
 
 // ResolveCommand validates one commands: entry — from the config file or
-// stored in the state db (see jobs.Manager) — into a Command: a non-empty id
-// and cmd, and an optional positive timeout (default
-// defaultOnErrorCommandTimeout).
+// stored in the state db (see jobs.Manager) — into a Command: a non-empty id,
+// an optional positive timeout (default defaultOnErrorCommandTimeout), and
+// what its type: needs (see resolveShellCommand and resolveTarCommand).
 func ResolveCommand(fc FileCommand) (Command, error) {
 	id := strings.TrimSpace(fc.ID)
 	if id == "" {
 		return Command{}, errors.New("id is required")
 	}
 
-	cmd := strings.TrimSpace(fc.Cmd)
-	if cmd == "" {
-		return Command{}, fmt.Errorf("command %q: cmd is required", id)
+	kind, err := parseCommandKind(fc.Type)
+	if err != nil {
+		return Command{}, fmt.Errorf("command %q: %w", id, err)
 	}
 
 	timeout, err := parseOnErrorCommandTimeout(fc.Timeout)
@@ -1012,10 +1056,85 @@ func ResolveCommand(fc FileCommand) (Command, error) {
 		return Command{}, fmt.Errorf("command %q: %w", id, err)
 	}
 
-	return Command{
-		ID: id, Cmd: cmd, Timeout: timeout, TimeoutSet: strings.TrimSpace(fc.Timeout) != "",
-		Container: strings.TrimSpace(fc.Container), ContainerUser: strings.TrimSpace(fc.ContainerUser),
-	}, nil
+	c := Command{ID: id, Kind: kind, Timeout: timeout, TimeoutSet: strings.TrimSpace(fc.Timeout) != ""}
+
+	switch kind {
+	case CommandKindShell:
+		err = resolveShellCommand(&c, fc)
+	case CommandKindTar:
+		err = resolveTarCommand(&c, fc)
+	}
+
+	if err != nil {
+		return Command{}, fmt.Errorf("command %q: %w", id, err)
+	}
+
+	return c, nil
+}
+
+// resolveShellCommand fills c from a type: shell entry: a non-empty cmd,
+// an optional container, and none of the tar-only fields.
+func resolveShellCommand(c *Command, fc FileCommand) error {
+	c.Cmd = strings.TrimSpace(fc.Cmd)
+	if c.Cmd == "" {
+		return errors.New("cmd is required")
+	}
+
+	hasTarFields := strings.TrimSpace(fc.Path) != "" || len(fc.Exclude) > 0 || strings.TrimSpace(fc.Compress) != ""
+	if hasTarFields {
+		return errors.New("path, exclude and compress only apply to type: tar")
+	}
+
+	c.Container = strings.TrimSpace(fc.Container)
+	c.ContainerUser = strings.TrimSpace(fc.ContainerUser)
+
+	return nil
+}
+
+// resolveTarCommand fills c from a type: tar entry: an absolute path,
+// well-formed exclude globs, an optional compress: gzip, and none of the
+// shell-only fields.
+//
+// security: path may name anything this process can read. That's no new
+// capability: whoever may edit commands can already run any shell cmd.
+func resolveTarCommand(c *Command, fc FileCommand) error {
+	hasShellFields := strings.TrimSpace(fc.Cmd) != "" || strings.TrimSpace(fc.Container) != "" ||
+		strings.TrimSpace(fc.ContainerUser) != ""
+	if hasShellFields {
+		return errors.New("cmd, container and container-user don't apply to type: tar")
+	}
+
+	root := strings.TrimSpace(fc.Path)
+	if root == "" {
+		return errors.New("path is required for type: tar")
+	}
+
+	if !filepath.IsAbs(root) {
+		return fmt.Errorf("path %q must be absolute", root)
+	}
+
+	exclude := make([]string, 0, len(fc.Exclude))
+
+	for _, p := range fc.Exclude {
+		if p = strings.TrimSpace(p); p == "" {
+			continue
+		}
+
+		if err := tarball.ValidatePattern(p); err != nil {
+			return err
+		}
+
+		exclude = append(exclude, p)
+	}
+
+	compress := strings.TrimSpace(fc.Compress)
+	if compress != "" && compress != compressGzip {
+		return fmt.Errorf("unknown compress %q (want %q or unset)", compress, compressGzip)
+	}
+
+	c.Tar = tarball.Options{Root: filepath.Clean(root), Exclude: exclude, Gzip: compress == compressGzip}
+
+	return nil
 }
 
 // parseOnErrorCommandTimeout parses a commands: entry's timeout: string,
@@ -1622,7 +1741,7 @@ func resolveJobSources(cfg *Config, commands map[string]Command) error {
 			return fmt.Errorf("files[%d]: no command %q defined under commands", i, ref.Command)
 		}
 
-		name := cmp.Or(ref.Name, ref.Command+ext)
+		name := cmp.Or(ref.Name, ref.Command+defaultFileExt(c)+ext)
 		if err := ValidateFileName(name); err != nil {
 			return fmt.Errorf("files[%d]: %w", i, err)
 		}
@@ -1639,6 +1758,20 @@ func resolveJobSources(cfg *Config, commands map[string]Command) error {
 	cfg.Sources = sources
 
 	return nil
+}
+
+// defaultFileExt is the extension a command's file gets, before the
+// encryption's own, when its files: entry sets no name: what a tar command's
+// output is; nothing for a shell command, whose output can be anything.
+func defaultFileExt(c Command) string {
+	switch {
+	case c.Kind != CommandKindTar:
+		return ""
+	case c.Tar.Gzip:
+		return ".tar.gz"
+	default:
+		return ".tar"
+	}
 }
 
 // convertInlineJobCommands turns every job's deprecated inline cmd: (its
@@ -1844,9 +1977,9 @@ func resolveJobTargets(cfg *Config, servers map[string]ResolvedServer, commands 
 		}
 
 		if ref.onErrorCommandID != "" {
-			command, ok := commands[ref.onErrorCommandID]
-			if !ok {
-				return fmt.Errorf("targets[%d]: no command named %q defined under commands", i, ref.onErrorCommandID)
+			command, err := hookCommand(commands, ref.onErrorCommandID)
+			if err != nil {
+				return fmt.Errorf("targets[%d]: on-error: %w", i, err)
 			}
 
 			if ref.onErrorAfter <= 0 {
@@ -1859,9 +1992,9 @@ func resolveJobTargets(cfg *Config, servers map[string]ResolvedServer, commands 
 		}
 
 		if ref.onRecoverCommandID != "" {
-			command, ok := commands[ref.onRecoverCommandID]
-			if !ok {
-				return fmt.Errorf("targets[%d]: no command named %q defined under commands", i, ref.onRecoverCommandID)
+			command, err := hookCommand(commands, ref.onRecoverCommandID)
+			if err != nil {
+				return fmt.Errorf("targets[%d]: on-recover: %w", i, err)
 			}
 
 			cfg.Targets[i].OnRecoverCommand = &command
@@ -1869,6 +2002,22 @@ func resolveJobTargets(cfg *Config, servers map[string]ResolvedServer, commands 
 	}
 
 	return nil
+}
+
+// hookCommand looks up a target's on-error/on-recover command by id. Only a
+// shell command can be one: a hook's output is discarded, so a tar
+// command's archive would be produced for nothing.
+func hookCommand(commands map[string]Command, id string) (Command, error) {
+	command, ok := commands[id]
+	if !ok {
+		return Command{}, fmt.Errorf("no command named %q defined under commands", id)
+	}
+
+	if command.Kind == CommandKindTar {
+		return Command{}, fmt.Errorf("command %q is type: tar, which can't be run as a hook", id)
+	}
+
+	return command, nil
 }
 
 // newConfigDefaults returns a *config with the built-in defaults applied to

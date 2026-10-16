@@ -2631,17 +2631,46 @@ components:
 
     CommandConfigInput:
       type: object
-      description: An on-error/on-recover shell command, with the same syntax as a former `commands:` config entry.
+      description: >-
+        A command, with the same syntax as a former `commands:` config entry: a job's backup source, or (shell only) a job
+        target's on-error/on-recover hook. A `shell` command runs `cmd` (optionally inside `container`); a `tar` command
+        archives `path` on this machine instead. Setting a field the other type uses is rejected.
       properties:
         id:
           type: string
           description: Immutable once created.
+        type:
+          type: string
+          enum: ["", shell, tar]
+          description: Empty (as stored before commands had a type) means shell.
         cmd:
           type: string
+          description: Shell only, required there. Run through the platform shell; its standard output is the backup.
         timeout:
           type: string
-          description: e.g. "15s". Empty means 30s.
-      required: [id, cmd]
+          description: e.g. "15s". Empty means no limit as a job source, 30s as a hook.
+        container:
+          type: string
+          description: Shell only. Runs `cmd` inside this running container through the Docker daemon.
+        container_user:
+          type: string
+          description: Shell only. user[:group] inside `container`; empty uses its default.
+        path:
+          type: string
+          description: Tar only, required there. Absolute path of the file or directory to archive.
+        exclude:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: >-
+            Tar only. Glob patterns (Go path.Match syntax); an entry whose path relative to `path`, or whose name, matches
+            one is left out, a directory with everything below it.
+        compress:
+          type: string
+          enum: ["", gzip]
+          description: Tar only. "gzip" compresses the archive.
+      required: [id]
 
     CommandConfig:
       allOf:

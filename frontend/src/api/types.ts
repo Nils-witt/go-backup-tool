@@ -397,16 +397,27 @@ export interface ServerConfigListJSON {
   servers: ServerConfigJSON[];
 }
 
+// CommandType mirrors config.CommandKind; "" (from before commands had a
+// type) means "shell".
+export type CommandType = "" | "shell" | "tar";
+
 // CommandDefinitionJSON mirrors config.FileCommand's JSON form: a job's
-// backup source, or a job target's on-error/on-recover hook. container, when
-// set, runs cmd inside that running container through the Docker socket;
-// container_user overrides its default user.
+// backup source, or (shell only) a job target's on-error/on-recover hook.
+// A shell command runs cmd; container, when set, runs it inside that running
+// container through the Docker socket, and container_user overrides its
+// default user. A tar command archives path on this machine instead, leaving
+// out entries matching an exclude glob, gzip-compressed when compress is
+// "gzip".
 export interface CommandDefinitionJSON {
   id: string;
+  type: CommandType;
   cmd: string;
   timeout: string;
   container: string;
   container_user: string;
+  path: string;
+  exclude: string[] | null;
+  compress: string;
 }
 
 // CommandConfigJSON mirrors commandConfigJSON: one stored command, the jobs

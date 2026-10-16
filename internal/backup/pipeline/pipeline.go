@@ -29,6 +29,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/dockerexec"
 	"nilswitt.dev/go-backup-tool/internal/backup/remoteAuth"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
+	"nilswitt.dev/go-backup-tool/internal/backup/tarball"
 )
 
 // remoteHTTPClient is shared by every remote target's upload/delete
@@ -240,19 +241,24 @@ func newSourceCommand(ctx context.Context, cmd string) *exec.Cmd {
 	return exec.CommandContext(ctx, "sh", "-c", cmd) //nolint:gosec // cfg.Source.Cmd is operator-supplied CLI config, not untrusted input; see runPipeline's doc comment
 }
 
-// sourceProcess is the running backup source command: an *exec.Cmd, or a
-// command running inside a container (see startContainerPipeline).
+// sourceProcess is the running backup source command: an *exec.Cmd, or an
+// asyncSource (a command running inside a container, or a tar archive being
+// written; see startContainerPipeline and startTarPipeline).
 type sourceProcess interface {
 	Wait() error
 }
 
-// sourceLabel names src in errors, with its container when it runs in one.
+// sourceLabel names src in errors, with its container when it runs in one
+// or the path it archives.
 func sourceLabel(src *config.Command) string {
-	if src.Container != "" {
+	switch {
+	case src.Kind == config.CommandKindTar:
+		return fmt.Sprintf("tar command %q of %q", src.ID, src.Tar.Root)
+	case src.Container != "":
 		return fmt.Sprintf("command %q in container %q", src.ID, src.Container)
+	default:
+		return fmt.Sprintf("command %q", src.ID)
 	}
-
-	return fmt.Sprintf("command %q", src.ID)
 }
 
 // startEncryptingPipeline starts src piped into gpg (the source's
@@ -271,9 +277,12 @@ func startEncryptingPipeline(ctx context.Context, cfg *config.Config, src *confi
 		srcCtx, cancel = context.WithTimeout(ctx, src.Timeout)
 	}
 
-	if src.Container != "" {
+	switch {
+	case src.Kind == config.CommandKindTar:
+		source, gpgCmd, gpgOut, err = startTarPipeline(ctx, srcCtx, cfg, src, log)
+	case src.Container != "":
 		source, gpgCmd, gpgOut, err = startContainerPipeline(ctx, srcCtx, cfg, src, log)
-	} else {
+	default:
 		source, gpgCmd, gpgOut, err = startLocalPipeline(ctx, srcCtx, cfg, src, log)
 	}
 
@@ -349,28 +358,37 @@ func startLocalPipeline(ctx, srcCtx context.Context, cfg *config.Config, src *co
 	return sourceCmd, gpgCmd, gpgOut, nil
 }
 
-// containerSource is a source command running inside a container (see
-// startContainerPipeline); Wait returns its outcome once it has exited and
-// all of its output has been handed to gpg.
-type containerSource struct {
+// asyncSource is a source producing its output from a goroutine of this
+// process into the pipe gpg reads (see startGPGOnPipe): a command running
+// inside a container, or a tar archive being written. Wait returns its
+// outcome once it has finished and all of its output has been handed to gpg.
+type asyncSource struct {
 	done chan error
 }
 
-func (c *containerSource) Wait() error { return <-c.done }
+func (a *asyncSource) Wait() error { return <-a.done }
 
-// startContainerPipeline is startEncryptingPipeline for a source with a
-// container: src.Cmd runs inside it through the Docker daemon (via
-// "sh -c", as it would locally) under srcCtx, and its demultiplexed stdout
-// is written into an OS pipe gpg reads as stdin. gpg starts first, and this
-// process closes its own copy of the pipe's read end once gpg holds one, so
-// gpg exiting early fails the next write (EPIPE) and ends the exec stream
-// instead of leaving it blocked.
-func startContainerPipeline(ctx, srcCtx context.Context, cfg *config.Config, src *config.Command, log *slog.Logger) (source sourceProcess, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
-	client, err := dockerexec.New(cfg.DockerHost)
-	if err != nil {
-		return nil, nil, nil, err
-	}
+// startAsyncSource runs produce in a goroutine, writing into pw, and closes
+// pw once it returns — gpg's EOF.
+func startAsyncSource(pw *os.File, produce func(w io.Writer) error) *asyncSource {
+	src := &asyncSource{done: make(chan error, 1)}
 
+	go func() {
+		err := produce(pw)
+		_ = pw.Close()
+
+		src.done <- err
+	}()
+
+	return src
+}
+
+// startGPGOnPipe starts gpg reading from a new OS pipe and returns it with
+// gpgOut, its stdout, and pw, the pipe's write end for the source to write
+// into. This process closes its own copy of the read end once gpg holds
+// one, so gpg exiting early fails the source's next write (EPIPE) instead
+// of leaving it blocked.
+func startGPGOnPipe(ctx context.Context, cfg *config.Config, log *slog.Logger) (gpgCmd *exec.Cmd, gpgOut io.ReadCloser, pw *os.File, err error) {
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("creating command output pipe: %w", err)
@@ -393,26 +411,63 @@ func startContainerPipeline(ctx, srcCtx context.Context, cfg *config.Config, src
 		return nil, nil, nil, fmt.Errorf("starting gpg: %w", err)
 	}
 
+	return gpgCmd, gpgOut, pw, nil
+}
+
+// startContainerPipeline is startEncryptingPipeline for a source with a
+// container: src.Cmd runs inside it through the Docker daemon (via
+// "sh -c", as it would locally) under srcCtx, and its demultiplexed stdout
+// is written into the pipe gpg reads (see startGPGOnPipe).
+func startContainerPipeline(ctx, srcCtx context.Context, cfg *config.Config, src *config.Command, log *slog.Logger) (source sourceProcess, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
+	client, err := dockerexec.New(cfg.DockerHost)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	gpgCmd, gpgOut, pw, err := startGPGOnPipe(ctx, cfg, log)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
 	log.Debug("starting source command in container", "command_id", src.ID, "cmd", src.Cmd,
 		"container", src.Container, "docker_host", cfg.DockerHost)
 
-	proc := &containerSource{done: make(chan error, 1)}
-
-	go func() {
-		err := client.Run(srcCtx, dockerexec.Exec{
+	source = startAsyncSource(pw, func(w io.Writer) error {
+		return client.Run(srcCtx, dockerexec.Exec{
 			Container: src.Container,
 			User:      src.ContainerUser,
 			Cmd:       []string{"sh", "-c", src.Cmd},
-			Stdout:    pw,
+			Stdout:    w,
 			Stderr:    &logWriter{log: log, msg: "command stderr"},
 		})
-		// Closing the write end is gpg's EOF.
-		_ = pw.Close()
+	})
 
-		proc.done <- err
-	}()
+	return source, gpgCmd, gpgOut, nil
+}
 
-	return proc, gpgCmd, gpgOut, nil
+// startTarPipeline is startEncryptingPipeline for a type: tar source: a tar
+// archive of src.Tar.Root is written in-process (see tarball.Write) under
+// srcCtx into the pipe gpg reads (see startGPGOnPipe). Entries tar can't
+// hold are logged as they're skipped.
+func startTarPipeline(ctx, srcCtx context.Context, cfg *config.Config, src *config.Command, log *slog.Logger) (source sourceProcess, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
+	gpgCmd, gpgOut, pw, err := startGPGOnPipe(ctx, cfg, log)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	opts := src.Tar
+	opts.OnSkip = func(name, reason string) {
+		log.Warn("tar command skipped an entry", "command_id", src.ID, "entry", name, "reason", reason)
+	}
+
+	log.Debug("starting tar command", "command_id", src.ID, "path", opts.Root,
+		"exclude", opts.Exclude, "gzip", opts.Gzip)
+
+	source = startAsyncSource(pw, func(w io.Writer) error {
+		return tarball.Write(srcCtx, w, opts)
+	})
+
+	return source, gpgCmd, gpgOut, nil
 }
 
 // runInContainer runs e through the Docker daemon at dockerHost.
