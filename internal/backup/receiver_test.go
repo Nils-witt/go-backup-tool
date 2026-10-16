@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -134,6 +135,31 @@ func TestListReceiverFilesListsNestedObjectsSortedByCreatedTimeAscending(t *test
 
 	if files[1].Key != "b.gpg" || files[1].Size != 3 {
 		t.Errorf("files[1] = %+v, want key b.gpg size 3 (newest)", files[1])
+	}
+}
+
+func TestListReceiverFilesSplitsMultiFileBackups(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, "host", "backup-1", "db.gpg"), "db")
+	writeFile(t, filepath.Join(root, "host", "backup-1", MultiFileMarker), "")
+	writeFile(t, filepath.Join(root, "host", "legacy.gpg"), "legacy")
+
+	files, err := ListReceiverFiles(config.ResolvedReceiver{ID: "a", Path: root})
+	if err != nil {
+		t.Fatalf("ListReceiverFiles() unexpected error: %v", err)
+	}
+
+	got := map[string]string{}
+	for _, f := range files {
+		got[f.Key] = f.File
+	}
+
+	expected := map[string]string{"host/backup-1": "db.gpg", "host/legacy.gpg": ""}
+	if !maps.Equal(got, expected) {
+		t.Errorf("ListReceiverFiles() key -> file = %v, want %v (marker itself hidden)", got, expected)
 	}
 }
 

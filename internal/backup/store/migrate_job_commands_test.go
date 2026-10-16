@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -50,7 +51,8 @@ func TestOpenMigratesInlineJobCommands(t *testing.T) {
 }
 
 // checkMigratedJobCommands checks TestOpenMigratesInlineJobCommands' db
-// after Open: db's inline cmd moved into command job-db-2, files untouched.
+// after Open: db's inline cmd moved into command job-db-2, and each job's
+// single command into its files.
 func checkMigratedJobCommands(t *testing.T, db *Store) {
 	t.Helper()
 
@@ -61,12 +63,13 @@ func checkMigratedJobCommands(t *testing.T, db *Store) {
 		t.Fatalf("ListJobConfigs() = %+v, %v", jobs, err)
 	}
 
-	if j := jobs[0]; j.Command != "job-db-2" || j.LegacyCmd != "" {
-		t.Errorf("db = command %q, cmd %q; want job-db-2 and no inline cmd", j.Command, j.LegacyCmd)
-	}
+	for i, want := range []string{"job-db-2", "job-db"} {
+		j := jobs[i]
 
-	if j := jobs[1]; j.Command != "job-db" {
-		t.Errorf("files command = %q, want it untouched", j.Command)
+		got := JobConfig{Command: j.Command, LegacyCmd: j.LegacyCmd, Files: j.Files}
+		if !reflect.DeepEqual(got, JobConfig{Files: []JobFile{{Command: want}}}) {
+			t.Errorf("job %q = %+v; want only file %s", j.Name, got, want)
+		}
 	}
 
 	commands, err := db.ListCommandConfigs(ctx)

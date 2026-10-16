@@ -246,7 +246,7 @@ func TestHandleRetryFailedTargetsKicksOffRetry(t *testing.T) {
 
 	job := &config.Config{
 		Name:       "test",
-		Source:     config.Command{ID: "test", Cmd: "echo hi"},
+		Sources:    []config.JobSource{{ID: "test", Cmd: "echo hi", Name: "test.gpg"}},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
@@ -259,7 +259,7 @@ func TestHandleRetryFailedTargetsKicksOffRetry(t *testing.T) {
 	statusStore := backup.NewStatusStore([]*config.Config{job})
 	statusStore.Starting(job.Name)
 	statusStore.TargetDone(job.Name, 0, context.DeadlineExceeded) // simulate a prior failure
-	statusStore.Finished(job.Name, context.DeadlineExceeded, 0)
+	statusStore.Finished(job.Name, context.DeadlineExceeded, 0, nil)
 
 	jobs := pipeline.StaticJobs([]*config.Config{job})
 	runner := pipeline.NewRunner(discardLogger, statusStore, nil, nil, nil, nil)

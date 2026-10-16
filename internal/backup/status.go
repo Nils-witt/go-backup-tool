@@ -49,6 +49,36 @@ type JobSnapshot struct {
 	Size      string           `json:"size,omitempty"` // encrypted object size from the last successful run; sticky across a later failure
 	Error     string           `json:"error,omitempty"`
 	Targets   []TargetSnapshot `json:"targets"`
+
+	// Files are the backup's files as of the last finished run, one per
+	// command (see config.Config.Sources): whether each was produced, not
+	// whether each target received it (that's Targets). Empty until the job
+	// first finishes in this process.
+	Files []FileSnapshot `json:"files,omitempty"`
+}
+
+// FileSnapshot is one file of a job's last run (see JobSnapshot.Files):
+// Name under the backup's key, the Command that produced it, and whether
+// producing (running, encrypting and staging) it succeeded.
+type FileSnapshot struct {
+	Name    string   `json:"name"`
+	Command string   `json:"command"`
+	State   RunState `json:"state"`
+	Size    string   `json:"size,omitempty"` // encrypted size; only when State is ok
+	Error   string   `json:"error,omitempty"`
+}
+
+// NewFileSnapshot builds name's FileSnapshot for command: ok with its
+// encrypted size when err is nil, failed with err's message otherwise.
+func NewFileSnapshot(name, command string, size int64, err error) FileSnapshot {
+	f := FileSnapshot{Name: name, Command: command}
+	SetOutcome(&f.State, &f.Error, err)
+
+	if err == nil {
+		f.Size = formatBytes(size)
+	}
+
+	return f
 }
 
 // StatusStore tracks the live state of every configured job and its targets,
@@ -311,19 +341,22 @@ func (s *StatusStore) SetNextRun(name string, next time.Time) {
 // completes, deriving the overall state from each target's own already-
 // recorded outcome (see targetDone) rather than solely from err != nil: a
 // job whose targets succeeded and failed in a mix is reported as
-// incomplete, not failed — the backup did land somewhere. It returns the
-// state it recorded (or "" if name is unknown), so a caller that persists
-// its own summary of the run (see runner.recordLastRun) can stay
-// consistent with the live store without re-deriving it.
+// incomplete, not failed — the backup did land somewhere. Likewise, a run
+// that produced only some of its files is incomplete, and one that
+// produced none is failed (see jobState). It returns the state it recorded
+// (or "" if name is unknown), so a caller that persists its own summary of
+// the run (see runner.recordLastRun) can stay consistent with the live
+// store without re-deriving it.
 //
-// size is the encrypted object's byte count; it's recorded whenever at
+// size is the encrypted files' total byte count; it's recorded whenever at
 // least one target succeeded (ok or incomplete), since staging must have
-// produced one complete file of exactly that size for any target to have
-// gotten a copy of it — a run that reached no target at all (every target
+// produced complete files of exactly that size for any target to have
+// gotten a copy of them — a run that reached no target at all (every target
 // failed, or the pipeline never got that far) leaves Size showing the last
 // successful run's size instead of misrepresenting 0 or a partial count as
-// a real file.
-func (s *StatusStore) Finished(name string, err error, size int64) RunState {
+// a real backup. files (each file's outcome) replaces the job's Files,
+// unless nil.
+func (s *StatusStore) Finished(name string, err error, size int64, files []FileSnapshot) RunState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	defer s.notifyLocked()
@@ -335,7 +368,12 @@ func (s *StatusStore) Finished(name string, err error, size int64) RunState {
 
 	j.LastEnd = time.Now()
 	j.Duration = j.LastEnd.Sub(j.LastStart).Round(time.Millisecond).String()
-	j.State = overallState(j.Targets)
+
+	if files != nil {
+		j.Files = slices.Clone(files)
+	}
+
+	j.State = jobState(j)
 
 	j.Error = ""
 	if err != nil {
@@ -345,6 +383,32 @@ func (s *StatusStore) Finished(name string, err error, size int64) RunState {
 	setSizeIfSucceeded(&j.Size, j.State, size)
 
 	return j.State
+}
+
+// jobState is j's overall state: its targets' (see overallState), but
+// incomplete rather than ok when some of the backup's files failed to be
+// produced, and failed when none were.
+func jobState(j *JobSnapshot) RunState {
+	state := overallState(j.Targets)
+
+	failedFiles := 0
+
+	for _, f := range j.Files {
+		if f.State == StateFailed {
+			failedFiles++
+		}
+	}
+
+	switch {
+	case failedFiles == 0:
+		return state
+	case failedFiles == len(j.Files):
+		return StateFailed
+	case state == StateOK:
+		return StateIncomplete
+	default:
+		return state
+	}
 }
 
 // overallState summarizes targets (a job's current per-target states) into
@@ -386,7 +450,7 @@ func (s *StatusStore) RefreshJobState(name string) {
 		return
 	}
 
-	j.State = overallState(j.Targets)
+	j.State = jobState(j)
 
 	if j.State == StateOK {
 		j.Error = ""
@@ -504,6 +568,7 @@ func (s *StatusStore) Snapshot() []JobSnapshot {
 	for _, name := range s.order {
 		j := *s.jobs[name]
 		j.Targets = append([]TargetSnapshot(nil), j.Targets...)
+		j.Files = slices.Clone(j.Files)
 		out = append(out, j)
 	}
 

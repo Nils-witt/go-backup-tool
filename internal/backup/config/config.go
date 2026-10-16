@@ -6,6 +6,7 @@ package config
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"flag"
 	"fmt"
@@ -44,21 +45,33 @@ func (s *stringSlice) Set(v string) error {
 type Config struct {
 	Name string // job name, from its jobs: entry; always set
 
-	// Source is the commands: entry the job's command: names, resolved: its
-	// stdout is the backup (see pipeline.startEncryptingPipeline). Its
-	// Timeout bounds the source only when TimeoutSet; otherwise only the
-	// run's overall timeout does.
-	Source Command
+	// Sources are the job's files: entries, resolved, in run order: each
+	// one's stdout, encrypted, becomes one file of the backup, named Name
+	// under the backup's Key (see pipeline.runPipeline). A source's Timeout
+	// bounds it only when TimeoutSet; otherwise only the run's overall
+	// timeout does.
+	Sources []JobSource
 
-	// commandRef is the job's command: id, resolved into Source by
-	// resolveJobSource.
-	commandRef string
+	// fileRefs are the job's files: entries as written, resolved into
+	// Sources by resolveJobSources.
+	fileRefs []FileJobFile
 
 	// DockerHost is the Docker daemon address (see dockerexec.New), set on
 	// each run's own copy of its job's config by the runner, the same way
-	// StateDB is. Only used when Source.Container is set.
+	// StateDB is. Only used by a source with a Container.
 	DockerHost string
-	Key        string // may still contain the {time} placeholder; resolved fresh per run
+
+	// Key names the backup: a folder holding one file per source. It may
+	// still contain the {time} placeholder; resolved fresh per run.
+	Key string
+
+	// File is the file under Key a single object read or write addresses
+	// (see backup.LocalObjectPath and pipeline.UploadToRemote): one source's
+	// Name, set on a per-file copy of a run's config. Empty addresses Key
+	// itself, as a flat object — how backups were stored before a job could
+	// have more than one command, and how older senders still upload to a
+	// receiver.
+	File string
 
 	// CreatedAt is when this run's backup content was actually produced, set
 	// once per run by runner.runOnce/RetryFailedTargets from the same
@@ -220,9 +233,20 @@ type Target struct {
 	OnRecoverCommand *Command
 }
 
+// JobSource is one of a job's files: entries, resolved: the command to
+// run and the file its encrypted output is stored as under the backup's key.
+type JobSource struct {
+	Command
+
+	// Name is the file name under the backup's key: the entry's name:, or
+	// the command's id plus ".gpg" (".asc" with armor) when that's unset.
+	// Always a valid single path segment (see ValidateFileName).
+	Name string
+}
+
 // Command is one top-level commands: entry after validation, ready to be
-// run by the pipeline package: as a job's backup source (see
-// Config.Source), or (see pipeline.runTargetCommand) once a target's
+// run by the pipeline package: as one of a job's backup sources (see
+// Config.Sources), or (see pipeline.runTargetCommand) once a target's
 // consecutive-failure streak reaches its on-error.after threshold, or once
 // a target recovers from a failure streak (on-recover:).
 type Command struct {
@@ -419,8 +443,15 @@ const (
 type FileJob struct {
 	Name string `yaml:"name" json:"name"`
 
-	// Command names the commands: entry whose stdout is the backup.
-	Command string `yaml:"command" json:"command"`
+	// Files are the backup's files, each one a commands: entry (by id) whose
+	// encrypted output is stored under the backup's key, run in order. The
+	// key is files:, not commands:, since the top-level job defaults share
+	// the config file's top level with the commands: list itself.
+	Files []FileJobFile `yaml:"files" json:"files"`
+
+	// Command is DEPRECATED: a job's single command, the same as Files with
+	// just that one entry. Setting both is an error.
+	Command string `yaml:"command" json:"command,omitempty"`
 
 	// Cmd is DEPRECATED: a job's own inline shell command. ParseFlags turns
 	// it into a commands: entry of its own (see convertInlineJobCommands),
@@ -442,6 +473,15 @@ type FileJob struct {
 	// notify.Build) to fire whenever this job's run ends in an error on any
 	// target — whether every target failed or just some. Optional.
 	FailureNotifications []string `yaml:"failure-notifications" json:"failure_notifications"`
+}
+
+// FileJobFile is one entry of a job's files:. Command names a top-level
+// commands: entry; Name (optional) is the file its encrypted output is
+// stored as under the backup's key, defaulting to the command's id plus
+// ".gpg" (".asc" with armor). Names must be unique within a job.
+type FileJobFile struct {
+	Command string `yaml:"command" json:"command"`
+	Name    string `yaml:"name" json:"name,omitempty"`
 }
 
 // FileJobTarget mirrors jobTargetRef for YAML unmarshaling. Retention (local
@@ -904,6 +944,13 @@ func resolveNotificationsAndCommands(fileCfg *fileConfig) (resolvedNotifications
 		return resolvedNotifications{}, nil, err
 	}
 
+	commandWarnings, err := convertSingleJobCommands(fileCfg)
+	if err != nil {
+		return resolvedNotifications{}, nil, err
+	}
+
+	fileCfg.warnings = append(fileCfg.warnings, commandWarnings...)
+
 	commands, err := buildCommands(fileCfg.Commands)
 	if err != nil {
 		return resolvedNotifications{}, nil, err
@@ -1334,7 +1381,7 @@ func buildJobsFromFile(fileCfg *fileConfig, commands map[string]Command) ([]*Con
 			return nil, fmt.Errorf("job %q: %w", name, err)
 		}
 
-		if err := resolveJobSource(cfg, commands); err != nil {
+		if err := resolveJobSources(cfg, commands); err != nil {
 			return nil, fmt.Errorf("job %q: %w", name, err)
 		}
 
@@ -1551,20 +1598,45 @@ type ResolvedServer struct {
 // Kind is s's type:.
 func (s ResolvedServer) Kind() ServerKind { return s.kind }
 
-// resolveJobSource resolves cfg's command: id against commands into
-// cfg.Source. A job with no command: is left without a Source; checkJob
-// reports that.
-func resolveJobSource(cfg *Config, commands map[string]Command) error {
-	if cfg.commandRef == "" {
-		return nil
+// resolveJobSources resolves cfg's files: entries against commands into
+// cfg.Sources, naming each file (see JobSource.Name) and checking the names
+// are valid and unique. A job with no files: is left without Sources;
+// checkJob reports that. Call it once cfg.Armor is final, since it picks
+// the default file extension.
+func resolveJobSources(cfg *Config, commands map[string]Command) error {
+	ext := ".gpg"
+	if cfg.Armor {
+		ext = ".asc"
 	}
 
-	c, ok := commands[cfg.commandRef]
-	if !ok {
-		return fmt.Errorf("command: no command %q defined under commands", cfg.commandRef)
+	sources := make([]JobSource, 0, len(cfg.fileRefs))
+	names := make(map[string]bool, len(cfg.fileRefs))
+
+	for i, ref := range cfg.fileRefs {
+		if ref.Command == "" {
+			return fmt.Errorf("files[%d]: command is required", i)
+		}
+
+		c, ok := commands[ref.Command]
+		if !ok {
+			return fmt.Errorf("files[%d]: no command %q defined under commands", i, ref.Command)
+		}
+
+		name := cmp.Or(ref.Name, ref.Command+ext)
+		if err := ValidateFileName(name); err != nil {
+			return fmt.Errorf("files[%d]: %w", i, err)
+		}
+
+		if names[name] {
+			return fmt.Errorf("files[%d]: duplicate file name %q (set name: to tell them apart)", i, name)
+		}
+
+		names[name] = true
+
+		sources = append(sources, JobSource{Command: c, Name: name})
 	}
 
-	cfg.Source = c
+	cfg.Sources = sources
 
 	return nil
 }
@@ -1579,8 +1651,8 @@ func resolveJobSource(cfg *Config, commands map[string]Command) error {
 // converted job, for the caller to log.
 func convertInlineJobCommands(fileCfg *fileConfig) ([]string, error) {
 	defaults := &fileCfg.FileJob
-	if strings.TrimSpace(defaults.Cmd) != "" && strings.TrimSpace(defaults.Command) != "" {
-		return nil, errors.New("set either command or the deprecated cmd, not both")
+	if strings.TrimSpace(defaults.Cmd) != "" && defaults.hasCommand() {
+		return nil, errors.New("set either files or the deprecated cmd, not both")
 	}
 
 	taken := make(map[string]bool, len(fileCfg.Commands))
@@ -1597,9 +1669,9 @@ func convertInlineJobCommands(fileCfg *fileConfig) ([]string, error) {
 		cmd := strings.TrimSpace(fj.Cmd)
 
 		switch {
-		case cmd != "" && strings.TrimSpace(fj.Command) != "":
-			return nil, fmt.Errorf("jobs[%d]: set either command or the deprecated cmd, not both", i)
-		case cmd == "" && (strings.TrimSpace(fj.Command) != "" || strings.TrimSpace(defaults.Command) != ""):
+		case cmd != "" && fj.hasCommand():
+			return nil, fmt.Errorf("jobs[%d]: set either files or the deprecated cmd, not both", i)
+		case cmd == "" && (fj.hasCommand() || defaults.hasCommand()):
 			continue
 		case cmd == "":
 			cmd = strings.TrimSpace(defaults.Cmd)
@@ -1613,14 +1685,105 @@ func convertInlineJobCommands(fileCfg *fileConfig) ([]string, error) {
 		taken[id] = true
 
 		fileCfg.Commands = append(fileCfg.Commands, FileCommand{ID: id, Cmd: cmd})
-		fj.Command, fj.Cmd = id, ""
+		fj.Files, fj.Cmd = []FileJobFile{{Command: id}}, ""
 
-		warnings = append(warnings, fmt.Sprintf("job %q: cmd: is deprecated; it now runs as commands: entry %q, which the job names as its command:", name, id))
+		warnings = append(warnings, fmt.Sprintf("job %q: cmd: is deprecated; it now runs as commands: entry %q, which the job lists under files:", name, id))
 	}
 
 	defaults.Cmd = ""
 
 	return warnings, nil
+}
+
+// convertSingleJobCommands turns every job's deprecated command: (and the
+// top-level default's) into a one-entry files: list (see
+// FileJob.NormalizeFiles), returning one deprecation warning per converted
+// entry, for the caller to log.
+func convertSingleJobCommands(fileCfg *fileConfig) ([]string, error) {
+	var warnings []string
+
+	convert := func(fj *FileJob, label string) error {
+		hadCommand := strings.TrimSpace(fj.Command) != ""
+
+		if err := fj.NormalizeFiles(); err != nil {
+			return err
+		}
+
+		if hadCommand {
+			warnings = append(warnings, label+": command: is deprecated; list the command under files: instead")
+		}
+
+		return nil
+	}
+
+	if err := convert(&fileCfg.FileJob, "top-level job defaults"); err != nil {
+		return nil, err
+	}
+
+	for i := range fileCfg.Jobs {
+		fj := &fileCfg.Jobs[i]
+		if err := convert(fj, fmt.Sprintf("job %q", strings.TrimSpace(fj.Name))); err != nil {
+			return nil, fmt.Errorf("jobs[%d]: %w", i, err)
+		}
+	}
+
+	return warnings, nil
+}
+
+// hasCommand reports whether fj names any command, through files: or the
+// deprecated command:.
+func (fj *FileJob) hasCommand() bool {
+	return strings.TrimSpace(fj.Command) != "" || len(fj.Files) > 0
+}
+
+// NormalizeFiles moves fj's deprecated single Command into Files, as its
+// only entry, and trims every entry's fields. Setting both is an error.
+func (fj *FileJob) NormalizeFiles() error {
+	command := strings.TrimSpace(fj.Command)
+	if command != "" && len(fj.Files) > 0 {
+		return errors.New("set either files or the deprecated command, not both")
+	}
+
+	if command != "" {
+		fj.Files = []FileJobFile{{Command: command}}
+	}
+
+	fj.Command = ""
+
+	files := make([]FileJobFile, len(fj.Files))
+	for i, f := range fj.Files {
+		files[i] = FileJobFile{Command: strings.TrimSpace(f.Command), Name: strings.TrimSpace(f.Name)}
+	}
+
+	if len(files) > 0 {
+		fj.Files = files
+	}
+
+	return nil
+}
+
+// ValidateFileName reports whether name can be one file of a backup: a
+// single path segment, safe to join under a backup's key on every
+// platform. It rejects a leading "." too (which also rules out "." and
+// ".."), since dot-files are hidden from every file listing and hold a
+// backup's own bookkeeping (see backup.MultiFileMarker).
+func ValidateFileName(name string) error {
+	const maxLen = 255
+
+	switch {
+	case name == "":
+		return errors.New("file name is required")
+	case len(name) > maxLen:
+		return fmt.Errorf("file name %q is longer than %d bytes", name, maxLen)
+	case strings.HasPrefix(name, "."):
+		return fmt.Errorf("file name %q must not start with \".\"", name)
+	case strings.ContainsAny(name, `/\:`+"\x00"):
+		return fmt.Errorf("file name %q must not contain /, \\, : or NUL", name)
+	case !filepath.IsLocal(name):
+		return fmt.Errorf("invalid file name %q", name)
+	}
+
+	return nil
 }
 
 // uniqueCommandID returns base, or base with the lowest "-N" suffix (from
@@ -1774,8 +1937,8 @@ func validateJob(cfg *Config) error {
 // whose caller already knows which job it asked about.
 func checkJob(cfg *Config) error {
 	switch {
-	case cfg.Source.ID == "":
-		return errors.New("command is required")
+	case len(cfg.Sources) == 0:
+		return errors.New("at least one file (a command under files:) is required")
 	case len(cfg.Targets) == 0:
 		return errors.New("at least one target is required (see targets: and servers:)")
 	case len(cfg.Recipients) == 0:
@@ -1801,6 +1964,10 @@ func ResolveJob(fj FileJob, gpg notify.GPGSettings, servers map[string]ResolvedS
 		return nil, errors.New("name is required")
 	}
 
+	if err := fj.NormalizeFiles(); err != nil {
+		return nil, err
+	}
+
 	cfg := newConfigDefaults()
 	cfg.Name = name
 	cfg.ServerName = serverName
@@ -1816,7 +1983,7 @@ func ResolveJob(fj FileJob, gpg notify.GPGSettings, servers map[string]ResolvedS
 		return nil, err
 	}
 
-	if err := resolveJobSource(cfg, commands); err != nil {
+	if err := resolveJobSources(cfg, commands); err != nil {
 		return nil, err
 	}
 
@@ -1851,7 +2018,6 @@ func flattenFileJob(defaults, fj FileJob) FileJob {
 		dst *string
 		def string
 	}{
-		{&out.Command, defaults.Command},
 		{&out.Key, defaults.Key},
 		{&out.Interval, defaults.Interval},
 		{&out.StartTime, defaults.StartTime},
@@ -1860,6 +2026,10 @@ func flattenFileJob(defaults, fj FileJob) FileJob {
 		if *f.dst == "" {
 			*f.dst = f.def
 		}
+	}
+
+	if len(out.Files) == 0 {
+		out.Files = slices.Clone(defaults.Files)
 	}
 
 	if len(out.Targets) == 0 {
@@ -1969,7 +2139,13 @@ func newJobTargetRef(t FileJobTarget) (jobTargetRef, error) {
 // startup and looked up there when the job fails (see
 // Config.FailureNotifications).
 func applyFileJob(cfg *Config, fj *FileJob) error {
-	applyString(&cfg.commandRef, strings.TrimSpace(fj.Command))
+	if len(fj.Files) > 0 {
+		cfg.fileRefs = make([]FileJobFile, len(fj.Files))
+		for i, f := range fj.Files {
+			cfg.fileRefs[i] = FileJobFile{Command: strings.TrimSpace(f.Command), Name: strings.TrimSpace(f.Name)}
+		}
+	}
+
 	applyString(&cfg.Key, fj.Key)
 	applyString(&cfg.GPGBin, fj.GPGBin)
 	applyString(&cfg.GPGHomedir, fj.GPGHomedir)

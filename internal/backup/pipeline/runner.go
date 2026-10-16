@@ -369,17 +369,25 @@ func (r *Runner) runOnce(ctx context.Context, job *config.Config) {
 		outcomes.add(&job.Targets[index], terr)
 	}
 
-	bytesWritten, err := runPipeline(ctx, &run, log, onTargetDone)
+	bytesWritten, files, err := runPipeline(ctx, &run, log, onTargetDone)
 
-	_ = r.finishRun(ctx, job, log, runMessages, start, bytesWritten, err, &outcomes)
+	_ = r.finishRun(ctx, job, log, runMessages, start, runResult{bytes: bytesWritten, files: files, err: err}, &outcomes)
 }
 
 // runMessages and retryMessages are the log lines finishRun writes for a
 // scheduled run and a RetryFailedTargets run respectively.
 var (
-	runMessages   = finishMessages{incomplete: "job incomplete: some targets failed", failed: "job failed", finished: "job finished"}
-	retryMessages = finishMessages{incomplete: "retry incomplete: some targets still failing", failed: "retry failed", finished: "retry finished"}
+	runMessages   = finishMessages{incomplete: "job incomplete: some targets or files failed", failed: "job failed", finished: "job finished"}
+	retryMessages = finishMessages{incomplete: "retry incomplete: some targets or files still failing", failed: "retry failed", finished: "retry finished"}
 )
+
+// runResult is what runPipeline reported for one run: the total encrypted
+// bytes, each file's outcome, and the run's error.
+type runResult struct {
+	bytes int64
+	files []backup.FileSnapshot
+	err   error
+}
 
 // finishMessages are the outcome log lines finishRun writes.
 type finishMessages struct {
@@ -414,9 +422,10 @@ func (o *targetOutcomes) add(t *config.Target, err error) {
 // command (concurrently, one per target) and the job's failure
 // notifications, any of which may take up to their own timeouts and used to
 // hold the run open. It returns err wrapped as config.JobError, or nil.
-func (r *Runner) finishRun(ctx context.Context, job *config.Config, log *slog.Logger, msgs finishMessages, start time.Time, bytesWritten int64, err error, outcomes *targetOutcomes) error {
+func (r *Runner) finishRun(ctx context.Context, job *config.Config, log *slog.Logger, msgs finishMessages, start time.Time, res runResult, outcomes *targetOutcomes) error {
 	duration := time.Since(start)
-	state := r.store.Finished(job.Name, err, bytesWritten)
+	bytesWritten, err := res.bytes, res.err
+	state := r.store.Finished(job.Name, err, bytesWritten, res.files)
 
 	var jobErr error
 
@@ -516,9 +525,9 @@ func (r *Runner) RetryFailedTargets(ctx context.Context, job *config.Config, tar
 		outcomes.add(&job.Targets[origIndex], terr)
 	}
 
-	bytesWritten, err := runPipeline(ctx, &run, log, onTargetDone)
+	bytesWritten, files, err := runPipeline(ctx, &run, log, onTargetDone)
 
-	if r.finishRun(ctx, job, log, retryMessages, start, bytesWritten, err, &outcomes) != nil {
+	if r.finishRun(ctx, job, log, retryMessages, start, runResult{bytes: bytesWritten, files: files, err: err}, &outcomes) != nil {
 		return err
 	}
 
@@ -656,13 +665,14 @@ func (r *Runner) retryOutstandingUploads(ctx context.Context, lookup JobLookup, 
 }
 
 // retryOutstandingUpload attempts a single outstanding target upload. On
-// success, it updates the target's live status and target-run history the
-// same way a normal run's own onTargetDone would, then forgets row. It also
+// success, it forgets row and — once no other upload is outstanding for the
+// same job and target — updates the target's live status and target-run
+// history the same way a normal run's own onTargetDone would. It also
 // gives up (forgetting row without ever succeeding) if row's job or target
 // no longer exists in the current config, or if its staged file is gone —
 // none of those are things a later retry could ever fix.
 func (r *Runner) retryOutstandingUpload(ctx context.Context, lookup JobLookup, row store.OutstandingTargetUpload, log *slog.Logger) {
-	log = log.With("job", row.JobName, "target", row.Target, "file", row.FileName)
+	log = log.With("job", row.JobName, "target", row.Target, "file", row.FileName, "backup_file", row.BackupFile)
 
 	job, ok := lookup(row.JobName)
 	if !ok {
@@ -689,6 +699,7 @@ func (r *Runner) retryOutstandingUpload(ctx context.Context, lookup JobLookup, r
 
 	run := *job
 	run.Key = row.Key
+	run.File = row.BackupFile
 	run.CreatedAt = row.CreatedAt
 	run.StateDB = r.stateDB
 	run.Identity = r.identity
@@ -706,11 +717,23 @@ func (r *Runner) retryOutstandingUpload(ctx context.Context, lookup JobLookup, r
 
 	log.Info("outstanding target upload retry succeeded")
 
+	r.forgetOutstandingUpload(ctx, row, log)
+
+	// Another file of the backup may still be outstanding for this target:
+	// it has only recovered once every one has gone through.
+	remaining, err := r.stateDB.CountOutstandingTargetUploads(ctx, row.JobName, row.Target)
+	if err != nil {
+		log.Warn("counting remaining outstanding target uploads", "err", err)
+		return
+	}
+
+	if remaining > 0 {
+		return
+	}
+
 	r.store.TargetDone(job.Name, index, nil)
 	r.store.RefreshJobState(job.Name)
 	r.persistTargetRun(ctx, job.Name, true, row.Target, nil)
-
-	r.forgetOutstandingUpload(ctx, row, log)
 }
 
 // forgetOutstandingUpload removes row from the state db and, if no other

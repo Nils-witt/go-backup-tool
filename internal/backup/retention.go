@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
@@ -117,6 +118,10 @@ func sweepRetention(ctx context.Context, db *store.Store, t *config.Target, log 
 		if err := db.DeleteObjectWrite(ctx, p); err != nil {
 			errs = append(errs, fmt.Errorf("removing retention db record for %q: %w", p, err))
 			continue
+		}
+
+		if err := removeEmptyMultiFileDir(filepath.Dir(p)); err != nil {
+			errs = append(errs, err)
 		}
 
 		log.Info("removed expired backup", "path", p, "server", t.ServerName, "retention", t.Retention)

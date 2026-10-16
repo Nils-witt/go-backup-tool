@@ -313,7 +313,7 @@ func TestJobCRUD(t *testing.T) {
 		t.Fatalf("UpdateJob() error: %v", err)
 	}
 
-	if got, ok := m.Get("db"); !ok || got.Source.Cmd != "echo new" {
+	if got, ok := m.Get("db"); !ok || got.Sources[0].Cmd != "echo new" {
 		t.Errorf("Get(db) = %+v, %v; want the updated cmd", got, ok)
 	}
 

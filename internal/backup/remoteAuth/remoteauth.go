@@ -20,8 +20,9 @@ import (
 const remoteAuthTokenTTL = 5 * time.Minute
 
 // Request is the one receiver API request a token is bound to: its HTTP
-// method, object key, creationTime query value (as sent, "" if none) and,
-// for a PUT, the hex SHA-256 of its body. Without it, a token one
+// method, object key, file under that key (for one file of a multi-file
+// backup, "" otherwise), creationTime query value (as sent, "" if none)
+// and, for a PUT, the hex SHA-256 of its body. Without it, a token one
 // destination instance receives would authorize any method, key, or body
 // at any other instance whose receiver has the same id and allows the same
 // sender — letting a compromised destination delete or overwrite the
@@ -30,6 +31,7 @@ const remoteAuthTokenTTL = 5 * time.Minute
 type Request struct {
 	Method       string `json:"htm,omitempty"`
 	Key          string `json:"key,omitempty"`
+	File         string `json:"file,omitempty"`
 	CreationTime string `json:"ctm,omitempty"`
 	BodySHA256   string `json:"sha256,omitempty"`
 }

@@ -60,13 +60,17 @@ func (targetRunModel) TableName() string { return "target_runs" }
 // due-time range and CountOutstandingTargetUploadsForFile's lookup, the
 // latter run after every pipeline run.
 type outstandingTargetUploadModel struct {
-	ID        uint      `gorm:"column:id;primaryKey;autoIncrement"`
-	JobName   string    `gorm:"column:job_name;not null"`
-	Target    string    `gorm:"column:target;not null"`
-	RunAt     time.Time `gorm:"column:run_at;not null;index:idx_outstanding_target_uploads_run_at"`
-	FileName  string    `gorm:"column:fileName;not null;index:idx_outstanding_target_uploads_file"`
-	Key       string    `gorm:"column:key;not null"`
-	CreatedAt time.Time `gorm:"column:createdAt"`
+	ID       uint      `gorm:"column:id;primaryKey;autoIncrement"`
+	JobName  string    `gorm:"column:job_name;not null"`
+	Target   string    `gorm:"column:target;not null"`
+	RunAt    time.Time `gorm:"column:run_at;not null;index:idx_outstanding_target_uploads_run_at"`
+	FileName string    `gorm:"column:fileName;not null;index:idx_outstanding_target_uploads_file"`
+	Key      string    `gorm:"column:key;not null"`
+	// BackupFile is the file under Key the upload is for (see
+	// config.Config.File); "" for a row from before backups had files,
+	// which addresses Key itself.
+	BackupFile string    `gorm:"column:backup_file;not null;default:''"`
+	CreatedAt  time.Time `gorm:"column:createdAt"`
 }
 
 func (outstandingTargetUploadModel) TableName() string { return "outstanding_target_uploads" }
@@ -355,15 +359,19 @@ func (s *Store) ListTargetRunEvents(ctx context.Context, limit int) ([]TargetRun
 	return events, nil
 }
 
-// AddOutstandingTargetUpload records a target upload that needs to be
-// retried at retryAt. key and createdAt are the failed run's own resolved
-// config.Config.Key/CreatedAt (see outstandingTargetUploadModel's doc
-// comment), not the job's static config.
-func (s *Store) AddOutstandingTargetUpload(ctx context.Context, jobName, targetName, fileName, key string, createdAt, retryAt time.Time) error {
-	m := outstandingTargetUploadModel{JobName: jobName, Target: targetName, RunAt: retryAt.UTC(), FileName: fileName, Key: key, CreatedAt: createdAt.UTC()}
+// AddOutstandingTargetUpload records u, a target upload that needs to be
+// retried at u.RetryAt (u.ID is ignored). u.Key, u.BackupFile and
+// u.CreatedAt are the failed run's own resolved config.Config.Key/File/
+// CreatedAt (see outstandingTargetUploadModel's doc comment), not the job's
+// static config.
+func (s *Store) AddOutstandingTargetUpload(ctx context.Context, u OutstandingTargetUpload) error {
+	m := outstandingTargetUploadModel{
+		JobName: u.JobName, Target: u.Target, RunAt: u.RetryAt.UTC(), FileName: u.FileName,
+		Key: u.Key, BackupFile: u.BackupFile, CreatedAt: u.CreatedAt.UTC(),
+	}
 
 	if err := s.db.WithContext(ctx).Create(&m).Error; err != nil {
-		return fmt.Errorf("recording outstanding target upload for job %q target %q: %w", jobName, targetName, err)
+		return fmt.Errorf("recording outstanding target upload for job %q target %q: %w", u.JobName, u.Target, err)
 	}
 
 	return nil
@@ -373,13 +381,17 @@ func (s *Store) AddOutstandingTargetUpload(ctx context.Context, jobName, targetN
 // recorded as failed and still needing a retry, as returned by
 // ListDueOutstandingTargetUploads.
 type OutstandingTargetUpload struct {
-	ID        uint
-	JobName   string
-	Target    string
-	FileName  string
-	Key       string
-	CreatedAt time.Time
-	RetryAt   time.Time
+	ID      uint
+	JobName string
+	Target  string
+
+	// FileName is the staged file to upload from (see
+	// pipeline.stageBackup), BackupFile the file under Key it's stored as.
+	FileName   string
+	Key        string
+	BackupFile string
+	CreatedAt  time.Time
+	RetryAt    time.Time
 }
 
 // ListDueOutstandingTargetUploads returns every outstanding target upload
@@ -396,7 +408,7 @@ func (s *Store) ListDueOutstandingTargetUploads(ctx context.Context, now time.Ti
 	for i, m := range rows {
 		out[i] = OutstandingTargetUpload{
 			ID: m.ID, JobName: m.JobName, Target: m.Target, FileName: m.FileName,
-			Key: m.Key, CreatedAt: m.CreatedAt, RetryAt: m.RunAt,
+			Key: m.Key, BackupFile: m.BackupFile, CreatedAt: m.CreatedAt, RetryAt: m.RunAt,
 		}
 	}
 
@@ -424,6 +436,22 @@ func (s *Store) DeleteOutstandingTargetUpload(ctx context.Context, id uint) erro
 	}
 
 	return nil
+}
+
+// CountOutstandingTargetUploads reports how many outstanding uploads job
+// jobName still has for target, e.g. other files of the same backup, so a
+// retry that succeeds for one of them only marks the target recovered once
+// none are left.
+func (s *Store) CountOutstandingTargetUploads(ctx context.Context, jobName, target string) (int64, error) {
+	var n int64
+
+	err := s.read.WithContext(ctx).Model(&outstandingTargetUploadModel{}).
+		Where("job_name = ? AND target = ?", jobName, target).Count(&n).Error
+	if err != nil {
+		return 0, fmt.Errorf("counting outstanding target uploads for job %q target %q: %w", jobName, target, err)
+	}
+
+	return n, nil
 }
 
 // CountOutstandingTargetUploadsForFile reports how many outstanding target

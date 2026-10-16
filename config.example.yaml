@@ -275,12 +275,27 @@ servers:
 
 jobs:
   - name: database
-    # command names the commands: entry (see commands: below) whose
-    # standard output is the backup. A job's own inline cmd: is DEPRECATED:
-    # it still works, but is turned into a commands: entry of its own at
-    # startup (id "job-<name>"), with a warning logged.
-    command: dump-database
-    key: "db-{time}.gpg"
+    # files lists the backup's files, one per commands: entry (see commands:
+    # below): each command's standard output is encrypted and stored as one
+    # file under the backup's key, so a run of this job writes
+    # db-<time>/dump-database.gpg and db-<time>/schema.sql.gpg. The commands
+    # run one after another, in this order. name (optional) is the file's
+    # name, defaulting to the command's id plus ".gpg" (".asc" with
+    # armor: true); names must be unique within the job and can't contain
+    # "/" or start with ".". If one command fails, the files that were
+    # produced are still uploaded and the run is reported incomplete.
+    #
+    # A job's single command: (command: dump-database) is DEPRECATED: it
+    # still works, as a files: list with just that entry, with a warning
+    # logged. A job's own inline cmd: is DEPRECATED too: it's turned into a
+    # commands: entry of its own at startup (id "job-<name>").
+    files:
+      - command: dump-database
+      - command: dump-schema
+        name: schema.sql.gpg
+    # key names the backup: a folder holding its files. {time} becomes the
+    # run's UTC timestamp, so a repeating job keeps a history of backups.
+    key: "db-{time}"
     targets:
       - server: nas
         bucket: my-backup-bucket
@@ -311,15 +326,16 @@ jobs:
     # startup, then resumes the correctly aligned grid — it won't replay
     # every individually missed slot.
   - name: uploads
-    command: dump-uploads
-    key: "uploads-{time}.gpg"
+    files:
+      - command: dump-uploads
+    key: "uploads-{time}"
     recipients:
       - me@example.com
     # A job may upload the same backup to more than one server by listing
     # more than one entry under targets:. Every target uploads the same
-    # encrypted object (same key), so only the server and bucket differ.
-    # A local server works the same way (see "nas" above): the object is
-    # written to /mnt/backups/my-backup-bucket-local/uploads-<time>.gpg. A
+    # encrypted files (same key), so only the server and bucket differ.
+    # A local server works the same way (see "nas" above): the file is
+    # written to /mnt/backups/my-backup-bucket-local/uploads-<time>/dump-uploads.gpg. A
     # remote server (see "sibling-instance" above) sends bucket as the id
     # naming which of the destination instance's receivers: entries to
     # write to.
@@ -494,7 +510,7 @@ jobs:
 # docker-socket: /var/run/docker.sock
 
 # commands: are named, reusable shell commands, referenced by id from a
-# job's command: (its backup source) and from a job target's
+# job's files: (its backup sources) and from a job target's
 # on-error.command or on-recover.command (see targets: above) — the same
 # "define once, reference by id" shape as notifications: above. id is
 # required and must be unique; cmd is required and is run through the
@@ -503,8 +519,8 @@ jobs:
 # are imported into the state db once webui.job-editing is on.
 #
 # timeout (optional, same duration syntax as retention:) bounds how long one
-# run may take. As an on-error/on-recover hook it defaults to 30s; as a
-# job's source, unset means no limit of its own (only the top-level
+# run may take. As an on-error/on-recover hook it defaults to 30s; as one of
+# a job's files, unset means no limit of its own (only the top-level
 # timeout: applies), so set one only if a dump may hang.
 #
 # container (optional) runs cmd inside that already-running container (name
@@ -530,6 +546,8 @@ commands:
     # container: mariadb
     # container-user: mysql
     # timeout: 2h
+  - id: dump-schema
+    cmd: "mysqldump --no-data mydb"
   - id: dump-uploads
     cmd: "tar czf - /srv/uploads"
 #   - id: restart-nas-mount

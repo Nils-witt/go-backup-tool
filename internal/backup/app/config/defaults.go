@@ -6,7 +6,7 @@ package config
 // given explicitly.
 const (
 	DefaultConfigPath = "config.yaml"
-	DefaultKeyPattern = "backup-{time}.gpg"
+	DefaultKeyPattern = "backup-{time}"
 	DefaultGPGBin     = "gpg"
 
 	// DefaultEventLogLimit is how many of the most recent entries each of

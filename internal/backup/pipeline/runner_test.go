@@ -2,11 +2,15 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"io"
+	"io/fs"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,7 +35,7 @@ func plainTestJob(t *testing.T, marker string) *config.Config {
 
 	return &config.Config{
 		Name:       "test",
-		Source:     config.Command{ID: "test", Cmd: `echo run >> "$MARKER_FILE"`},
+		Sources:    []config.JobSource{{ID: "test", Cmd: `echo run >> "$MARKER_FILE"`, Name: "test.gpg"}},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
@@ -110,7 +114,7 @@ func TestRunOnceRefreshesEachTargetIndependently(t *testing.T) {
 
 	job := &config.Config{
 		Name:       "test",
-		Source:     config.Command{ID: "test", Cmd: "echo hi"},
+		Sources:    []config.JobSource{{ID: "test", Cmd: "echo hi", Name: "test.gpg"}},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
@@ -195,7 +199,7 @@ func TestRunOnceReportsIncompleteWhenSomeTargetsFail(t *testing.T) {
 
 	job := &config.Config{
 		Name:       "test",
-		Source:     config.Command{ID: "test", Cmd: "echo hi"},
+		Sources:    []config.JobSource{{ID: "test", Cmd: "echo hi", Name: "test.gpg"}},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
@@ -257,6 +261,129 @@ func TestRunOnceReportsIncompleteWhenSomeTargetsFail(t *testing.T) {
 	}
 }
 
+// multiFileTestJob builds a one-shot job whose sources are cmds (named
+// "<id>.gpg"), using fakeGPG so each stored file is exactly its command's
+// output, with one local target under dir.
+func multiFileTestJob(t *testing.T, dir string, cmds map[string]string) *config.Config {
+	t.Helper()
+
+	ids := slices.Sorted(maps.Keys(cmds))
+	sources := make([]config.JobSource, len(ids))
+
+	for i, id := range ids {
+		sources[i] = config.JobSource{ID: id, Cmd: cmds[id], Name: id + ".gpg"}
+	}
+
+	return &config.Config{
+		Name:       "multi",
+		Sources:    sources,
+		Key:        "backup",
+		Recipients: []string{"unused@example.com"},
+		GPGBin:     fakeGPG(t),
+		Targets:    []config.Target{{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir}},
+	}
+}
+
+func TestRunOnceStoresEachFileUnderKey(t *testing.T) {
+	t.Parallel()
+	skipOnWindows(t)
+
+	dir := t.TempDir()
+	job := multiFileTestJob(t, dir, map[string]string{"db": "echo db-dump", "files": "echo file-dump"})
+
+	statusStore := backup.NewStatusStore([]*config.Config{job})
+	r := &Runner{log: discardLogger, store: statusStore}
+
+	r.runOnce(context.Background(), job)
+
+	backupDir := filepath.Join(dir, "sub", "backup")
+
+	for name, expected := range map[string]string{"db.gpg": "db-dump\n", "files.gpg": "file-dump\n"} {
+		got, err := os.ReadFile(filepath.Join(backupDir, name)) //nolint:gosec // backupDir is t.TempDir() plus fixed test literals
+		if err != nil || string(got) != expected {
+			t.Errorf("%s = %q, %v; want %q", name, got, err, expected)
+		}
+	}
+
+	if _, err := os.Stat(filepath.Join(backupDir, backup.MultiFileMarker)); err != nil {
+		t.Errorf("multi-file marker missing: %v", err)
+	}
+
+	snap := statusStore.Snapshot()[0]
+	if snap.State != backup.StateOK || len(snap.Files) != 2 {
+		t.Fatalf("job = state %q, files %+v; want ok with two files", snap.State, snap.Files)
+	}
+
+	for _, f := range snap.Files {
+		if f.State != backup.StateOK || f.Size == "" {
+			t.Errorf("file %+v, want ok with a size", f)
+		}
+	}
+}
+
+func TestRunOnceUploadsFilesThatSucceeded(t *testing.T) {
+	t.Parallel()
+	skipOnWindows(t)
+
+	dir := t.TempDir()
+	job := multiFileTestJob(t, dir, map[string]string{"broken": "exit 3", "ok": "echo fine"})
+
+	statusStore := backup.NewStatusStore([]*config.Config{job})
+	r := &Runner{log: discardLogger, store: statusStore}
+
+	r.runOnce(context.Background(), job)
+
+	backupDir := filepath.Join(dir, "sub", "backup")
+
+	got, err := os.ReadFile(filepath.Join(backupDir, "ok.gpg")) //nolint:gosec // backupDir is t.TempDir() plus fixed test literals
+	if err != nil || string(got) != "fine\n" {
+		t.Errorf("ok.gpg = %q, %v; want the successful command's output", got, err)
+	}
+
+	if _, err := os.Stat(filepath.Join(backupDir, "broken.gpg")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("broken.gpg stat error = %v, want not exist", err)
+	}
+
+	snap := statusStore.Snapshot()[0]
+	if snap.State != backup.StateIncomplete {
+		t.Errorf("job State = %q, want incomplete", snap.State)
+	}
+
+	if snap.Targets[0].State != backup.StateOK {
+		t.Errorf("target State = %q, want ok (it got every file that was produced)", snap.Targets[0].State)
+	}
+
+	if !strings.Contains(snap.Error, `file "broken.gpg"`) {
+		t.Errorf("job Error = %q, want it to name the failed file", snap.Error)
+	}
+
+	if len(snap.Files) != 2 || snap.Files[0].State != backup.StateFailed || snap.Files[1].State != backup.StateOK {
+		t.Errorf("Files = %+v, want broken failed and ok succeeded", snap.Files)
+	}
+}
+
+func TestRunOnceFailsWhenNoFileIsProduced(t *testing.T) {
+	t.Parallel()
+	skipOnWindows(t)
+
+	dir := t.TempDir()
+	job := multiFileTestJob(t, dir, map[string]string{"a": "exit 1", "b": "exit 2"})
+
+	statusStore := backup.NewStatusStore([]*config.Config{job})
+	r := &Runner{log: discardLogger, store: statusStore}
+
+	r.runOnce(context.Background(), job)
+
+	snap := statusStore.Snapshot()[0]
+	if snap.State != backup.StateFailed || snap.Targets[0].State != backup.StateFailed {
+		t.Errorf("job = %q, target = %q; want both failed", snap.State, snap.Targets[0].State)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "sub", "backup")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("backup folder stat error = %v, want nothing written", err)
+	}
+}
+
 // TestRunOnceFiresFailureNotificationOnFailure verifies runOnce fires a
 // job's failure-notifications: when its run ends incomplete (some targets
 // failed), mirroring TestRunOnceReportsIncompleteWhenSomeTargetsFail's setup.
@@ -297,7 +424,7 @@ func TestRunOnceFiresFailureNotificationOnFailure(t *testing.T) {
 
 	job := &config.Config{
 		Name:                 "test",
-		Source:               config.Command{ID: "test", Cmd: "echo hi"},
+		Sources:              []config.JobSource{{ID: "test", Cmd: "echo hi", Name: "test.gpg"}},
 		Key:                  "backup-{time}.gpg",
 		Recipients:           []string{testGPGRecipient},
 		GPGBin:               "gpg",
@@ -351,7 +478,7 @@ func TestRunOnceNoFailureNotificationOnSuccess(t *testing.T) {
 
 	job := &config.Config{
 		Name:                 "test",
-		Source:               config.Command{ID: "test", Cmd: "echo hi"},
+		Sources:              []config.JobSource{{ID: "test", Cmd: "echo hi", Name: "test.gpg"}},
 		Key:                  "backup-{time}.gpg",
 		Recipients:           []string{testGPGRecipient},
 		GPGBin:               "gpg",
@@ -397,7 +524,7 @@ func TestRunOnceKeepsStagedFileForRetryWhenTargetFails(t *testing.T) {
 
 	job := &config.Config{
 		Name:       "test",
-		Source:     config.Command{ID: "test", Cmd: "echo hi"},
+		Sources:    []config.JobSource{{ID: "test", Cmd: "echo hi", Name: "test.gpg"}},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
@@ -452,7 +579,7 @@ func TestRunOnceDeletesStagedFileOnSuccess(t *testing.T) {
 
 	job := &config.Config{
 		Name:       "test",
-		Source:     config.Command{ID: "test", Cmd: "echo hi"},
+		Sources:    []config.JobSource{{ID: "test", Cmd: "echo hi", Name: "test.gpg"}},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
@@ -511,7 +638,7 @@ func TestRetryFailedTargetsRetriesOnlyNamedTargets(t *testing.T) {
 
 	job := &config.Config{
 		Name:       "test",
-		Source:     config.Command{ID: "test", Cmd: "echo hi"},
+		Sources:    []config.JobSource{{ID: "test", Cmd: "echo hi", Name: "test.gpg"}},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
@@ -608,7 +735,7 @@ func TestRetryFailedTargetsFiresFailureNotificationOnFailure(t *testing.T) {
 	// exercise notifyJobFailure (there's no run to fail), so instead retry
 	// the job's own "good" target, but with a job Cmd that fails, forcing
 	// the retried run itself to fail.
-	job.Source.Cmd = "false"
+	job.Sources = []config.JobSource{{ID: "test", Cmd: "false", Name: "test.gpg"}}
 
 	if err := r.RetryFailedTargets(context.Background(), job, []string{"good"}); err == nil {
 		t.Fatal("RetryFailedTargets() error = nil, want an error since the retried run's cmd always fails")
@@ -824,7 +951,7 @@ func startTimeTestJob(t *testing.T, marker string, startTime time.Time, interval
 
 	return &config.Config{
 		Name:       "test",
-		Source:     config.Command{ID: "test", Cmd: `echo run >> "$MARKER_FILE"`},
+		Sources:    []config.JobSource{{ID: "test", Cmd: `echo run >> "$MARKER_FILE"`, Name: "test.gpg"}},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
@@ -948,7 +1075,7 @@ func TestRetryOutstandingUploadSucceedsAfterTargetRecovers(t *testing.T) {
 
 	job := &config.Config{
 		Name:       "test",
-		Source:     config.Command{ID: "test", Cmd: "echo hi"},
+		Sources:    []config.JobSource{{ID: "test", Cmd: "echo hi", Name: "test.gpg"}},
 		Key:        "backup-{time}.gpg",
 		Recipients: []string{testGPGRecipient},
 		GPGBin:     "gpg",
@@ -1055,7 +1182,7 @@ func TestRetryOutstandingUploadGivesUpWhenStagedFileIsGone(t *testing.T) {
 
 	missing := filepath.Join(t.TempDir(), "no-such-file.staged")
 
-	if err := stateDB.AddOutstandingTargetUpload(context.Background(), "test", "flaky", missing, "backup.gpg", time.Now(), time.Now()); err != nil {
+	if err := stateDB.AddOutstandingTargetUpload(context.Background(), store.OutstandingTargetUpload{JobName: "test", Target: "flaky", FileName: missing, Key: "backup.gpg", CreatedAt: time.Now(), RetryAt: time.Now()}); err != nil {
 		t.Fatalf("AddOutstandingTargetUpload() error: %v", err)
 	}
 

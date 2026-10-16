@@ -26,9 +26,125 @@ func newReceiverMux(receivers map[string]config.ResolvedReceiver) *http.ServeMux
 	status := backup.NewReceiverStatusStore(receivers)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(backup.NewReceiverRegistry(receivers), status, discardLogger, nil))
+	RegisterRoutes(mux, backup.NewReceiverRegistry(receivers), status, discardLogger, nil)
 
 	return mux
+}
+
+func TestRemoteTargetInteropMultiFileBackup(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	id, key := testServerIdentityAndKey(t)
+	recv := config.ResolvedReceiver{ID: "instance-a", PublicKey: &key.PublicKey, Path: dir}
+
+	srv := httptest.NewServer(newReceiverMux(map[string]config.ResolvedReceiver{recv.ID: recv}))
+	defer srv.Close()
+
+	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: recv.ID}
+
+	files := map[string]string{"db.gpg": "db bytes", "uploads.gpg": "upload bytes"}
+	for name, content := range files {
+		cfg := &config.Config{Key: "backup-20260101", File: name, Identity: id}
+		if err := pipeline.UploadToRemote(t.Context(), cfg, tgt, strings.NewReader(content)); err != nil {
+			t.Fatalf("pipeline.UploadToRemote(%s) unexpected error: %v", name, err)
+		}
+	}
+
+	for name, content := range files {
+		got, err := os.ReadFile(filepath.Join(dir, "backup-20260101", name)) //nolint:gosec // dir is t.TempDir() plus fixed test literals
+		if err != nil || string(got) != content {
+			t.Errorf("%s = %q, %v; want %q", name, got, err, content)
+		}
+	}
+
+	listed, err := backup.ListReceiverFiles(recv)
+	if err != nil {
+		t.Fatalf("ListReceiverFiles() error: %v", err)
+	}
+
+	if len(listed) != 2 {
+		t.Fatalf("ListReceiverFiles() = %+v, want the backup's two files", listed)
+	}
+
+	for _, f := range listed {
+		if f.Key != "backup-20260101" || files[f.File] == "" {
+			t.Errorf("listed file = %+v, want key backup-20260101 and one of the backup's files", f)
+		}
+	}
+}
+
+// putBackupFile sends a PUT to the multi-file route for key, with rawQuery
+// attached as-is and a token signed with id for bound.
+func putBackupFile(t *testing.T, baseURL string, id *identity.ServerIdentity, recvID, key, rawQuery string, bound remoteAuth.Request) *http.Response {
+	t.Helper()
+
+	token, err := id.SignRequest(recvID, bound)
+	if err != nil {
+		t.Fatalf("signing request: %v", err)
+	}
+
+	u := baseURL + "/api/v1/backups/" + recvID + "/" + key + "?" + rawQuery
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, u, strings.NewReader("x"))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("sending request: %v", err)
+	}
+
+	return resp
+}
+
+func TestHandleReceiveBackupFileRejects(t *testing.T) {
+	t.Parallel()
+
+	const digestOfX = "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+
+	boundFor := func(file string) remoteAuth.Request {
+		return remoteAuth.Request{Method: http.MethodPut, Key: "k", File: file, BodySHA256: digestOfX}
+	}
+
+	tests := []struct {
+		name     string
+		rawQuery string
+		bound    remoteAuth.Request
+		expected int
+	}{
+		{name: "missing file", rawQuery: "", bound: boundFor(""), expected: http.StatusBadRequest},
+		{name: "hidden file", rawQuery: "file=.gbt-backup", bound: boundFor(".gbt-backup"), expected: http.StatusBadRequest},
+		{name: "file with a slash", rawQuery: "file=a%2Fb", bound: boundFor("a/b"), expected: http.StatusBadRequest},
+		{name: "token for another file", rawQuery: "file=a.gpg", bound: boundFor("b.gpg"), expected: http.StatusUnauthorized},
+		{name: "unbound token", rawQuery: "file=a.gpg", bound: remoteAuth.Request{}, expected: http.StatusUnauthorized},
+		{name: "valid", rawQuery: "file=a.gpg", bound: boundFor("a.gpg"), expected: http.StatusCreated},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			id, key := testServerIdentityAndKey(t)
+			receivers := map[string]config.ResolvedReceiver{
+				"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: dir},
+			}
+
+			srv := httptest.NewServer(newReceiverMux(receivers))
+			defer srv.Close()
+
+			resp := putBackupFile(t, srv.URL, id, "instance-a", "k", tt.rawQuery, tt.bound)
+			_ = resp.Body.Close()
+
+			if resp.StatusCode != tt.expected {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tt.expected)
+			}
+		})
+	}
 }
 
 func TestRemoteTargetInteropWithReceiver(t *testing.T) {

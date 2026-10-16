@@ -242,3 +242,47 @@ func TestSweepRetentionForTargetNilDBIsNoop(t *testing.T) {
 		t.Fatalf("SweepRetentionForTarget() unexpected error: %v", err)
 	}
 }
+
+func TestSweepRetentionRemovesEmptyMultiFileBackup(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	db := openTestRetentionDB(t)
+	tgt := &config.Target{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
+	old := time.Now().Add(-2 * time.Hour).UTC()
+
+	for _, name := range []string{"a.gpg", "b.gpg"} {
+		cfg := &config.Config{Key: "backup-1", File: name, StateDB: db, CreatedAt: old}
+
+		if err := WriteLocalObject(cfg, tgt, strings.NewReader(name)); err != nil {
+			t.Fatalf("WriteLocalObject(%s) unexpected error: %v", name, err)
+		}
+
+		if err := RecordObjectWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
+			t.Fatalf("RecordObjectWrite(%s) unexpected error: %v", name, err)
+		}
+	}
+
+	// A flat object whose key contains a "/" shares a parent folder with
+	// nothing marked as a backup: that folder must survive its sweep.
+	flat := &config.Config{Key: "plain/backup.gpg", StateDB: db, CreatedAt: old}
+	if err := WriteLocalObject(flat, tgt, strings.NewReader("flat")); err != nil {
+		t.Fatalf("WriteLocalObject(flat) unexpected error: %v", err)
+	}
+
+	if err := RecordObjectWrite(t.Context(), flat, tgt, discardLogger); err != nil {
+		t.Fatalf("RecordObjectWrite(flat) unexpected error: %v", err)
+	}
+
+	if err := SweepRetentionForTarget(t.Context(), db, tgt, discardLogger); err != nil {
+		t.Fatalf("SweepRetentionForTarget() unexpected error: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "sub", "backup-1")); !os.IsNotExist(err) {
+		t.Errorf("backup folder stat error = %v, want it removed with its last file", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "sub", "plain")); err != nil {
+		t.Errorf("flat object's folder stat error = %v, want it kept", err)
+	}
+}

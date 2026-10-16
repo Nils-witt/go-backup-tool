@@ -123,6 +123,11 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("migrating job state db %q: %w", path, err)
 	}
 
+	if err := migrateSingleJobCommands(ctx, gdb); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("migrating job state db %q: %w", path, err)
+	}
+
 	// Opened only once the schema exists: the read pool can't create it.
 	read, err := openReadPool(path, gormConfig)
 	if err != nil {
@@ -304,6 +309,34 @@ func migrateInlineJobCommands(ctx context.Context, gdb *gorm.DB) error {
 			if err := tx.Model(&jobModel{}).Where("name = ?", j.Name).
 				Updates(map[string]any{"command": id, "cmd": ""}).Error; err != nil {
 				return fmt.Errorf("pointing job %q at command %q: %w", j.Name, id, err)
+			}
+		}
+
+		return nil
+	})
+}
+
+// migrateSingleJobCommands moves every stored job's single command (the
+// command column, from before a job listed its files) into its files, as
+// the only entry, in one transaction. Runs after migrateInlineJobCommands,
+// which points a job's command at the command it creates. Once done, no job
+// row has command set, so running it again changes nothing.
+func migrateSingleJobCommands(ctx context.Context, gdb *gorm.DB) error {
+	return gdb.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var jobs []jobModel
+		if err := tx.Where("command <> ''").Order("name").Find(&jobs).Error; err != nil {
+			return fmt.Errorf("reading jobs with a single command: %w", err)
+		}
+
+		for _, j := range jobs {
+			files := j.Files
+			if len(files) == 0 {
+				files = []JobFile{{Command: j.Command}}
+			}
+
+			if err := tx.Model(&jobModel{}).Where("name = ?", j.Name).
+				Select("files", "command").Updates(&jobModel{Files: files}).Error; err != nil {
+				return fmt.Errorf("moving job %q's command into its files: %w", j.Name, err)
 			}
 		}
 

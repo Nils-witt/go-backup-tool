@@ -18,11 +18,33 @@ func TestRemoteObjectURL(t *testing.T) {
 
 	tgt := &config.Target{Endpoint: "https://backup2.example.com:8443/", Bucket: "from primary"}
 
-	got := RemoteObjectURL(tgt, "backup 20260101.gpg")
-	want := "https://backup2.example.com:8443/api/v1/objects/from%20primary/backup%2020260101.gpg"
+	tests := []struct {
+		name     string
+		key      string
+		file     string
+		expected string
+	}{
+		{
+			name:     "flat object",
+			key:      "backup 20260101.gpg",
+			expected: "https://backup2.example.com:8443/api/v1/objects/from%20primary/backup%2020260101.gpg",
+		},
+		{
+			name:     "file of a multi-file backup",
+			key:      "backup 20260101",
+			file:     "db.gpg",
+			expected: "https://backup2.example.com:8443/api/v1/backups/from%20primary/backup%2020260101",
+		},
+	}
 
-	if got != want {
-		t.Errorf("RemoteObjectURL() = %q, want %q", got, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := RemoteObjectURL(tgt, tt.key, tt.file); got != tt.expected {
+				t.Errorf("RemoteObjectURL() = %q, want %q", got, tt.expected)
+			}
+		})
 	}
 }
 

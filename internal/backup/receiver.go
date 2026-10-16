@@ -85,20 +85,24 @@ func ReceiverTarget(recv config.ResolvedReceiver) *config.Target {
 
 // ReceiverFile is one object currently stored under a receiver's path, as
 // reported over /api/receivers/{id}/files, for display in the web UI
-// dashboard (see webui.go). ExpiresAt is the zero time.Time (see hasTime in
-// the frontend's format.ts) when the receiver has no retention: configured,
-// since there's then nothing to expire.
+// dashboard (see webui.go). File is set for one file of a multi-file backup
+// (see MultiFileMarker): Key is then the backup's key and File the file's
+// name under it; a flat object has only Key. ExpiresAt is the zero
+// time.Time (see hasTime in the frontend's format.ts) when the receiver has
+// no retention: configured, since there's then nothing to expire.
 type ReceiverFile struct {
 	Key       string    `json:"key"`
+	File      string    `json:"file,omitempty"`
 	Size      int64     `json:"size"`
 	ModTime   time.Time `json:"mod_time"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // ListReceiverFiles walks recv.Path and returns every object currently
-// stored there, keyed the same way receiver.HandleReceiveObject
-// address them (the path relative to recv.Path, using "/" separators
-// regardless of OS), sorted by creation time ascending (oldest first). A root
+// stored there, keyed the same way the receiver API addresses them (the path
+// relative to recv.Path, using "/" separators regardless of OS — split into
+// Key and File for a multi-file backup's files, see ReceiverFile), sorted by
+// creation time ascending (oldest first). A root
 // directory that doesn't exist yet (nothing has been received) is not an
 // error — it just yields no files.
 // Temp files left behind by an interrupted write (see WriteLocalObject's
@@ -118,6 +122,7 @@ func ListReceiverFiles(recv config.ResolvedReceiver) ([]ReceiverFile, error) {
 	}
 
 	files := []ReceiverFile{}
+	isMultiFile := multiFileDirCache(recv.Path)
 
 	err := filepath.WalkDir(recv.Path, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -143,9 +148,12 @@ func ListReceiverFiles(recv config.ResolvedReceiver) ([]ReceiverFile, error) {
 			expiresAt = info.ModTime().Add(recv.Retention)
 		}
 
-		files = append(files, ReceiverFile{
-			Key: filepath.ToSlash(rel), Size: info.Size(), ModTime: info.ModTime(), ExpiresAt: expiresAt,
-		})
+		f := ReceiverFile{Key: filepath.ToSlash(rel), Size: info.Size(), ModTime: info.ModTime(), ExpiresAt: expiresAt}
+		if isMultiFile(filepath.Dir(path)) {
+			f.Key, f.File = filepath.ToSlash(filepath.Dir(rel)), d.Name()
+		}
+
+		files = append(files, f)
 
 		return nil
 	})
@@ -156,6 +164,35 @@ func ListReceiverFiles(recv config.ResolvedReceiver) ([]ReceiverFile, error) {
 	sort.Slice(files, func(i, j int) bool { return files[i].ModTime.Before(files[j].ModTime) })
 
 	return files, nil
+}
+
+// multiFileDirCache returns a func reporting whether dir — a folder under
+// root, root itself excluded — holds a MultiFileMarker, checking each dir on
+// disk only once.
+func multiFileDirCache(root string) func(dir string) bool {
+	seen := map[string]bool{}
+
+	return func(dir string) bool {
+		if dir == filepath.Clean(root) {
+			return false
+		}
+
+		is, ok := seen[dir]
+		if !ok {
+			_, err := os.Stat(filepath.Join(dir, MultiFileMarker))
+			is = err == nil
+			seen[dir] = is
+		}
+
+		return is
+	}
+}
+
+// ObjectPath joins key, and file when non-empty, under root: where a
+// receiver stores (and the dashboard reads) one object. Both must already be
+// validated (see SanitizeObjectKey and config.ValidateFileName).
+func ObjectPath(root, key, file string) string {
+	return filepath.Join(root, filepath.FromSlash(key), file)
 }
 
 // LastReceivedAt returns the most recent modification time among every

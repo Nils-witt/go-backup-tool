@@ -7,7 +7,7 @@ export function CommandSettingsPage() {
     <>
       <PageHeader
         title="Commands"
-        subtitle="Shell commands job targets run when uploads keep failing or recover."
+        subtitle="Shell commands that produce a job's backup files, or that job targets run when uploads keep failing or recover."
       />
       <RequirePermission test={(s) => s.canManageJobs}>
         <CommandConfigSection />

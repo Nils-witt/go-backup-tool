@@ -114,7 +114,7 @@ func TestStatusStoreLifecycleSuccess(t *testing.T) {
 	store.TargetDone("test", 0, nil)
 	store.TargetDone("test", 1, nil)
 
-	if got := store.Finished("test", nil, 2048); got != StateOK {
+	if got := store.Finished("test", nil, 2048, nil); got != StateOK {
 		t.Errorf("finished() = %q, want ok", got)
 	}
 
@@ -154,7 +154,7 @@ func TestStatusStoreLifecycleIncomplete(t *testing.T) {
 	store.TargetDone("test", 0, nil)
 	store.TargetDone("test", 1, boom)
 
-	if got := store.Finished("test", boom, 2048); got != StateIncomplete {
+	if got := store.Finished("test", boom, 2048, nil); got != StateIncomplete {
 		t.Errorf("finished() = %q, want incomplete", got)
 	}
 
@@ -190,7 +190,7 @@ func TestStatusStoreLifecycleTotalFailure(t *testing.T) {
 	store.TargetDone("test", 0, boom)
 	store.TargetDone("test", 1, boom)
 
-	if got := store.Finished("test", boom, 0); got != StateFailed {
+	if got := store.Finished("test", boom, 0, nil); got != StateFailed {
 		t.Errorf("finished() = %q, want failed", got)
 	}
 
@@ -217,7 +217,7 @@ func TestStatusStoreStartingResetsPriorError(t *testing.T) {
 
 	store.Starting("test")
 	store.TargetDone("test", 0, boom)
-	store.Finished("test", boom, 0)
+	store.Finished("test", boom, 0, nil)
 
 	store.Starting("test")
 
@@ -242,7 +242,7 @@ func TestStatusStoreUnknownJobAndTargetAreNoOps(t *testing.T) {
 	store.TargetDone("nope", 0, nil)
 	store.TargetDone("test", 99, nil)
 	store.TargetDone("test", -1, nil)
-	store.Finished("nope", nil, 0)
+	store.Finished("nope", nil, 0, nil)
 
 	snap := store.Snapshot()[0]
 	if snap.State != StateIdle {
@@ -386,7 +386,7 @@ func TestStatusStoreRetryStartingTouchesOnlyGivenTargets(t *testing.T) {
 	store.Starting("test")
 	store.TargetDone("test", 0, boom)
 	store.TargetDone("test", 1, nil)
-	store.Finished("test", boom, 1024)
+	store.Finished("test", boom, 1024, nil)
 
 	store.RetryStarting("test", []string{"sibling"})
 
@@ -429,7 +429,7 @@ func TestStatusStoreFailedTargets(t *testing.T) {
 	store.Starting("test")
 	store.TargetDone("test", 0, boom)
 	store.TargetDone("test", 1, nil)
-	store.Finished("test", boom, 1024)
+	store.Finished("test", boom, 1024, nil)
 
 	if got := store.FailedTargets("test"); len(got) != 1 || got[0] != "sibling" {
 		t.Errorf("FailedTargets() = %v, want [sibling]", got)
@@ -444,7 +444,7 @@ func TestStatusStoreFailedTargetsNoneFailed(t *testing.T) {
 	store.Starting("test")
 	store.TargetDone("test", 0, nil)
 	store.TargetDone("test", 1, nil)
-	store.Finished("test", nil, 1024)
+	store.Finished("test", nil, 1024, nil)
 
 	if got := store.FailedTargets("test"); got != nil {
 		t.Errorf("FailedTargets() = %v, want nil", got)
@@ -499,7 +499,7 @@ func TestStatusStoreChangedFiresOnEveryMutation(t *testing.T) {
 		{"Starting", func() { s.Starting("test") }},
 		{"TargetDone", func() { s.TargetDone("test", 0, errors.New("boom")) }},
 		{"SetNextRun", func() { s.SetNextRun("test", time.Now()) }},
-		{"Finished", func() { s.Finished("test", nil, 1) }},
+		{"Finished", func() { s.Finished("test", nil, 1, nil) }},
 		{"RefreshJobState", func() { s.RefreshJobState("test") }},
 		{"RetryStarting", func() { s.RetryStarting("test", []string{"sibling"}) }},
 		{"SeedLastRun", func() { s.SeedLastRun("test", time.Now(), time.Now(), StateOK, "", 1) }},

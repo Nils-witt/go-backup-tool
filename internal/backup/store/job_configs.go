@@ -96,6 +96,13 @@ type JobTargetOnRecover struct {
 	Command string `json:"command"`
 }
 
+// JobFile is one of a stored job's files, as entered: a command (by id)
+// and an optional file name. Stored as JSON inside its job's row.
+type JobFile struct {
+	Command string `json:"command"`
+	Name    string `json:"name,omitempty"`
+}
+
 // jobModel is jobs: every backup job this instance runs (see
 // internal/backup/jobs' Manager), managed in the web UI. Kept as entered —
 // durations, server names, and command/notification ids unparsed — and
@@ -104,8 +111,13 @@ type JobTargetOnRecover struct {
 // renamed.
 type jobModel struct {
 	Name string `gorm:"column:name;primaryKey"`
-	// Command is the commands: entry (by id) whose stdout is the backup.
+	// Command is the job's single command (by id), from before a job
+	// listed its files; Open moves any still set into Files (see
+	// migrateSingleJobCommands), so it's always "" afterwards.
 	Command string `gorm:"column:command;not null;default:''"`
+	// Files are the backup's files, each a command (by id) and an optional
+	// file name, in run order.
+	Files []JobFile `gorm:"column:files;serializer:json"`
 	// LegacyCmd is the job's own inline shell command, from before jobs
 	// named a command; Open moves any still set into a command of its own
 	// (see migrateInlineJobCommands), so it's always "" afterwards.
@@ -131,7 +143,8 @@ func (jobModel) TableName() string { return "jobs" }
 // JobConfig is one stored job (see jobModel).
 type JobConfig struct {
 	Name                 string
-	Command              string
+	Command              string // always "" once Open has migrated it; see jobModel
+	Files                []JobFile
 	LegacyCmd            string // always "" once Open has migrated it; see jobModel
 	Key                  string
 	Targets              []JobTarget
@@ -318,7 +331,7 @@ func (s *Store) UpdateJobConfig(ctx context.Context, c JobConfig) error {
 	m := jobModel(c)
 
 	return updateRow(ctx, s.db, &m, "name", c.Name, []string{
-		"command", "cmd", "key", "targets", "recipients", "armor", "gpg_bin", "gpg_homedir",
+		"command", "files", "cmd", "key", "targets", "recipients", "armor", "gpg_bin", "gpg_homedir",
 		"interval", "start_time", "staging_dir", "failure_notifications",
 	}, "job", ErrJobNotFound)
 }

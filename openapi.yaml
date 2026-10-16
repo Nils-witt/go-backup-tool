@@ -1562,6 +1562,72 @@ paths:
               schema:
                 type: string
 
+  /api/v1/backups/{id}/{key}:
+    put:
+      tags: [receiver-api]
+      summary: Write (upload) one file of a multi-file backup to a receiver
+      operationId: putBackupFile
+      description: >
+        Called by another go-backup-tool instance's `type: remote` target for
+        each file of a backup (one per job command). Stored at `key/file`
+        under the receiver, otherwise exactly as `putObject`. The bearer
+        token must be bound to this request, including its `file`. Older
+        receivers don't serve this route and answer 404.
+      security:
+        - receiverBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ReceiverId"
+        - $ref: "#/components/parameters/ObjectKey"
+        - name: file
+          in: query
+          required: true
+          description: >
+            The file's name under the backup's key: a single path segment
+            not starting with ".".
+          schema:
+            type: string
+        - name: creationTime
+          in: query
+          required: false
+          description: As for `putObject`.
+          schema:
+            type: string
+            format: date-time
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: File written
+        "400":
+          description: Invalid key, file, or creationTime, or a body that doesn't match the token's `sha256` claim
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          description: Missing, invalid, or unbound bearer token, or one bound to another request
+          content:
+            text/plain:
+              schema:
+                type: string
+        "404":
+          description: Unknown receiver id
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          description: Writing the file failed
+          content:
+            text/plain:
+              schema:
+                type: string
+
 components:
   securitySchemes:
     webUIBearer:
@@ -1911,14 +1977,38 @@ components:
           type: string
         size:
           type: string
-          description: Encrypted object size from the last successful run; sticky across a later failure.
+          description: Encrypted files' total size from the last successful run; sticky across a later failure.
         error:
           type: string
         targets:
           type: array
           items:
             $ref: "#/components/schemas/TargetSnapshot"
+        files:
+          type: array
+          description: >
+            The backup's files as of the last finished run, one per command:
+            whether each was produced (not whether each target received it).
+            A run that produced only some files is incomplete.
+          items:
+            $ref: "#/components/schemas/FileSnapshot"
       required: [name, state, last_start, last_end, next_run, targets]
+
+    FileSnapshot:
+      type: object
+      properties:
+        name:
+          type: string
+        command:
+          type: string
+        state:
+          $ref: "#/components/schemas/RunState"
+        size:
+          type: string
+          description: Encrypted size; only when state is ok.
+        error:
+          type: string
+      required: [name, command, state]
 
     Identity:
       type: object
@@ -1967,6 +2057,12 @@ components:
       properties:
         key:
           type: string
+          description: The object's path under the receiver, or — when `file` is set — the multi-file backup's key.
+        file:
+          type: string
+          description: >
+            Set for one file of a multi-file backup: its name under `key`.
+            Download it as `key/file`.
         size:
           type: integer
           format: int64
@@ -2344,6 +2440,21 @@ components:
           required: [command]
       required: [server, bucket]
 
+    JobFile:
+      type: object
+      description: One of a job's files.
+      properties:
+        command:
+          type: string
+          description: A command's id.
+        name:
+          type: string
+          description: >
+            The file's name under the backup's key: a single path segment
+            not starting with ".". Empty means the command's id plus ".gpg"
+            (".asc" with armor). Unique within a job.
+      required: [command]
+
     JobConfigInput:
       type: object
       description: >
@@ -2354,12 +2465,21 @@ components:
         name:
           type: string
           description: Immutable once created; the job's run history is keyed by it.
-        cmd:
+        files:
+          type: array
+          minItems: 1
+          description: >
+            The backup's files, run in order: each a command whose encrypted
+            standard output is stored as one file under the backup's key.
+          items:
+            $ref: "#/components/schemas/JobFile"
+        command:
           type: string
-          description: Shell command whose standard output is the backup.
+          deprecated: true
+          description: A single command's id, the same as `files` with just that entry. Setting both is an error.
         key:
           type: string
-          description: Object key; "{time}" becomes the run's UTC timestamp. Empty means "backup-{time}.gpg".
+          description: The backup's key, a folder holding one file per command; "{time}" becomes the run's UTC timestamp. Empty means "backup-{time}".
         targets:
           type: array
           minItems: 1
@@ -2392,7 +2512,7 @@ components:
           items:
             type: string
           description: Notification ids fired whenever a run fails on any target.
-      required: [name, cmd, targets, recipients]
+      required: [name, files, targets, recipients]
 
     JobConfig:
       allOf:

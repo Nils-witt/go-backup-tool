@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -65,53 +66,58 @@ func removeStagingFileIfUnreferenced(ctx context.Context, db *store.Store, path 
 
 // runPipeline runs the backup in two phases:
 //
-//	shell command --(stdout)--> gpg encrypt --(stdout)--> local staging file
-//	local staging file --(read once per target, independently)--> every target
+//	for each of cfg.Sources, in order:
+//	  shell command --(stdout)--> gpg encrypt --(stdout)--> local staging file
+//	every staged file --(read once per target, independently)--> every target
 //
+// Each source is one file of the backup, stored as its Name under cfg.Key.
 // Each target is either a directory on the local filesystem or another
-// go-backup-tool instance's receiver API. The backup command's output is
-// encrypted and drained into a private local
-// temp file (see stageBackup) before any target ever sees it, rather than
-// streamed directly to every target. That has two consequences: a
-// source/gpg failure never reaches a target at all (there's nothing to roll
-// back, unlike a live streaming design where a target could already have a
-// complete-but-truncated object by the time the failure is noticed), and
-// each target then uploads from that same stable file independently, so one
-// target's failure never affects any other target's own attempt. Each
-// target gets exactly one attempt within a run (see uploadStagedToTargets);
-// a failed target's staged file is instead handed off to
-// Runner.RunOutstandingUploadRetries, which retries it in the background
-// every TargetUploadRetryInterval until it succeeds.
+// go-backup-tool instance's receiver API. Each command's output is encrypted
+// and drained into a private local temp file (see stageSource) before any
+// target ever sees it, rather than streamed directly to every target. That
+// has two consequences: a source/gpg failure never reaches a target at all
+// (there's nothing to roll back, unlike a live streaming design where a
+// target could already have a complete-but-truncated object by the time the
+// failure is noticed), and each target then uploads from those same stable
+// files independently, so one target's failure never affects any other
+// target's own attempt. A file whose command fails is left out, while every
+// file that was staged is still uploaded: the run then ends with an error
+// (and the job as incomplete, see backup.StatusStore.Finished). Each target
+// gets exactly one attempt per file within a run (see
+// uploadStagedToTargets); a failed upload's staged file is instead handed
+// off to Runner.RunOutstandingUploadRetries, which retries it in the
+// background every TargetUploadRetryInterval until it succeeds.
 //
-// cfg.Source.Cmd is run through the platform shell ("sh -c" on every OS but
-// Windows, "cmd /C" there — see newSourceCommand) deliberately: it lets an
-// operator pass a full shell pipeline (e.g. "mysqldump db | gzip") as the
-// backup source. cfg.Source.Cmd is operator-supplied CLI configuration, not
-// untrusted external input, so this is the intended behavior rather than a
-// command-injection risk.
+// Commands run one at a time, so a job's sources never compete with each
+// other for the systems they read from. Each one is run through the
+// platform shell ("sh -c" on every OS but Windows, "cmd /C" there — see
+// newSourceCommand) deliberately: it lets an operator pass a full shell
+// pipeline (e.g. "mysqldump db | gzip") as a backup source. It is
+// operator-supplied configuration, not untrusted external input, so this is
+// the intended behavior rather than a command-injection risk.
 //
 // onTargetDone, if non-nil, is called exactly once per target — index-
 // aligned with cfg.Targets — as soon as that target's own outcome is known
-// (nil means it succeeded), independently of every other target and of the
-// job as a whole: a target that finishes early (or fails) is reported right
-// away rather than waiting for the slowest target to finish. Callers such
-// as the web UI's status store use this to refresh
+// (nil means it received every staged file), independently of every other
+// target and of the job as a whole: a target that finishes early (or fails)
+// is reported right away rather than waiting for the slowest target to
+// finish. Callers such as the web UI's status store use this to refresh
 // each target's displayed state as it happens instead of only once the
 // whole run completes. If the pipeline never reaches the upload stage at
-// all (e.g. the source command failed), every target is still reported
-// exactly once, with that same pipeline-level error, since no more specific
-// detail exists.
+// all (no file could be staged), every target is still reported exactly
+// once, with that same pipeline-level error, since no more specific detail
+// exists.
 //
-// bytesWritten is the size of the encrypted object written to every target
-// (they all upload from the same staged file), for callers that want to
-// report the backup's size; it's 0 if the pipeline failed before staging
-// finished.
-func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger, onTargetDone func(index int, err error)) (bytesWritten int64, err error) {
+// bytesWritten is the total size of the encrypted files uploaded to every
+// target (they all upload from the same staged files), for callers that
+// want to report the backup's size; it's 0 if no file was staged. files is
+// each source's own outcome, in cfg.Sources order.
+func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger, onTargetDone func(index int, err error)) (bytesWritten int64, files []backup.FileSnapshot, err error) {
 	// Guarantees the onTargetDone contract above even on an early return:
 	// uploadStagedToTargets reports each target itself once it starts, so
-	// this only fires for a failure earlier in the pipeline, and it always
-	// sees the right err — a named return set by any "return ..., err"
-	// above is assigned before deferred calls run.
+	// this only fires when nothing could be staged, and it always sees the
+	// right err — a named return set by any "return ..., err" below is
+	// assigned before deferred calls run.
 	uploadStarted := false
 
 	defer func() {
@@ -122,16 +128,76 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger, onTa
 		}
 	}()
 
-	sourceCmd, gpgCmd, gpgOut, err := startEncryptingPipeline(ctx, cfg, log)
-	if err != nil {
-		return 0, err
+	staged := make([]stagedFile, 0, len(cfg.Sources))
+	files = make([]backup.FileSnapshot, 0, len(cfg.Sources))
+
+	var sourceErrs []error
+
+	for i := range cfg.Sources {
+		src := &cfg.Sources[i]
+
+		f, err := stageSource(ctx, cfg, src, log.With("file", src.Name))
+		if err == nil {
+			defer removeStagingFileIfUnreferenced(ctx, cfg.StateDB, f.path, log)
+
+			staged = append(staged, f)
+			bytesWritten += f.size
+		} else {
+			sourceErrs = append(sourceErrs, fmt.Errorf("file %q: %w", src.Name, err))
+		}
+
+		files = append(files, backup.NewFileSnapshot(src.Name, src.ID, f.size, err))
 	}
 
-	log.Info("staging encrypted backup", "dir", cfg.StagingDir)
+	sourceErr := errors.Join(sourceErrs...)
 
-	stagingPath, bytesWritten, stageErr := stageBackup(cfg, gpgOut)
+	// Only upload what genuinely succeeded: staging a file from a failed
+	// source command or gpg would just mean uploading corrupt or truncated
+	// garbage to every target. Below this point, uploadStagedToTargets takes
+	// over reporting each target's outcome (see onTargetDone above), so mark
+	// uploadStarted before calling it — not after, so a panic partway through
+	// still leaves the deferred fallback disabled rather than
+	// double-reporting.
+	if len(staged) == 0 {
+		return 0, files, sourceErr
+	}
 
-	log.Info("backup finished staging", "staging_path", stagingPath, "bytes_written", bytesWritten)
+	log.Debug("uploading to targets", "targets", len(cfg.Targets), "files", len(staged))
+
+	uploadStarted = true
+
+	if uploadErr := uploadStagedToTargets(ctx, cfg, staged, onTargetDone, log); uploadErr != nil {
+		return bytesWritten, files, errors.Join(sourceErr, fmt.Errorf("uploading to targets: %w", uploadErr))
+	}
+
+	return bytesWritten, files, sourceErr
+}
+
+// stagedFile is one of a run's files, encrypted and staged (see
+// stageSource): name under the backup's key, the staging file's path, and
+// its size.
+type stagedFile struct {
+	name string
+	path string
+	size int64
+}
+
+// stageSource runs src piped into gpg and drains the encrypted output into
+// a staging file (see stageBackup), returning it once the command, gpg and
+// staging all succeeded. On failure the staging file is already removed and
+// the error names the first stage that failed; size still reports how many
+// bytes were staged before that, for logging.
+func stageSource(ctx context.Context, cfg *config.Config, src *config.JobSource, log *slog.Logger) (stagedFile, error) {
+	sourceCmd, gpgCmd, gpgOut, err := startEncryptingPipeline(ctx, cfg, &src.Command, log)
+	if err != nil {
+		return stagedFile{name: src.Name}, err
+	}
+
+	log.Info("staging encrypted backup file", "dir", cfg.StagingDir)
+
+	stagingPath, size, stageErr := stageBackup(cfg, gpgOut)
+
+	log.Info("backup file finished staging", "staging_path", stagingPath, "bytes_written", size)
 
 	// gpgOut must be fully drained (which a successful stageBackup does)
 	// before Wait, per exec.Cmd.StdoutPipe's documented contract. A failed
@@ -146,27 +212,19 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger, onTa
 	gpgErr := gpgCmd.Wait()
 	sourceErr := sourceCmd.Wait()
 
-	if stageErr == nil {
-		defer removeStagingFileIfUnreferenced(ctx, cfg.StateDB, stagingPath, log)
+	f := stagedFile{name: src.Name, path: stagingPath, size: size}
+
+	if err := firstPipelineError(sourceLabel(&src.Command), sourceErr, gpgErr, stageErr); err != nil {
+		if stageErr == nil {
+			_ = os.Remove(stagingPath)
+		}
+
+		f.path = ""
+
+		return f, err
 	}
 
-	// Only upload if every earlier stage genuinely succeeded: staging a
-	// backup from a failed source command or gpg would just mean uploading
-	// corrupt or truncated garbage to every target. Below this point,
-	// uploadStagedToTargets takes over reporting each target's outcome
-	// (see onTargetDone above), so mark uploadStarted before calling it —
-	// not after, so a panic partway through still leaves the deferred
-	// fallback disabled rather than double-reporting.
-	var uploadErr error
-
-	if sourceErr == nil && gpgErr == nil && stageErr == nil {
-		log.Debug("uploading to targets", "targets", len(cfg.Targets))
-
-		uploadStarted = true
-		uploadErr = uploadStagedToTargets(ctx, cfg, stagingPath, onTargetDone, log)
-	}
-
-	return bytesWritten, firstPipelineError(sourceLabel(cfg), sourceErr, gpgErr, stageErr, uploadErr)
+	return f, nil
 }
 
 // newSourceCommand builds the (not yet started) command that runs cmd
@@ -188,17 +246,16 @@ type sourceProcess interface {
 	Wait() error
 }
 
-// sourceLabel names cfg's source command in errors, with its container
-// when it runs in one.
-func sourceLabel(cfg *config.Config) string {
-	if cfg.Source.Container != "" {
-		return fmt.Sprintf("command %q in container %q", cfg.Source.ID, cfg.Source.Container)
+// sourceLabel names src in errors, with its container when it runs in one.
+func sourceLabel(src *config.Command) string {
+	if src.Container != "" {
+		return fmt.Sprintf("command %q in container %q", src.ID, src.Container)
 	}
 
-	return fmt.Sprintf("command %q", cfg.Source.ID)
+	return fmt.Sprintf("command %q", src.ID)
 }
 
-// startEncryptingPipeline starts cfg.Source piped into gpg (the source's
+// startEncryptingPipeline starts src piped into gpg (the source's
 // stdout wired to gpgCmd's stdin) and returns both, already started, plus
 // gpgOut: gpg's stdout, ready for the caller to drain (e.g. via stageBackup)
 // into the encrypted backup. The caller is responsible for Wait-ing on both
@@ -206,18 +263,18 @@ func sourceLabel(cfg *config.Config) string {
 // contract — gpgCmd first, since the source's exit only matters once gpg
 // (its downstream reader) is done with it.
 //
-// When the source command sets its own timeout (cfg.Source.TimeoutSet), it
-// bounds the source alone: gpg, staging and uploads only answer to ctx.
-func startEncryptingPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (source sourceProcess, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
+// When the source command sets its own timeout (src.TimeoutSet), it bounds
+// the source alone: gpg, staging and uploads only answer to ctx.
+func startEncryptingPipeline(ctx context.Context, cfg *config.Config, src *config.Command, log *slog.Logger) (source sourceProcess, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
 	srcCtx, cancel := ctx, context.CancelFunc(func() {})
-	if cfg.Source.TimeoutSet {
-		srcCtx, cancel = context.WithTimeout(ctx, cfg.Source.Timeout)
+	if src.TimeoutSet {
+		srcCtx, cancel = context.WithTimeout(ctx, src.Timeout)
 	}
 
-	if cfg.Source.Container != "" {
-		source, gpgCmd, gpgOut, err = startContainerPipeline(ctx, srcCtx, cfg, log)
+	if src.Container != "" {
+		source, gpgCmd, gpgOut, err = startContainerPipeline(ctx, srcCtx, cfg, src, log)
 	} else {
-		source, gpgCmd, gpgOut, err = startLocalPipeline(ctx, srcCtx, cfg, log)
+		source, gpgCmd, gpgOut, err = startLocalPipeline(ctx, srcCtx, cfg, src, log)
 	}
 
 	if err != nil {
@@ -227,7 +284,7 @@ func startEncryptingPipeline(ctx context.Context, cfg *config.Config, log *slog.
 
 	timedOut := func() bool { return errors.Is(srcCtx.Err(), context.DeadlineExceeded) }
 
-	return &timedSource{sourceProcess: source, timedOut: timedOut, cancel: cancel, timeout: cfg.Source.Timeout}, gpgCmd, gpgOut, nil
+	return &timedSource{sourceProcess: source, timedOut: timedOut, cancel: cancel, timeout: src.Timeout}, gpgCmd, gpgOut, nil
 }
 
 // timedSource releases a source's timeout context once it has exited, and
@@ -253,8 +310,8 @@ func (t *timedSource) Wait() error {
 // startLocalPipeline is startEncryptingPipeline for a source that runs on
 // this machine, through the platform shell (see newSourceCommand), under
 // srcCtx.
-func startLocalPipeline(ctx, srcCtx context.Context, cfg *config.Config, log *slog.Logger) (source sourceProcess, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
-	sourceCmd := newSourceCommand(srcCtx, cfg.Source.Cmd)
+func startLocalPipeline(ctx, srcCtx context.Context, cfg *config.Config, src *config.Command, log *slog.Logger) (source sourceProcess, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
+	sourceCmd := newSourceCommand(srcCtx, src.Cmd)
 	sourceCmd.Stderr = &logWriter{log: log, msg: "command stderr"}
 
 	sourceOut, err := sourceCmd.StdoutPipe()
@@ -271,10 +328,10 @@ func startLocalPipeline(ctx, srcCtx context.Context, cfg *config.Config, log *sl
 		return nil, nil, nil, fmt.Errorf("wiring gpg output: %w", err)
 	}
 
-	log.Debug("starting source command", "command_id", cfg.Source.ID, "cmd", cfg.Source.Cmd)
+	log.Debug("starting source command", "command_id", src.ID, "cmd", src.Cmd)
 
 	if err := sourceCmd.Start(); err != nil {
-		return nil, nil, nil, fmt.Errorf("starting %s: %w", sourceLabel(cfg), err)
+		return nil, nil, nil, fmt.Errorf("starting %s: %w", sourceLabel(src), err)
 	}
 
 	log.Debug("starting gpg", "args", gpgCmd.Args)
@@ -302,13 +359,13 @@ type containerSource struct {
 func (c *containerSource) Wait() error { return <-c.done }
 
 // startContainerPipeline is startEncryptingPipeline for a source with a
-// container: cfg.Source.Cmd runs inside it through the Docker daemon (via
+// container: src.Cmd runs inside it through the Docker daemon (via
 // "sh -c", as it would locally) under srcCtx, and its demultiplexed stdout
 // is written into an OS pipe gpg reads as stdin. gpg starts first, and this
 // process closes its own copy of the pipe's read end once gpg holds one, so
 // gpg exiting early fails the next write (EPIPE) and ends the exec stream
 // instead of leaving it blocked.
-func startContainerPipeline(ctx, srcCtx context.Context, cfg *config.Config, log *slog.Logger) (source sourceProcess, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
+func startContainerPipeline(ctx, srcCtx context.Context, cfg *config.Config, src *config.Command, log *slog.Logger) (source sourceProcess, gpgCmd *exec.Cmd, gpgOut io.ReadCloser, err error) {
 	client, err := dockerexec.New(cfg.DockerHost)
 	if err != nil {
 		return nil, nil, nil, err
@@ -336,26 +393,26 @@ func startContainerPipeline(ctx, srcCtx context.Context, cfg *config.Config, log
 		return nil, nil, nil, fmt.Errorf("starting gpg: %w", err)
 	}
 
-	log.Debug("starting source command in container", "command_id", cfg.Source.ID, "cmd", cfg.Source.Cmd,
-		"container", cfg.Source.Container, "docker_host", cfg.DockerHost)
+	log.Debug("starting source command in container", "command_id", src.ID, "cmd", src.Cmd,
+		"container", src.Container, "docker_host", cfg.DockerHost)
 
-	src := &containerSource{done: make(chan error, 1)}
+	proc := &containerSource{done: make(chan error, 1)}
 
 	go func() {
 		err := client.Run(srcCtx, dockerexec.Exec{
-			Container: cfg.Source.Container,
-			User:      cfg.Source.ContainerUser,
-			Cmd:       []string{"sh", "-c", cfg.Source.Cmd},
+			Container: src.Container,
+			User:      src.ContainerUser,
+			Cmd:       []string{"sh", "-c", src.Cmd},
 			Stdout:    pw,
 			Stderr:    &logWriter{log: log, msg: "command stderr"},
 		})
 		// Closing the write end is gpg's EOF.
 		_ = pw.Close()
 
-		src.done <- err
+		proc.done <- err
 	}()
 
-	return src, gpgCmd, gpgOut, nil
+	return proc, gpgCmd, gpgOut, nil
 }
 
 // runInContainer runs e through the Docker daemon at dockerHost.
@@ -438,9 +495,9 @@ func targetLabel(t *config.Target) string {
 	return fmt.Sprintf("server %q, bucket %q", t.ServerName, t.Bucket)
 }
 
-// firstPipelineError reports the first failure among the pipeline's stages,
-// in source -> gpg -> staging -> upload order.
-func firstPipelineError(source string, sourceErr, gpgErr, stageErr, uploadErr error) error {
+// firstPipelineError reports the first failure among one file's stages, in
+// source -> gpg -> staging order.
+func firstPipelineError(source string, sourceErr, gpgErr, stageErr error) error {
 	stages := [...]struct {
 		err   error
 		label string
@@ -448,7 +505,6 @@ func firstPipelineError(source string, sourceErr, gpgErr, stageErr, uploadErr er
 		{sourceErr, source + " failed"},
 		{gpgErr, "gpg failed"},
 		{stageErr, "staging encrypted backup"},
-		{uploadErr, "uploading to targets"},
 	}
 
 	for _, stage := range stages {
@@ -481,25 +537,27 @@ func buildGPGCommand(ctx context.Context, cfg *config.Config) *exec.Cmd {
 	return exec.CommandContext(ctx, cfg.GPGBin, args...) //nolint:gosec // cfg.GPGBin/args are operator-supplied CLI config, not untrusted input
 }
 
-// uploadStagedToTargets uploads the already-staged backup at stagingPath
-// (see stageBackup) to every one of cfg.Targets, each independently and
-// concurrently: every target opens its own handle on stagingPath, so one
-// target being slow or blocked doesn't affect any other's progress the way
-// funneling them all through a single shared reader would.
+// uploadStagedToTargets uploads every already-staged file (see stageSource)
+// to every one of cfg.Targets, each target independently and concurrently,
+// its files one after another: every upload opens its own handle on the
+// staging file, so one target being slow or blocked doesn't affect any
+// other's progress the way funneling them all through a single shared
+// reader would.
 //
-// Each target gets exactly one attempt here; a target whose attempt fails
-// has its failure reported for this run same as any other (see
-// onTargetDone), but — when cfg.StateDB is set — is also recorded as an
-// outstanding upload for Runner.RunOutstandingUploadRetries to keep retrying
-// in the background every TargetUploadRetryInterval until it eventually
-// succeeds. onTargetDone (see its doc on runPipeline) is called for target i
-// the moment this attempt's outcome is known, independently of every other
-// target still in progress; onTargetDone must be safe for concurrent use,
-// since every target's goroutine calls it on its own.
+// Each file gets exactly one attempt per target here; a failed upload is
+// reported in its target's outcome for this run (see onTargetDone), but —
+// when cfg.StateDB is set — is also recorded as an outstanding upload for
+// Runner.RunOutstandingUploadRetries to keep retrying in the background
+// every TargetUploadRetryInterval until it eventually succeeds. A target
+// still gets its other files when one fails. onTargetDone (see its doc on
+// runPipeline) is called for target i the moment all of its uploads'
+// outcomes are known, independently of every other target still in
+// progress; onTargetDone must be safe for concurrent use, since every
+// target's goroutine calls it on its own.
 //
 // It returns the combined error via errors.Join, for callers that just want
 // to know whether anything failed.
-func uploadStagedToTargets(ctx context.Context, cfg *config.Config, stagingPath string, onTargetDone func(index int, err error), log *slog.Logger) error {
+func uploadStagedToTargets(ctx context.Context, cfg *config.Config, files []stagedFile, onTargetDone func(index int, err error), log *slog.Logger) error {
 	targetErrs := make([]error, len(cfg.Targets))
 
 	var wg sync.WaitGroup
@@ -512,24 +570,19 @@ func uploadStagedToTargets(ctx context.Context, cfg *config.Config, stagingPath 
 		wg.Go(func() {
 			start := time.Now()
 
-			err := uploadTargetAttempt(ctx, cfg, t, stagingPath, log)
-			if err == nil {
-				log.Debug("target upload finished", "target", targetLabel(t), "duration", time.Since(start))
-				onTargetDone(i, nil)
+			var fileErrs []error
 
-				return
-			}
-
-			log.Warn("target upload failed", "target", targetLabel(t), "duration", time.Since(start), "err", err)
-
-			if cfg.StateDB != nil {
-				retryAt := time.Now().Add(TargetUploadRetryInterval)
-				if err1 := cfg.StateDB.AddOutstandingTargetUpload(ctx, cfg.Name, cfg.Targets[i].ServerName, stagingPath, cfg.Key, cfg.CreatedAt, retryAt); err1 != nil {
-					log.Warn("recording outstanding target upload failed", "target", targetLabel(t), "err", err1)
+			for _, f := range files {
+				if err := uploadStagedFile(ctx, cfg, t, f, log); err != nil {
+					fileErrs = append(fileErrs, err)
 				}
 			}
 
-			targetErrs[i] = fmt.Errorf("target (%s): %w", targetLabel(t), err)
+			if err := errors.Join(fileErrs...); err != nil {
+				targetErrs[i] = fmt.Errorf("target (%s): %w", targetLabel(t), err)
+			}
+
+			log.Debug("target upload finished", "target", targetLabel(t), "duration", time.Since(start), "failed_files", len(fileErrs))
 			onTargetDone(i, targetErrs[i])
 		})
 	}
@@ -537,6 +590,32 @@ func uploadStagedToTargets(ctx context.Context, cfg *config.Config, stagingPath 
 	wg.Wait()
 
 	return errors.Join(targetErrs...)
+}
+
+// uploadStagedFile makes the one in-run attempt to upload f to t, recording
+// a failed attempt as an outstanding upload (see uploadStagedToTargets).
+func uploadStagedFile(ctx context.Context, cfg *config.Config, t *config.Target, f stagedFile, log *slog.Logger) error {
+	fileCfg := *cfg
+	fileCfg.File = f.name
+
+	err := uploadTargetAttempt(ctx, &fileCfg, t, f.path, log)
+	if err == nil {
+		return nil
+	}
+
+	log.Warn("target upload failed", "target", targetLabel(t), "file", f.name, "err", err)
+
+	if cfg.StateDB != nil {
+		row := store.OutstandingTargetUpload{
+			JobName: cfg.Name, Target: t.ServerName, FileName: f.path, Key: cfg.Key, BackupFile: f.name,
+			CreatedAt: cfg.CreatedAt, RetryAt: time.Now().Add(TargetUploadRetryInterval),
+		}
+		if err1 := cfg.StateDB.AddOutstandingTargetUpload(ctx, row); err1 != nil {
+			log.Warn("recording outstanding target upload failed", "target", targetLabel(t), "file", f.name, "err", err1)
+		}
+	}
+
+	return fmt.Errorf("file %q: %w", f.name, err)
 }
 
 // uploadTargetAttempt runs a single upload attempt for target t, reading
@@ -572,19 +651,37 @@ func uploadTargetAttempt(ctx context.Context, cfg *config.Config, t *config.Targ
 
 // RemoteObjectURL returns the URL a remote target (t.Kind ==
 // config.ServerKindRemote) uploads key at: t.Endpoint's
-// /api/v1/objects/{bucket}/{key}, where t.Bucket is the id identifying the
-// destination instance's storage path (see receiver.go) and key is
+// /api/v1/objects/{bucket}/{key} for a flat object, or — when file is set,
+// one file of a multi-file backup — /api/v1/backups/{bucket}/{key} (the
+// file itself goes in the query, see remoteObjectURL). t.Bucket is the id
+// identifying the destination instance's receiver (see receiver.go); key is
 // path-escaped since it may contain characters not otherwise safe in a URL
 // path segment.
-func RemoteObjectURL(t *config.Target, key string) string {
-	return fmt.Sprintf("%s/api/v1/objects/%s/%s",
-		strings.TrimSuffix(t.Endpoint, "/"), url.PathEscape(t.Bucket), url.PathEscape(key))
+func RemoteObjectURL(t *config.Target, key, file string) string {
+	route := "objects"
+	if file != "" {
+		route = "backups"
+	}
+
+	return fmt.Sprintf("%s/api/v1/%s/%s/%s",
+		strings.TrimSuffix(t.Endpoint, "/"), route, url.PathEscape(t.Bucket), url.PathEscape(key))
 }
 
-// remoteObjectURL is RemoteObjectURL with an optional query string appended
-// (e.g. UploadToRemote's creationTime), for doAuthenticatedRemoteRequest.
-func remoteObjectURL(t *config.Target, key string, query url.Values) string {
-	u := RemoteObjectURL(t, key)
+// remoteObjectURL is RemoteObjectURL with its query string appended: file
+// (when set) and query (e.g. UploadToRemote's creationTime), for
+// doAuthenticatedRemoteRequest.
+func remoteObjectURL(t *config.Target, key, file string, query url.Values) string {
+	u := RemoteObjectURL(t, key, file)
+
+	if file != "" {
+		query = maps.Clone(query)
+		if query == nil {
+			query = url.Values{}
+		}
+
+		query.Set("file", file)
+	}
+
 	if len(query) > 0 {
 		u += "?" + query.Encode()
 	}
@@ -637,7 +734,7 @@ func UploadToRemote(ctx context.Context, cfg *config.Config, t *config.Target, r
 // non-empty, and an optional query string) to target t's receiver API, for
 // UploadToRemote.
 func doAuthenticatedRemoteRequest(ctx context.Context, cfg *config.Config, t *config.Target, method string, body io.Reader, contentType string, query url.Values) error {
-	bound := remoteAuth.Request{Method: method, Key: cfg.Key, CreationTime: query.Get("creationTime")}
+	bound := remoteAuth.Request{Method: method, Key: cfg.Key, File: cfg.File, CreationTime: query.Get("creationTime")}
 
 	if body != nil {
 		digest, err := bodySHA256(body)
@@ -653,7 +750,7 @@ func doAuthenticatedRemoteRequest(ctx context.Context, cfg *config.Config, t *co
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, remoteObjectURL(t, cfg.Key, query), body)
+	req, err := http.NewRequestWithContext(ctx, method, remoteObjectURL(t, cfg.Key, cfg.File, query), body)
 	if err != nil {
 		return fmt.Errorf("building request: %w", err)
 	}

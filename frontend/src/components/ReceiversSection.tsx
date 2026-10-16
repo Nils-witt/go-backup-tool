@@ -44,6 +44,45 @@ function startDownload(id: string, key: string) {
     .catch(() => {});
 }
 
+// objectPath is f's path under its receiver, as the download endpoint
+// addresses it: key/file for one file of a multi-file backup.
+function objectPath(f: ReceiverFile): string {
+  return f.file ? f.key + "/" + f.file : f.key;
+}
+
+// FileGroup is one backup in the listing: a flat object (one file, no
+// file name), or a multi-file backup's files under their shared key.
+interface FileGroup {
+  key: string;
+  isMultiFile: boolean;
+  files: ReceiverFile[];
+}
+
+// groupFiles groups files by backup, keeping the listing's (oldest-first)
+// order by each backup's first file.
+function groupFiles(files: ReceiverFile[]): FileGroup[] {
+  const groups: FileGroup[] = [];
+  const byKey = new Map<string, FileGroup>();
+
+  for (const f of files) {
+    if (!f.file) {
+      groups.push({ key: f.key, isMultiFile: false, files: [f] });
+      continue;
+    }
+
+    let g = byKey.get(f.key);
+    if (!g) {
+      g = { key: f.key, isMultiFile: true, files: [] };
+      byKey.set(f.key, g);
+      groups.push(g);
+    }
+
+    g.files.push(f);
+  }
+
+  return groups;
+}
+
 function FileListDialog({
   id,
   canDownload,
@@ -108,26 +147,43 @@ function FileListDialog({
               </TableRow>
             </TableHead>
             <TableBody>
-              {files.map((f) => (
-                <TableRow key={f.key}>
-                  <TableCell sx={{ overflowWrap: "anywhere" }}>{f.key}</TableCell>
-                  <TableCell>{fmtSize(f.size)}</TableCell>
-                  <TableCell>{fmtTime(f.mod_time)}</TableCell>
-                  <TableCell>{fmtTime(f.expires_at)}</TableCell>
-                  <TableCell>
-                    {canDownload && id ? (
-                      <Link
-                        component="button"
-                        variant="body2"
-                        underline="hover"
-                        onClick={() => onDownload(id, f.key)}
-                      >
-                        download
-                      </Link>
-                    ) : null}
-                  </TableCell>
-                </TableRow>
-              ))}
+              {groupFiles(files).map((g) => [
+                g.isMultiFile ? (
+                  <TableRow key={"backup:" + g.key} sx={{ bgcolor: "action.hover" }}>
+                    <TableCell sx={{ overflowWrap: "anywhere", fontWeight: 500 }}>
+                      {g.key}
+                    </TableCell>
+                    <TableCell>{fmtSize(g.files.reduce((n, f) => n + f.size, 0))}</TableCell>
+                    <TableCell colSpan={3}>
+                      <Typography variant="caption" color="text.secondary">
+                        {g.files.length} {g.files.length === 1 ? "file" : "files"}
+                      </Typography>
+                    </TableCell>
+                  </TableRow>
+                ) : null,
+                ...g.files.map((f) => (
+                  <TableRow key={objectPath(f)}>
+                    <TableCell sx={{ overflowWrap: "anywhere", pl: g.isMultiFile ? 4 : undefined }}>
+                      {f.file ?? f.key}
+                    </TableCell>
+                    <TableCell>{fmtSize(f.size)}</TableCell>
+                    <TableCell>{fmtTime(f.mod_time)}</TableCell>
+                    <TableCell>{fmtTime(f.expires_at)}</TableCell>
+                    <TableCell>
+                      {canDownload && id ? (
+                        <Link
+                          component="button"
+                          variant="body2"
+                          underline="hover"
+                          onClick={() => onDownload(id, objectPath(f))}
+                        >
+                          download
+                        </Link>
+                      ) : null}
+                    </TableCell>
+                  </TableRow>
+                )),
+              ])}
             </TableBody>
           </Table>
         )}

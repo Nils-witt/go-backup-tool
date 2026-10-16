@@ -127,6 +127,33 @@ export function JobsGrid({ jobs, canRetry, refreshNow, runsByJob }: JobsGridProp
                     </Box>
                   ) : null}
 
+                  {j.files?.length ? (
+                    <>
+                      <Typography variant="caption" color="text.secondary">
+                        Files
+                      </Typography>
+                      <Stack spacing={0.5} sx={{ mt: 0.5, mb: 1.5 }}>
+                        {j.files.map((f) => (
+                          <Stack
+                            key={f.name}
+                            direction="row"
+                            spacing={1}
+                            sx={{ alignItems: "center" }}
+                          >
+                            <Typography variant="body2" sx={{ flex: 1, overflowWrap: "anywhere" }}>
+                              {f.name}{" "}
+                              <Typography component="span" variant="caption" color="text.secondary">
+                                ({f.command}
+                                {f.size ? ", " + f.size : ""})
+                              </Typography>
+                            </Typography>
+                            <StatusChip state={f.state} error={f.error} />
+                          </Stack>
+                        ))}
+                      </Stack>
+                    </>
+                  ) : null}
+
                   <Typography variant="caption" color="text.secondary">
                     Targets
                   </Typography>

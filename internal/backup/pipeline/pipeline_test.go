@@ -72,8 +72,10 @@ func TestWriteLocalObjectCreatesMissingDirectories(t *testing.T) {
 // stageTestContent stages content into a private temp file via the real
 // stageBackup, for tests exercising uploadStagedToTargets/uploadTargetAttempt
 // against a real file on disk the way runPipeline does, rather than an
-// in-memory reader. The file is removed automatically when the test ends.
-func stageTestContent(t *testing.T, content string) string {
+// in-memory reader. It's returned as the run's only staged file, with no
+// name, so it's stored flat at the run's key. The file is removed
+// automatically when the test ends.
+func stageTestContent(t *testing.T, content string) []stagedFile {
 	t.Helper()
 
 	path, n, err := stageBackup(&config.Config{}, strings.NewReader(content))
@@ -87,7 +89,7 @@ func stageTestContent(t *testing.T, content string) string {
 
 	t.Cleanup(func() { _ = os.Remove(path) })
 
-	return path
+	return []stagedFile{{path: path, size: n}}
 }
 
 // collectTargetDone returns an onTargetDone callback safe for the
@@ -450,7 +452,7 @@ func TestRunPipelineStagingFailureDoesNotHang(t *testing.T) {
 
 	cfg := &config.Config{
 		Name:       "stage-fail",
-		Source:     config.Command{ID: "big", Cmd: "head -c 4194304 /dev/zero"},
+		Sources:    []config.JobSource{{ID: "big", Cmd: "head -c 4194304 /dev/zero", Name: "big.gpg"}},
 		GPGBin:     fakeGPG(t),
 		StagingDir: filepath.Join(t.TempDir(), "missing"),
 	}
@@ -458,7 +460,7 @@ func TestRunPipelineStagingFailureDoesNotHang(t *testing.T) {
 	done := make(chan error, 1)
 
 	go func() {
-		_, err := runPipeline(context.Background(), cfg, slog.New(slog.DiscardHandler), func(int, error) {})
+		_, _, err := runPipeline(context.Background(), cfg, slog.New(slog.DiscardHandler), func(int, error) {})
 		done <- err
 	}()
 

@@ -699,7 +699,7 @@ func (m *Manager) validateJobLocked(fj config.FileJob) (*config.Config, error) {
 }
 
 // usersLocked maps each server name (byServer) or else each command id — as
-// a job's own command or a target's on-error/on-recover — to the stored
+// one of a job's files or a target's on-error/on-recover — to the stored
 // jobs using it ("job <name>"). m.mu must be held.
 func (m *Manager) usersLocked(byServer bool) map[string][]string {
 	users := make(map[string][]string)
@@ -712,6 +712,10 @@ func (m *Manager) usersLocked(byServer bool) map[string][]string {
 	for _, name := range slices.Sorted(maps.Keys(m.jobDefs)) {
 		if !byServer {
 			add(strings.TrimSpace(m.jobDefs[name].Command), name)
+
+			for _, f := range m.jobDefs[name].Files {
+				add(strings.TrimSpace(f.Command), name)
+			}
 		}
 
 		for _, t := range m.jobDefs[name].Targets {

@@ -4,6 +4,7 @@ import type {
   JobConfigJSON,
   JobConfigListJSON,
   JobDefinitionJSON,
+  JobFileJSON,
   JobTargetJSON,
   ServerOptionJSON,
 } from "../api/types";
@@ -37,6 +38,7 @@ import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import AddIcon from "@mui/icons-material/Add";
+import ArrowUpwardIcon from "@mui/icons-material/ArrowUpward";
 import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
@@ -55,9 +57,11 @@ const EMPTY_TARGET: JobTargetJSON = {
   on_recover: null,
 };
 
+const EMPTY_FILE: JobFileJSON = { command: "", name: "" };
+
 const EMPTY_FORM: JobForm = {
   name: "",
-  command: "",
+  files: [EMPTY_FILE],
   key: "",
   targets: [EMPTY_TARGET],
   recipients: "",
@@ -73,7 +77,9 @@ const EMPTY_FORM: JobForm = {
 function formFrom(j: JobConfigJSON): JobForm {
   return {
     name: j.name,
-    command: j.command,
+    files: j.files?.length
+      ? j.files.map((f) => ({ command: f.command, name: f.name ?? "" }))
+      : [EMPTY_FILE],
     key: j.key,
     targets: j.targets.length ? j.targets : [EMPTY_TARGET],
     recipients: j.recipients.join("\n"),
@@ -91,6 +97,10 @@ function definitionOf(form: JobForm): JobDefinitionJSON {
   return {
     ...form,
     name: form.name.trim(),
+    files: form.files.map((f) => {
+      const name = f.name?.trim();
+      return name ? { command: f.command, name } : { command: f.command };
+    }),
     recipients: form.recipients
       .split(/[\n,]/)
       .map((r) => r.trim())
@@ -105,6 +115,12 @@ function errorText(err: unknown): string {
 function scheduleText(j: JobDefinitionJSON): string {
   if (!j.interval) return "once";
   return j.start_time ? `every ${j.interval} from ${fmtTime(j.start_time)}` : `every ${j.interval}`;
+}
+
+// fileName is the name f is stored as under the backup's key: its own, or
+// the server's default (see config.resolveJobSources).
+function fileName(f: JobFileJSON, armor: boolean): string {
+  return f.name?.trim() || `${f.command}${armor ? ".asc" : ".gpg"}`;
 }
 
 // CommandSelect picks one command id, or none ("") unless required.
@@ -148,6 +164,94 @@ function CommandSelect({
       ))}
       {value && !commands.includes(value) ? <MenuItem value={value}>{value}</MenuItem> : null}
     </TextField>
+  );
+}
+
+// FilesEditor edits a job's files: one row per command, in run order, each
+// with an optional file name.
+function FilesEditor({
+  files,
+  commands,
+  armor,
+  onChange,
+}: {
+  files: JobFileJSON[];
+  commands: string[];
+  armor: boolean;
+  onChange: (files: JobFileJSON[]) => void;
+}) {
+  const setFile = (i: number, patch: Partial<JobFileJSON>) =>
+    onChange(files.map((old, j) => (j === i ? { ...old, ...patch } : old)));
+  const moveUp = (i: number) =>
+    onChange(files.map((f, j) => (j === i - 1 ? files[i] : j === i ? files[i - 1] : f)));
+  const names = files.map((f) => fileName(f, armor));
+
+  return (
+    <Stack spacing={1}>
+      <Typography variant="subtitle2">Files</Typography>
+      <Typography variant="caption" color="text.secondary">
+        Each command&apos;s standard output is encrypted and stored as one file under the
+        backup&apos;s key. Commands run one after another, in this order. Manage commands on the
+        Commands page.
+      </Typography>
+      {files.map((f, i) => {
+        const duplicate = !!f.command && names.indexOf(names[i]) !== i;
+        return (
+          <Stack
+            key={i}
+            direction={{ xs: "column", sm: "row" }}
+            spacing={1}
+            sx={{ alignItems: { sm: "flex-start" } }}
+          >
+            <CommandSelect
+              label="Command"
+              commands={commands}
+              value={f.command}
+              onChange={(command) => setFile(i, { command })}
+              required
+            />
+            <TextField
+              size="small"
+              label="File name"
+              value={f.name ?? ""}
+              onChange={(e) => setFile(i, { name: e.target.value })}
+              placeholder={f.command ? fileName({ command: f.command }, armor) : "<command>.gpg"}
+              error={duplicate}
+              helperText={duplicate ? "Another file already has this name" : undefined}
+              slotProps={{ htmlInput: { spellCheck: false } }}
+              sx={{ flex: 1 }}
+            />
+            <Stack direction="row" sx={{ alignSelf: { xs: "flex-end", sm: "center" } }}>
+              <Tooltip title="Move up">
+                <span>
+                  <IconButton size="small" onClick={() => moveUp(i)} disabled={i === 0}>
+                    <ArrowUpwardIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+              <Tooltip title="Remove file">
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={() => onChange(files.filter((_, j) => j !== i))}
+                    disabled={files.length === 1}
+                  >
+                    <DeleteIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            </Stack>
+          </Stack>
+        );
+      })}
+      <Button
+        startIcon={<AddIcon />}
+        onClick={() => onChange([...files, EMPTY_FILE])}
+        sx={{ alignSelf: "flex-start" }}
+      >
+        Add file
+      </Button>
+    </Stack>
   );
 }
 
@@ -300,9 +404,12 @@ function JobDialog({
   const set = (patch: Partial<JobForm>) => onChange({ ...form, ...patch });
   const setTarget = (i: number, t: JobTargetJSON) =>
     set({ targets: form.targets.map((old, j) => (j === i ? t : old)) });
+  const fileNames = form.files.map((f) => fileName(f, form.armor));
   const canSave =
     !!form.name.trim() &&
-    !!form.command &&
+    form.files.length > 0 &&
+    form.files.every((f) => f.command) &&
+    new Set(fileNames).size === fileNames.length &&
     !!form.recipients.trim() &&
     form.targets.every((t) => t.server && t.bucket.trim());
 
@@ -324,20 +431,18 @@ function JobDialog({
           {!data.commands.length ? (
             <Alert severity="warning">No commands yet — create one on the Commands page.</Alert>
           ) : null}
-          <CommandSelect
-            label="Command"
+          <FilesEditor
+            files={form.files}
             commands={data.commands}
-            value={form.command}
-            onChange={(command) => set({ command })}
-            required
-            helperText="Its standard output is the backup, encrypted before upload. Manage commands on the Commands page."
+            armor={form.armor}
+            onChange={(files) => set({ files })}
           />
           <TextField
             label="Key"
             value={form.key}
             onChange={(e) => set({ key: e.target.value })}
-            placeholder="backup-{time}.gpg"
-            helperText="Object name. {time} becomes the run's UTC timestamp, so repeats don't overwrite each other."
+            placeholder="backup-{time}"
+            helperText="The backup's name: a folder holding one file per command. {time} becomes the run's UTC timestamp, so repeats don't overwrite each other."
             slotProps={{ htmlInput: { spellCheck: false } }}
           />
           <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
@@ -570,7 +675,7 @@ export function JobConfigSection() {
             <TableHead>
               <TableRow>
                 <TableCell>Name</TableCell>
-                <TableCell>Command</TableCell>
+                <TableCell>Files</TableCell>
                 <TableCell>Schedule</TableCell>
                 <TableCell>Targets</TableCell>
                 <TableCell>Recipients</TableCell>
@@ -592,7 +697,11 @@ export function JobConfigSection() {
                     ) : null}
                   </TableCell>
                   <TableCell sx={{ overflowWrap: "anywhere", maxWidth: 280 }}>
-                    <code>{j.command}</code>
+                    {(j.files ?? []).map((f, i) => (
+                      <Typography key={i} variant="caption" sx={{ display: "block" }}>
+                        <code>{f.command}</code> → {fileName(f, j.armor)}
+                      </Typography>
+                    ))}
                   </TableCell>
                   <TableCell>{scheduleText(j)}</TableCell>
                   <TableCell sx={{ overflowWrap: "anywhere" }}>

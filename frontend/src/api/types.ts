@@ -28,6 +28,19 @@ export interface JobSnapshot {
   size?: string;
   error?: string;
   targets: TargetSnapshot[];
+  // files mirrors JobSnapshot.Files: each of the backup's files as of the
+  // last finished run, one per command.
+  files?: FileSnapshot[];
+}
+
+// FileSnapshot mirrors backup.FileSnapshot: whether one file of a job's
+// last run was produced (not whether each target received it).
+export interface FileSnapshot {
+  name: string;
+  command: string;
+  state: RunState;
+  size?: string;
+  error?: string;
 }
 
 export interface ReceiverSnapshot {
@@ -50,8 +63,12 @@ export interface LiveStatusMessage {
   receivers: ReceiverSnapshot[];
 }
 
+// ReceiverFile mirrors backup.ReceiverFile. file is set for one file of a
+// multi-file backup, key then being the backup's key; a flat object has
+// only key. Its download path is key/file.
 export interface ReceiverFile {
   key: string;
+  file?: string;
   size: number;
   mod_time: string;
   expires_at: string;
@@ -299,12 +316,20 @@ export interface JobTargetJSON {
   on_recover: { command: string } | null;
 }
 
+// JobFileJSON mirrors config.FileJobFile.
+export interface JobFileJSON {
+  command: string;
+  name?: string;
+}
+
 // JobDefinitionJSON mirrors config.FileJob's JSON form: a job's editable
 // fields, as sent to POST/PUT /api/job-configs.
 export interface JobDefinitionJSON {
   name: string;
-  // command names the commands entry whose stdout is the backup.
-  command: string;
+  // files are the backup's files: each a commands entry (by id) whose
+  // encrypted output is stored as name (default "<command>.gpg", ".asc"
+  // with armor) under the backup's key.
+  files: JobFileJSON[];
   key: string;
   targets: JobTargetJSON[];
   recipients: string[];

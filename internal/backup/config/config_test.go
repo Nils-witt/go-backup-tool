@@ -107,7 +107,7 @@ func TestParseFlags(t *testing.T) {
 		{
 			name:    "missing command",
 			yaml:    "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\njobs:\n  - name: test\n    targets: [{server: s, bucket: b}]\n    recipients: [me@example.com]\n",
-			wantErr: "command is required",
+			wantErr: "at least one file",
 		},
 		{
 			name:    "missing targets",
@@ -287,8 +287,8 @@ jobs:
 
 	cfg := singleJob(t, rc)
 
-	if cfg.Source.Cmd != "echo from-file" {
-		t.Errorf("cfg.Source.Cmd = %q, want %q", cfg.Source.Cmd, "echo from-file")
+	if cfg.Sources[0].Cmd != "echo from-file" {
+		t.Errorf("cfg.Sources[0].Cmd = %q, want %q", cfg.Sources[0].Cmd, "echo from-file")
 	}
 
 	want := Target{ServerName: "primary", Kind: ServerKindLocal, Bucket: "file-bucket", LocalPath: "/mnt/backups"}
@@ -870,7 +870,7 @@ jobs:
 
 	db, files := rc.Jobs[0], rc.Jobs[1]
 
-	if db.Name != "database" || db.Source.Cmd != "mysqldump db" {
+	if db.Name != "database" || db.Sources[0].Cmd != "mysqldump db" {
 		t.Errorf("db job = %+v", db)
 	}
 
@@ -1485,7 +1485,7 @@ jobs:
 
 	a, b := rc.FileJobs[0], rc.FileJobs[1]
 
-	if a.Command != "job-a" || a.Interval != "1h" || !a.Armor || len(a.Targets) != 1 || a.Recipients[0] != "me@example.com" {
+	if !slices.Equal(a.Files, []FileJobFile{{Command: "job-a"}}) || a.Interval != "1h" || !a.Armor || len(a.Targets) != 1 || a.Recipients[0] != "me@example.com" {
 		t.Errorf("job a = %+v, want the top-level defaults layered in", a)
 	}
 
@@ -1493,7 +1493,7 @@ jobs:
 		t.Errorf("job a GPGBin = %q, want \"\" (top-level gpg-bin stays global)", a.GPGBin)
 	}
 
-	if b.Command != "job-b" || b.GPGHomedir != "/keys" || b.Recipients[0] != "other@example.com" {
+	if !slices.Equal(b.Files, []FileJobFile{{Command: "job-b"}}) || b.GPGHomedir != "/keys" || b.Recipients[0] != "other@example.com" {
 		t.Errorf("job b = %+v, want its own fields kept", b)
 	}
 
@@ -1553,7 +1553,7 @@ func TestResolveJobErrors(t *testing.T) {
 		want string
 	}{
 		{"no name", FileJob{Command: "x"}, "name is required"},
-		{"no command", FileJob{Name: "x", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "nas", Bucket: "b"}}}, "command is required"},
+		{"no command", FileJob{Name: "x", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "nas", Bucket: "b"}}}, "at least one file"},
 		{"unknown job command", FileJob{Name: "x", Command: "gone", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "nas", Bucket: "b"}}}, `no command "gone" defined`},
 		{"unknown server", FileJob{Name: "x", Command: "x", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "gone", Bucket: "b"}}}, "no server named"},
 		{"unknown command", FileJob{Name: "x", Command: "x", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "nas", Bucket: "b", OnRecover: &FileTargetOnRecover{Command: "gone"}}}}, "no command named"},

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -29,6 +30,21 @@ import (
 // write here is reflected there immediately.
 func RegisterRoutes(mux *http.ServeMux, receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) {
 	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(receivers, status, log, db))
+	mux.HandleFunc("PUT /api/v1/backups/{id}/{key...}", HandleReceiveBackupFile(receivers, status, log, db))
+}
+
+// HandleReceiveBackupFile serves PUT /api/v1/backups/{id}/{key...}?file=: one
+// file (the required file query parameter, a single path segment — see
+// config.ValidateFileName) of the multi-file backup key, stored at
+// key/file under the receiver's path, alongside the folder's
+// backup.MultiFileMarker. Otherwise it behaves exactly as
+// HandleReceiveObject. It's a route of its own, rather than a parameter on
+// that one, so an older receiver that knows nothing of multi-file backups
+// answers 404 instead of storing every file of a backup at the same key.
+// Only request-bound tokens (see remoteAuth.Request) are accepted, since
+// every sender that knows this route also binds its tokens.
+func HandleReceiveBackupFile(receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
+	return receiveObject(receivers, status, log, db, true)
 }
 
 // HandleReceiveObject serves PUT /api/v1/objects/{id}/{key...}: after
@@ -48,11 +64,20 @@ func RegisterRoutes(mux *http.ServeMux, receivers *backup.ReceiverRegistry, stat
 // Every attempt is recorded to status, win or lose, so /api/receivers
 // reflects it.
 func HandleReceiveObject(receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
+	return receiveObject(receivers, status, log, db, false)
+}
+
+// receiveObject is HandleReceiveObject, or HandleReceiveBackupFile when
+// multiFile is set. key, as recorded in status and the receiver's event log,
+// is the object's path under the receiver: key/file for a backup's file.
+func receiveObject(receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store, multiFile bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		recv, cfg, t, key, bound, ok := resolveReceiverRequest(w, r, receivers, db, log)
+		recv, cfg, t, bound, ok := resolveReceiverRequest(w, r, receivers, db, log, multiFile)
 		if !ok {
 			return
 		}
+
+		key := path.Join(cfg.Key, cfg.File)
 
 		createdAt, err := backup.ParseCreationTime(r.URL.Query().Get("creationTime"), time.Now())
 		if err != nil {
@@ -97,7 +122,7 @@ func HandleReceiveObject(receivers *backup.ReceiverRegistry, status *backup.Rece
 		status.Record(recv.ID, key, nil)
 
 		var size int64
-		if info, statErr := os.Stat(backup.LocalObjectPath(cfg, t)); statErr == nil { //nolint:gosec // cfg.Key is resolveReceiverRequest's already-SanitizeObjectKey-validated key, not raw untrusted input
+		if info, statErr := os.Stat(backup.LocalObjectPath(cfg, t)); statErr == nil { //nolint:gosec // cfg.Key/cfg.File are resolveReceiverRequest's already-validated key and file, not raw untrusted input
 			size = info.Size()
 		}
 
@@ -189,11 +214,12 @@ func verifyReceiverToken(recv config.ResolvedReceiver, token string) (string, re
 // token was signed for (see remoteAuth.Request.BodySHA256).
 var errBodyDigestMismatch = errors.New("body does not match the request token's digest")
 
-// checkRequestBinding reports whether r, whose sanitized key is key, is
-// the request bound names: same method, key and creationTime, and — for a
-// PUT — a body digest to verify while it streams (see digestReader). A
-// zero bound (an older sender's unbound token) is accepted as before.
-func checkRequestBinding(r *http.Request, key string, bound remoteAuth.Request) error {
+// checkRequestBinding reports whether r, whose sanitized key and file are
+// key and file, is the request bound names: same method, key, file and
+// creationTime, and — for a PUT — a body digest to verify while it streams
+// (see digestReader). A zero bound (an older sender's unbound token) is
+// accepted as before.
+func checkRequestBinding(r *http.Request, key, file string, bound remoteAuth.Request) error {
 	if bound.IsZero() {
 		return nil
 	}
@@ -203,6 +229,8 @@ func checkRequestBinding(r *http.Request, key string, bound remoteAuth.Request) 
 		return fmt.Errorf("token is for method %q, not %q", bound.Method, r.Method)
 	case bound.Key != key:
 		return fmt.Errorf("token is for key %q, not %q", bound.Key, key)
+	case bound.File != file:
+		return fmt.Errorf("token is for file %q, not %q", bound.File, file)
 	case bound.CreationTime != r.URL.Query().Get("creationTime"):
 		return errors.New("token is for a different creationTime")
 	case r.Method == http.MethodPut && bound.BodySHA256 == "":
@@ -270,30 +298,46 @@ func warnUnboundTokenOnce(receiverID, token string, log *slog.Logger) {
 
 // resolveReceiverRequest authorizes r against receivers (see
 // authorizeReceiver) and sanitizes its {key} path value (see
-// backup.SanitizeObjectKey), writing an error response and reporting ok as
-// false if any step fails. On success it also builds the cfg/t pair
-// HandleReceiveObject needs to reuse WriteLocalObject as a type: local
+// backup.SanitizeObjectKey) and — when multiFile — its required file query
+// parameter (see config.ValidateFileName), writing an error response and
+// reporting ok as false if any step fails. On success it also builds the
+// cfg/t pair receiveObject needs to reuse WriteLocalObject as a type: local
 // target would (see backup.ReceiverTarget).
-func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry, db *store.Store, log *slog.Logger) (recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, key string, bound remoteAuth.Request, ok bool) {
+func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry, db *store.Store, log *slog.Logger, multiFile bool) (recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, bound remoteAuth.Request, ok bool) {
 	recv, bound, ok = authorizeReceiver(w, r, receivers, log)
 	if !ok {
-		return config.ResolvedReceiver{}, nil, nil, "", remoteAuth.Request{}, false
+		return config.ResolvedReceiver{}, nil, nil, remoteAuth.Request{}, false
 	}
 
 	key, err := backup.SanitizeObjectKey(r.PathValue("key"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
-		return config.ResolvedReceiver{}, nil, nil, "", remoteAuth.Request{}, false
+		return config.ResolvedReceiver{}, nil, nil, remoteAuth.Request{}, false
 	}
 
-	if err := checkRequestBinding(r, key, bound); err != nil {
-		log.Debug("receiver: rejected request", "id", recv.ID, "key", key, "err", err)
+	var file string
+
+	if multiFile {
+		file = r.URL.Query().Get("file")
+		if err := config.ValidateFileName(file); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return config.ResolvedReceiver{}, nil, nil, remoteAuth.Request{}, false
+		}
+	}
+
+	bindErr := checkRequestBinding(r, key, file, bound)
+	if bindErr == nil && multiFile && bound.IsZero() {
+		bindErr = errors.New("token is not bound to its request")
+	}
+
+	if bindErr != nil {
+		log.Debug("receiver: rejected request", "id", recv.ID, "key", key, "file", file, "err", bindErr)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 
-		return config.ResolvedReceiver{}, nil, nil, "", remoteAuth.Request{}, false
+		return config.ResolvedReceiver{}, nil, nil, remoteAuth.Request{}, false
 	}
 
-	return recv, &config.Config{Key: key, StateDB: db}, backup.ReceiverTarget(recv), key, bound, true
+	return recv, &config.Config{Key: key, File: file, StateDB: db}, backup.ReceiverTarget(recv), bound, true
 }
 
 // bearerToken extracts the token from an "Authorization: Bearer <token>"

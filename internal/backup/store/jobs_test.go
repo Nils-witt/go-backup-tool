@@ -355,11 +355,11 @@ func TestListDueOutstandingTargetUploadsOnlyReturnsDueRows(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	createdAt := now.Add(-time.Minute)
 
-	if err := db.AddOutstandingTargetUpload(ctx, "job-a", "server-a", "/tmp/a.staged", "backup-a.gpg", createdAt, now.Add(-time.Second)); err != nil {
+	if err := db.AddOutstandingTargetUpload(ctx, OutstandingTargetUpload{JobName: "job-a", Target: "server-a", FileName: "/tmp/a.staged", Key: "backup-a.gpg", CreatedAt: createdAt, RetryAt: now.Add(-time.Second)}); err != nil {
 		t.Fatalf("AddOutstandingTargetUpload() due error: %v", err)
 	}
 
-	if err := db.AddOutstandingTargetUpload(ctx, "job-a", "server-b", "/tmp/b.staged", "backup-b.gpg", createdAt, now.Add(time.Hour)); err != nil {
+	if err := db.AddOutstandingTargetUpload(ctx, OutstandingTargetUpload{JobName: "job-a", Target: "server-b", FileName: "/tmp/b.staged", Key: "backup-b.gpg", CreatedAt: createdAt, RetryAt: now.Add(time.Hour)}); err != nil {
 		t.Fatalf("AddOutstandingTargetUpload() not-yet-due error: %v", err)
 	}
 
@@ -386,7 +386,7 @@ func TestRescheduleOutstandingTargetUpload(t *testing.T) {
 
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
-	if err := db.AddOutstandingTargetUpload(ctx, "job-a", "server-a", "/tmp/a.staged", "backup-a.gpg", now, now); err != nil {
+	if err := db.AddOutstandingTargetUpload(ctx, OutstandingTargetUpload{JobName: "job-a", Target: "server-a", FileName: "/tmp/a.staged", Key: "backup-a.gpg", CreatedAt: now, RetryAt: now}); err != nil {
 		t.Fatalf("AddOutstandingTargetUpload() error: %v", err)
 	}
 
@@ -409,6 +409,41 @@ func TestRescheduleOutstandingTargetUpload(t *testing.T) {
 	}
 }
 
+func TestCountOutstandingTargetUploadsPerBackupFile(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	for _, u := range []OutstandingTargetUpload{
+		{JobName: "job-a", Target: "server-a", FileName: "/tmp/1.staged", Key: "backup", BackupFile: "db.gpg", CreatedAt: now, RetryAt: now},
+		{JobName: "job-a", Target: "server-a", FileName: "/tmp/2.staged", Key: "backup", BackupFile: "files.gpg", CreatedAt: now, RetryAt: now},
+		{JobName: "job-a", Target: "server-b", FileName: "/tmp/1.staged", Key: "backup", BackupFile: "db.gpg", CreatedAt: now, RetryAt: now},
+	} {
+		if err := db.AddOutstandingTargetUpload(ctx, u); err != nil {
+			t.Fatalf("AddOutstandingTargetUpload() error: %v", err)
+		}
+	}
+
+	due, err := db.ListDueOutstandingTargetUploads(ctx, now)
+	if err != nil || len(due) != 3 || due[1].BackupFile != "files.gpg" {
+		t.Fatalf("ListDueOutstandingTargetUploads() = %+v, %v; want three rows keeping BackupFile", due, err)
+	}
+
+	if n, err := db.CountOutstandingTargetUploads(ctx, "job-a", "server-a"); err != nil || n != 2 {
+		t.Errorf("CountOutstandingTargetUploads(server-a) = %d, %v; want 2", n, err)
+	}
+
+	if err := db.DeleteOutstandingTargetUpload(ctx, due[0].ID); err != nil {
+		t.Fatalf("DeleteOutstandingTargetUpload() error: %v", err)
+	}
+
+	if n, err := db.CountOutstandingTargetUploads(ctx, "job-a", "server-a"); err != nil || n != 1 {
+		t.Errorf("CountOutstandingTargetUploads(server-a) after delete = %d, %v; want 1", n, err)
+	}
+}
+
 func TestDeleteOutstandingTargetUploadAndFileReferenceCount(t *testing.T) {
 	t.Parallel()
 
@@ -419,11 +454,11 @@ func TestDeleteOutstandingTargetUploadAndFileReferenceCount(t *testing.T) {
 
 	const file = "/tmp/shared.staged"
 
-	if err := db.AddOutstandingTargetUpload(ctx, "job-a", "server-a", file, "backup.gpg", now, now); err != nil {
+	if err := db.AddOutstandingTargetUpload(ctx, OutstandingTargetUpload{JobName: "job-a", Target: "server-a", FileName: file, Key: "backup.gpg", CreatedAt: now, RetryAt: now}); err != nil {
 		t.Fatalf("AddOutstandingTargetUpload() server-a error: %v", err)
 	}
 
-	if err := db.AddOutstandingTargetUpload(ctx, "job-a", "server-b", file, "backup.gpg", now, now); err != nil {
+	if err := db.AddOutstandingTargetUpload(ctx, OutstandingTargetUpload{JobName: "job-a", Target: "server-b", FileName: file, Key: "backup.gpg", CreatedAt: now, RetryAt: now}); err != nil {
 		t.Fatalf("AddOutstandingTargetUpload() server-b error: %v", err)
 	}
 
