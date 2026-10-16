@@ -42,6 +42,7 @@ import ArrowUpwardIcon from "@mui/icons-material/ArrowUpward";
 import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import Box from "@mui/material/Box";
 
 // JobForm is the create/edit dialog's state: a job's definition, with its
 // lists as editable text (one entry per line).
@@ -150,7 +151,7 @@ function CommandSelect({
       required={required}
       helperText={helperText}
       fullWidth={required}
-      sx={{ minWidth: 160 }}
+      sx={{ minWidth: 160, flex: 1 }}
     >
       {required ? null : (
         <MenuItem value="">
@@ -197,11 +198,10 @@ function FilesEditor({
       {files.map((f, i) => {
         const duplicate = !!f.command && names.indexOf(names[i]) !== i;
         return (
-          <Stack
+          <Box
             key={i}
-            direction={{ xs: "column", sm: "row" }}
-            spacing={1}
-            sx={{ alignItems: { sm: "flex-start" } }}
+            sx={{ alignItems: { sm: "flex-start" }, display: "flex", flexDirection: { xs: "column", sm: "row" }, gap: 1, width: "100%" }}
+
           >
             <CommandSelect
               label="Command"
@@ -241,7 +241,7 @@ function FilesEditor({
                 </span>
               </Tooltip>
             </Stack>
-          </Stack>
+          </Box>
         );
       })}
       <Button
