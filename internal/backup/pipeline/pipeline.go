@@ -572,7 +572,10 @@ func firstPipelineError(source string, sourceErr, gpgErr, stageErr error) error 
 }
 
 // buildGPGCommand constructs the gpg invocation that encrypts a backup to
-// cfg.Recipients.
+// cfg.Recipients. --force-mdc makes gpg always add a modification detection
+// code, so a tampered ciphertext fails to decrypt instead of yielding
+// silently altered plaintext, even for recipient keys that don't advertise
+// MDC support.
 func buildGPGCommand(ctx context.Context, cfg *config.Config) *exec.Cmd {
 	args := []string{"--batch", "--yes"}
 
@@ -584,7 +587,7 @@ func buildGPGCommand(ctx context.Context, cfg *config.Config) *exec.Cmd {
 		args = append(args, "--armor")
 	}
 
-	args = append(args, "--trust-model", "always", "--encrypt")
+	args = append(args, "--trust-model", "always", "--force-mdc", "--encrypt")
 	for _, r := range cfg.Recipients {
 		args = append(args, "--recipient", r)
 	}

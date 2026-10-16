@@ -311,7 +311,7 @@ func TestBuildGPGCommand(t *testing.T) {
 				Recipients: []string{"me@example.com"},
 			},
 			wantArgs: []string{
-				"--batch", "--yes", "--trust-model", "always", "--encrypt",
+				"--batch", "--yes", "--trust-model", "always", "--force-mdc", "--encrypt",
 				"--recipient", "me@example.com",
 			},
 		},
@@ -325,7 +325,7 @@ func TestBuildGPGCommand(t *testing.T) {
 			},
 			wantArgs: []string{
 				"--batch", "--yes", "--homedir", "/tmp/gnupg-test", "--armor",
-				"--trust-model", "always", "--encrypt",
+				"--trust-model", "always", "--force-mdc", "--encrypt",
 				"--recipient", "a@example.com", "--recipient", "b@example.com",
 			},
 		},

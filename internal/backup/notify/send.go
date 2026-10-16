@@ -161,7 +161,7 @@ func encryptGPGBody(ctx context.Context, enc EmailEncrypt, body string) (string,
 		args = append(args, "--homedir", enc.GPGHomedir)
 	}
 
-	args = append(args, "--trust-model", "always", "--armor", "--encrypt")
+	args = append(args, "--trust-model", "always", "--force-mdc", "--armor", "--encrypt")
 
 	for _, r := range enc.Recipients {
 		args = append(args, "--recipient", r)
