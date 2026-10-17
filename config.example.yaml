@@ -255,6 +255,12 @@ servers:
 #   # https://backups.example.com/login/sso/callback) and that origin
 #   # allowed for CORS. Every API request then carries the provider's access
 #   # token, which this instance verifies against the issuer's keys.
+#   # To end dashboard sessions as soon as the user signs out at the
+#   # provider (or an admin ends their session there), also register
+#   # <origin>/api/sso/backchannel-logout as the client's back-channel
+#   # logout URL (OpenID Connect Back-Channel Logout); without it, an
+#   # access token keeps working until it expires. Logouts are enforced for
+#   # 24 hours, so keep the provider's access token lifetime below that.
 #   # Changing anything here needs a restart.
 #   oidc:
 #     enabled: true

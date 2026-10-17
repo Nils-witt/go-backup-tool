@@ -217,7 +217,7 @@ func TestSSOBearerUser(t *testing.T) {
 		t.Fatalf("ssoBearerUser() error: %v", err)
 	}
 
-	if want := (principal{Username: "alice", Perm: permission.PermissionView | permission.PermissionViewLoginLog}); *user != want {
+	if want := (principal{Username: "alice", Perm: permission.PermissionView | permission.PermissionViewLoginLog}); user.Username != want.Username || user.Perm != want.Perm {
 		t.Errorf("principal = %+v, want %+v", *user, want)
 	}
 

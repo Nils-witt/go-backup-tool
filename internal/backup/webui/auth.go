@@ -9,7 +9,8 @@
 // client) and turns it into a principal whose permissions come solely from
 // the config file's webui.oidc.default-permissions plus the token's groups
 // (see webui.oidc.group-permissions). Nothing about a user is stored
-// locally.
+// locally, except for a while after the provider ends their session (see
+// backchannel.go).
 //
 // The one other accepted bearer credential is a long-lived, read-only API
 // token this instance issued itself (see tokens.go).
@@ -61,6 +62,11 @@ const userContextKey contextKey = iota
 type principal struct {
 	Username string
 	Perm     permission.Permission
+
+	// session is the provider session the access token belongs to, checked
+	// against back-channel logouts (see backchannel.go). Zero for an API
+	// token.
+	session ssoSession
 }
 
 // currentUser returns the principal attached to ctx by requireUser, if any.
@@ -76,6 +82,7 @@ func currentUser(ctx context.Context) (*principal, bool) {
 type authenticator struct {
 	oidc              config.OIDCSettings
 	verifiers         *ssoVerifierCache
+	logouts           *ssoLogouts
 	tokens            *apiTokens
 	db                *store.Store
 	log               *slog.Logger
@@ -86,6 +93,7 @@ func newAuthenticator(oidcSettings config.OIDCSettings, tokens *apiTokens, db *s
 	return &authenticator{
 		oidc:              oidcSettings,
 		verifiers:         newSSOVerifierCache(),
+		logouts:           newAuthenticatorLogouts(context.Background(), oidcSettings, db, log),
 		tokens:            tokens,
 		db:                db,
 		log:               log,
@@ -97,7 +105,8 @@ func newAuthenticator(oidcSettings config.OIDCSettings, tokens *apiTokens, db *s
 // storing it in the request context (see currentUser). The accepted
 // credential is an "Authorization: Bearer" SSO access token (see
 // ssoBearerUser) or API token (see apiTokens) — there are no local accounts
-// or session cookies. A
+// or session cookies. An SSO token whose session the provider has ended
+// (see backchannel.go) is rejected like an invalid one. A
 // missing/invalid credential gets a 401; the SPA itself decides whether to
 // renew its token or navigate to /login based on that.
 func requireUser(a *authenticator, next http.HandlerFunc) http.HandlerFunc {
@@ -121,6 +130,10 @@ func requireUser(a *authenticator, next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		user, err := ssoBearerUser(r.Context(), a.oidc, a.verifiers, raw)
+		if err == nil && a.logouts.ended(user.session) {
+			err = errSSOSessionEnded
+		}
+
 		if err != nil {
 			a.rejectBearer(w, r, err)
 			return
@@ -158,12 +171,14 @@ func bearerToken(r *http.Request) (string, bool) {
 
 // rejectBearer answers a failed bearer check with a generic 401 — the
 // specific reason is only logged server-side. An expired token (a routine
-// event for an idle tab, which the SPA recovers from by renewing it) is only
-// logged at debug level; anything else (bad signature, wrong issuer/client,
+// event for an idle tab, which the SPA recovers from by renewing it) or one
+// whose session was ended by a back-channel logout (the user signed out at
+// the provider, so the SPA's renewal fails and it shows the login page) is
+// only logged at debug level; anything else (bad signature, wrong issuer/client,
 // SSO disabled) is also recorded as a failed login in the login log.
 func (a *authenticator) rejectBearer(w http.ResponseWriter, r *http.Request, err error) {
-	if isTokenExpired(err) {
-		a.log.Debug("sso: bearer token expired", "err", err)
+	if isTokenExpired(err) || errors.Is(err, errSSOSessionEnded) {
+		a.log.Debug("sso: bearer token no longer valid", "err", err)
 	} else {
 		a.log.Warn("sso: bearer token rejected", "err", err)
 		recordLogin(r.Context(), a.db, a.log, r, a.trustProxyHeaders, loginMethodSSO, "sso", "", err.Error(), false)
@@ -313,10 +328,12 @@ type bearerClaims struct {
 	AuthorizedParty   string `json:"azp"`
 	Email             string `json:"email"`
 	PreferredUsername string `json:"preferred_username"`
+	SessionID         string `json:"sid"`
 }
 
 // ssoBearerUser verifies rawToken against s and returns the principal it
-// identifies. Its permissions are s.DefaultPermissions plus whatever the
+// identifies. Whether a back-channel logout has since ended its session is
+// checked by requireUser (see ssoLogouts.ended). Its permissions are s.DefaultPermissions plus whatever the
 // token's groups are mapped to in s.GroupPermissions — worked out afresh on
 // every request and never stored, so a group change at the provider applies
 // on the user's next request.
@@ -352,6 +369,7 @@ func ssoBearerUser(ctx context.Context, s config.OIDCSettings, cache *ssoVerifie
 	return &principal{
 		Username: usernameFromClaims(claims.Email, claims.PreferredUsername, token.Subject),
 		Perm:     s.DefaultPermissions | groupGrants(s.GroupPermissions, groupsFromClaim(all[s.GroupsClaim])),
+		session:  ssoSession{subject: token.Subject, sessionID: claims.SessionID, issuedAt: token.IssuedAt},
 	}, nil
 }
 

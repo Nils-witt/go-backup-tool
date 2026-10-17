@@ -3,6 +3,7 @@ package webui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -106,10 +107,11 @@ func (c *liveStatusCache) get() (payload []byte, jobsChanged, receiversChanged <
 }
 
 // liveTicketEntry is one currently valid live-status ticket: who minted it
-// (for logging) and when it expires.
+// (for logging, and to close the socket once a back-channel logout ends
+// their session) and when it expires.
 type liveTicketEntry struct {
-	username string
-	expires  time.Time
+	user    principal
+	expires time.Time
 }
 
 // liveTicketStore tracks currently valid live-status tickets. Like
@@ -128,8 +130,8 @@ func newLiveTicketStore() *liveTicketStore {
 	return &liveTicketStore{byID: make(map[string]liveTicketEntry)}
 }
 
-// create mints a new ticket attributed to username, valid for liveTicketTTL.
-func (s *liveTicketStore) create(username string) (string, error) {
+// create mints a new ticket attributed to user, valid for liveTicketTTL.
+func (s *liveTicketStore) create(user principal) (string, error) {
 	id, err := randomTicketID()
 	if err != nil {
 		return "", err
@@ -147,17 +149,17 @@ func (s *liveTicketStore) create(username string) (string, error) {
 		}
 	}
 
-	s.byID[id] = liveTicketEntry{username: username, expires: now.Add(liveTicketTTL)}
+	s.byID[id] = liveTicketEntry{user: user, expires: now.Add(liveTicketTTL)}
 
 	return id, nil
 }
 
-// consume redeems ticket id, reporting the username it was minted for and
+// consume redeems ticket id, reporting the user it was minted for and
 // ok=true only if it names a currently unexpired ticket. Either way, id is
 // no longer valid afterwards.
-func (s *liveTicketStore) consume(id string) (username string, ok bool) {
+func (s *liveTicketStore) consume(id string) (user principal, ok bool) {
 	if id == "" {
-		return "", false
+		return principal{}, false
 	}
 
 	s.mu.Lock()
@@ -166,10 +168,10 @@ func (s *liveTicketStore) consume(id string) (username string, ok bool) {
 	s.mu.Unlock()
 
 	if !exists || time.Now().After(e.expires) {
-		return "", false
+		return principal{}, false
 	}
 
-	return e.username, true
+	return e.user, true
 }
 
 // handleMintLiveTicket serves POST /api/live/ticket: it mints a short-lived,
@@ -178,12 +180,12 @@ func (s *liveTicketStore) consume(id string) (username string, ok bool) {
 // /api/receivers need, since the socket streams exactly what they serve.
 func handleMintLiveTicket(tickets *liveTicketStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var username string
-		if user, ok := currentUser(r.Context()); ok {
-			username = user.Username
+		var user principal
+		if u, ok := currentUser(r.Context()); ok {
+			user = *u
 		}
 
-		ticket, err := tickets.create(username)
+		ticket, err := tickets.create(user)
 		if err != nil {
 			http.Error(w, "minting live status ticket failed", http.StatusInternalServerError)
 			return
@@ -203,8 +205,10 @@ func handleMintLiveTicket(tickets *liveTicketStore) http.HandlerFunc {
 // receiverStore may be nil, which streams an empty receiver list. With
 // trustProxyHeaders set, the browser's Origin is checked against the Host a
 // reverse proxy reports in Forwarded/X-Forwarded-Host (see forwardedHost),
-// since a proxy that rewrites Host would otherwise never match it.
-func handleLive(baseCtx context.Context, statusStore *backup.StatusStore, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, tickets *liveTicketStore, devMode, trustProxyHeaders bool, log *slog.Logger) http.HandlerFunc {
+// since a proxy that rewrites Host would otherwise never match it. The
+// socket is closed once logouts records a back-channel logout ending the
+// session of the user who minted the ticket.
+func handleLive(baseCtx context.Context, statusStore *backup.StatusStore, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, tickets *liveTicketStore, logouts *ssoLogouts, devMode, trustProxyHeaders bool, log *slog.Logger) http.HandlerFunc {
 	cache := &liveStatusCache{statusStore: statusStore, receivers: receivers, receiverStore: receiverStore, log: log}
 
 	var opts websocket.AcceptOptions
@@ -215,7 +219,7 @@ func handleLive(baseCtx context.Context, statusStore *backup.StatusStore, receiv
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		username, ok := tickets.consume(r.URL.Query().Get("ticket"))
+		user, ok := tickets.consume(r.URL.Query().Get("ticket"))
 		if !ok {
 			http.Error(w, "missing or expired live status ticket", http.StatusForbidden)
 			return
@@ -232,7 +236,7 @@ func handleLive(baseCtx context.Context, statusStore *backup.StatusStore, receiv
 
 		conn, err := websocket.Accept(w, r, &opts)
 		if err != nil {
-			log.Debug("web UI: accepting live status websocket", "user", username, "err", err)
+			log.Debug("web UI: accepting live status websocket", "user", user.Username, "err", err)
 			return
 		}
 		defer func() { _ = conn.CloseNow() }()
@@ -246,6 +250,20 @@ func handleLive(baseCtx context.Context, statusStore *backup.StatusStore, receiv
 			cancel()
 		})
 		defer stop()
+
+		// Like the shutdown hook above, close before cancelling: once ctx
+		// ends, CloseRead's reader drops the connection without a close
+		// frame.
+		sessionCtx := logouts.untilEnded(ctx, user.session)
+
+		stopSession := context.AfterFunc(sessionCtx, func() {
+			if errors.Is(context.Cause(sessionCtx), errSSOSessionEnded) {
+				_ = conn.Close(websocket.StatusPolicyViolation, "session ended")
+			}
+
+			cancel()
+		})
+		defer stopSession()
 
 		ctx = conn.CloseRead(ctx)
 

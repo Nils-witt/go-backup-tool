@@ -435,7 +435,8 @@ type RunConfig struct {
 // webui.oidc: entry (see fileWebUIOIDC). The web UI's SPA logs in as the
 // public client ClientID (authorization code + PKCE, no client secret), and
 // the backend verifies every request's access token against Issuer (see
-// internal/backup/webui/auth.go). Nothing about users is stored: a
+// internal/backup/webui/auth.go). Nothing about users is stored (beyond
+// recent back-channel logouts, see internal/backup/webui/backchannel.go): a
 // request's permissions are DefaultPermissions plus whatever its token's
 // groups (read from GroupsClaim) are mapped to in GroupPermissions, worked
 // out afresh on every request.

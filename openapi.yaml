@@ -103,6 +103,50 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /api/sso/backchannel-logout:
+    post:
+      tags: [auth]
+      summary: OpenID Connect back-channel logout
+      operationId: ssoBackchannelLogout
+      description: >
+        Called by the OIDC provider, not the SPA (OpenID Connect Back-Channel
+        Logout 1.0): register `<origin>/api/sso/backchannel-logout` as the
+        client's back-channel logout URL. Authenticated only by the logout
+        token's signature, which must be from `webui.oidc.issuer` with
+        `webui.oidc.client-id` in its `aud`. From then on, access tokens of
+        the ended session are rejected with 401 (a logout token with a `sid`
+        ends that session; one with only a `sub` ends every session of that
+        user issued before it), and that session's open `/api/live` sockets
+        are closed with status 1008. Logouts are kept in the state db for 24
+        hours. Not found while `webui.oidc` is disabled.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [logout_token]
+              properties:
+                logout_token:
+                  type: string
+                  description: The provider-signed logout token (a JWT).
+      responses:
+        "200":
+          description: The logout was accepted and applies immediately
+        "400":
+          description: Missing or invalid logout token (the reason is only logged server-side)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    enum: [invalid_request]
+        "404":
+          description: "`webui.oidc` is disabled"
+
   /api/status:
     get:
       tags: [dashboard]

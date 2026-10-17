@@ -32,7 +32,9 @@ import (
 // Nothing about web UI users is stored: every login is SSO and every
 // permission comes from the access token's groups (see
 // internal/backup/webui/auth.go). The only web UI credentials kept are the
-// read-only API tokens' metadata and signing key (see tokens.go).
+// read-only API tokens' metadata and signing key (see tokens.go), plus, for
+// a day after each OIDC back-channel logout, the subject and session it
+// ended (see sso_logouts.go).
 //
 // It holds two connection pools on the same file: db, a single connection
 // every write (and every read inside a write's transaction) goes through,
@@ -101,7 +103,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		&loginEventModel{}, &downloadEventModel{}, &receiverEventModel{}, &auditEventModel{},
 		&apiTokenModel{}, &tokenSigningKeyModel{},
 		&receiverModel{}, &notificationModel{}, &reportSettingsModel{},
-		&trustedServerModel{},
+		&trustedServerModel{}, &ssoLogoutModel{},
 		&serverModel{}, &commandModel{}, &jobModel{},
 	); err != nil {
 		_ = sqlDB.Close()
