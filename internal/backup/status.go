@@ -535,7 +535,7 @@ func (s *StatusStore) RetryStarting(name string, targets []string) {
 
 // FailedTargets returns the server names of every target in name currently
 // reported as failed, for the web UI's "retry failed targets" action (see
-// handleRetryFailedTargets in webui.go) to determine which targets a retry
+// handleRetryFailedTargets in webui/jobs.go) to determine which targets a retry
 // request applies to. Returns nil if name is unknown or none are failed.
 func (s *StatusStore) FailedTargets(name string) []string {
 	s.mu.Lock()

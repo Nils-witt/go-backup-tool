@@ -368,7 +368,7 @@ func (r *Runner) release(name string) {
 
 // RunNow starts a single run of job in the background, outside its
 // schedule, and returns immediately — the web UI's "Run now" action (see
-// handleRunJob in webui.go). It returns ErrJobRunning, without starting
+// handleRunJob in webui/jobs.go). It returns ErrJobRunning, without starting
 // anything, if job already has a run in flight. The run doesn't move the
 // job's next scheduled run. ctx is expected to be detached from the
 // triggering HTTP request's own cancellation (see context.WithoutCancel),
@@ -520,7 +520,7 @@ func (r *Runner) finishRun(ctx context.Context, job *config.Config, log *slog.Lo
 // source command, gpg encryption, and staging, since the original run's
 // staged file was already removed once it finished, leaving nothing to
 // re-upload from. It's used by the web UI's "retry failed targets" action
-// (see handleRetryFailedTargets in webui.go); ctx is expected to be
+// (see handleRetryFailedTargets in webui/jobs.go); ctx is expected to be
 // detached from the triggering HTTP request's own cancellation (see
 // context.WithoutCancel) so the retry isn't cut short just because that
 // request has already returned its response. It returns ErrJobRunning if
