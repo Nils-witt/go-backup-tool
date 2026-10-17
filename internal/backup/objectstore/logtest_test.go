@@ -1,4 +1,4 @@
-package backup
+package objectstore
 
 import "log/slog"
 

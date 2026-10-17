@@ -105,7 +105,7 @@ Expire-Date: 0
 	return dir, nil
 }
 
-// testServerIdentity builds a *backup.ServerIdentity backed by a freshly
+// testServerIdentity builds a *identity.ServerIdentity backed by a freshly
 // generated RSA key, for tests that need one to exercise signing without
 // touching disk.
 func testServerIdentity(t *testing.T) *identity.ServerIdentity {

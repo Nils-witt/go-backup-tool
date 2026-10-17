@@ -18,9 +18,9 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
+	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
 )
 
 const testClientID = "backup-ui"
@@ -254,7 +254,7 @@ func startSSOWebUI(t *testing.T, idp *testIDP, receivers map[string]config.Resol
 		Log:       discardLogger,
 		DB:        db,
 		Status:    store,
-		Receivers: backup.NewReceiverRegistry(receivers),
+		Receivers: receiver.NewRegistry(receivers),
 	}, Options{
 		Addr: "127.0.0.1:0",
 		OIDC: idp.settings(),

@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/gpgkeys"
 	"nilswitt.dev/go-backup-tool/internal/backup/identity"
@@ -56,7 +55,7 @@ type Deps struct {
 	Jobs            *jobs.Manager
 	Runner          *pipeline.Runner
 	GPGKeyring      *gpgkeys.Keyring
-	Receivers       *backup.ReceiverRegistry
+	Receivers       *receiver.Registry
 	ReceiverStatus  *status.ReceiverStore
 	ReceiverManager *receiver.Manager
 	Settings        *settings.Manager

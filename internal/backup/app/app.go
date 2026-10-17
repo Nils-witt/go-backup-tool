@@ -16,13 +16,13 @@ import (
 	"syscall"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/dockerexec"
 	"nilswitt.dev/go-backup-tool/internal/backup/gpgkeys"
 	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/jobs"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/periodic"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
@@ -128,13 +128,13 @@ func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, deps webu
 // requests against, and their manager returned for the web UI.
 // notifications must already be loaded (see newSettings), since receivers
 // are checked against it.
-func newReceivers(ctx context.Context, rc *config.RunConfig, stateDB *store.Store, notifications *notify.Registry, log *slog.Logger) (*backup.ReceiverRegistry, *status.ReceiverStore, *receiver.Manager, *trust.Manager) {
+func newReceivers(ctx context.Context, rc *config.RunConfig, stateDB *store.Store, notifications *notify.Registry, log *slog.Logger) (*receiver.Registry, *status.ReceiverStore, *receiver.Manager, *trust.Manager) {
 	// Trusted servers load first: every receiver resolves its allowed
 	// servers against them.
 	trustManager := trust.NewManager(stateDB, trust.NewRegistry(nil), log)
 	trustManager.Load(ctx)
 
-	registry := backup.NewReceiverRegistry(nil)
+	registry := receiver.NewRegistry(nil)
 	receiverStatus := status.NewReceiverStore(nil)
 	manager := receiver.NewManager(stateDB, registry, receiverStatus, notifications, trustManager.Registry(), rc.ServerName, rc.ReceiversBaseDir, log)
 	manager.Load(ctx, rc.FileReceivers)
@@ -277,7 +277,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	// Independent of the web UI: a daily report is useful for anyone
 	// monitoring receivers by inbox, not just those watching the dashboard.
 	// RunReportLoop idles while the report is disabled.
-	go pipeline.RunReportLoop(ctx, rc.ServerName, jobsManager.Names, reportSettings, notifications, receivers, stateDB, mailQueue, log)
+	go pipeline.RunReportLoop(ctx, rc.ServerName, jobsManager.Names, reportSettings, notifications, receivers.Snapshot, stateDB, mailQueue, log)
 
 	srv := startWebUIIfConfigured(ctx, rc, webui.Deps{
 		Log:             log,
@@ -352,7 +352,7 @@ const eventLogRetention = 90 * 24 * time.Hour
 // pruneEventLogs deletes event log rows older than eventLogRetention once at
 // startup and then daily, until ctx is done.
 func pruneEventLogs(ctx context.Context, db *store.Store, log *slog.Logger) {
-	backup.RunPeriodically(ctx, 24*time.Hour, true, func() {
+	periodic.Run(ctx, 24*time.Hour, true, func() {
 		n, err := db.PruneEvents(ctx, time.Now().Add(-eventLogRetention))
 		if err != nil {
 			log.Warn("pruning event logs", "err", err)

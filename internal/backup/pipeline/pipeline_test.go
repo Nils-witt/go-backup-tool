@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/objectstore"
 	"nilswitt.dev/go-backup-tool/internal/backup/tarball"
 )
 
@@ -31,8 +31,8 @@ func TestWriteLocalObject(t *testing.T) {
 
 	const content = "ciphertext bytes"
 
-	if err := backup.WriteLocalObject(cfg, tgt, strings.NewReader(content)); err != nil {
-		t.Fatalf("backup.WriteLocalObject() unexpected error: %v", err)
+	if err := objectstore.WriteLocalObject(cfg, tgt, strings.NewReader(content)); err != nil {
+		t.Fatalf("objectstore.WriteLocalObject() unexpected error: %v", err)
 	}
 
 	wantPath := filepath.Join(dir, "sub", "backup.gpg")
@@ -64,11 +64,11 @@ func TestWriteLocalObjectCreatesMissingDirectories(t *testing.T) {
 	cfg := &config.Config{Key: "backup.gpg"}
 	tgt := &config.Target{Kind: config.ServerKindLocal, Bucket: "does/not/exist", LocalPath: dir}
 
-	if err := backup.WriteLocalObject(cfg, tgt, strings.NewReader("x")); err != nil {
-		t.Fatalf("backup.WriteLocalObject() unexpected error: %v", err)
+	if err := objectstore.WriteLocalObject(cfg, tgt, strings.NewReader("x")); err != nil {
+		t.Fatalf("objectstore.WriteLocalObject() unexpected error: %v", err)
 	}
 
-	if _, err := os.Stat(backup.LocalObjectPath(cfg, tgt)); err != nil {
+	if _, err := os.Stat(objectstore.LocalObjectPath(cfg, tgt)); err != nil {
 		t.Errorf("written file not found: %v", err)
 	}
 }
@@ -146,7 +146,7 @@ func TestUploadStagedToTargetsLocal(t *testing.T) {
 		t.Fatalf("uploadStagedToTargets() reported target results = %v, want [nil]", targetErrs)
 	}
 
-	got, err := os.ReadFile(backup.LocalObjectPath(cfg, &cfg.Targets[0]))
+	got, err := os.ReadFile(objectstore.LocalObjectPath(cfg, &cfg.Targets[0]))
 	if err != nil {
 		t.Fatalf("reading written file: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestUploadStagedToTargetsContinuesAfterOneTargetFails(t *testing.T) {
 		t.Errorf("uploadStagedToTargets() good target err = %v, want nil (other target's failure shouldn't affect it)", targetErrs[1])
 	}
 
-	got, err := os.ReadFile(backup.LocalObjectPath(cfg, &cfg.Targets[1]))
+	got, err := os.ReadFile(objectstore.LocalObjectPath(cfg, &cfg.Targets[1]))
 	if err != nil {
 		t.Fatalf("reading good target's written file: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestUploadStagedToTargetsIsolatesSlowTarget(t *testing.T) {
 		t.Errorf("uploadStagedToTargets() local target err = %v, want nil (the remote target's failure shouldn't affect it)", targetErrs[1])
 	}
 
-	got, readErr := os.ReadFile(backup.LocalObjectPath(cfg, &cfg.Targets[1]))
+	got, readErr := os.ReadFile(objectstore.LocalObjectPath(cfg, &cfg.Targets[1]))
 	if readErr != nil {
 		t.Fatalf("reading local target's written file: %v", readErr)
 	}

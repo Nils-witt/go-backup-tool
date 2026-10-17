@@ -120,9 +120,8 @@ type FileTargetOnRecover struct {
 // has no day unit; "m" is already minutes in time.ParseDuration, not
 // months); when set, any object this tool writes under path is deleted once
 // it's older than that, tracked in the shared state sqlite database kept
-// alongside the config file (see retention.go and schedule_state.go). Unset
-// or "0"
-// disables automatic cleanup. A remote server needs no auth field of its
+// alongside the config file (see objectstore/retention.go and the store
+// package). Unset or "0" disables automatic cleanup. A remote server needs no auth field of its
 // own: it authenticates to the destination instance's receiver API with
 // this instance's own persistent identity (see loadServerIdentity), which
 // the destination instance verifies against the public key configured on

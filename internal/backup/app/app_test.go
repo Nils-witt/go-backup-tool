@@ -9,7 +9,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 )
 
-// TestNewRunLoggerLogViewerGate covers newRunLogger's *backup.LogRingBuffer
+// TestNewRunLoggerLogViewerGate covers newRunLogger's *webui.LogRingBuffer
 // decision: it must only wire one up (so /api/logs has anything to serve)
 // when both the web UI is enabled (listen:) and the operator opted into the
 // log viewer (enable-log-viewer:) — never from listen: alone, since unlike

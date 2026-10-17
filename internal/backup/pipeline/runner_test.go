@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/objectstore"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
@@ -306,7 +306,7 @@ func TestRunOnceStoresEachFileUnderKey(t *testing.T) {
 		}
 	}
 
-	if _, err := os.Stat(filepath.Join(backupDir, backup.MultiFileMarker)); err != nil {
+	if _, err := os.Stat(filepath.Join(backupDir, objectstore.MultiFileMarker)); err != nil {
 		t.Errorf("multi-file marker missing: %v", err)
 	}
 

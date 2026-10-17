@@ -169,7 +169,7 @@ func (fj *FileJob) NormalizeFiles() error {
 // single path segment, safe to join under a backup's key on every
 // platform. It rejects a leading "." too (which also rules out "." and
 // ".."), since dot-files are hidden from every file listing and hold a
-// backup's own bookkeeping (see backup.MultiFileMarker).
+// backup's own bookkeeping (see objectstore.MultiFileMarker).
 func ValidateFileName(name string) error {
 	const maxLen = 255
 

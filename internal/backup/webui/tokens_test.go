@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -67,7 +67,7 @@ func startTokenWebUI(t *testing.T, idp *testIDP) (*Server, *store.Store) {
 		Log:       discardLogger,
 		DB:        db,
 		Status:    statusStore,
-		Receivers: backup.NewReceiverRegistry(receivers),
+		Receivers: receiver.NewRegistry(receivers),
 	}, Options{
 		Addr: "127.0.0.1:0",
 		OIDC: idp.settings(),

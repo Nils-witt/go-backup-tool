@@ -37,7 +37,7 @@ type Config struct {
 	Key string
 
 	// File is the file under Key a single object read or write addresses
-	// (see backup.LocalObjectPath and pipeline.UploadToRemote): one source's
+	// (see objectstore.LocalObjectPath and pipeline.UploadToRemote): one source's
 	// Name, set on a per-file copy of a run's config. Empty addresses Key
 	// itself, as a flat object — how backups were stored before a job could
 	// have more than one command, and how older senders still upload to a

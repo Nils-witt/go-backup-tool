@@ -11,8 +11,8 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 )
 
@@ -30,7 +30,7 @@ func startLiveWebUI(t *testing.T, idp *testIDP, trustProxyHeaders bool) (*Server
 		Log:            discardLogger,
 		DB:             openTestStateDB(t),
 		Status:         statusStore,
-		Receivers:      backup.NewReceiverRegistry(receivers),
+		Receivers:      receiver.NewRegistry(receivers),
 		ReceiverStatus: receiverStore,
 	}, Options{
 		Addr:              "127.0.0.1:0",
@@ -284,7 +284,7 @@ func TestLiveStatusCacheSharesPayloadUntilChange(t *testing.T) {
 	statusStore, _ := newTestStore()
 	receivers := map[string]config.ResolvedReceiver{"a": {ID: "a", Path: t.TempDir()}}
 	receiverStore := status.NewReceiverStore(receivers)
-	cache := &liveStatusCache{statusStore: statusStore, receivers: backup.NewReceiverRegistry(receivers), receiverStore: receiverStore, log: discardLogger}
+	cache := &liveStatusCache{statusStore: statusStore, receivers: receiver.NewRegistry(receivers), receiverStore: receiverStore, log: discardLogger}
 
 	first, jobsChanged, receiversChanged := getLivePayload(t, cache)
 

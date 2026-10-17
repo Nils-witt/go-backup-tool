@@ -14,9 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/objectstore"
+	"nilswitt.dev/go-backup-tool/internal/backup/periodic"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
@@ -78,7 +79,7 @@ const receiverRetentionSweepInterval = time.Minute
 
 // MonitorReceiverRetention periodically sweeps every receiver with
 // retention: set for objects now past their retention window (see
-// backup.SweepRetentionForTarget), replacing the old approach of sweeping a
+// objectstore.SweepRetentionForTarget), replacing the old approach of sweeping a
 // receiver only when it next happened to receive a write: that tied a
 // receiver's retention sweep to its incoming traffic (a receiver that
 // stopped hearing from its sender would never get swept again) and made
@@ -87,17 +88,17 @@ const receiverRetentionSweepInterval = time.Minute
 // done. Receivers are read from the registry on every sweep, so ones added
 // or edited in the web UI are picked up. A nil db (retention tracking
 // unavailable this run) is a no-op.
-func MonitorReceiverRetention(ctx context.Context, db *store.Store, receivers *backup.ReceiverRegistry, log *slog.Logger) {
+func MonitorReceiverRetention(ctx context.Context, db *store.Store, receivers *Registry, log *slog.Logger) {
 	if db == nil {
 		return
 	}
 
-	backup.RunPeriodically(ctx, receiverRetentionSweepInterval, true, func() {
+	periodic.Run(ctx, receiverRetentionSweepInterval, true, func() {
 		sweepAllReceivers(ctx, db, receivers.Snapshot(), log)
 	})
 }
 
-// sweepAllReceivers runs one retention sweep (see backup.SweepRetentionForTarget)
+// sweepAllReceivers runs one retention sweep (see objectstore.SweepRetentionForTarget)
 // across every entry in receivers with retention: set, factored out of
 // MonitorReceiverRetention's periodic loop so a single sweep pass can be
 // exercised directly in tests without also driving RunPeriodically's timing.
@@ -107,11 +108,11 @@ func sweepAllReceivers(ctx context.Context, db *store.Store, receivers map[strin
 			continue
 		}
 
-		t := backup.ReceiverTarget(recv)
+		t := objectstore.ReceiverTarget(recv)
 
 		log.Debug("receiver retention sweep", "id", recv.ID, "path", recv.Path, "retention", recv.Retention)
 
-		if err := backup.SweepRetentionForTarget(ctx, db, t, log); err != nil {
+		if err := objectstore.SweepRetentionForTarget(ctx, db, t, log); err != nil {
 			log.Warn("receiver retention sweep failed", "id", recv.ID, "err", err)
 		}
 	}
@@ -163,7 +164,7 @@ func (m *staleReceiverMonitor) check(recv config.ResolvedReceiver, queue *notify
 		return
 	}
 
-	lastSeen, ok, err := backup.LastReceivedAt(recv)
+	lastSeen, ok, err := objectstore.LastReceivedAt(recv)
 	if err != nil {
 		log.Warn("stale receiver check: listing files failed", "id", recv.ID, "err", err)
 		return
@@ -318,7 +319,7 @@ func notifyStaleReceiverEmail(recv config.ResolvedReceiver, email notify.Email, 
 
 // MonitorStaleReceivers periodically checks every receiver with stale-after:
 // set, notifying its stale-notifications: whenever the most recent file
-// under its path (see backup.LastReceivedAt) is older than stale-after. A
+// under its path (see objectstore.LastReceivedAt) is older than stale-after. A
 // receiver that has never received anything at all never fires — there's no
 // file to be stale — so this only alerts on a sender that stopped showing
 // up, not one that never started. It checks once immediately, then every
@@ -327,7 +328,7 @@ func notifyStaleReceiverEmail(recv config.ResolvedReceiver, email notify.Email, 
 // sender that stays down doesn't spam them indefinitely. Receivers are read
 // from the registry on every check, so ones added, edited, or deleted in
 // the web UI are picked up.
-func MonitorStaleReceivers(ctx context.Context, receivers *backup.ReceiverRegistry, queue *notify.Queue, log *slog.Logger) {
+func MonitorStaleReceivers(ctx context.Context, receivers *Registry, queue *notify.Queue, log *slog.Logger) {
 	monitor := newStaleReceiverMonitor()
 
 	checkAll := func() {
@@ -339,5 +340,5 @@ func MonitorStaleReceivers(ctx context.Context, receivers *backup.ReceiverRegist
 		}
 	}
 
-	backup.RunPeriodically(ctx, staleReceiverCheckInterval, true, checkAll)
+	periodic.Run(ctx, staleReceiverCheckInterval, true, checkAll)
 }

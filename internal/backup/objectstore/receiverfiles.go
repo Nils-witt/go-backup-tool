@@ -1,41 +1,16 @@
-package backup
+package objectstore
 
 import (
 	"fmt"
 	"io/fs"
-	"maps"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 )
-
-// ParseCreationTime parses raw (the receiver API's creationTime query
-// parameter, RFC3339) against now (the time the upload request is being
-// handled), returning the zero Time and no error when raw is empty —
-// meaning "not provided, use upload time" (see RecordObjectWrite). A
-// non-empty raw that fails to parse, or that names a time not strictly
-// before now, is an error.
-func ParseCreationTime(raw string, now time.Time) (time.Time, error) {
-	if raw == "" {
-		return time.Time{}, nil
-	}
-
-	t, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("invalid creationTime %q: %w", raw, err)
-	}
-
-	if !t.Before(now) {
-		return time.Time{}, fmt.Errorf("creationTime %q must be before the upload time", raw)
-	}
-
-	return t, nil
-}
 
 // SanitizeObjectKey validates key (the {key...} wildcard segment of a
 // receiver API request path) before it's joined into a filesystem path.
@@ -237,67 +212,4 @@ func LastReceivedAt(recv config.ResolvedReceiver) (t time.Time, ok bool, err err
 	}
 
 	return t, ok, nil
-}
-
-// ReceiverRegistry holds every receiver this instance currently accepts
-// objects into, keyed by id. It's shared by the receiver API, the
-// dashboard, the stale/retention monitors, and the report, and changes at
-// runtime as receivers are created, edited, or deleted in the web UI (see
-// receiver.Manager), so every reader looks receivers up here per use rather
-// than holding on to its own copy. Safe for concurrent use.
-type ReceiverRegistry struct {
-	mu   sync.RWMutex
-	byID map[string]config.ResolvedReceiver
-}
-
-// NewReceiverRegistry builds a registry holding receivers (copied).
-func NewReceiverRegistry(receivers map[string]config.ResolvedReceiver) *ReceiverRegistry {
-	return &ReceiverRegistry{byID: maps.Clone(receivers)}
-}
-
-// Get returns receiver id, reporting false if there is none. A nil
-// registry holds no receivers.
-func (r *ReceiverRegistry) Get(id string) (config.ResolvedReceiver, bool) {
-	if r == nil {
-		return config.ResolvedReceiver{}, false
-	}
-
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	recv, ok := r.byID[id]
-
-	return recv, ok
-}
-
-// Snapshot returns a copy of every receiver, keyed by id.
-func (r *ReceiverRegistry) Snapshot() map[string]config.ResolvedReceiver {
-	if r == nil {
-		return nil
-	}
-
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	return maps.Clone(r.byID)
-}
-
-// Put adds recv, replacing any existing receiver with the same id.
-func (r *ReceiverRegistry) Put(recv config.ResolvedReceiver) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.byID == nil {
-		r.byID = make(map[string]config.ResolvedReceiver)
-	}
-
-	r.byID[recv.ID] = recv
-}
-
-// Delete removes receiver id, a no-op if there is none.
-func (r *ReceiverRegistry) Delete(id string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	delete(r.byID, id)
 }

@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/objectstore"
 	"nilswitt.dev/go-backup-tool/internal/backup/remoteauth"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
@@ -29,7 +29,7 @@ import (
 // is the live receiver status store, shared with whatever also displays it
 // (e.g. the dashboard's /api/receivers), so a write here is reflected there
 // immediately.
-func RegisterRoutes(mux *http.ServeMux, receivers *backup.ReceiverRegistry, receiverStatus *status.ReceiverStore, log *slog.Logger, db *store.Store) {
+func RegisterRoutes(mux *http.ServeMux, receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db *store.Store) {
 	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(receivers, receiverStatus, log, db))
 	mux.HandleFunc("PUT /api/v1/backups/{id}/{key...}", HandleReceiveBackupFile(receivers, receiverStatus, log, db))
 }
@@ -38,40 +38,40 @@ func RegisterRoutes(mux *http.ServeMux, receivers *backup.ReceiverRegistry, rece
 // file (the required file query parameter, a single path segment — see
 // config.ValidateFileName) of the multi-file backup key, stored at
 // key/file under the receiver's path, alongside the folder's
-// backup.MultiFileMarker. Otherwise it behaves exactly as
+// objectstore.MultiFileMarker. Otherwise it behaves exactly as
 // HandleReceiveObject. It's a route of its own, rather than a parameter on
 // that one, so an older receiver that knows nothing of multi-file backups
 // answers 404 instead of storing every file of a backup at the same key.
 // Only request-bound tokens (see remoteauth.Request) are accepted, since
 // every sender that knows this route also binds its tokens.
-func HandleReceiveBackupFile(receivers *backup.ReceiverRegistry, receiverStatus *status.ReceiverStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
+func HandleReceiveBackupFile(receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
 	return receiveObject(receivers, receiverStatus, log, db, true)
 }
 
 // HandleReceiveObject serves PUT /api/v1/objects/{id}/{key...}: after
 // authorizing the request against receivers (see authorizeReceiver), it
 // writes the request body to disk exactly as a type: local target would
-// (see backup.ReceiverTarget), so a remote target's PUT and this instance's
+// (see objectstore.ReceiverTarget), so a remote target's PUT and this instance's
 // own local-target writes share the same on-disk behavior (atomic
 // temp-file-then-rename) and retention tracking. It records the write for
-// retention (backup.RecordObjectWrite) but doesn't sweep for expired objects
+// retention (objectstore.RecordObjectWrite) but doesn't sweep for expired objects
 // itself — MonitorReceiverRetention sweeps every receiver on its own
 // one-minute timer instead, so a PUT's latency isn't paying for a sweep. An
 // optional creationTime query parameter (RFC3339, must be strictly before
-// the upload time — see backup.ParseCreationTime) lets the caller base
+// the upload time — see parseCreationTime) lets the caller base
 // retention on when the backup content was actually produced rather than on
 // upload time; when given, it's also stamped as the written file's mtime
-// (backup.SetObjectModTime) so the dashboard's file listing agrees with it.
+// (objectstore.SetObjectModTime) so the dashboard's file listing agrees with it.
 // Every attempt is recorded to status, win or lose, so /api/receivers
 // reflects it.
-func HandleReceiveObject(receivers *backup.ReceiverRegistry, receiverStatus *status.ReceiverStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
+func HandleReceiveObject(receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
 	return receiveObject(receivers, receiverStatus, log, db, false)
 }
 
 // receiveObject is HandleReceiveObject, or HandleReceiveBackupFile when
 // multiFile is set. key, as recorded in status and the receiver's event log,
 // is the object's path under the receiver: key/file for a backup's file.
-func receiveObject(receivers *backup.ReceiverRegistry, receiverStatus *status.ReceiverStore, log *slog.Logger, db *store.Store, multiFile bool) http.HandlerFunc {
+func receiveObject(receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db *store.Store, multiFile bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, cfg, t, bound, ok := resolveReceiverRequest(w, r, receivers, log, multiFile)
 		if !ok {
@@ -80,7 +80,7 @@ func receiveObject(receivers *backup.ReceiverRegistry, receiverStatus *status.Re
 
 		key := path.Join(cfg.Key, cfg.File)
 
-		createdAt, err := backup.ParseCreationTime(r.URL.Query().Get("creationTime"), time.Now())
+		createdAt, err := parseCreationTime(r.URL.Query().Get("creationTime"), time.Now())
 		if err != nil {
 			log.Warn("receiver: invalid creationTime", "id", recv.ID, "key", key, "err", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -95,7 +95,7 @@ func receiveObject(receivers *backup.ReceiverRegistry, receiverStatus *status.Re
 			body = &digestReader{r: r.Body, h: sha256.New(), want: bound.BodySHA256}
 		}
 
-		if err := backup.WriteLocalObject(cfg, t, body); err != nil {
+		if err := objectstore.WriteLocalObject(cfg, t, body); err != nil {
 			log.Warn("receiver: writing object failed", "id", recv.ID, "key", key, "err", err)
 			receiverStatus.Record(recv.ID, key, err)
 			recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, store.ReceiverEventReceive, key, 0, err)
@@ -111,25 +111,25 @@ func receiveObject(receivers *backup.ReceiverRegistry, receiverStatus *status.Re
 		}
 
 		if !cfg.CreatedAt.IsZero() {
-			if err := backup.SetObjectModTime(cfg, t, cfg.CreatedAt); err != nil {
+			if err := objectstore.SetObjectModTime(cfg, t, cfg.CreatedAt); err != nil {
 				log.Warn("receiver: setting object mod time failed", "id", recv.ID, "key", key, "err", err)
 			}
 		}
 
-		if err := backup.RecordObjectWrite(r.Context(), db, cfg, t, log); err != nil {
+		if err := objectstore.RecordObjectWrite(r.Context(), db, cfg, t, log); err != nil {
 			log.Warn("receiver: retention tracking failed", "id", recv.ID, "key", key, "err", err)
 		}
 
 		receiverStatus.Record(recv.ID, key, nil)
 
 		var size int64
-		if info, statErr := os.Stat(backup.LocalObjectPath(cfg, t)); statErr == nil { //nolint:gosec // cfg.Key/cfg.File are resolveReceiverRequest's already-validated key and file, not raw untrusted input
+		if info, statErr := os.Stat(objectstore.LocalObjectPath(cfg, t)); statErr == nil { //nolint:gosec // cfg.Key/cfg.File are resolveReceiverRequest's already-validated key and file, not raw untrusted input
 			size = info.Size()
 		}
 
 		recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, store.ReceiverEventReceive, key, size, nil)
 
-		log.Info("receiver: object written", "id", recv.ID, "key", key, "path", backup.LocalObjectPath(cfg, t))
+		log.Info("receiver: object written", "id", recv.ID, "key", key, "path", objectstore.LocalObjectPath(cfg, t))
 		w.WriteHeader(http.StatusCreated)
 	}
 }
@@ -140,7 +140,7 @@ func receiveObject(receivers *backup.ReceiverRegistry, receiverStatus *status.Re
 // either the id is unknown or the token doesn't verify. bound is the
 // request the token is bound to (see remoteauth.Request), for the caller
 // to check against r once it has sanitized the key.
-func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry, log *slog.Logger) (recv config.ResolvedReceiver, bound remoteauth.Request, ok bool) {
+func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *Registry, log *slog.Logger) (recv config.ResolvedReceiver, bound remoteauth.Request, ok bool) {
 	recv, exists := receivers.Get(r.PathValue("id"))
 	if !exists {
 		http.Error(w, "unknown receiver id", http.StatusNotFound)
@@ -299,18 +299,18 @@ func warnUnboundTokenOnce(receiverID, token string, log *slog.Logger) {
 
 // resolveReceiverRequest authorizes r against receivers (see
 // authorizeReceiver) and sanitizes its {key} path value (see
-// backup.SanitizeObjectKey) and — when multiFile — its required file query
+// objectstore.SanitizeObjectKey) and — when multiFile — its required file query
 // parameter (see config.ValidateFileName), writing an error response and
 // reporting ok as false if any step fails. On success it also builds the
 // cfg/t pair receiveObject needs to reuse WriteLocalObject as a type: local
-// target would (see backup.ReceiverTarget).
-func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry, log *slog.Logger, multiFile bool) (recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, bound remoteauth.Request, ok bool) {
+// target would (see objectstore.ReceiverTarget).
+func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *Registry, log *slog.Logger, multiFile bool) (recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, bound remoteauth.Request, ok bool) {
 	recv, bound, ok = authorizeReceiver(w, r, receivers, log)
 	if !ok {
 		return config.ResolvedReceiver{}, nil, nil, remoteauth.Request{}, false
 	}
 
-	key, err := backup.SanitizeObjectKey(r.PathValue("key"))
+	key, err := objectstore.SanitizeObjectKey(r.PathValue("key"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return config.ResolvedReceiver{}, nil, nil, remoteauth.Request{}, false
@@ -338,7 +338,7 @@ func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *b
 		return config.ResolvedReceiver{}, nil, nil, remoteauth.Request{}, false
 	}
 
-	return recv, &config.Config{Key: key, File: file}, backup.ReceiverTarget(recv), bound, true
+	return recv, &config.Config{Key: key, File: file}, objectstore.ReceiverTarget(recv), bound, true
 }
 
 // bearerToken extracts the token from an "Authorization: Bearer <token>"

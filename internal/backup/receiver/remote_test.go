@@ -10,16 +10,16 @@ import (
 	"testing"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/identity"
+	"nilswitt.dev/go-backup-tool/internal/backup/objectstore"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/remoteauth"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
-// newReceiverMux builds the same mux backup.StartWebUI registers the
+// newReceiverMux builds the same mux webui.StartWebUI registers the
 // receiver routes on, without a real listener, so an interop test can
 // exercise the client (UploadToRemote) against the real
 // server-side handlers rather than a hand-rolled stand-in.
@@ -27,7 +27,7 @@ func newReceiverMux(receivers map[string]config.ResolvedReceiver) *http.ServeMux
 	receiverStatus := status.NewReceiverStore(receivers)
 
 	mux := http.NewServeMux()
-	RegisterRoutes(mux, backup.NewReceiverRegistry(receivers), receiverStatus, discardLogger, nil)
+	RegisterRoutes(mux, NewRegistry(receivers), receiverStatus, discardLogger, nil)
 
 	return mux
 }
@@ -59,7 +59,7 @@ func TestRemoteTargetInteropMultiFileBackup(t *testing.T) {
 		}
 	}
 
-	listed, err := backup.ListReceiverFiles(recv)
+	listed, err := objectstore.ListReceiverFiles(recv)
 	if err != nil {
 		t.Fatalf("ListReceiverFiles() error: %v", err)
 	}
@@ -389,7 +389,7 @@ func newReceiverMuxWithDB(receivers map[string]config.ResolvedReceiver, db *stor
 	receiverStatus := status.NewReceiverStore(receivers)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(backup.NewReceiverRegistry(receivers), receiverStatus, discardLogger, db))
+	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(NewRegistry(receivers), receiverStatus, discardLogger, db))
 
 	return mux
 }

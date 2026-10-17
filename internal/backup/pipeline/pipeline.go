@@ -24,10 +24,10 @@ import (
 	"sync"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/dockerexec"
 	"nilswitt.dev/go-backup-tool/internal/backup/identity"
+	"nilswitt.dev/go-backup-tool/internal/backup/objectstore"
 	"nilswitt.dev/go-backup-tool/internal/backup/remoteauth"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
@@ -748,11 +748,11 @@ func uploadTargetAttempt(ctx context.Context, env runEnv, cfg *config.Config, t 
 
 	switch t.Kind {
 	case config.ServerKindLocal:
-		if err := backup.WriteLocalObject(cfg, t, f); err != nil {
+		if err := objectstore.WriteLocalObject(cfg, t, f); err != nil {
 			return err
 		}
 
-		if err := backup.RecordLocalWrite(ctx, env.db, cfg, t, log); err != nil {
+		if err := objectstore.RecordLocalWrite(ctx, env.db, cfg, t, log); err != nil {
 			// Retention tracking is best-effort auxiliary bookkeeping: the
 			// backup itself already succeeded, so a db hiccup here shouldn't
 			// fail the whole target (or trigger a retry of the upload).
@@ -833,7 +833,7 @@ func remoteAuthHeader(id *identity.ServerIdentity, t *config.Target, req remotea
 // body, never buffered. When cfg.CreatedAt is set, it's sent as the
 // creationTime query parameter (RFC3339), so the receiver bases retention on
 // when this run's backup content was actually produced rather than on
-// upload time — see backup.ParseCreationTime. A zero cfg.CreatedAt sends no
+// upload time — see receiver.parseCreationTime. A zero cfg.CreatedAt sends no
 // creationTime at all, matching the receiver's own upload-time fallback.
 // r must also implement io.Seeker (the staged *os.File does): it's read
 // once up front to sign its SHA-256 into the request token (see

@@ -15,10 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/objectstore"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
+	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
@@ -130,7 +131,7 @@ func TestHandleReceiverStatusIncludesStaleness(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers", nil)
 	rec := httptest.NewRecorder()
 
-	handleReceiverStatus(backup.NewReceiverRegistry(receivers), store, discardLogger)(rec, req)
+	handleReceiverStatus(receiver.NewRegistry(receivers), store, discardLogger)(rec, req)
 
 	var snapshots []status.ReceiverSnapshot
 	if err := json.Unmarshal(rec.Body.Bytes(), &snapshots); err != nil {
@@ -160,7 +161,7 @@ func TestHandleReceiverStatusFreshFileIsNotStale(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers", nil)
 	rec := httptest.NewRecorder()
 
-	handleReceiverStatus(backup.NewReceiverRegistry(receivers), store, discardLogger)(rec, req)
+	handleReceiverStatus(receiver.NewRegistry(receivers), store, discardLogger)(rec, req)
 
 	var snapshots []status.ReceiverSnapshot
 	if err := json.Unmarshal(rec.Body.Bytes(), &snapshots); err != nil {
@@ -181,7 +182,7 @@ func TestHandleReceiverStatusWithoutStaleAfterOmitsStaleness(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers", nil)
 	rec := httptest.NewRecorder()
 
-	handleReceiverStatus(backup.NewReceiverRegistry(receivers), store, discardLogger)(rec, req)
+	handleReceiverStatus(receiver.NewRegistry(receivers), store, discardLogger)(rec, req)
 
 	var snapshots []status.ReceiverSnapshot
 	if err := json.Unmarshal(rec.Body.Bytes(), &snapshots); err != nil {
@@ -441,13 +442,13 @@ func TestHandleReceiverFilesServesJSON(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleReceiverFiles(backup.NewReceiverRegistry(receivers), discardLogger)(rec, req)
+	handleReceiverFiles(receiver.NewRegistry(receivers), discardLogger)(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 
-	var files []backup.ReceiverFile
+	var files []objectstore.ReceiverFile
 	if err := json.Unmarshal(rec.Body.Bytes(), &files); err != nil {
 		t.Fatalf("decoding response body: %v", err)
 	}
@@ -465,7 +466,7 @@ func TestHandleReceiverFilesUnknownID(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleReceiverFiles(backup.NewReceiverRegistry(nil), discardLogger)(rec, req)
+	handleReceiverFiles(receiver.NewRegistry(nil), discardLogger)(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
@@ -511,7 +512,7 @@ func TestHandleDownloadFileServesContent(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleDownloadFile(backup.NewReceiverRegistry(receivers), discardLogger, nil, tickets, false, nil)(rec, req)
+	handleDownloadFile(receiver.NewRegistry(receivers), discardLogger, nil, tickets, false, nil)(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -558,7 +559,7 @@ func TestHandleDownloadFileRejectsMissingTicket(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	handleDownloadFile(backup.NewReceiverRegistry(receivers), discardLogger, nil, newDownloadTicketStore(), false, nil)(rec, req)
+	handleDownloadFile(receiver.NewRegistry(receivers), discardLogger, nil, newDownloadTicketStore(), false, nil)(rec, req)
 
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
@@ -840,7 +841,7 @@ func TestHandleDownloadFileRecordsDownloadEvents(t *testing.T) {
 	req.SetPathValue("key", "backup.gpg")
 	req.RemoteAddr = "198.51.100.1:4321"
 
-	handleDownloadFile(backup.NewReceiverRegistry(receivers), discardLogger, db, tickets, false, nil)(httptest.NewRecorder(), req)
+	handleDownloadFile(receiver.NewRegistry(receivers), discardLogger, db, tickets, false, nil)(httptest.NewRecorder(), req)
 
 	req = httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers/a/download/missing.gpg", nil)
 	req.SetPathValue("id", "a")
@@ -858,7 +859,7 @@ func TestHandleDownloadFileRecordsDownloadEvents(t *testing.T) {
 
 	req.URL.RawQuery = "ticket=" + ticket2
 
-	handleDownloadFile(backup.NewReceiverRegistry(receivers), discardLogger, db, tickets, false, nil)(httptest.NewRecorder(), req)
+	handleDownloadFile(receiver.NewRegistry(receivers), discardLogger, db, tickets, false, nil)(httptest.NewRecorder(), req)
 
 	events, err := db.ListDownloadEvents(t.Context(), 10)
 	if err != nil {
@@ -927,7 +928,7 @@ func TestHandleDownloadFileFiresDownloadWebhookOnSuccess(t *testing.T) {
 	req.SetPathValue("id", "a")
 	req.SetPathValue("key", "backup.gpg")
 
-	handleDownloadFile(backup.NewReceiverRegistry(receivers), discardLogger, nil, tickets, false, nil)(httptest.NewRecorder(), req)
+	handleDownloadFile(receiver.NewRegistry(receivers), discardLogger, nil, tickets, false, nil)(httptest.NewRecorder(), req)
 
 	select {
 	case got := <-calls:
@@ -976,7 +977,7 @@ func TestHandleDownloadFileDoesNotFireDownloadWebhookOnFailure(t *testing.T) {
 	req.SetPathValue("key", "missing.gpg")
 
 	rec := httptest.NewRecorder()
-	handleDownloadFile(backup.NewReceiverRegistry(receivers), discardLogger, nil, tickets, false, nil)(rec, req)
+	handleDownloadFile(receiver.NewRegistry(receivers), discardLogger, nil, tickets, false, nil)(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)

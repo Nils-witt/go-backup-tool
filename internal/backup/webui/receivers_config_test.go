@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
@@ -66,12 +65,12 @@ func testPublicKeyPEM(t *testing.T) string {
 // are managed by a fresh receiver.Manager over its own state db, with
 // notification "ops" defined and receiver paths restricted to the returned
 // base dir.
-func startReceiverConfigWebUI(t *testing.T, idp *testIDP) (*Server, *backup.ReceiverRegistry, string) {
+func startReceiverConfigWebUI(t *testing.T, idp *testIDP) (*Server, *receiver.Registry, string) {
 	t.Helper()
 
 	db := openTestStateDB(t)
 	baseDir := t.TempDir()
-	registry := backup.NewReceiverRegistry(nil)
+	registry := receiver.NewRegistry(nil)
 	receiverStatus := status.NewReceiverStore(nil)
 	notifications := notify.NewRegistry(map[string]notify.Notification{"ops": {ID: "ops", Webhook: &notify.Webhook{URL: "http://example.invalid"}}})
 	trustManager := trust.NewManager(db, trust.NewRegistry(nil), discardLogger)

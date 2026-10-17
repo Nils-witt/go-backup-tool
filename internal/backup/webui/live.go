@@ -11,7 +11,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 )
 
@@ -59,7 +59,7 @@ type liveStatusJSON struct {
 // which encodes an empty receiver list. Safe for concurrent use.
 type liveStatusCache struct {
 	statusStore   *status.Store
-	receivers     *backup.ReceiverRegistry
+	receivers     *receiver.Registry
 	receiverStore *status.ReceiverStore
 	log           *slog.Logger
 
@@ -209,7 +209,7 @@ func handleMintLiveTicket(tickets *liveTicketStore) http.HandlerFunc {
 // since a proxy that rewrites Host would otherwise never match it. The
 // socket is closed once logouts records a back-channel logout ending the
 // session of the user who minted the ticket.
-func handleLive(baseCtx context.Context, statusStore *status.Store, receivers *backup.ReceiverRegistry, receiverStore *status.ReceiverStore, tickets *liveTicketStore, logouts *ssoLogouts, devMode, trustProxyHeaders bool, log *slog.Logger) http.HandlerFunc {
+func handleLive(baseCtx context.Context, statusStore *status.Store, receivers *receiver.Registry, receiverStore *status.ReceiverStore, tickets *liveTicketStore, logouts *ssoLogouts, devMode, trustProxyHeaders bool, log *slog.Logger) http.HandlerFunc {
 	cache := &liveStatusCache{statusStore: statusStore, receivers: receivers, receiverStore: receiverStore, log: log}
 
 	var opts websocket.AcceptOptions

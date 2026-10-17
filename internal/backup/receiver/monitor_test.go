@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/objectstore"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
@@ -31,7 +31,7 @@ func testWebhookRegistry(wh notify.Webhook) *notify.Registry {
 	return notify.NewRegistry(map[string]notify.Notification{"test": {ID: "test", Webhook: &wh}})
 }
 
-// testServerIdentity builds a *backup.ServerIdentity backed by a freshly
+// testServerIdentity builds a *identity.ServerIdentity backed by a freshly
 // generated RSA key, for tests that need one to exercise signing without
 // touching disk.
 func testServerIdentity(t *testing.T) *identity.ServerIdentity {
@@ -436,14 +436,14 @@ func TestSweepAllReceiversRemovesExpiredObjects(t *testing.T) {
 	recv := config.ResolvedReceiver{ID: "a", Path: dir, Retention: time.Hour}
 	receivers := map[string]config.ResolvedReceiver{"a": recv}
 
-	tgt := backup.ReceiverTarget(recv)
+	tgt := objectstore.ReceiverTarget(recv)
 	cfg := &config.Config{Key: "old.gpg"}
 
-	if err := backup.WriteLocalObject(cfg, tgt, strings.NewReader("stale")); err != nil {
+	if err := objectstore.WriteLocalObject(cfg, tgt, strings.NewReader("stale")); err != nil {
 		t.Fatalf("WriteLocalObject() error: %v", err)
 	}
 
-	oldPath := backup.LocalObjectPath(cfg, tgt)
+	oldPath := objectstore.LocalObjectPath(cfg, tgt)
 
 	if err := db.SaveObjectWrite(context.Background(), tgt.ServerName, tgt.Bucket, oldPath, time.Now().Add(-2*time.Hour), int64(tgt.Retention/time.Second)); err != nil {
 		t.Fatalf("SaveObjectWrite() error: %v", err)
@@ -471,7 +471,7 @@ func TestMonitorReceiverRetentionNilDBIsNoop(t *testing.T) {
 
 	// Must return promptly rather than blocking on RunPeriodically's loop:
 	// a nil db means retention tracking is unavailable this run.
-	MonitorReceiverRetention(ctx, nil, backup.NewReceiverRegistry(receivers), discardLogger)
+	MonitorReceiverRetention(ctx, nil, NewRegistry(receivers), discardLogger)
 }
 
 func TestMonitorReceiverRetentionNoRetentionConfiguredIsNoop(t *testing.T) {
@@ -485,7 +485,7 @@ func TestMonitorReceiverRetentionNoRetentionConfiguredIsNoop(t *testing.T) {
 
 	// Same as the nil-db case: no receiver has retention: set, so there's
 	// nothing to sweep and this must return promptly.
-	MonitorReceiverRetention(ctx, db, backup.NewReceiverRegistry(receivers), discardLogger)
+	MonitorReceiverRetention(ctx, db, NewRegistry(receivers), discardLogger)
 }
 
 func TestSeedReceiverStatusFromState(t *testing.T) {

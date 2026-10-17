@@ -23,9 +23,9 @@ import (
 // top-level notifications: entries on a cron schedule. It's independent of
 // the web UI dashboard (webui.go) — useful for anyone monitoring
 // receivers/jobs by inbox or webhook, not just those watching the
-// dashboard — but reads the same receiver_events/job_runs history
-// (schedule_state.go) and on-disk receiver state (receiver.go) the
-// dashboard itself uses. Unset (the default) disables it.
+// dashboard — but reads the same receiver_events/job_runs history (the
+// store package) and on-disk receiver state (objectstore/receiverfiles.go)
+// the dashboard itself uses. Unset (the default) disables it.
 type FileReport struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
 

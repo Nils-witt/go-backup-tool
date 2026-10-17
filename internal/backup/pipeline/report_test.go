@@ -13,7 +13,6 @@ import (
 
 	"github.com/robfig/cron/v3"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	reportpkg "nilswitt.dev/go-backup-tool/internal/backup/report"
@@ -365,7 +364,7 @@ func TestRunReportLoopPicksUpSettingsChanges(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	go RunReportLoop(ctx, "", func() []string { return nil }, live, notifications, backup.NewReceiverRegistry(nil), nil, nil, discardLogger)
+	go RunReportLoop(ctx, "", func() []string { return nil }, live, notifications, func() map[string]config.ResolvedReceiver { return map[string]config.ResolvedReceiver{} }, nil, nil, discardLogger)
 
 	select {
 	case <-sent:

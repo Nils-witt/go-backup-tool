@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/objectstore"
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
@@ -121,14 +121,14 @@ type ticketJSON struct {
 // dashboard's JS calls this — with its Authorization: Bearer header — right
 // before navigating the browser to the matching GET, which can't carry that
 // header itself (see handleDownloadFile).
-func handleMintDownloadTicket(receivers *backup.ReceiverRegistry, tickets *downloadTicketStore) http.HandlerFunc {
+func handleMintDownloadTicket(receivers *receiver.Registry, tickets *downloadTicketStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := lookupReceiver(w, r, receivers)
 		if !ok {
 			return
 		}
 
-		key, err := backup.SanitizeObjectKey(r.PathValue("key"))
+		key, err := objectstore.SanitizeObjectKey(r.PathValue("key"))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -165,14 +165,14 @@ func handleMintDownloadTicket(receivers *backup.ReceiverRegistry, tickets *downl
 // section (see handleDownloadEvents); a write failure there is only logged,
 // not surfaced to the browser, mirroring recordLogin's own tolerance for a
 // login log write failure.
-func handleDownloadFile(receivers *backup.ReceiverRegistry, log *slog.Logger, db *store.Store, tickets *downloadTicketStore, trustProxyHeaders bool, queue *notify.Queue) http.HandlerFunc {
+func handleDownloadFile(receivers *receiver.Registry, log *slog.Logger, db *store.Store, tickets *downloadTicketStore, trustProxyHeaders bool, queue *notify.Queue) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := lookupReceiver(w, r, receivers)
 		if !ok {
 			return
 		}
 
-		key, err := backup.SanitizeObjectKey(r.PathValue("key"))
+		key, err := objectstore.SanitizeObjectKey(r.PathValue("key"))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

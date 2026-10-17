@@ -12,10 +12,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/objectstore"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
@@ -99,7 +99,7 @@ func (r *Runner) Failed() bool {
 }
 
 // SeedStatusFromState initializes store's jobs from previously persisted
-// last-run info (see backup.ReadLastRun), so a restart's web UI can still
+// last-run info (see store.Store.GetLastRun), so a restart's web UI can still
 // show when each job last ran instead of every job reverting to "never"
 // until it next runs. Called once at startup, before the jobs' own
 // goroutines start.
@@ -853,7 +853,7 @@ func SweepStartupRetention(ctx context.Context, db *store.Store, jobs []*config.
 
 			log.Debug("startup retention sweep", "server", t.ServerName, "path", t.LocalPath, "retention", t.Retention)
 
-			if err := backup.SweepRetentionForTarget(ctx, db, t, log); err != nil {
+			if err := objectstore.SweepRetentionForTarget(ctx, db, t, log); err != nil {
 				log.Warn("startup retention sweep failed", "server", t.ServerName, "err", err)
 			}
 		}

@@ -1,10 +1,9 @@
-// Package backup holds go-backup-tool's shared run-time state and storage
-// primitives, used by both a job's own uploads and the receiver API: local
-// object read/write (this file), retention tracking and sweeping
-// (retention.go), receiver status/listing (receiver.go), job/target status
-// for the web UI (status.go), and the periodic-loop helper (periodic.go)
-// they're all built on.
-package backup
+// Package objectstore is the on-disk object layout shared by a job's local
+// targets and the receiver API: writing an object (one flat file, or one
+// file of a multi-file backup under its marker directory), the paths and
+// listings derived from that layout, and retention tracking and sweeping
+// in the state db.
+package objectstore
 
 import (
 	"errors"

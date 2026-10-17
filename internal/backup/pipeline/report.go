@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/objectstore"
 	reportpkg "nilswitt.dev/go-backup-tool/internal/backup/report"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
@@ -25,10 +25,11 @@ import (
 // report edited in the web UI) reschedules immediately. db may be nil (the
 // state db couldn't be opened at startup); the report is still sent, just
 // without any receiver_events/job_runs history (see buildReport).
-// Receivers and notifications are read from their live registries at each
-// send, and jobs from jobNames, so ones managed in the web UI are included.
+// Receivers (from receivers, e.g. receiver.Registry.Snapshot), notifications
+// (from their live registry) and jobs (from jobNames) are read at each send,
+// so ones managed in the web UI are included.
 // serverName is this instance's {server_name} (see config.RunConfig.ServerName).
-func RunReportLoop(ctx context.Context, serverName string, jobNames func() []string, live *reportpkg.Live, notifications *notify.Registry, receivers *backup.ReceiverRegistry, db *store.Store, queue *notify.Queue, log *slog.Logger) {
+func RunReportLoop(ctx context.Context, serverName string, jobNames func() []string, live *reportpkg.Live, notifications *notify.Registry, receivers func() map[string]config.ResolvedReceiver, db *store.Store, queue *notify.Queue, log *slog.Logger) {
 	log = log.With("component", "report")
 
 	var prev time.Time // zero until the first report in this process has been sent
@@ -62,7 +63,7 @@ func RunReportLoop(ctx context.Context, serverName string, jobNames func() []str
 			start = next.Add(-24 * time.Hour)
 		}
 
-		sendReport(ctx, serverName, jobNames(), notifications.Resolve(settings.Notifications, log), receivers.Snapshot(), db, start, next, queue, log)
+		sendReport(ctx, serverName, jobNames(), notifications.Resolve(settings.Notifications, log), receivers(), db, start, next, queue, log)
 		prev = next
 	}
 }
@@ -139,7 +140,7 @@ type reportContent struct {
 // buildReport summarizes rc's configured receivers' and jobs' activity in
 // the window from start to end: files received/runs completed and errors
 // from receiver_events/job_runs (db, skipped if nil), and current receiver
-// staleness read live from disk (see backup.LastReceivedAt), mirroring the
+// staleness read live from disk (see objectstore.LastReceivedAt), mirroring the
 // dashboard's own annotateReceiverStaleness so the two never disagree. A
 // query failure is logged and leaves that section empty rather than failing
 // the whole report — a partial report is better than none, matching this
@@ -156,7 +157,7 @@ func buildReport(ctx context.Context, serverName string, jobNames []string, rece
 // buildReceiverReport summarizes receivers' activity in the
 // window from start to end: files received and errors from receiver_events
 // (db, skipped if nil), and current staleness read live from disk (see
-// backup.LastReceivedAt), mirroring the dashboard's own
+// objectstore.LastReceivedAt), mirroring the dashboard's own
 // annotateReceiverStaleness so the two never disagree. A query failure is
 // logged and leaves that section empty rather than failing the whole
 // report — a partial report is better than none, matching this codebase's
@@ -206,7 +207,7 @@ func buildReceiverReport(ctx context.Context, receivers map[string]config.Resolv
 			continue
 		}
 
-		lastSeen, ok, err := backup.LastReceivedAt(recv)
+		lastSeen, ok, err := objectstore.LastReceivedAt(recv)
 		if err != nil {
 			log.Warn("daily report: checking receiver staleness failed", "id", id, "err", err)
 			continue
