@@ -135,5 +135,5 @@ jobs:
           # Pinned so a new linter release can't break CI unannounced;
           # bump deliberately. (The pre-commit hook uses whatever
           # golangci-lint is on PATH, so keep a local install close to this.)
-          version: v2.14.0
+          version: v2.15.0
           args: --timeout 5m
