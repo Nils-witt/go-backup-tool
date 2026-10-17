@@ -32,11 +32,56 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/tarball"
 )
 
-// remoteHTTPClient is shared by every remote target's upload/delete
-// requests. It sets no client-side timeout: the request's context (derived
-// from the run's overall -timeout, if any) governs cancellation instead,
-// consistent with how local filesystem writes are bounded only by ctx.
-var remoteHTTPClient = &http.Client{}
+// remoteDefaultClient is shared by every remote target's upload/delete
+// requests that use Go's default TLS verification. It sets no client-side
+// timeout: the request's context (derived from the run's overall -timeout,
+// if any) governs cancellation instead, consistent with how local
+// filesystem writes are bounded only by ctx.
+var remoteDefaultClient = &http.Client{}
+
+// remoteTLSClients caches one client per distinct config.TargetTLS (see
+// remoteHTTPClient), so targets with the same settings share connections.
+// Entries are never evicted: there is one per TLS setting ever used, which
+// only changes when an admin edits a server.
+var (
+	remoteTLSClientsMu sync.Mutex
+	remoteTLSClients   = map[config.TargetTLS]*http.Client{}
+)
+
+// remoteHTTPClient returns the client for t's TLS settings:
+// remoteDefaultClient for the default verification, otherwise a cached
+// client whose transport is http.DefaultTransport's settings plus t's
+// tls.Config, and, like remoteDefaultClient, no client-side timeout.
+func remoteHTTPClient(t *config.Target) (*http.Client, error) {
+	if t.TLS.IsZero() {
+		return remoteDefaultClient, nil
+	}
+
+	remoteTLSClientsMu.Lock()
+	defer remoteTLSClientsMu.Unlock()
+
+	if c, ok := remoteTLSClients[t.TLS]; ok {
+		return c, nil
+	}
+
+	tlsCfg, err := t.TLS.ClientConfig()
+	if err != nil {
+		return nil, fmt.Errorf("server %q: %w", t.ServerName, err)
+	}
+
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, errors.New("http.DefaultTransport is not an *http.Transport")
+	}
+
+	transport := base.Clone()
+	transport.TLSClientConfig = tlsCfg
+
+	c := &http.Client{Transport: transport}
+	remoteTLSClients[t.TLS] = c
+
+	return c, nil
+}
 
 // TargetUploadRetryInterval is how long a failed target upload waits before
 // Runner.RunOutstandingUploadRetries attempts it again.
@@ -820,7 +865,12 @@ func doAuthenticatedRemoteRequest(ctx context.Context, cfg *config.Config, t *co
 		req.Header.Set("Content-Type", contentType)
 	}
 
-	resp, err := remoteHTTPClient.Do(req)
+	client, err := remoteHTTPClient(t)
+	if err != nil {
+		return err
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("sending request: %w", err)
 	}

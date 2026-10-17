@@ -14,16 +14,23 @@ import (
 // (see internal/backup/jobs' Manager), managed in the web UI. Fields are kept
 // exactly as entered and validated (config.ResolveServer) on every load.
 type serverModel struct {
-	Name       string    `gorm:"column:name;primaryKey"`
-	Type       string    `gorm:"column:type;not null"`
-	Endpoint   string    `gorm:"column:endpoint;not null;default:''"`
-	ServerUUID string    `gorm:"column:server_uuid;not null;default:''"`
-	Path       string    `gorm:"column:path;not null;default:''"`
-	Retention  string    `gorm:"column:retention;not null;default:''"`
-	CreatedAt  time.Time `gorm:"column:created_at;not null"`
-	CreatedBy  string    `gorm:"column:created_by;not null"`
-	UpdatedAt  time.Time `gorm:"column:updated_at;not null"`
-	UpdatedBy  string    `gorm:"column:updated_by;not null"`
+	Name       string `gorm:"column:name;primaryKey"`
+	Type       string `gorm:"column:type;not null"`
+	Endpoint   string `gorm:"column:endpoint;not null;default:''"`
+	ServerUUID string `gorm:"column:server_uuid;not null;default:''"`
+	Path       string `gorm:"column:path;not null;default:''"`
+	Retention  string `gorm:"column:retention;not null;default:''"`
+
+	// TLS verification for a remote server's https endpoint (see
+	// config.TargetTLS); all zero is Go's default verification.
+	TLSInsecureSkipVerify bool   `gorm:"column:tls_insecure_skip_verify;not null;default:false"`
+	TLSSkipHostnameVerify bool   `gorm:"column:tls_skip_hostname_verify;not null;default:false"`
+	TLSCA                 string `gorm:"column:tls_ca;not null;default:''"`
+
+	CreatedAt time.Time `gorm:"column:created_at;not null"`
+	CreatedBy string    `gorm:"column:created_by;not null"`
+	UpdatedAt time.Time `gorm:"column:updated_at;not null"`
+	UpdatedBy string    `gorm:"column:updated_by;not null"`
 }
 
 func (serverModel) TableName() string { return "servers" }
@@ -36,10 +43,15 @@ type ServerConfig struct {
 	ServerUUID string
 	Path       string
 	Retention  string
-	CreatedAt  time.Time
-	CreatedBy  string
-	UpdatedAt  time.Time
-	UpdatedBy  string
+
+	TLSInsecureSkipVerify bool
+	TLSSkipHostnameVerify bool
+	TLSCA                 string
+
+	CreatedAt time.Time
+	CreatedBy string
+	UpdatedAt time.Time
+	UpdatedBy string
 }
 
 // commandModel is commands: every named command — shell or tar — a job or a job target's
@@ -224,7 +236,10 @@ func (s *Store) UpdateServerConfig(ctx context.Context, c ServerConfig) error {
 	c.UpdatedAt = c.UpdatedAt.UTC()
 	m := serverModel(c)
 
-	return updateRow(ctx, s.db, &m, "name", c.Name, []string{"type", "endpoint", "server_uuid", "path", "retention"}, "server", ErrServerNotFound)
+	return updateRow(ctx, s.db, &m, "name", c.Name, []string{
+		"type", "endpoint", "server_uuid", "path", "retention",
+		"tls_insecure_skip_verify", "tls_skip_hostname_verify", "tls_ca",
+	}, "server", ErrServerNotFound)
 }
 
 // DeleteServerConfig removes the stored server name, returning

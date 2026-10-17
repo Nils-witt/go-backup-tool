@@ -83,6 +83,22 @@ servers:
     # page), recorded so the dashboard can tell exactly which instance this
     # server delivers to. Only valid for type: remote.
     # server-uuid: "6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b"
+    # Optional TLS verification of an https endpoint (type: remote only).
+    # By default the receiver's certificate must chain to the system roots
+    # and name the endpoint's host.
+    # tls-ca: trust these PEM certificate(s) instead of the system roots,
+    # e.g. a private CA or the receiver's self-signed certificate.
+    # tls-ca: |
+    #   -----BEGIN CERTIFICATE-----
+    #   ...
+    #   -----END CERTIFICATE-----
+    # tls-skip-hostname-verify: still verify the chain, but not that the
+    # certificate names the endpoint's host (e.g. reached by IP address).
+    # tls-skip-hostname-verify: true
+    # tls-insecure-skip-verify: accept any certificate. Anyone able to
+    # intercept the connection can impersonate the receiver; prefer tls-ca.
+    # Can't be combined with the two above.
+    # tls-insecure-skip-verify: true
     # No auth field here: this instance authenticates to the destination
     # with its own generated identity (see above). Give the destination
     # instance's operator this instance's server ID and public key (both on

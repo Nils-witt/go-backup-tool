@@ -45,7 +45,7 @@ func auditResources(db *store.Store, keyring *gpgkeys.Keyring) map[string]auditR
 		"job-configs": {snapshot: getStored(db.GetJobConfig, jobs.FileJobFrom)},
 		"server-configs": {snapshot: func(ctx context.Context, name string) (any, bool, error) {
 			return findStored(ctx, db.ListServerConfigs, func(sc store.ServerConfig) (config.FileServer, bool) {
-				return config.FileServer{Name: sc.Name, Type: sc.Type, Endpoint: sc.Endpoint, ServerUUID: sc.ServerUUID, Path: sc.Path, Retention: sc.Retention}, sc.Name == name
+				return jobs.FileServerFrom(sc), sc.Name == name
 			})
 		}},
 		"command-configs": {snapshot: func(ctx context.Context, id string) (any, bool, error) {

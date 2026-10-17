@@ -337,7 +337,7 @@ func (m *Manager) readStoredLocked(ctx context.Context) {
 	}
 
 	for _, sc := range servers {
-		m.serverDefs[sc.Name] = fromStoreServer(sc)
+		m.serverDefs[sc.Name] = FileServerFrom(sc)
 	}
 
 	commands, err := m.db.ListCommandConfigs(ctx)

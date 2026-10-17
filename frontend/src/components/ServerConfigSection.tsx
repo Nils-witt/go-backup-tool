@@ -6,15 +6,19 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { EditingDisabledNotice } from "./EditingDisabledNotice";
 import { fmtTime } from "../lib/format";
 import Alert from "@mui/material/Alert";
+import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
+import Chip from "@mui/material/Chip";
 import Dialog from "@mui/material/Dialog";
 import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
 import DialogTitle from "@mui/material/DialogTitle";
+import FormControlLabel from "@mui/material/FormControlLabel";
 import IconButton from "@mui/material/IconButton";
 import MenuItem from "@mui/material/MenuItem";
 import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
+import Switch from "@mui/material/Switch";
 import Table from "@mui/material/Table";
 import TableBody from "@mui/material/TableBody";
 import TableCell from "@mui/material/TableCell";
@@ -35,6 +39,9 @@ const EMPTY_FORM: ServerDefinitionJSON = {
   server_uuid: "",
   path: "",
   retention: "",
+  tls_insecure_skip_verify: false,
+  tls_skip_hostname_verify: false,
+  tls_ca: "",
 };
 
 function errorText(err: unknown): string {
@@ -42,9 +49,12 @@ function errorText(err: unknown): string {
 }
 
 // definitionOf keeps only the fields the server's type uses, so switching
-// type in the dialog doesn't send the other type's leftovers.
+// type in the dialog doesn't send the other type's leftovers. Ignoring
+// certificate errors likewise drops the hostname and CA settings it
+// overrides.
 function definitionOf(form: ServerDefinitionJSON): ServerDefinitionJSON {
   const name = form.name.trim();
+  const insecure = !!form.tls_insecure_skip_verify;
   return form.type === "remote"
     ? {
         name,
@@ -53,6 +63,9 @@ function definitionOf(form: ServerDefinitionJSON): ServerDefinitionJSON {
         server_uuid: form.server_uuid.trim(),
         path: "",
         retention: "",
+        tls_insecure_skip_verify: insecure,
+        tls_skip_hostname_verify: !insecure && !!form.tls_skip_hostname_verify,
+        tls_ca: insecure ? "" : (form.tls_ca ?? "").trim(),
       }
     : {
         name,
@@ -61,7 +74,97 @@ function definitionOf(form: ServerDefinitionJSON): ServerDefinitionJSON {
         server_uuid: "",
         path: form.path.trim(),
         retention: form.retention.trim(),
+        tls_insecure_skip_verify: false,
+        tls_skip_hostname_verify: false,
+        tls_ca: "",
       };
+}
+
+// TLSFields edits a remote server's certificate verification settings.
+function TLSFields({
+  form,
+  set,
+}: {
+  form: ServerDefinitionJSON;
+  set: (patch: Partial<ServerDefinitionJSON>) => void;
+}) {
+  const insecure = form.tls_insecure_skip_verify;
+  const https = /^https:/i.test(form.endpoint.trim());
+
+  return (
+    <>
+      <Typography variant="subtitle2" sx={{ pt: 1 }}>
+        TLS
+      </Typography>
+      {!https ? (
+        <Typography variant="body2" color="text.secondary">
+          These settings apply to an https endpoint only.
+        </Typography>
+      ) : null}
+      <FormControlLabel
+        control={
+          <Switch
+            checked={insecure}
+            onChange={(e) => set({ tls_insecure_skip_verify: e.target.checked })}
+            disabled={!https && !insecure}
+          />
+        }
+        label="Ignore certificate errors"
+      />
+      {insecure ? (
+        <Alert severity="warning">
+          The receiver&apos;s certificate isn&apos;t checked at all, so anyone able to intercept the
+          connection can impersonate it. Prefer a custom CA.
+        </Alert>
+      ) : null}
+      <Box>
+        <FormControlLabel
+          control={
+            <Switch
+              checked={!insecure && !form.tls_skip_hostname_verify}
+              onChange={(e) => set({ tls_skip_hostname_verify: !e.target.checked })}
+              disabled={insecure || (!https && !form.tls_skip_hostname_verify)}
+            />
+          }
+          label="Require hostname"
+        />
+        <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+          Off still verifies the certificate chain, but not that it was issued for the
+          endpoint&apos;s host, e.g. when it&apos;s reached by IP address.
+        </Typography>
+      </Box>
+      <TextField
+        label="Custom CA"
+        value={insecure ? "" : form.tls_ca}
+        onChange={(e) => set({ tls_ca: e.target.value })}
+        helperText="Optional. PEM certificate(s) trusted instead of the system roots."
+        placeholder="-----BEGIN CERTIFICATE-----"
+        disabled={insecure || (!https && !form.tls_ca)}
+        multiline
+        minRows={3}
+        slotProps={{ htmlInput: { spellCheck: false, style: { fontFamily: "monospace" } } }}
+      />
+    </>
+  );
+}
+
+// tlsChips summarizes a remote server's non-default TLS settings.
+function tlsChips(s: ServerConfigJSON) {
+  const chips = [];
+  if (s.tls_insecure_skip_verify) {
+    chips.push(<Chip key="insecure" size="small" color="warning" label="TLS unverified" />);
+  }
+  if (s.tls_ca) {
+    chips.push(<Chip key="ca" size="small" variant="outlined" label="custom CA" />);
+  }
+  if (s.tls_skip_hostname_verify) {
+    chips.push(<Chip key="hostname" size="small" variant="outlined" label="no hostname check" />);
+  }
+  return chips.length ? (
+    <Stack direction="row" spacing={0.5} useFlexGap sx={{ flexWrap: "wrap", mt: 0.5 }}>
+      {chips}
+    </Stack>
+  ) : null;
 }
 
 function ServerDialog({
@@ -148,6 +251,7 @@ function ServerDialog({
                 helperText="Optional. The destination instance's UUID, shown on its Identity page."
                 slotProps={{ htmlInput: { spellCheck: false } }}
               />
+              <TLSFields form={form} set={set} />
             </>
           )}
         </Stack>
@@ -300,6 +404,7 @@ export function ServerConfigSection() {
                         ID <code>{s.server_uuid}</code>
                       </Typography>
                     ) : null}
+                    {s.type === "remote" ? tlsChips(s) : null}
                   </TableCell>
                   <TableCell>{s.type === "remote" ? "—" : s.retention || "forever"}</TableCell>
                   <TableCell sx={{ overflowWrap: "anywhere" }}>

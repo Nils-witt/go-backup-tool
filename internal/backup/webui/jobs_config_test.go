@@ -124,6 +124,36 @@ func checkJobConfigLists(t *testing.T, srv *Server, admin string) {
 	}
 }
 
+func TestServerConfigAPITLS(t *testing.T) {
+	t.Parallel()
+
+	idp := newTestIDP(t)
+	srv, _ := startJobsWebUI(t, idp, true)
+
+	admin := idp.token(t, "erin", map[string]any{"preferred_username": "erin", "groups": []string{"admins"}})
+
+	offsite := config.FileServer{Name: "offsite", Type: "remote", Endpoint: "https://10.0.0.5:8443", TLSInsecureSkipVerify: true}
+	badCA := config.FileServer{Name: "offsite", Type: "remote", Endpoint: "https://10.0.0.5:8443", TLSSkipHostnameVerify: true, TLSCA: "garbage"}
+	plainHTTP := config.FileServer{Name: "plain", Type: "remote", Endpoint: "http://10.0.0.5:8080", TLSInsecureSkipVerify: true}
+
+	for _, c := range []receiverConfigCall{
+		{"create insecure server", http.MethodPost, "/api/server-configs", admin, offsite, http.StatusCreated},
+		{"tls on an http endpoint", http.MethodPost, "/api/server-configs", admin, plainHTTP, http.StatusBadRequest},
+		{"invalid ca", http.MethodPut, "/api/server-configs/offsite", admin, badCA, http.StatusBadRequest},
+	} {
+		c.run(t, srv)
+	}
+
+	var servers serverConfigListJSON
+	if code := doJSON(t, srv, http.MethodGet, "/api/server-configs", admin, &servers); code != http.StatusOK {
+		t.Fatalf("admin server list = %d", code)
+	}
+
+	if len(servers.Servers) != 1 || !servers.Servers[0].TLSInsecureSkipVerify || servers.Servers[0].TLSCA != "" {
+		t.Errorf("servers = %+v, want offsite stored as created", servers)
+	}
+}
+
 func TestJobConfigAPIEditingDisabled(t *testing.T) {
 	t.Parallel()
 

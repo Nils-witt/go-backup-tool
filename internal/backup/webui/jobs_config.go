@@ -118,17 +118,18 @@ func handleListServerConfigs(m *jobs.Manager, log *slog.Logger) http.HandlerFunc
 			return
 		}
 
-		out := serverConfigListJSON{Editing: m.Editing(), Servers: make([]serverConfigJSON, len(list))}
-		for i, ms := range list {
-			sc := ms.ServerConfig
-			out.Servers[i] = serverConfigJSON{
-				Name: sc.Name, Type: sc.Type, Endpoint: sc.Endpoint, ServerUUID: sc.ServerUUID, Path: sc.Path, Retention: sc.Retention,
-				auditJSON: audit(sc.CreatedAt, sc.CreatedBy, sc.UpdatedAt, sc.UpdatedBy),
-				UsedBy:    nonNil(ms.UsedBy), Error: ms.Error,
-			}
-		}
+		writeJSON(w, serverConfigListJSON{Editing: m.Editing(), Servers: convertAll(list, serverConfigOf)})
+	}
+}
 
-		writeJSON(w, out)
+// serverConfigOf is ms's wire shape.
+func serverConfigOf(ms jobs.ManagedServer) serverConfigJSON {
+	sc := ms.ServerConfig
+
+	return serverConfigJSON{
+		FileServer: jobs.FileServerFrom(sc),
+		auditJSON:  audit(sc.CreatedAt, sc.CreatedBy, sc.UpdatedAt, sc.UpdatedBy),
+		UsedBy:     nonNil(ms.UsedBy), Error: ms.Error,
 	}
 }
 
@@ -141,18 +142,30 @@ func handleListCommandConfigs(m *jobs.Manager, log *slog.Logger) http.HandlerFun
 			return
 		}
 
-		out := commandConfigListJSON{Editing: m.Editing(), Commands: make([]commandConfigJSON, len(list))}
-		for i, mc := range list {
-			cc := mc.CommandConfig
-			out.Commands[i] = commandConfigJSON{
-				FileCommand: jobs.FileCommandFrom(cc),
-				auditJSON:   audit(cc.CreatedAt, cc.CreatedBy, cc.UpdatedAt, cc.UpdatedBy),
-				UsedBy:      nonNil(mc.UsedBy), Error: mc.Error,
-			}
-		}
-
-		writeJSON(w, out)
+		writeJSON(w, commandConfigListJSON{Editing: m.Editing(), Commands: convertAll(list, commandConfigOf)})
 	}
+}
+
+// commandConfigOf is mc's wire shape.
+func commandConfigOf(mc jobs.ManagedCommand) commandConfigJSON {
+	cc := mc.CommandConfig
+
+	return commandConfigJSON{
+		FileCommand: jobs.FileCommandFrom(cc),
+		auditJSON:   audit(cc.CreatedAt, cc.CreatedBy, cc.UpdatedAt, cc.UpdatedBy),
+		UsedBy:      nonNil(mc.UsedBy), Error: mc.Error,
+	}
+}
+
+// convertAll returns conv applied to each of in, as a non-nil slice so it
+// encodes as [] rather than null.
+func convertAll[In, Out any](in []In, conv func(In) Out) []Out {
+	out := make([]Out, len(in))
+	for i, v := range in {
+		out[i] = conv(v)
+	}
+
+	return out
 }
 
 func audit(createdAt time.Time, createdBy string, updatedAt time.Time, updatedBy string) auditJSON {

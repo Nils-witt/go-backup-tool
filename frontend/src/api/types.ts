@@ -382,6 +382,14 @@ export interface ServerDefinitionJSON {
   server_uuid: string;
   path: string;
   retention: string;
+  // TLS verification of a remote https endpoint. tls_insecure_skip_verify
+  // accepts any certificate (and excludes the other two);
+  // tls_skip_hostname_verify still verifies the chain but not that it names
+  // the endpoint's host; tls_ca is PEM certificates that replace the system
+  // roots. All unset is the default verification.
+  tls_insecure_skip_verify: boolean;
+  tls_skip_hostname_verify: boolean;
+  tls_ca: string;
 }
 
 // ServerConfigJSON mirrors serverConfigJSON: one stored server, the jobs

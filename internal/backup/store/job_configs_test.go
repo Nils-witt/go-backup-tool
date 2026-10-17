@@ -136,6 +136,67 @@ func TestServerConfigServerUUID(t *testing.T) {
 	}
 }
 
+// serverTLSOf is sc's TLS settings, for comparing them at once.
+func serverTLSOf(sc ServerConfig) [3]any {
+	return [3]any{sc.TLSInsecureSkipVerify, sc.TLSSkipHostnameVerify, sc.TLSCA}
+}
+
+// onlyServerTLS returns the TLS settings stored for server name.
+func onlyServerTLS(t *testing.T, db *Store, name string) [3]any {
+	t.Helper()
+
+	servers, err := db.ListServerConfigs(t.Context())
+	if err != nil {
+		t.Fatalf("ListServerConfigs() error: %v", err)
+	}
+
+	for _, sc := range servers {
+		if sc.Name == name {
+			return serverTLSOf(sc)
+		}
+	}
+
+	t.Fatalf("ListServerConfigs() = %+v, want server %q", servers, name)
+
+	return [3]any{}
+}
+
+func TestServerConfigTLS(t *testing.T) {
+	t.Parallel()
+
+	db := openTestStore(t)
+	ctx := t.Context()
+
+	remote := ServerConfig{Name: "sibling", Type: "remote", Endpoint: "https://x", TLSSkipHostnameVerify: true, TLSCA: "-----BEGIN CERTIFICATE-----"}
+	if err := db.CreateServerConfig(ctx, remote); err != nil {
+		t.Fatalf("CreateServerConfig() error: %v", err)
+	}
+
+	if got := onlyServerTLS(t, db, "sibling"); got != serverTLSOf(remote) {
+		t.Errorf("TLS after create = %v, want %v", got, serverTLSOf(remote))
+	}
+
+	// Switching to insecure must also clear the other two: false and ""
+	// are written, not skipped as zero values.
+	remote.TLSInsecureSkipVerify, remote.TLSSkipHostnameVerify, remote.TLSCA = true, false, ""
+	if err := db.UpdateServerConfig(ctx, remote); err != nil {
+		t.Fatalf("UpdateServerConfig() error: %v", err)
+	}
+
+	if got := onlyServerTLS(t, db, "sibling"); got != serverTLSOf(remote) {
+		t.Errorf("TLS after update = %v, want %v", got, serverTLSOf(remote))
+	}
+
+	other := ServerConfig{Name: "other", Type: "remote", Endpoint: "https://y", TLSInsecureSkipVerify: true}
+	if imported, err := db.ImportServerConfigs(ctx, []ServerConfig{other}); err != nil || !slices.Equal(imported, []string{"other"}) {
+		t.Fatalf("ImportServerConfigs() = %v, %v", imported, err)
+	}
+
+	if got := onlyServerTLS(t, db, "other"); got != serverTLSOf(other) {
+		t.Errorf("TLS after import = %v, want %v", got, serverTLSOf(other))
+	}
+}
+
 func TestCommandConfigCRUD(t *testing.T) {
 	t.Parallel()
 

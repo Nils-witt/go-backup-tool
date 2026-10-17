@@ -203,6 +203,10 @@ type Target struct {
 	// snapshots, not part of authentication.
 	ServerUUID string
 
+	// TLS is a remote server's certificate verification settings; the
+	// zero value is Go's default verification.
+	TLS TargetTLS
+
 	// LocalPath is the local server's root directory (only set when
 	// kind == serverKindLocal). The object is written to
 	// LocalPath/bucket/key.
@@ -583,6 +587,15 @@ type FileServer struct {
 	ServerUUID string `yaml:"server-uuid" json:"server_uuid"` // remote only, optional: the destination instance's server UUID
 	Path       string `yaml:"path" json:"path"`               // local only: root directory backups are written under
 	Retention  string `yaml:"retention" json:"retention"`     // local only: e.g. "7d" or "168h"; unset/"0" keeps objects forever
+
+	// TLS verification of an https endpoint (remote only; see TargetTLS).
+	// TLSInsecureSkipVerify accepts any certificate and excludes the other
+	// two. TLSSkipHostnameVerify still verifies the chain but not that it
+	// names the endpoint's host. TLSCA is PEM certificates that replace the
+	// system roots.
+	TLSInsecureSkipVerify bool   `yaml:"tls-insecure-skip-verify" json:"tls_insecure_skip_verify"`
+	TLSSkipHostnameVerify bool   `yaml:"tls-skip-hostname-verify" json:"tls_skip_hostname_verify"`
+	TLSCA                 string `yaml:"tls-ca" json:"tls_ca"`
 }
 
 // FileCommand is one top-level commands: entry, defined once and referenced
@@ -1574,6 +1587,10 @@ func buildLocalServer(name string, fs *FileServer) (ResolvedServer, error) {
 		return ResolvedServer{}, fmt.Errorf("server %q: server-uuid is not valid for type: local", name)
 	}
 
+	if !fileServerTLS(fs).IsZero() {
+		return ResolvedServer{}, fmt.Errorf("server %q: tls-* settings are not valid for type: local", name)
+	}
+
 	retention, err := parseRetention(fs.Retention)
 	if err != nil {
 		return ResolvedServer{}, fmt.Errorf("server %q: %w", name, err)
@@ -1583,9 +1600,9 @@ func buildLocalServer(name string, fs *FileServer) (ResolvedServer, error) {
 }
 
 // buildRemoteServer validates and builds a ResolvedServer for a type: remote
-// servers: entry, which uses only endpoint and the optional server-uuid —
-// auth is this instance's own identity (see loadServerIdentity), not a
-// config field.
+// servers: entry, which uses only endpoint, the optional server-uuid and
+// the optional tls-* settings — auth is this instance's own identity (see
+// loadServerIdentity), not a config field.
 func buildRemoteServer(name string, fs *FileServer) (ResolvedServer, error) {
 	if strings.TrimSpace(fs.Endpoint) == "" {
 		return ResolvedServer{}, fmt.Errorf("server %q: endpoint is required for type: remote", name)
@@ -1602,7 +1619,12 @@ func buildRemoteServer(name string, fs *FileServer) (ResolvedServer, error) {
 		}
 	}
 
-	return ResolvedServer{name: name, kind: ServerKindRemote, endpoint: fs.Endpoint, serverUUID: serverUUID}, nil
+	serverTLS, err := resolveServerTLS(fs.Endpoint, fileServerTLS(fs))
+	if err != nil {
+		return ResolvedServer{}, fmt.Errorf("server %q: %w", name, err)
+	}
+
+	return ResolvedServer{name: name, kind: ServerKindRemote, endpoint: fs.Endpoint, serverUUID: serverUUID, tls: serverTLS}, nil
 }
 
 // parseRetention parses a local server's retention: string into a
@@ -1712,6 +1734,7 @@ type ResolvedServer struct {
 	serverUUID string        // remote only: the destination instance's server UUID, "" if not given
 	path       string        // local only: root directory backups are written under
 	retention  time.Duration // local only: 0 means no automatic expiry
+	tls        TargetTLS     // remote only: certificate verification settings
 }
 
 // Kind is s's type:.
@@ -1972,6 +1995,7 @@ func resolveJobTargets(cfg *Config, servers map[string]ResolvedServer, commands 
 			Bucket:     ref.bucket,
 			Endpoint:   server.endpoint,
 			ServerUUID: server.serverUUID,
+			TLS:        server.tls,
 			LocalPath:  server.path,
 			Retention:  retention,
 		}

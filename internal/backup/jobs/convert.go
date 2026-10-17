@@ -16,6 +16,7 @@ func normalizeServer(fs config.FileServer) config.FileServer {
 	fs.ServerUUID = strings.TrimSpace(fs.ServerUUID)
 	fs.Path = strings.TrimSpace(fs.Path)
 	fs.Retention = strings.TrimSpace(fs.Retention)
+	fs.TLSCA = strings.TrimSpace(fs.TLSCA)
 
 	return fs
 }
@@ -88,11 +89,19 @@ func trimAll(ss []string) []string {
 }
 
 func toStoreServer(fs config.FileServer) store.ServerConfig {
-	return store.ServerConfig{Name: fs.Name, Type: fs.Type, Endpoint: fs.Endpoint, ServerUUID: fs.ServerUUID, Path: fs.Path, Retention: fs.Retention}
+	return store.ServerConfig{
+		Name: fs.Name, Type: fs.Type, Endpoint: fs.Endpoint, ServerUUID: fs.ServerUUID, Path: fs.Path, Retention: fs.Retention,
+		TLSInsecureSkipVerify: fs.TLSInsecureSkipVerify, TLSSkipHostnameVerify: fs.TLSSkipHostnameVerify, TLSCA: fs.TLSCA,
+	}
 }
 
-func fromStoreServer(sc store.ServerConfig) config.FileServer {
-	return config.FileServer{Name: sc.Name, Type: sc.Type, Endpoint: sc.Endpoint, ServerUUID: sc.ServerUUID, Path: sc.Path, Retention: sc.Retention}
+// FileServerFrom converts a stored server back into the definition it was
+// entered as, the way FileCommandFrom does for a command.
+func FileServerFrom(sc store.ServerConfig) config.FileServer {
+	return config.FileServer{
+		Name: sc.Name, Type: sc.Type, Endpoint: sc.Endpoint, ServerUUID: sc.ServerUUID, Path: sc.Path, Retention: sc.Retention,
+		TLSInsecureSkipVerify: sc.TLSInsecureSkipVerify, TLSSkipHostnameVerify: sc.TLSSkipHostnameVerify, TLSCA: sc.TLSCA,
+	}
 }
 
 func toStoreCommand(fc config.FileCommand) store.CommandConfig {

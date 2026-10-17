@@ -178,7 +178,7 @@ func TestParseFlagsHelp(t *testing.T) {
 	}
 }
 
-//nolint:paralleltest // t.Chdir changes the process's working directory, so this test can't have parallel ancestors
+// Not parallel: t.Chdir changes the process's working directory, so this test can't have parallel ancestors.
 func TestParseFlagsNoConfigFile(t *testing.T) {
 	t.Chdir(t.TempDir())
 
@@ -1533,6 +1533,32 @@ func TestResolveJob(t *testing.T) {
 
 	if len(job.Targets) != 1 || job.Targets[0].Retention != 7*24*time.Hour || job.Targets[0].OnErrorCommand == nil {
 		t.Errorf("ResolveJob() targets = %+v", job.Targets)
+	}
+}
+
+func TestResolveJobRemoteTLS(t *testing.T) {
+	t.Parallel()
+
+	remote, err := ResolveServer(FileServer{Name: "offsite", Type: "remote", Endpoint: "https://offsite.example.com", TLSInsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("ResolveServer() error: %v", err)
+	}
+
+	cmd, err := ResolveCommand(FileCommand{ID: "page", Cmd: "echo page"})
+	if err != nil {
+		t.Fatalf("ResolveCommand() error: %v", err)
+	}
+
+	job, err := ResolveJob(FileJob{
+		Name: "db", Command: "page", Recipients: []string{"me@example.com"},
+		Targets: []FileJobTarget{{Server: "offsite", Bucket: "b"}},
+	}, notify.GPGSettings{Bin: "gpg"}, map[string]ResolvedServer{"offsite": remote}, map[string]Command{"page": cmd}, "primary")
+	if err != nil {
+		t.Fatalf("ResolveJob() error: %v", err)
+	}
+
+	if len(job.Targets) != 1 || job.Targets[0].TLS != (TargetTLS{InsecureSkipVerify: true}) {
+		t.Errorf("ResolveJob() targets = %+v, want the server's TLS settings carried over", job.Targets)
 	}
 }
 
