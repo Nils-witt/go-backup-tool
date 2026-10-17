@@ -21,6 +21,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/remoteauth"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
+	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
 // RegisterRoutes mounts the receiver API's PUT object endpoint on
@@ -275,7 +276,7 @@ func warnLegacyKeyOnce(receiverID, token string, log *slog.Logger) {
 	}
 
 	issuer, _ := remoteauth.UnverifiedIssuer(token)
-	log.Warn("receiver: request authorized by the receiver's deprecated public key; add the sender as a trusted server and allow it on this receiver instead",
+	log.Warn("receiver: request authorized by the receiver's deprecated public key, which stops working in "+version.DeprecatedConfigRemoval+"; add the sender as a trusted server and allow it on this receiver instead",
 		"id", receiverID, "sender_server_id", issuer)
 }
 

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
 func TestJobCommandReference(t *testing.T) {
@@ -278,8 +280,8 @@ jobs:
 		t.Errorf("FileJob = %+v, want command moved into files", fj)
 	}
 
-	if len(rc.Warnings) != 1 || !strings.Contains(rc.Warnings[0], "command: is deprecated") {
-		t.Errorf("Warnings = %v, want one deprecation warning", rc.Warnings)
+	if len(rc.Warnings) != 1 || !strings.Contains(rc.Warnings[0], "command: is deprecated") || !strings.Contains(rc.Warnings[0], version.DeprecatedConfigRemoval) {
+		t.Errorf("Warnings = %v, want one deprecation warning naming %s", rc.Warnings, version.DeprecatedConfigRemoval)
 	}
 }
 

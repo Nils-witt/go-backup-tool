@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/tarball"
+	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
 // Command is one top-level commands: entry after validation, ready to be
@@ -276,7 +277,7 @@ func convertInlineJobCommands(fileCfg *fileConfig) ([]string, error) {
 		fileCfg.Commands = append(fileCfg.Commands, FileCommand{ID: id, Cmd: cmd})
 		fj.Files, fj.Cmd = []FileJobFile{{Command: id}}, ""
 
-		warnings = append(warnings, fmt.Sprintf("job %q: cmd: is deprecated; it now runs as commands: entry %q, which the job lists under files:", name, id))
+		warnings = append(warnings, fmt.Sprintf("job %q: cmd: is deprecated and will be removed in %s; it now runs as commands: entry %q, which the job lists under files:", name, version.DeprecatedConfigRemoval, id))
 	}
 
 	defaults.Cmd = ""
@@ -299,7 +300,7 @@ func convertSingleJobCommands(fileCfg *fileConfig) ([]string, error) {
 		}
 
 		if hadCommand {
-			warnings = append(warnings, label+": command: is deprecated; list the command under files: instead")
+			warnings = append(warnings, label+": command: is deprecated and will be removed in "+version.DeprecatedConfigRemoval+"; list the command under files: instead")
 		}
 
 		return nil

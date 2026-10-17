@@ -9,3 +9,11 @@ var (
 	// Commit is the short git commit hash the binary was built from.
 	Commit = "unknown"
 )
+
+// DeprecatedConfigRemoval is the release that removes the config file's
+// deprecated settings: the receivers:, notifications: and report: sections,
+// a job's cmd: and command:, a receiver's public-key:, and importing jobs:,
+// servers: and commands: under webui.job-editing. Every deprecation warning
+// names it, and config.example.yaml must too (see
+// TestExampleConfigNamesRemovalRelease).
+const DeprecatedConfigRemoval = "v8.0.0"

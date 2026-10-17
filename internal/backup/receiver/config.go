@@ -15,6 +15,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 	"nilswitt.dev/go-backup-tool/internal/backup/trust"
+	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
 var (
@@ -125,7 +126,7 @@ func (m *Manager) Load(ctx context.Context, yamlReceivers []config.FileReceiver)
 			m.log.Error("importing config file receivers into the state db", "err", err)
 		}
 
-		m.log.Warn("receivers: in the config file is deprecated: receivers are managed in the web UI now; remove the receivers: section from the config file",
+		m.log.Warn("receivers: in the config file is deprecated and will be removed in "+version.DeprecatedConfigRemoval+": receivers are managed in the web UI now; remove the receivers: section from the config file",
 			"imported", imported, "already_stored", len(yamlReceivers)-len(imported))
 	}
 

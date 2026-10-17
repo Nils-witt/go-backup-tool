@@ -20,6 +20,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
+	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
 var (
@@ -152,7 +153,7 @@ func (m *Manager) importLocked(ctx context.Context, yamlNotifications []notify.F
 			m.log.Error("importing config file notifications into the state db", "err", err)
 		}
 
-		m.log.Warn("notifications: in the config file is deprecated: notifications are managed in the web UI now; remove the notifications: section from the config file",
+		m.log.Warn("notifications: in the config file is deprecated and will be removed in "+version.DeprecatedConfigRemoval+": notifications are managed in the web UI now; remove the notifications: section from the config file",
 			"imported", imported, "already_stored", len(yamlNotifications)-len(imported))
 	}
 
@@ -165,7 +166,7 @@ func (m *Manager) importLocked(ctx context.Context, yamlNotifications []notify.F
 			m.log.Error("importing config file report: into the state db", "err", err)
 		}
 
-		m.log.Warn("report: in the config file is deprecated: the report is managed in the web UI now; remove the report: section from the config file",
+		m.log.Warn("report: in the config file is deprecated and will be removed in "+version.DeprecatedConfigRemoval+": the report is managed in the web UI now; remove the report: section from the config file",
 			"imported", imported)
 	}
 }

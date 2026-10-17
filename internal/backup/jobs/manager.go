@@ -21,6 +21,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
+	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
 var (
@@ -241,7 +242,7 @@ func (m *Manager) logImport(section string, total int, imported []string, err er
 		m.log.Error("importing config file "+section+" into the state db", "err", err)
 	}
 
-	m.log.Warn(section+": in the config file is ignored once imported, since webui.job-editing manages "+section+" in the web UI; remove the "+section+": section from the config file",
+	m.log.Warn(section+": in the config file is ignored once imported, since webui.job-editing manages "+section+" in the web UI, and won't be imported at all from "+version.DeprecatedConfigRemoval+"; remove the "+section+": section from the config file",
 		"imported", imported, "already_stored", total-len(imported))
 }
 

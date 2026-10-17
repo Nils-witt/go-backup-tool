@@ -29,8 +29,9 @@
 #   apply without a restart. Entries still listed here are imported once at
 #   startup — each job with the top-level defaults below folded in — and a
 #   name already stored is left alone, so web UI edits win; remove the
-#   sections once imported. Switching back off later makes this file the
-#   source again (what's in the state db is then ignored).
+#   sections once imported. This import is DEPRECATED and will be removed
+#   in v8.0.0. Switching back off later makes this file the source again
+#   (what's in the state db is then ignored).
 #
 # gpg-bin/gpg-homedir stay top-level settings every job falls back to either
 # way.
@@ -307,9 +308,10 @@ jobs:
     # "/" or start with ".". If one command fails, the files that were
     # produced are still uploaded and the run is reported incomplete.
     #
-    # A job's single command: (command: dump-database) is DEPRECATED: it
-    # still works, as a files: list with just that entry, with a warning
-    # logged. A job's own inline cmd: is DEPRECATED too: it's turned into a
+    # A job's single command: (command: dump-database) is DEPRECATED and
+    # will be removed in v8.0.0: it still works, as a files: list with just
+    # that entry, with a warning logged. A job's own inline cmd: is
+    # DEPRECATED too, and also removed in v8.0.0: it's turned into a
     # commands: entry of its own at startup (id "job-<name>").
     files:
       - command: dump-database
@@ -385,28 +387,29 @@ jobs:
     # no interval: this job runs once and doesn't repeat, even though
     # "database" above keeps the whole process alive
 
-# receivers: is DEPRECATED. Receivers — the destination side of another
-# go-backup-tool instance's type: remote target above — are managed in the
-# web UI now (Receiver settings, admin only), stored in the state db, and
-# take effect immediately without a restart. Any receivers: entries still
-# listed here are imported into the state db once at startup (an id already
-# stored is left alone, so web UI edits win) and a warning is logged; remove
-# the section once imported. The receiver API is only reachable when
-# webui.enabled: true is set (it's served by the same HTTP server as the
-# dashboard), and receiver paths set from the web UI must lie inside
-# webui.receivers-base-dir: (see webui: above).
+# receivers: is DEPRECATED and will be removed in v8.0.0. Receivers — the
+# destination side of another go-backup-tool instance's type: remote target
+# above — are managed in the web UI now (Receiver settings, admin only),
+# stored in the state db, and take effect immediately without a restart. Any
+# receivers: entries still listed here are imported into the state db once at
+# startup (an id already stored is left alone, so web UI edits win) and a
+# warning is logged; remove the section once imported. The receiver API is
+# only reachable when webui.enabled: true is set (it's served by the same
+# HTTP server as the dashboard), and receiver paths set from the web UI must
+# lie inside webui.receivers-base-dir: (see webui: above).
 #
-# Each receiver's id is what a sender's target names as its bucket;
-# public-key must be the sending instance's own public key — the contents
-# of that instance's ./data/keys/server.pub (see "sibling-instance" above) —
-# so this instance can verify the JSON Web Token every request from it is
-# signed with, instead of a shared secret (imported receivers accept it
+# Each receiver's id is what a sender's target names as its bucket.
+# public-key is DEPRECATED and will be removed in v8.0.0: add the sender as a
+# trusted server and allow it on the receiver in the web UI instead. Until
+# then, public-key must be the sending instance's own public key — the
+# contents of that instance's ./data/keys/server.pub (see "sibling-instance"
+# above) — so this instance can verify the JSON Web Token every request from
+# it is signed with, instead of a shared secret (imported receivers accept it
 # alongside any trusted servers later allowed on them in the web UI, which
-# replace it); path is the root directory
-# incoming objects for this id are written under (object ends up at
-# path/key, mirroring a local server's path/bucket/key); retention
-# (optional, same syntax as a local server's) deletes objects here once
-# they're older than that.
+# replace it); path is the root directory incoming objects for this id are
+# written under (object ends up at path/key, mirroring a local server's
+# path/bucket/key); retention (optional, same syntax as a local server's)
+# deletes objects here once they're older than that.
 #
 # stale-after and stale-notifications (optional, set together) monitor this
 # receiver for a sender that's stopped showing up: once at least one file has
@@ -466,15 +469,15 @@ jobs:
 #   # never encrypts, for a trusted local relay only.
 #   security: starttls
 
-# notifications: is DEPRECATED. Notifications are managed in the web UI now
-# (Settings > Notifications, admin only), stored in the state db, and edits
-# apply immediately without a restart. Any entries still listed here are
-# imported into the state db once at startup (an id already stored is left
-# alone, so web UI edits win) and a warning is logged; remove the section
-# once imported. A notification can't be deleted in the web UI while a job,
-# receiver, or the report still references it. Webhook header values are
-# write-only there: they're never shown again after saving. The format
-# below is what the import reads.
+# notifications: is DEPRECATED and will be removed in v8.0.0. Notifications
+# are managed in the web UI now (Settings > Notifications, admin only),
+# stored in the state db, and edits apply immediately without a restart. Any
+# entries still listed here are imported into the state db once at startup
+# (an id already stored is left alone, so web UI edits win) and a warning is
+# logged; remove the section once imported. A notification can't be deleted
+# in the web UI while a job, receiver, or the report still references it.
+# Webhook header values are write-only there: they're never shown again after
+# saving. The format below is what the import reads.
 #
 # notifications: are named, reusable webhook/email destinations, referenced
 # by id from report.notifications: below and a receivers: entry's
@@ -601,11 +604,11 @@ commands:
 #   - id: resolve-oncall
 #     cmd: "curl -fsS -X POST https://events.example.com/resolve -d \"target=$GBT_TARGET&failures=$GBT_CONSECUTIVE_FAILURES\""
 
-# report: is DEPRECATED. The report is configured in the web UI now
-# (Settings > Report, admin only), stored in the state db, and a changed
-# schedule applies immediately. A report: section still here is imported
-# into the state db once, only if none is stored yet, and a warning is
-# logged; remove it once imported.
+# report: is DEPRECATED and will be removed in v8.0.0. The report is
+# configured in the web UI now (Settings > Report, admin only), stored in the
+# state db, and a changed schedule applies immediately. A report: section
+# still here is imported into the state db once, only if none is stored yet,
+# and a warning is logged; remove it once imported.
 #
 # report: configures an optional summary of this instance's receiver
 # activity: how many files each configured receivers: entry received since
