@@ -24,8 +24,7 @@ import (
 
 // RegisterRoutes mounts the receiver API's PUT object endpoint on
 // mux, for the composition root to combine onto the same mux/port the web
-// UI dashboard serves from (see webui.StartWebUI's registerExtraRoutes
-// parameter). status is the live receiver status store, shared with
+// UI dashboard serves from (see webui.Options.ExtraRoutes). status is the live receiver status store, shared with
 // whatever also displays it (e.g. the dashboard's /api/receivers), so a
 // write here is reflected there immediately.
 func RegisterRoutes(mux *http.ServeMux, receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) {

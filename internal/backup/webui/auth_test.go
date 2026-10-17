@@ -250,7 +250,15 @@ func startSSOWebUI(t *testing.T, idp *testIDP, receivers map[string]config.Resol
 	store, _ := newTestStore()
 	db := openTestStateDB(t)
 
-	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, backup.NewReceiverRegistry(receivers), nil, nil, nil, nil, discardLogger, db, nil, idp.settings(), nil, false, false, 0, nil, "", nil, nil)
+	srv := StartWebUI(Deps{
+		Log:       discardLogger,
+		DB:        db,
+		Status:    store,
+		Receivers: backup.NewReceiverRegistry(receivers),
+	}, Options{
+		Addr: "127.0.0.1:0",
+		OIDC: idp.settings(),
+	})
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}
@@ -370,7 +378,14 @@ func TestSSOLoginRecordsLoginEvents(t *testing.T) {
 	store, _ := newTestStore()
 	db := openTestStateDB(t)
 
-	srv := StartWebUI("127.0.0.1:0", store, nil, nil, nil, nil, nil, nil, nil, nil, discardLogger, db, nil, idp.settings(), nil, false, false, 0, nil, "", nil, nil)
+	srv := StartWebUI(Deps{
+		Log:    discardLogger,
+		DB:     db,
+		Status: store,
+	}, Options{
+		Addr: "127.0.0.1:0",
+		OIDC: idp.settings(),
+	})
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil")
 	}

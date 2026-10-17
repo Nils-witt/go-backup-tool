@@ -20,7 +20,14 @@ func startDockerWebUI(t *testing.T, idp *testIDP, dockerHost string) *Server {
 	runner := pipeline.NewRunner(discardLogger, status, nil, nil, nil, notify.NewRegistry(nil))
 	runner.UseDocker(dockerHost)
 
-	srv := StartWebUI("127.0.0.1:0", status, nil, nil, runner, nil, nil, nil, nil, nil, discardLogger, nil, nil, idp.settings(), nil, false, false, 0, nil, "", nil, nil)
+	srv := StartWebUI(Deps{
+		Log:    discardLogger,
+		Status: status,
+		Runner: runner,
+	}, Options{
+		Addr: "127.0.0.1:0",
+		OIDC: idp.settings(),
+	})
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}

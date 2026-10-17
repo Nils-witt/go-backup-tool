@@ -25,7 +25,17 @@ func startLiveWebUI(t *testing.T, idp *testIDP, trustProxyHeaders bool) (*Server
 	receivers := map[string]config.ResolvedReceiver{"a": {ID: "a", Path: t.TempDir()}}
 	receiverStore := backup.NewReceiverStatusStore(receivers)
 
-	srv := StartWebUI("127.0.0.1:0", statusStore, nil, nil, nil, backup.NewReceiverRegistry(receivers), receiverStore, nil, nil, nil, discardLogger, openTestStateDB(t), nil, idp.settings(), nil, trustProxyHeaders, false, 0, nil, "", nil, nil)
+	srv := StartWebUI(Deps{
+		Log:            discardLogger,
+		DB:             openTestStateDB(t),
+		Status:         statusStore,
+		Receivers:      backup.NewReceiverRegistry(receivers),
+		ReceiverStatus: receiverStore,
+	}, Options{
+		Addr:              "127.0.0.1:0",
+		OIDC:              idp.settings(),
+		TrustProxyHeaders: trustProxyHeaders,
+	})
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")
 	}

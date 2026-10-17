@@ -89,24 +89,31 @@ func Run(args []string, stderr io.Writer) int {
 // with the stale-receiver webhook monitor (see
 // receiver.MonitorStaleReceivers) and the per-receiver retention sweep (see
 // receiver.MonitorReceiverRetention). It returns nil, doing nothing else,
-// when rc.Listen is unset. queue lets a download/stale notification email
-// that fails to send be retried later (see notify.Queue). receivers,
-// receiverStore and receiverManager are the live receiver set, its
-// dashboard status, and the web UI's way of changing it, and trustManager
-// manages the trusted servers receivers allow (see newReceivers).
-// jobsManager is the live job set the web UI shows and edits (see newJobs).
-func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, statusStore *backup.StatusStore, jobsManager *jobs.Manager, stateDB *store.Store, logs *webui.LogRingBuffer, serverIdentity *identity.ServerIdentity, runner *pipeline.Runner, queue *notify.Queue, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, receiverManager *receiver.Manager, settingsManager *settings.Manager, trustManager *trust.Manager, log *slog.Logger) *webui.Server {
+// when rc.Listen is unset. deps.GPGKeyring is set here from rc.GPG, so
+// callers leave it nil. The monitors and the receiver API share deps'
+// live receiver set (see newReceivers) and notification queue.
+func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, deps webui.Deps) *webui.Server {
 	if rc.Listen == "" {
 		return nil
 	}
 
-	go receiver.MonitorReceiverRetention(ctx, stateDB, receivers, log)
+	go receiver.MonitorReceiverRetention(ctx, deps.DB, deps.Receivers, deps.Log)
 
-	srv := webui.StartWebUI(rc.Listen, statusStore, jobsManager, gpgkeys.New(rc.GPG), runner, receivers, receiverStore, receiverManager, settingsManager, trustManager, log, stateDB, logs, rc.OIDC, serverIdentity, rc.TrustProxyHeaders, rc.DevMode, rc.EventLogLimit, rc.CORSGetOrigins, rc.ServerName, func(mux *http.ServeMux) {
-		receiver.RegisterRoutes(mux, receivers, receiverStore, log, stateDB)
-	}, queue)
+	deps.GPGKeyring = gpgkeys.New(rc.GPG)
+	srv := webui.StartWebUI(deps, webui.Options{
+		Addr:              rc.Listen,
+		InstanceName:      rc.ServerName,
+		OIDC:              rc.OIDC,
+		TrustProxyHeaders: rc.TrustProxyHeaders,
+		DevMode:           rc.DevMode,
+		EventLogLimit:     rc.EventLogLimit,
+		CORSGetOrigins:    rc.CORSGetOrigins,
+		ExtraRoutes: func(mux *http.ServeMux) {
+			receiver.RegisterRoutes(mux, deps.Receivers, deps.ReceiverStatus, deps.Log, deps.DB)
+		},
+	})
 
-	go receiver.MonitorStaleReceivers(ctx, receivers, queue, log)
+	go receiver.MonitorStaleReceivers(ctx, deps.Receivers, deps.NotifyQueue, deps.Log)
 
 	return srv
 }
@@ -226,24 +233,8 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		log.Debug("run timeout set", "timeout", rc.Timeout)
 	}
 
-	var stateDB *store.Store
-
-	// Always opened: backs catch-up scheduling, the web UI, retention
-	// tracking, and the target-error log, which every run needs regardless
-	// of those other features.
-	path := store.StateDBPath(rc.ConfigPath)
-
-	db, err := store.Open(ctx, path)
-	if err != nil {
-		log.Warn("opening job state db", "path", path, "err", err)
-	} else {
-		stateDB = db
-		defer func() { _ = db.Close() }()
-
-		log.Debug("opened job state db", "path", path)
-
-		go pruneEventLogs(ctx, db, log)
-	}
+	stateDB, closeStateDB := openStateDB(ctx, rc, log)
+	defer closeStateDB()
 
 	statusStore := backup.NewStatusStore(nil)
 
@@ -287,7 +278,21 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	// RunReportLoop idles while the report is disabled.
 	go pipeline.RunReportLoop(ctx, rc.ServerName, jobsManager.Names, reportSettings, notifications, receivers, stateDB, mailQueue, log)
 
-	srv := startWebUIIfConfigured(ctx, rc, statusStore, jobsManager, stateDB, logs, serverIdentity, r, mailQueue, receivers, receiverStore, receiverManager, settingsManager, trustManager, log)
+	srv := startWebUIIfConfigured(ctx, rc, webui.Deps{
+		Log:             log,
+		DB:              stateDB,
+		Status:          statusStore,
+		Jobs:            jobsManager,
+		Runner:          r,
+		Receivers:       receivers,
+		ReceiverStatus:  receiverStore,
+		ReceiverManager: receiverManager,
+		Settings:        settingsManager,
+		Trust:           trustManager,
+		Identity:        serverIdentity,
+		Logs:            logs,
+		NotifyQueue:     mailQueue,
+	})
 
 	log.Info("starting jobs", "count", len(jobsManager.Names()))
 	jobsManager.Start(ctx)
@@ -314,6 +319,29 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	log.Info("run finished")
 
 	return 0
+}
+
+// openStateDB opens the job state db next to the config file and starts
+// pruning its event logs (see pruneEventLogs). It is always opened: it backs
+// catch-up scheduling, the web UI, retention tracking, and the target-error
+// log, which every run needs regardless of those other features. A failure
+// is only logged: it returns a nil *store.Store, which those features treat
+// as unavailable, and a no-op close.
+func openStateDB(ctx context.Context, rc *config.RunConfig, log *slog.Logger) (db *store.Store, closeDB func()) {
+	path := store.StateDBPath(rc.ConfigPath)
+
+	db, err := store.Open(ctx, path)
+	if err != nil {
+		log.Warn("opening job state db", "path", path, "err", err)
+
+		return nil, func() {}
+	}
+
+	log.Debug("opened job state db", "path", path)
+
+	go pruneEventLogs(ctx, db, log)
+
+	return db, func() { _ = db.Close() }
 }
 
 // eventLogRetention is how long the login, download, receiver, and audit
