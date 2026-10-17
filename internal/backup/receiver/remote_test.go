@@ -15,6 +15,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/remoteauth"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -23,10 +24,10 @@ import (
 // exercise the client (UploadToRemote) against the real
 // server-side handlers rather than a hand-rolled stand-in.
 func newReceiverMux(receivers map[string]config.ResolvedReceiver) *http.ServeMux {
-	status := backup.NewReceiverStatusStore(receivers)
+	receiverStatus := status.NewReceiverStore(receivers)
 
 	mux := http.NewServeMux()
-	RegisterRoutes(mux, backup.NewReceiverRegistry(receivers), status, discardLogger, nil)
+	RegisterRoutes(mux, backup.NewReceiverRegistry(receivers), receiverStatus, discardLogger, nil)
 
 	return mux
 }
@@ -384,10 +385,10 @@ func TestRemoteTargetInteropUnknownID(t *testing.T) {
 // test can inspect what they recorded to it (retention tracking,
 // receiver_events).
 func newReceiverMuxWithDB(receivers map[string]config.ResolvedReceiver, db *store.Store) *http.ServeMux {
-	status := backup.NewReceiverStatusStore(receivers)
+	receiverStatus := status.NewReceiverStore(receivers)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(backup.NewReceiverRegistry(receivers), status, discardLogger, db))
+	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(backup.NewReceiverRegistry(receivers), receiverStatus, discardLogger, db))
 
 	return mux
 }

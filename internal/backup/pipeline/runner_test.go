@@ -20,6 +20,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -63,7 +64,7 @@ func TestRunOnceRecordsLastRunToStateDB(t *testing.T) { //nolint:paralleltest //
 
 	t.Cleanup(func() { _ = stateDB.Close() })
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore, stateDB: stateDB}
 
 	r.runOnce(context.Background(), job)
@@ -125,7 +126,7 @@ func TestRunOnceRefreshesEachTargetIndependently(t *testing.T) {
 		},
 	}
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore, identity: testServerIdentity(t)}
 
 	done := make(chan struct{})
@@ -150,12 +151,12 @@ func TestRunOnceRefreshesEachTargetIndependently(t *testing.T) {
 		remoteState := snap[0].Targets[0].State
 		localState := snap[0].Targets[1].State
 
-		if localState == backup.StateOK {
-			if remoteState != backup.StateRunning {
+		if localState == status.StateOK {
+			if remoteState != status.StateRunning {
 				close(release)
 				<-done
 
-				t.Fatalf("local target finished, but remote target state = %q, want %q (it should still be in flight, held by the test)", remoteState, backup.StateRunning)
+				t.Fatalf("local target finished, but remote target state = %q, want %q (it should still be in flight, held by the test)", remoteState, status.StateRunning)
 			}
 
 			break
@@ -168,12 +169,12 @@ func TestRunOnceRefreshesEachTargetIndependently(t *testing.T) {
 	<-done
 
 	snap := statusStore.Snapshot()
-	if snap[0].Targets[0].State != backup.StateOK {
-		t.Errorf("remote target final state = %q, want %q", snap[0].Targets[0].State, backup.StateOK)
+	if snap[0].Targets[0].State != status.StateOK {
+		t.Errorf("remote target final state = %q, want %q", snap[0].Targets[0].State, status.StateOK)
 	}
 
-	if snap[0].Targets[1].State != backup.StateOK {
-		t.Errorf("local target final state = %q, want %q", snap[0].Targets[1].State, backup.StateOK)
+	if snap[0].Targets[1].State != status.StateOK {
+		t.Errorf("local target final state = %q, want %q", snap[0].Targets[1].State, status.StateOK)
 	}
 }
 
@@ -217,13 +218,13 @@ func TestRunOnceReportsIncompleteWhenSomeTargetsFail(t *testing.T) {
 
 	t.Cleanup(func() { _ = stateDB.Close() })
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore, stateDB: stateDB}
 
 	r.runOnce(context.Background(), job)
 
 	snap := statusStore.Snapshot()[0]
-	if snap.State != backup.StateIncomplete {
+	if snap.State != status.StateIncomplete {
 		t.Errorf("job State = %q, want incomplete", snap.State)
 	}
 
@@ -231,11 +232,11 @@ func TestRunOnceReportsIncompleteWhenSomeTargetsFail(t *testing.T) {
 		t.Error("job Size is empty, want the backup's size (the good target got a complete copy)")
 	}
 
-	if snap.Targets[0].State != backup.StateFailed {
+	if snap.Targets[0].State != status.StateFailed {
 		t.Errorf("bad target state = %q, want failed", snap.Targets[0].State)
 	}
 
-	if snap.Targets[1].State != backup.StateOK {
+	if snap.Targets[1].State != status.StateOK {
 		t.Errorf("good target state = %q, want ok", snap.Targets[1].State)
 	}
 
@@ -291,7 +292,7 @@ func TestRunOnceStoresEachFileUnderKey(t *testing.T) {
 	dir := t.TempDir()
 	job := multiFileTestJob(t, dir, map[string]string{"db": "echo db-dump", "files": "echo file-dump"})
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore}
 
 	r.runOnce(context.Background(), job)
@@ -310,12 +311,12 @@ func TestRunOnceStoresEachFileUnderKey(t *testing.T) {
 	}
 
 	snap := statusStore.Snapshot()[0]
-	if snap.State != backup.StateOK || len(snap.Files) != 2 {
+	if snap.State != status.StateOK || len(snap.Files) != 2 {
 		t.Fatalf("job = state %q, files %+v; want ok with two files", snap.State, snap.Files)
 	}
 
 	for _, f := range snap.Files {
-		if f.State != backup.StateOK || f.Size == "" {
+		if f.State != status.StateOK || f.Size == "" {
 			t.Errorf("file %+v, want ok with a size", f)
 		}
 	}
@@ -328,7 +329,7 @@ func TestRunOnceUploadsFilesThatSucceeded(t *testing.T) {
 	dir := t.TempDir()
 	job := multiFileTestJob(t, dir, map[string]string{"broken": "exit 3", "ok": "echo fine"})
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore}
 
 	r.runOnce(context.Background(), job)
@@ -345,11 +346,11 @@ func TestRunOnceUploadsFilesThatSucceeded(t *testing.T) {
 	}
 
 	snap := statusStore.Snapshot()[0]
-	if snap.State != backup.StateIncomplete {
+	if snap.State != status.StateIncomplete {
 		t.Errorf("job State = %q, want incomplete", snap.State)
 	}
 
-	if snap.Targets[0].State != backup.StateOK {
+	if snap.Targets[0].State != status.StateOK {
 		t.Errorf("target State = %q, want ok (it got every file that was produced)", snap.Targets[0].State)
 	}
 
@@ -357,7 +358,7 @@ func TestRunOnceUploadsFilesThatSucceeded(t *testing.T) {
 		t.Errorf("job Error = %q, want it to name the failed file", snap.Error)
 	}
 
-	if len(snap.Files) != 2 || snap.Files[0].State != backup.StateFailed || snap.Files[1].State != backup.StateOK {
+	if len(snap.Files) != 2 || snap.Files[0].State != status.StateFailed || snap.Files[1].State != status.StateOK {
 		t.Errorf("Files = %+v, want broken failed and ok succeeded", snap.Files)
 	}
 }
@@ -369,13 +370,13 @@ func TestRunOnceFailsWhenNoFileIsProduced(t *testing.T) {
 	dir := t.TempDir()
 	job := multiFileTestJob(t, dir, map[string]string{"a": "exit 1", "b": "exit 2"})
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore}
 
 	r.runOnce(context.Background(), job)
 
 	snap := statusStore.Snapshot()[0]
-	if snap.State != backup.StateFailed || snap.Targets[0].State != backup.StateFailed {
+	if snap.State != status.StateFailed || snap.Targets[0].State != status.StateFailed {
 		t.Errorf("job = %q, target = %q; want both failed", snap.State, snap.Targets[0].State)
 	}
 
@@ -435,7 +436,7 @@ func TestRunOnceFiresFailureNotificationOnFailure(t *testing.T) {
 		},
 	}
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore, notifications: notifications}
 
 	r.runOnce(context.Background(), job)
@@ -489,7 +490,7 @@ func TestRunOnceNoFailureNotificationOnSuccess(t *testing.T) {
 		},
 	}
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore, notifications: notifications}
 
 	r.runOnce(context.Background(), job)
@@ -542,7 +543,7 @@ func TestRunOnceKeepsStagedFileForRetryWhenTargetFails(t *testing.T) {
 
 	t.Cleanup(func() { _ = stateDB.Close() })
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore, stateDB: stateDB}
 
 	r.runOnce(context.Background(), job)
@@ -597,7 +598,7 @@ func TestRunOnceDeletesStagedFileOnSuccess(t *testing.T) {
 
 	t.Cleanup(func() { _ = stateDB.Close() })
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore, stateDB: stateDB}
 
 	r.runOnce(context.Background(), job)
@@ -656,17 +657,17 @@ func TestRetryFailedTargetsRetriesOnlyNamedTargets(t *testing.T) {
 
 	t.Cleanup(func() { _ = stateDB.Close() })
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore, stateDB: stateDB}
 
 	r.runOnce(context.Background(), job)
 
 	snap := statusStore.Snapshot()[0]
-	if snap.Targets[0].State != backup.StateFailed {
+	if snap.Targets[0].State != status.StateFailed {
 		t.Fatalf("bad target state after first run = %q, want failed", snap.Targets[0].State)
 	}
 
-	if snap.Targets[1].State != backup.StateOK {
+	if snap.Targets[1].State != status.StateOK {
 		t.Fatalf("good target state after first run = %q, want ok", snap.Targets[1].State)
 	}
 
@@ -683,15 +684,15 @@ func TestRetryFailedTargetsRetriesOnlyNamedTargets(t *testing.T) {
 
 	snap = statusStore.Snapshot()[0]
 
-	if snap.Targets[0].State != backup.StateOK {
+	if snap.Targets[0].State != status.StateOK {
 		t.Errorf("bad target state after retry = %q, want ok", snap.Targets[0].State)
 	}
 
-	if snap.Targets[1].State != backup.StateOK || snap.Targets[1].Error != goodLastError {
+	if snap.Targets[1].State != status.StateOK || snap.Targets[1].Error != goodLastError {
 		t.Errorf("good target after retry = {state: %q, error: %q}, want unchanged {ok, %q}", snap.Targets[1].State, snap.Targets[1].Error, goodLastError)
 	}
 
-	if snap.State != backup.StateOK {
+	if snap.State != status.StateOK {
 		t.Errorf("job State after retry = %q, want ok", snap.State)
 	}
 }
@@ -727,7 +728,7 @@ func TestRetryFailedTargetsFiresFailureNotificationOnFailure(t *testing.T) {
 		},
 	}
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore, notifications: notifications}
 
 	// RetryFailedTargets itself returns an error before running the
@@ -762,7 +763,7 @@ func TestRetryFailedTargetsUnknownTargetNameReturnsError(t *testing.T) {
 		},
 	}
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore}
 
 	if err := r.RetryFailedTargets(context.Background(), job, []string{"nope"}); err == nil {
@@ -777,7 +778,7 @@ func TestRunNowRunsJobInBackground(t *testing.T) { //nolint:paralleltest // plai
 	marker := filepath.Join(t.TempDir(), "marker")
 	job := plainTestJob(t, marker)
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore}
 
 	if err := r.RunNow(context.Background(), job); err != nil {
@@ -790,7 +791,7 @@ func TestRunNowRunsJobInBackground(t *testing.T) { //nolint:paralleltest // plai
 		t.Errorf("marker recorded %d runs, want 1", got)
 	}
 
-	if state := statusStore.Snapshot()[0].State; state != backup.StateOK {
+	if state := statusStore.Snapshot()[0].State; state != status.StateOK {
 		t.Errorf("job state = %q, want ok", state)
 	}
 }
@@ -821,7 +822,7 @@ func TestRunNowRejectsRunningJob(t *testing.T) {
 	t.Parallel()
 
 	job := &config.Config{Name: "test"}
-	r := &Runner{log: discardLogger, store: backup.NewStatusStore([]*config.Config{job})}
+	r := &Runner{log: discardLogger, store: status.NewStore([]*config.Config{job})}
 
 	r.claim(job.Name)
 
@@ -841,7 +842,7 @@ func TestRetryFailedTargetsRejectsRunningJob(t *testing.T) {
 			{ServerName: "good", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: t.TempDir()},
 		},
 	}
-	r := &Runner{log: discardLogger, store: backup.NewStatusStore([]*config.Config{job})}
+	r := &Runner{log: discardLogger, store: status.NewStore([]*config.Config{job})}
 
 	r.claim(job.Name)
 
@@ -857,7 +858,7 @@ func TestScheduleSkipsRunWhileJobIsRunning(t *testing.T) { //nolint:paralleltest
 	marker := filepath.Join(t.TempDir(), "marker")
 	job := plainTestJob(t, marker)
 
-	r := &Runner{log: discardLogger, store: backup.NewStatusStore([]*config.Config{job})}
+	r := &Runner{log: discardLogger, store: status.NewStore([]*config.Config{job})}
 
 	r.claim(job.Name)
 
@@ -888,20 +889,20 @@ func TestSeedStatusFromStateAcrossRestart(t *testing.T) { //nolint:paralleltest 
 
 	t.Cleanup(func() { _ = stateDB.Close() })
 
-	firstStore := backup.NewStatusStore([]*config.Config{job})
+	firstStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: firstStore, stateDB: stateDB}
 	r.runOnce(context.Background(), job)
 
-	restartedStore := backup.NewStatusStore([]*config.Config{job})
+	restartedStore := status.NewStore([]*config.Config{job})
 
-	if got := restartedStore.Snapshot()[0].State; got != backup.StateIdle {
+	if got := restartedStore.Snapshot()[0].State; got != status.StateIdle {
 		t.Fatalf("restartedStore before seeding: State = %q, want idle", got)
 	}
 
 	SeedStatusFromState(context.Background(), stateDB, []*config.Config{job}, restartedStore, discardLogger)
 
 	snap := restartedStore.Snapshot()[0]
-	if snap.State != backup.StateOK {
+	if snap.State != status.StateOK {
 		t.Errorf("restartedStore after seeding: State = %q, want ok", snap.State)
 	}
 
@@ -1090,7 +1091,7 @@ func TestScheduleStartTimeCatchesUpMissedRun(t *testing.T) { //nolint:parallelte
 
 	job := startTimeTestJob(t, marker, time.Now().Add(-10*time.Minute), time.Second)
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
@@ -1129,11 +1130,11 @@ func TestScheduleStartTimeSkipsCatchUpWhenAlreadyRecorded(t *testing.T) { //noli
 		t.Fatal("lastDueSlot() ok = false, want true (start-time is in the past)")
 	}
 
-	if err := stateDB.SaveJobRun(context.Background(), job.Name, string(backup.StateOK), true, due, due, 0, ""); err != nil {
+	if err := stateDB.SaveJobRun(context.Background(), job.Name, string(status.StateOK), true, due, due, 0, ""); err != nil {
 		t.Fatalf("SaveJobRun() error: %v", err)
 	}
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore, stateDB: stateDB}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
@@ -1194,7 +1195,7 @@ func TestRetryOutstandingUploadSucceedsAfterTargetRecovers(t *testing.T) {
 
 	t.Cleanup(func() { _ = stateDB.Close() })
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore, stateDB: stateDB, identity: identity}
 
 	r.runOnce(context.Background(), job)
@@ -1227,7 +1228,7 @@ func TestRetryOutstandingUploadSucceedsAfterTargetRecovers(t *testing.T) {
 // verification, split out to keep that test's cyclomatic complexity down:
 // once a retry succeeds, the outstanding row and its staged file must both
 // be gone, and the target/job's live and persisted state must show success.
-func assertOutstandingUploadResolved(t *testing.T, stateDB *store.Store, statusStore *backup.StatusStore, jobName, stagedPath string) {
+func assertOutstandingUploadResolved(t *testing.T, stateDB *store.Store, statusStore *status.Store, jobName, stagedPath string) {
 	t.Helper()
 
 	stillDue, err := stateDB.ListDueOutstandingTargetUploads(context.Background(), time.Now().Add(time.Hour))
@@ -1248,7 +1249,7 @@ func assertOutstandingUploadResolved(t *testing.T, stateDB *store.Store, statusS
 		t.Fatalf("ListTargetRuns() error: %v", err)
 	}
 
-	if len(targetRuns) != 1 || targetRuns[0].State != string(backup.StateOK) {
+	if len(targetRuns) != 1 || targetRuns[0].State != string(status.StateOK) {
 		t.Errorf("ListTargetRuns() = %+v, want a single ok entry recording the retry's success", targetRuns)
 	}
 
@@ -1257,12 +1258,12 @@ func assertOutstandingUploadResolved(t *testing.T, stateDB *store.Store, statusS
 		t.Fatalf("statusStore.Snapshot() = %+v, want one job with one target", snapshot)
 	}
 
-	if got := snapshot[0].Targets[0].State; got != backup.StateOK {
-		t.Errorf("snapshot target state = %q, want %q (retry succeeded)", got, backup.StateOK)
+	if got := snapshot[0].Targets[0].State; got != status.StateOK {
+		t.Errorf("snapshot target state = %q, want %q (retry succeeded)", got, status.StateOK)
 	}
 
-	if got := snapshot[0].State; got != backup.StateOK {
-		t.Errorf("snapshot job state = %q, want %q (the only target's retry succeeded)", got, backup.StateOK)
+	if got := snapshot[0].State; got != status.StateOK {
+		t.Errorf("snapshot job state = %q, want %q (the only target's retry succeeded)", got, status.StateOK)
 	}
 }
 
@@ -1296,7 +1297,7 @@ func TestRetryOutstandingUploadGivesUpWhenStagedFileIsGone(t *testing.T) {
 		Targets: []config.Target{{ServerName: "flaky", Kind: config.ServerKindRemote, Endpoint: "http://127.0.0.1:0", Bucket: "instance-a"}},
 	}
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore, stateDB: stateDB}
 
 	r.retryOutstandingUpload(context.Background(), StaticJobs([]*config.Config{job}), due[0], discardLogger)

@@ -4,12 +4,12 @@ import (
 	"net/http"
 	"testing"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/gpgkeys"
 	"nilswitt.dev/go-backup-tool/internal/backup/jobs"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 )
 
 // startJobsWebUI starts an SSO-enabled web UI whose jobs, servers, and
@@ -26,10 +26,10 @@ func startJobsWebUIWithKeyring(t *testing.T, idp *testIDP, editing bool, keyring
 	t.Helper()
 
 	db := openTestStateDB(t)
-	status := backup.NewStatusStore(nil)
+	statusStore := status.NewStore(nil)
 	notifications := notify.NewRegistry(nil)
-	runner := pipeline.NewRunner(discardLogger, status, db, nil, nil, notifications)
-	manager := jobs.NewManager(db, status, runner, notifications, jobs.Settings{GPG: notify.GPGSettings{Bin: "gpg"}, Editing: editing}, discardLogger)
+	runner := pipeline.NewRunner(discardLogger, statusStore, db, nil, nil, notifications)
+	manager := jobs.NewManager(db, statusStore, runner, notifications, jobs.Settings{GPG: notify.GPGSettings{Bin: "gpg"}, Editing: editing}, discardLogger)
 
 	if err := manager.Load(t.Context(), nil, nil, nil); err != nil {
 		t.Fatalf("Load() error: %v", err)
@@ -38,7 +38,7 @@ func startJobsWebUIWithKeyring(t *testing.T, idp *testIDP, editing bool, keyring
 	srv := StartWebUI(Deps{
 		Log:        discardLogger,
 		DB:         db,
-		Status:     status,
+		Status:     statusStore,
 		Jobs:       manager,
 		Runner:     runner,
 		GPGKeyring: keyring,

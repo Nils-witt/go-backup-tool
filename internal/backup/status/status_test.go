@@ -1,4 +1,4 @@
-package backup
+package status
 
 import (
 	"errors"
@@ -8,7 +8,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 )
 
-func newTestStore() (*StatusStore, *config.Config) {
+func newTestStore() (*Store, *config.Config) {
 	cfg := &config.Config{
 		Name:     "test",
 		Interval: time.Minute,
@@ -18,7 +18,7 @@ func newTestStore() (*StatusStore, *config.Config) {
 		},
 	}
 
-	return NewStatusStore([]*config.Config{cfg}), cfg
+	return NewStore([]*config.Config{cfg}), cfg
 }
 
 func TestFormatBytes(t *testing.T) {
@@ -256,7 +256,7 @@ func TestNewStatusStoreInitializesNextRunFromStartTime(t *testing.T) {
 	start := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
 	cfg := &config.Config{Name: "test", Interval: time.Hour, StartTime: start}
 
-	store := NewStatusStore([]*config.Config{cfg})
+	store := NewStore([]*config.Config{cfg})
 
 	if got := store.Snapshot()[0].NextRun; !got.Equal(start) {
 		t.Errorf("snapshot()[0].NextRun = %v, want %v", got, start)
@@ -524,7 +524,7 @@ func TestStatusStoreUpsertAndRemove(t *testing.T) {
 	t.Parallel()
 
 	b := &config.Config{Name: "b", Targets: []config.Target{{ServerName: "nas", Bucket: "x"}}}
-	s := NewStatusStore([]*config.Config{b})
+	s := NewStore([]*config.Config{b})
 
 	s.TargetDone("b", 0, errors.New("boom"))
 

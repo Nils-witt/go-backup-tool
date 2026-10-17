@@ -19,17 +19,19 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/remoteauth"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 // RegisterRoutes mounts the receiver API's PUT object endpoint on
 // mux, for the composition root to combine onto the same mux/port the web
-// UI dashboard serves from (see webui.Options.ExtraRoutes). status is the live receiver status store, shared with
-// whatever also displays it (e.g. the dashboard's /api/receivers), so a
-// write here is reflected there immediately.
-func RegisterRoutes(mux *http.ServeMux, receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) {
-	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(receivers, status, log, db))
-	mux.HandleFunc("PUT /api/v1/backups/{id}/{key...}", HandleReceiveBackupFile(receivers, status, log, db))
+// UI dashboard serves from (see webui.Options.ExtraRoutes). receiverStatus
+// is the live receiver status store, shared with whatever also displays it
+// (e.g. the dashboard's /api/receivers), so a write here is reflected there
+// immediately.
+func RegisterRoutes(mux *http.ServeMux, receivers *backup.ReceiverRegistry, receiverStatus *status.ReceiverStore, log *slog.Logger, db *store.Store) {
+	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(receivers, receiverStatus, log, db))
+	mux.HandleFunc("PUT /api/v1/backups/{id}/{key...}", HandleReceiveBackupFile(receivers, receiverStatus, log, db))
 }
 
 // HandleReceiveBackupFile serves PUT /api/v1/backups/{id}/{key...}?file=: one
@@ -42,8 +44,8 @@ func RegisterRoutes(mux *http.ServeMux, receivers *backup.ReceiverRegistry, stat
 // answers 404 instead of storing every file of a backup at the same key.
 // Only request-bound tokens (see remoteauth.Request) are accepted, since
 // every sender that knows this route also binds its tokens.
-func HandleReceiveBackupFile(receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
-	return receiveObject(receivers, status, log, db, true)
+func HandleReceiveBackupFile(receivers *backup.ReceiverRegistry, receiverStatus *status.ReceiverStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
+	return receiveObject(receivers, receiverStatus, log, db, true)
 }
 
 // HandleReceiveObject serves PUT /api/v1/objects/{id}/{key...}: after
@@ -62,14 +64,14 @@ func HandleReceiveBackupFile(receivers *backup.ReceiverRegistry, status *backup.
 // (backup.SetObjectModTime) so the dashboard's file listing agrees with it.
 // Every attempt is recorded to status, win or lose, so /api/receivers
 // reflects it.
-func HandleReceiveObject(receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
-	return receiveObject(receivers, status, log, db, false)
+func HandleReceiveObject(receivers *backup.ReceiverRegistry, receiverStatus *status.ReceiverStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
+	return receiveObject(receivers, receiverStatus, log, db, false)
 }
 
 // receiveObject is HandleReceiveObject, or HandleReceiveBackupFile when
 // multiFile is set. key, as recorded in status and the receiver's event log,
 // is the object's path under the receiver: key/file for a backup's file.
-func receiveObject(receivers *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, log *slog.Logger, db *store.Store, multiFile bool) http.HandlerFunc {
+func receiveObject(receivers *backup.ReceiverRegistry, receiverStatus *status.ReceiverStore, log *slog.Logger, db *store.Store, multiFile bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, cfg, t, bound, ok := resolveReceiverRequest(w, r, receivers, db, log, multiFile)
 		if !ok {
@@ -95,7 +97,7 @@ func receiveObject(receivers *backup.ReceiverRegistry, status *backup.ReceiverSt
 
 		if err := backup.WriteLocalObject(cfg, t, body); err != nil {
 			log.Warn("receiver: writing object failed", "id", recv.ID, "key", key, "err", err)
-			status.Record(recv.ID, key, err)
+			receiverStatus.Record(recv.ID, key, err)
 			recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, store.ReceiverEventReceive, key, 0, err)
 
 			if errors.Is(err, errBodyDigestMismatch) {
@@ -118,7 +120,7 @@ func receiveObject(receivers *backup.ReceiverRegistry, status *backup.ReceiverSt
 			log.Warn("receiver: retention tracking failed", "id", recv.ID, "key", key, "err", err)
 		}
 
-		status.Record(recv.ID, key, nil)
+		receiverStatus.Record(recv.ID, key, nil)
 
 		var size int64
 		if info, statErr := os.Stat(backup.LocalObjectPath(cfg, t)); statErr == nil { //nolint:gosec // cfg.Key/cfg.File are resolveReceiverRequest's already-validated key and file, not raw untrusted input

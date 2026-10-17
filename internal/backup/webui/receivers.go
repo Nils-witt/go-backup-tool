@@ -8,13 +8,14 @@ import (
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 )
 
 // handleReceiverStatus serves store's current receiver statuses as JSON,
 // annotated with each receiver's live staleness (see
 // annotateReceiverStaleness) for any entry in receivers with stale-after:
 // set.
-func handleReceiverStatus(receivers *backup.ReceiverRegistry, store *backup.ReceiverStatusStore, log *slog.Logger) http.HandlerFunc {
+func handleReceiverStatus(receivers *backup.ReceiverRegistry, store *status.ReceiverStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, receiverSnapshots(receivers, store, log))
 	}
@@ -23,7 +24,7 @@ func handleReceiverStatus(receivers *backup.ReceiverRegistry, store *backup.Rece
 // receiverSnapshots returns store's current receiver statuses, each
 // annotated with its live staleness (see annotateReceiverStaleness). Shared
 // by handleReceiverStatus and the live status WebSocket (see handleLive).
-func receiverSnapshots(receivers *backup.ReceiverRegistry, store *backup.ReceiverStatusStore, log *slog.Logger) []backup.ReceiverSnapshot {
+func receiverSnapshots(receivers *backup.ReceiverRegistry, store *status.ReceiverStore, log *slog.Logger) []status.ReceiverSnapshot {
 	snapshots := store.Snapshot()
 
 	for i := range snapshots {
@@ -42,7 +43,7 @@ func receiverSnapshots(receivers *backup.ReceiverRegistry, store *backup.Receive
 // fires the webhook. A lastReceivedAt failure is logged and leaves Stale
 // false rather than failing the whole /api/receivers response over one
 // receiver's directory listing.
-func annotateReceiverStaleness(snap *backup.ReceiverSnapshot, recv config.ResolvedReceiver, log *slog.Logger) {
+func annotateReceiverStaleness(snap *status.ReceiverSnapshot, recv config.ResolvedReceiver, log *slog.Logger) {
 	if recv.StaleAfter <= 0 {
 		return
 	}

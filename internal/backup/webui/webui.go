@@ -25,6 +25,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
 	"nilswitt.dev/go-backup-tool/internal/backup/settings"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
@@ -51,12 +52,12 @@ type Server struct {
 type Deps struct {
 	Log             *slog.Logger
 	DB              *store.Store
-	Status          *backup.StatusStore
+	Status          *status.Store
 	Jobs            *jobs.Manager
 	Runner          *pipeline.Runner
 	GPGKeyring      *gpgkeys.Keyring
 	Receivers       *backup.ReceiverRegistry
-	ReceiverStatus  *backup.ReceiverStatusStore
+	ReceiverStatus  *status.ReceiverStore
 	ReceiverManager *receiver.Manager
 	Settings        *settings.Manager
 	Trust           *trust.Manager

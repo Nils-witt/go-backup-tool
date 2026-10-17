@@ -15,6 +15,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	reportpkg "nilswitt.dev/go-backup-tool/internal/backup/report"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -370,7 +371,7 @@ func renderReportSubject(tmpl string, report reportContent, escape func(string) 
 // "1.2 GB") for the report body. Unlike a general-purpose humanize package,
 // this only needs to read reasonably in an email, not be exact.
 func formatReportBytes(n int64) string {
-	return backup.FormatSize(n, 1000, "kMGTPE", false)
+	return status.FormatSize(n, 1000, "kMGTPE", false)
 }
 
 // reportNotifyTimeout bounds a single report notification delivery (one

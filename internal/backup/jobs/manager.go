@@ -16,10 +16,10 @@ import (
 	"sync"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -78,7 +78,7 @@ type schedule struct {
 // start-time changed.
 type Manager struct {
 	db            *store.Store
-	status        *backup.StatusStore
+	status        *status.Store
 	runner        *pipeline.Runner
 	notifications *notify.Registry
 	settings      Settings
@@ -120,9 +120,9 @@ const (
 // opened), mirroring jobs into status and running them on runner. Job
 // failure-notifications are checked against notifications. Call Load, then
 // Start.
-func NewManager(db *store.Store, status *backup.StatusStore, runner *pipeline.Runner, notifications *notify.Registry, settings Settings, log *slog.Logger) *Manager {
+func NewManager(db *store.Store, statusStore *status.Store, runner *pipeline.Runner, notifications *notify.Registry, settings Settings, log *slog.Logger) *Manager {
 	return &Manager{
-		db: db, status: status, runner: runner, notifications: notifications, settings: settings, log: log,
+		db: db, status: statusStore, runner: runner, notifications: notifications, settings: settings, log: log,
 		serverDefs: make(map[string]config.FileServer), commandDefs: make(map[string]config.FileCommand), jobDefs: make(map[string]config.FileJob),
 		servers: make(map[string]config.ResolvedServer), commands: make(map[string]config.Command), jobs: make(map[string]*config.Config),
 		invalid:   map[string]map[string]string{kindServer: {}, kindCommand: {}, kindJob: {}},

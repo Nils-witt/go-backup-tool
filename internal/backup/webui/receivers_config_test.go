@@ -15,6 +15,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
 
@@ -71,10 +72,10 @@ func startReceiverConfigWebUI(t *testing.T, idp *testIDP) (*Server, *backup.Rece
 	db := openTestStateDB(t)
 	baseDir := t.TempDir()
 	registry := backup.NewReceiverRegistry(nil)
-	status := backup.NewReceiverStatusStore(nil)
+	receiverStatus := status.NewReceiverStore(nil)
 	notifications := notify.NewRegistry(map[string]notify.Notification{"ops": {ID: "ops", Webhook: &notify.Webhook{URL: "http://example.invalid"}}})
 	trustManager := trust.NewManager(db, trust.NewRegistry(nil), discardLogger)
-	manager := receiver.NewManager(db, registry, status, notifications, trustManager.Registry(), "", baseDir, discardLogger)
+	manager := receiver.NewManager(db, registry, receiverStatus, notifications, trustManager.Registry(), "", baseDir, discardLogger)
 	statusStore, _ := newTestStore()
 
 	srv := StartWebUI(Deps{
@@ -82,7 +83,7 @@ func startReceiverConfigWebUI(t *testing.T, idp *testIDP) (*Server, *backup.Rece
 		DB:              db,
 		Status:          statusStore,
 		Receivers:       registry,
-		ReceiverStatus:  status,
+		ReceiverStatus:  receiverStatus,
 		ReceiverManager: manager,
 		Trust:           trustManager,
 	}, Options{
@@ -159,7 +160,7 @@ func TestReceiverConfigAPI(t *testing.T) {
 		c.run(t, srv)
 	}
 
-	var snaps []backup.ReceiverSnapshot
+	var snaps []status.ReceiverSnapshot
 	if code := doJSON(t, srv, http.MethodGet, "/api/receivers", viewer, &snaps); code != http.StatusOK || len(snaps) != 1 || snaps[0].ID != "a" {
 		t.Errorf("GET /api/receivers = %d %+v, want just a", code, snaps)
 	}

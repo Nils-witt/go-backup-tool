@@ -13,17 +13,18 @@ import (
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 )
 
 // startLiveWebUI starts an SSO-enabled web UI with one job ("test") and one
 // receiver ("a"), returning the stores so tests can drive state changes.
 // trustProxyHeaders is passed through as webui.trust-proxy-headers.
-func startLiveWebUI(t *testing.T, idp *testIDP, trustProxyHeaders bool) (*Server, *backup.StatusStore, *backup.ReceiverStatusStore) {
+func startLiveWebUI(t *testing.T, idp *testIDP, trustProxyHeaders bool) (*Server, *status.Store, *status.ReceiverStore) {
 	t.Helper()
 
 	statusStore, _ := newTestStore()
 	receivers := map[string]config.ResolvedReceiver{"a": {ID: "a", Path: t.TempDir()}}
-	receiverStore := backup.NewReceiverStatusStore(receivers)
+	receiverStore := status.NewReceiverStore(receivers)
 
 	srv := StartWebUI(Deps{
 		Log:            discardLogger,
@@ -110,19 +111,19 @@ func TestLiveStatusStreamsChanges(t *testing.T) {
 	}
 
 	msg := readLive(t, conn)
-	if msg.Type != "status" || len(msg.Jobs) != 1 || msg.Jobs[0].State != backup.StateIdle || len(msg.Receivers) != 1 {
+	if msg.Type != "status" || len(msg.Jobs) != 1 || msg.Jobs[0].State != status.StateIdle || len(msg.Receivers) != 1 {
 		t.Fatalf("initial message = %+v, want one idle job and one receiver", msg)
 	}
 
 	statusStore.Starting("test")
 
-	if msg = readLive(t, conn); msg.Jobs[0].State != backup.StateRunning || msg.Jobs[0].Targets[0].State != backup.StateRunning {
+	if msg = readLive(t, conn); msg.Jobs[0].State != status.StateRunning || msg.Jobs[0].Targets[0].State != status.StateRunning {
 		t.Errorf("after Starting, jobs = %+v, want the job and its targets running", msg.Jobs)
 	}
 
 	receiverStore.Record("a", "backup.gpg", nil)
 
-	if msg = readLive(t, conn); msg.Receivers[0].State != backup.StateOK || msg.Receivers[0].LastKey != "backup.gpg" {
+	if msg = readLive(t, conn); msg.Receivers[0].State != status.StateOK || msg.Receivers[0].LastKey != "backup.gpg" {
 		t.Errorf("after Record, receivers = %+v, want a ok with last key backup.gpg", msg.Receivers)
 	}
 }
@@ -282,7 +283,7 @@ func TestLiveStatusCacheSharesPayloadUntilChange(t *testing.T) {
 
 	statusStore, _ := newTestStore()
 	receivers := map[string]config.ResolvedReceiver{"a": {ID: "a", Path: t.TempDir()}}
-	receiverStore := backup.NewReceiverStatusStore(receivers)
+	receiverStore := status.NewReceiverStore(receivers)
 	cache := &liveStatusCache{statusStore: statusStore, receivers: backup.NewReceiverRegistry(receivers), receiverStore: receiverStore, log: discardLogger}
 
 	first, jobsChanged, receiversChanged := getLivePayload(t, cache)
@@ -304,7 +305,7 @@ func TestLiveStatusCacheSharesPayloadUntilChange(t *testing.T) {
 		t.Fatalf("decoding payload: %v", err)
 	}
 
-	if len(msg.Jobs) == 0 || msg.Jobs[0].State != backup.StateRunning {
+	if len(msg.Jobs) == 0 || msg.Jobs[0].State != status.StateRunning {
 		t.Errorf("payload jobs = %+v, want job test running", msg.Jobs)
 	}
 

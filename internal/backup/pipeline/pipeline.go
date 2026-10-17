@@ -28,6 +28,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/dockerexec"
 	"nilswitt.dev/go-backup-tool/internal/backup/remoteauth"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 	"nilswitt.dev/go-backup-tool/internal/backup/tarball"
 )
@@ -128,7 +129,7 @@ func removeStagingFileIfUnreferenced(ctx context.Context, db *store.Store, path 
 // files independently, so one target's failure never affects any other
 // target's own attempt. A file whose command fails is left out, while every
 // file that was staged is still uploaded: the run then ends with an error
-// (and the job as incomplete, see backup.StatusStore.Finished). Each target
+// (and the job as incomplete, see status.Store.Finished). Each target
 // gets exactly one attempt per file within a run (see
 // uploadStagedToTargets); a failed upload's staged file is instead handed
 // off to Runner.RunOutstandingUploadRetries, which retries it in the
@@ -158,7 +159,7 @@ func removeStagingFileIfUnreferenced(ctx context.Context, db *store.Store, path 
 // target (they all upload from the same staged files), for callers that
 // want to report the backup's size; it's 0 if no file was staged. files is
 // each source's own outcome, in cfg.Sources order.
-func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger, onTargetDone func(index int, err error)) (bytesWritten int64, files []backup.FileSnapshot, err error) {
+func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger, onTargetDone func(index int, err error)) (bytesWritten int64, files []status.FileSnapshot, err error) {
 	// Guarantees the onTargetDone contract above even on an early return:
 	// uploadStagedToTargets reports each target itself once it starts, so
 	// this only fires when nothing could be staged, and it always sees the
@@ -175,7 +176,7 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger, onTa
 	}()
 
 	staged := make([]stagedFile, 0, len(cfg.Sources))
-	files = make([]backup.FileSnapshot, 0, len(cfg.Sources))
+	files = make([]status.FileSnapshot, 0, len(cfg.Sources))
 
 	var sourceErrs []error
 
@@ -192,7 +193,7 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger, onTa
 			sourceErrs = append(sourceErrs, fmt.Errorf("file %q: %w", src.Name, err))
 		}
 
-		files = append(files, backup.NewFileSnapshot(src.Name, src.ID, f.size, err))
+		files = append(files, status.NewFileSnapshot(src.Name, src.ID, f.size, err))
 	}
 
 	sourceErr := errors.Join(sourceErrs...)

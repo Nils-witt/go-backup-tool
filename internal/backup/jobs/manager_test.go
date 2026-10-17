@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -34,22 +34,22 @@ func openTestStateDB(t *testing.T) *store.Store {
 type testManager struct {
 	*Manager
 
-	status *backup.StatusStore
+	status *status.Store
 	db     *store.Store
 }
 
 func newTestManager(t *testing.T, db *store.Store, settings Settings) testManager {
 	t.Helper()
 
-	status := backup.NewStatusStore(nil)
+	statusStore := status.NewStore(nil)
 	notifications := notify.NewRegistry(map[string]notify.Notification{"ops": {ID: "ops", Webhook: &notify.Webhook{URL: "http://example.invalid"}}})
-	runner := pipeline.NewRunner(discardLogger, status, db, nil, nil, notifications)
+	runner := pipeline.NewRunner(discardLogger, statusStore, db, nil, nil, notifications)
 
 	if settings.GPG.Bin == "" {
 		settings.GPG.Bin = "gpg"
 	}
 
-	return testManager{Manager: NewManager(db, status, runner, notifications, settings, discardLogger), status: status, db: db}
+	return testManager{Manager: NewManager(db, statusStore, runner, notifications, settings, discardLogger), status: statusStore, db: db}
 }
 
 func localServer(name string) config.FileServer {
@@ -75,7 +75,7 @@ func job(name, server string) config.FileJob {
 	}
 }
 
-func statusNames(s *backup.StatusStore) []string {
+func statusNames(s *status.Store) []string {
 	var names []string
 	for _, j := range s.Snapshot() {
 		names = append(names, j.Name)
@@ -482,14 +482,14 @@ func TestScheduling(t *testing.T) {
 
 // waitForRun waits for job name's run started after since to finish,
 // returning its start.
-func waitForRun(t *testing.T, s *backup.StatusStore, name string, since time.Time) time.Time {
+func waitForRun(t *testing.T, s *status.Store, name string, since time.Time) time.Time {
 	t.Helper()
 
 	deadline := time.Now().Add(10 * time.Second)
 
 	for time.Now().Before(deadline) {
 		for _, j := range s.Snapshot() {
-			if j.Name == name && j.LastStart.After(since) && j.State != backup.StateRunning && !j.LastEnd.IsZero() {
+			if j.Name == name && j.LastStart.After(since) && j.State != status.StateRunning && !j.LastEnd.IsZero() {
 				return j.LastStart
 			}
 		}

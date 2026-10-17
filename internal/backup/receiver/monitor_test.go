@@ -20,6 +20,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -502,22 +503,22 @@ func TestSeedReceiverStatusFromState(t *testing.T) {
 		"a": {ID: "a", Path: t.TempDir()},
 		"b": {ID: "b", Path: t.TempDir()}, // no events recorded: stays idle
 	}
-	statusStore := backup.NewReceiverStatusStore(receivers)
+	statusStore := status.NewReceiverStore(receivers)
 
 	SeedReceiverStatusFromState(ctx, db, receivers, statusStore, discardLogger)
 
 	snap := statusStore.Snapshot()
 
-	byID := make(map[string]backup.ReceiverSnapshot, len(snap))
+	byID := make(map[string]status.ReceiverSnapshot, len(snap))
 	for _, s := range snap {
 		byID[s.ID] = s
 	}
 
-	if got := byID["a"]; got.State != backup.StateOK || got.LastKey != "obj.gpg" || !got.LastSeen.Equal(at) {
+	if got := byID["a"]; got.State != status.StateOK || got.LastKey != "obj.gpg" || !got.LastSeen.Equal(at) {
 		t.Errorf("receiver a = %+v, want state ok, last_key obj.gpg, last_seen %v", got, at)
 	}
 
-	if got := byID["b"]; got.State != backup.StateIdle {
+	if got := byID["b"]; got.State != status.StateIdle {
 		t.Errorf("receiver b = %+v, want state idle", got)
 	}
 }

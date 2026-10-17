@@ -27,6 +27,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
 	"nilswitt.dev/go-backup-tool/internal/backup/settings"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 	"nilswitt.dev/go-backup-tool/internal/backup/webui"
@@ -127,18 +128,18 @@ func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, deps webu
 // requests against, and their manager returned for the web UI.
 // notifications must already be loaded (see newSettings), since receivers
 // are checked against it.
-func newReceivers(ctx context.Context, rc *config.RunConfig, stateDB *store.Store, notifications *notify.Registry, log *slog.Logger) (*backup.ReceiverRegistry, *backup.ReceiverStatusStore, *receiver.Manager, *trust.Manager) {
+func newReceivers(ctx context.Context, rc *config.RunConfig, stateDB *store.Store, notifications *notify.Registry, log *slog.Logger) (*backup.ReceiverRegistry, *status.ReceiverStore, *receiver.Manager, *trust.Manager) {
 	// Trusted servers load first: every receiver resolves its allowed
 	// servers against them.
 	trustManager := trust.NewManager(stateDB, trust.NewRegistry(nil), log)
 	trustManager.Load(ctx)
 
 	registry := backup.NewReceiverRegistry(nil)
-	status := backup.NewReceiverStatusStore(nil)
-	manager := receiver.NewManager(stateDB, registry, status, notifications, trustManager.Registry(), rc.ServerName, rc.ReceiversBaseDir, log)
+	receiverStatus := status.NewReceiverStore(nil)
+	manager := receiver.NewManager(stateDB, registry, receiverStatus, notifications, trustManager.Registry(), rc.ServerName, rc.ReceiversBaseDir, log)
 	manager.Load(ctx, rc.FileReceivers)
 
-	return registry, status, manager, trustManager
+	return registry, receiverStatus, manager, trustManager
 }
 
 // newSettings loads every notification and the report settings (see
@@ -161,7 +162,7 @@ func newSettings(ctx context.Context, rc *config.RunConfig, stateDB *store.Store
 // runner — not scheduled until its Start. notifications must already be
 // loaded (see newSettings), since job failure-notifications are checked
 // against it. The error is an unknown -job.
-func newJobs(ctx context.Context, rc *config.RunConfig, stateDB *store.Store, statusStore *backup.StatusStore, runner *pipeline.Runner, notifications *notify.Registry, log *slog.Logger) (*jobs.Manager, error) {
+func newJobs(ctx context.Context, rc *config.RunConfig, stateDB *store.Store, statusStore *status.Store, runner *pipeline.Runner, notifications *notify.Registry, log *slog.Logger) (*jobs.Manager, error) {
 	manager := jobs.NewManager(stateDB, statusStore, runner, notifications, jobs.Settings{
 		GPG: rc.GPG, ServerName: rc.ServerName, Editing: rc.JobEditing, Filter: rc.JobFilter,
 	}, log)
@@ -236,7 +237,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	stateDB, closeStateDB := openStateDB(ctx, rc, log)
 	defer closeStateDB()
 
-	statusStore := backup.NewStatusStore(nil)
+	statusStore := status.NewStore(nil)
 
 	// Holds any notification email SendMailQueued couldn't deliver, retrying
 	// it every notify.RetryInterval instead of losing it; shared by every

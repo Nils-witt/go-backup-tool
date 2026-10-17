@@ -6,12 +6,12 @@ import (
 	"log/slog"
 	"net/http"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 )
 
 // handleStatus serves store's current job/target statuses as JSON.
-func handleStatus(store *backup.StatusStore) http.HandlerFunc {
+func handleStatus(store *status.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, store.Snapshot())
 	}
@@ -34,7 +34,7 @@ func handleStatus(store *backup.StatusStore) http.HandlerFunc {
 // the retry's progress instead.
 // context.WithoutCancel detaches the retry from this request's own
 // context, so it isn't cut short the moment the response is written.
-func handleRetryFailedTargets(lookupJob pipeline.JobLookup, statusStore *backup.StatusStore, runner *pipeline.Runner, log *slog.Logger) http.HandlerFunc {
+func handleRetryFailedTargets(lookupJob pipeline.JobLookup, statusStore *status.Store, runner *pipeline.Runner, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
 

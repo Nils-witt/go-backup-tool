@@ -5,10 +5,10 @@ import (
 	"runtime"
 	"testing"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/dockerexec/dockerexectest"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 )
 
 // startDockerWebUI starts an SSO-enabled web UI whose runner talks to the
@@ -16,13 +16,13 @@ import (
 func startDockerWebUI(t *testing.T, idp *testIDP, dockerHost string) *Server {
 	t.Helper()
 
-	status := backup.NewStatusStore(nil)
-	runner := pipeline.NewRunner(discardLogger, status, nil, nil, nil, notify.NewRegistry(nil))
+	statusStore := status.NewStore(nil)
+	runner := pipeline.NewRunner(discardLogger, statusStore, nil, nil, nil, notify.NewRegistry(nil))
 	runner.UseDocker(dockerHost)
 
 	srv := StartWebUI(Deps{
 		Log:    discardLogger,
-		Status: status,
+		Status: statusStore,
 		Runner: runner,
 	}, Options{
 		Addr: "127.0.0.1:0",

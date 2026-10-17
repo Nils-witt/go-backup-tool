@@ -1,4 +1,10 @@
-package backup
+// Package status is the web UI's live read-model of job and receiver state:
+// in-memory stores that the pipeline and the receiver API update as runs and
+// uploads happen, and that the dashboard reads (GET /api/status,
+// /api/receivers) and watches through each store's Changed channel (the
+// /api/live WebSocket). Nothing here is persisted; past runs are seeded back
+// in from the state db at startup (see Store.SeedLastRun).
+package status
 
 import (
 	"fmt"
@@ -81,11 +87,11 @@ func NewFileSnapshot(name, command string, size int64, err error) FileSnapshot {
 	return f
 }
 
-// StatusStore tracks the live state of every configured job and its targets,
+// Store tracks the live state of every configured job and its targets,
 // updated as jobs execute (see the pipeline package) and read by the web UI's
 // HTTP handlers. Safe for concurrent use: jobs run concurrently with each
 // other and with any number of status requests.
-type StatusStore struct {
+type Store struct {
 	mu    sync.Mutex
 	jobs  map[string]*JobSnapshot
 	order []string // job names in config order, for stable UI listing
@@ -116,17 +122,17 @@ func (n *changeNotifier) notifyLocked() {
 // Changed returns a channel that is closed on the store's next change.
 // Watchers should re-read the store's Snapshot after it fires, then call
 // Changed again for the change after that.
-func (s *StatusStore) Changed() <-chan struct{} {
+func (s *Store) Changed() <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	return s.changed
 }
 
-// NewStatusStore builds a StatusStore with one idle entry per job in jobs,
+// NewStore builds a Store with one idle entry per job in jobs,
 // preserving their order.
-func NewStatusStore(jobs []*config.Config) *StatusStore {
-	s := &StatusStore{jobs: make(map[string]*JobSnapshot, len(jobs)), changeNotifier: newChangeNotifier()}
+func NewStore(jobs []*config.Config) *Store {
+	s := &Store{jobs: make(map[string]*JobSnapshot, len(jobs)), changeNotifier: newChangeNotifier()}
 
 	for _, j := range jobs {
 		s.jobs[j.Name] = newJobSnapshot(j)
@@ -159,7 +165,7 @@ func idleTargets(job *config.Config) []TargetSnapshot {
 // — for a job already present, e.g. one just edited in the web UI — updates
 // its interval and targets, keeping its last-run info and each target whose
 // server and bucket are unchanged.
-func (s *StatusStore) Upsert(job *config.Config) {
+func (s *Store) Upsert(job *config.Config) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	defer s.notifyLocked()
@@ -190,7 +196,7 @@ func (s *StatusStore) Upsert(job *config.Config) {
 
 // Remove drops job name, e.g. once it's deleted in the web UI. A run still
 // in flight for it keeps going; its updates are then ignored.
-func (s *StatusStore) Remove(name string) {
+func (s *Store) Remove(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	defer s.notifyLocked()
@@ -205,7 +211,7 @@ func (s *StatusStore) Remove(name string) {
 
 // LastStart returns when job name's most recent run started, the zero Time
 // if it hasn't run (or isn't known).
-func (s *StatusStore) LastStart(name string) time.Time {
+func (s *Store) LastStart(name string) time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -257,8 +263,8 @@ func FormatSize(n, unit int64, suffixes string, binarySuffix bool) string {
 }
 
 // SetOutcome sets *state/*errText to reflect err: failed/err.Error() when
-// err is non-nil, ok/"" otherwise. Shared by StatusStore.TargetDone (job
-// targets) and ReceiverStatusStore.Record (receivers), which track the same
+// err is non-nil, ok/"" otherwise. Shared by Store.TargetDone (job
+// targets) and ReceiverStore.Record (receivers), which track the same
 // shape of live status for two different kinds of item, and by
 // pipeline.Runner's target-run persistence.
 func SetOutcome(state *RunState, errText *string, err error) {
@@ -286,7 +292,7 @@ func setSizeIfSucceeded(dst *string, state RunState, size int64) {
 
 // Starting marks name as running, resetting its (and its targets') last
 // error so a fresh run starts clean.
-func (s *StatusStore) Starting(name string) {
+func (s *Store) Starting(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	defer s.notifyLocked()
@@ -308,7 +314,7 @@ func (s *StatusStore) Starting(name string) {
 
 // TargetDone records the outcome of job name's target at index (index-aligned
 // with the job's targets:, per runPipeline's targetErrs).
-func (s *StatusStore) TargetDone(name string, index int, err error) {
+func (s *Store) TargetDone(name string, index int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	defer s.notifyLocked()
@@ -324,7 +330,7 @@ func (s *StatusStore) TargetDone(name string, index int, err error) {
 // SetNextRun records job name's next scheduled run time, for display in the
 // web UI. Called by runner.schedule whenever it computes (or recomputes) the
 // time it's about to wait for.
-func (s *StatusStore) SetNextRun(name string, next time.Time) {
+func (s *Store) SetNextRun(name string, next time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	defer s.notifyLocked()
@@ -356,7 +362,7 @@ func (s *StatusStore) SetNextRun(name string, next time.Time) {
 // successful run's size instead of misrepresenting 0 or a partial count as
 // a real backup. files (each file's outcome) replaces the job's Files,
 // unless nil.
-func (s *StatusStore) Finished(name string, err error, size int64, files []FileSnapshot) RunState {
+func (s *Store) Finished(name string, err error, size int64, files []FileSnapshot) RunState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	defer s.notifyLocked()
@@ -440,7 +446,7 @@ func overallState(targets []TargetSnapshot) RunState {
 // failed during a run finally succeeds on a later background retry. Clears
 // the job's recorded error once every target is now OK, matching Finished's
 // own success handling.
-func (s *StatusStore) RefreshJobState(name string) {
+func (s *Store) RefreshJobState(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	defer s.notifyLocked()
@@ -462,7 +468,7 @@ func (s *StatusStore) RefreshJobState(name string) {
 // show when the job last ran instead of reverting to "never" until it next
 // runs. Called once at startup, before any job's own goroutine can call
 // starting/finished, so it never races an actual run.
-func (s *StatusStore) SeedLastRun(name string, start, end time.Time, state RunState, errText string, size int64) {
+func (s *Store) SeedLastRun(name string, start, end time.Time, state RunState, errText string, size int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	defer s.notifyLocked()
@@ -487,7 +493,7 @@ func (s *StatusStore) SeedLastRun(name string, start, end time.Time, state RunSt
 // each target's last outcome instead of every target reverting to "idle"
 // until it next runs. Called once at startup, before any job's own goroutine
 // can call starting/targetDone, so it never races an actual run.
-func (s *StatusStore) SeedTargetRun(name, target string, state RunState, errText string) {
+func (s *Store) SeedTargetRun(name, target string, state RunState, errText string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	defer s.notifyLocked()
@@ -513,7 +519,7 @@ func (s *StatusStore) SeedTargetRun(name, target string, state RunState, errText
 // untouched, since pipeline.Runner.RetryFailedTargets only re-runs this
 // specific subset rather than the whole job. It still updates the job's own
 // LastStart, so the dashboard's "last run" timestamp reflects this retry.
-func (s *StatusStore) RetryStarting(name string, targets []string) {
+func (s *Store) RetryStarting(name string, targets []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	defer s.notifyLocked()
@@ -537,7 +543,7 @@ func (s *StatusStore) RetryStarting(name string, targets []string) {
 // reported as failed, for the web UI's "retry failed targets" action (see
 // handleRetryFailedTargets in webui/jobs.go) to determine which targets a retry
 // request applies to. Returns nil if name is unknown or none are failed.
-func (s *StatusStore) FailedTargets(name string) []string {
+func (s *Store) FailedTargets(name string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -559,7 +565,7 @@ func (s *StatusStore) FailedTargets(name string) []string {
 
 // Snapshot returns every job's current status, in config-file order, each a
 // copy safe to serialize (or otherwise use) without holding s.mu.
-func (s *StatusStore) Snapshot() []JobSnapshot {
+func (s *Store) Snapshot() []JobSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

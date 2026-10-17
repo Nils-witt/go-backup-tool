@@ -16,6 +16,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -23,7 +24,7 @@ import (
 // scheduled jobs.
 type Runner struct {
 	log      *slog.Logger
-	store    *backup.StatusStore
+	store    *status.Store
 	stateDB  *store.Store             // nil only if the db couldn't be opened
 	identity *identity.ServerIdentity // nil if loadServerIdentity failed at startup; see Config.Identity
 	queue    *notify.Queue            // retries a failed job-failure email later; see notify.SendMailQueued
@@ -70,7 +71,7 @@ type targetKey struct {
 
 // NewRunner builds a Runner sharing store/stateDB/identity/queue across
 // every job scheduled through it in this run.
-func NewRunner(log *slog.Logger, statusStore *backup.StatusStore, stateDB *store.Store, identity *identity.ServerIdentity, queue *notify.Queue, notifications *notify.Registry) *Runner {
+func NewRunner(log *slog.Logger, statusStore *status.Store, stateDB *store.Store, identity *identity.ServerIdentity, queue *notify.Queue, notifications *notify.Registry) *Runner {
 	return &Runner{log: log, store: statusStore, stateDB: stateDB, identity: identity, queue: queue, notifications: notifications, targetFailures: make(map[targetKey]int)}
 }
 
@@ -97,7 +98,7 @@ func (r *Runner) Failed() bool {
 // show when each job last ran instead of every job reverting to "never"
 // until it next runs. Called once at startup, before the jobs' own
 // goroutines start.
-func SeedStatusFromState(ctx context.Context, db *store.Store, jobs []*config.Config, statusStore *backup.StatusStore, log *slog.Logger) {
+func SeedStatusFromState(ctx context.Context, db *store.Store, jobs []*config.Config, statusStore *status.Store, log *slog.Logger) {
 	for _, j := range jobs {
 		run, ok, err := db.GetLastRun(ctx, j.Name)
 		if err != nil {
@@ -111,9 +112,9 @@ func SeedStatusFromState(ctx context.Context, db *store.Store, jobs []*config.Co
 
 		log.Debug("seeded job status from state db", "job", j.Name, "success", run.Success, "last_end", run.End)
 
-		state := backup.StateFailed
+		state := status.StateFailed
 		if run.Success {
-			state = backup.StateOK
+			state = status.StateOK
 		}
 
 		statusStore.SeedLastRun(j.Name, run.Start, run.End, state, run.Error, run.Size)
@@ -127,7 +128,7 @@ func SeedStatusFromState(ctx context.Context, db *store.Store, jobs []*config.Co
 		}
 
 		for _, tr := range targetRuns {
-			statusStore.SeedTargetRun(j.Name, tr.Target, backup.RunState(tr.State), tr.Error)
+			statusStore.SeedTargetRun(j.Name, tr.Target, status.RunState(tr.State), tr.Error)
 		}
 	}
 }
@@ -436,7 +437,7 @@ var (
 // bytes, each file's outcome, and the run's error.
 type runResult struct {
 	bytes int64
-	files []backup.FileSnapshot
+	files []status.FileSnapshot
 	err   error
 }
 
@@ -485,7 +486,7 @@ func (r *Runner) finishRun(ctx context.Context, job *config.Config, log *slog.Lo
 
 		jobErr = config.JobError(job, err)
 
-		if state == backup.StateIncomplete {
+		if state == status.StateIncomplete {
 			log.Warn(msgs.incomplete, "duration", duration, "err", jobErr)
 		} else {
 			log.Error(msgs.failed, "duration", duration, "err", jobErr)
@@ -596,7 +597,7 @@ func (r *Runner) RetryFailedTargets(ctx context.Context, job *config.Config, tar
 // succeeded, partly succeeded, or failed outright), so a future restart's
 // web UI can still show it via SeedStatusFromState. Best-effort: a db
 // hiccup here shouldn't fail the run.
-func (r *Runner) recordJobRun(ctx context.Context, name string, state backup.RunState, success bool, start time.Time, bytesWritten int64, errText string) {
+func (r *Runner) recordJobRun(ctx context.Context, name string, state status.RunState, success bool, start time.Time, bytesWritten int64, errText string) {
 	if r.stateDB == nil {
 		return
 	}
@@ -616,11 +617,11 @@ func (r *Runner) persistTargetRun(ctx context.Context, jobName string, success b
 	}
 
 	var (
-		state   backup.RunState
+		state   status.RunState
 		errText string
 	)
 
-	backup.SetOutcome(&state, &errText, terr)
+	status.SetOutcome(&state, &errText, terr)
 
 	if err := r.stateDB.SaveTargetRun(ctx, jobName, success, target, string(state), errText, time.Now()); err != nil {
 		r.log.Warn("recording target run to state db", "job", jobName, "target", target, "err", err)

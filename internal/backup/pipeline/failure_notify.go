@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 )
 
 // jobFailurePayload is the default JSON body POSTed to a job-failure
@@ -40,7 +40,7 @@ const defaultJobFailureBody = "Job {job} {state} after {duration} (started {star
 // jobFailureWebhookBody builds the request body sent to wh: wh.Body: (see
 // renderJobFailurePayload), if set, otherwise the default JSON
 // jobFailurePayload.
-func jobFailureWebhookBody(wh notify.Webhook, job *config.Config, jobErr error, state backup.RunState, start time.Time, duration time.Duration) ([]byte, error) {
+func jobFailureWebhookBody(wh notify.Webhook, job *config.Config, jobErr error, state status.RunState, start time.Time, duration time.Duration) ([]byte, error) {
 	if wh.Body != "" {
 		esc := wh.TemplateEscaper(defaultJobFailureWebhookContentType)
 
@@ -66,7 +66,7 @@ func jobFailureWebhookBody(wh notify.Webhook, job *config.Config, jobErr error, 
 // instead of go-backup-tool's own default shape. Every value goes through
 // escape first (see notify.Webhook.TemplateEscaper): {error} can carry a
 // remote receiver's response text.
-func renderJobFailurePayload(tmpl string, job *config.Config, jobErr error, state backup.RunState, start time.Time, duration time.Duration, escape func(string) string) string {
+func renderJobFailurePayload(tmpl string, job *config.Config, jobErr error, state status.RunState, start time.Time, duration time.Duration, escape func(string) string) string {
 	replacer := strings.NewReplacer(
 		"{job}", escape(job.Name),
 		"{error}", escape(jobErr.Error()),
@@ -87,7 +87,7 @@ func renderJobFailurePayload(tmpl string, job *config.Config, jobErr error, stat
 // the result — mirrors receiver.notifyStaleReceiver/NotifyDownload's
 // fire-and-forget style. queue, if non-nil, retries a failed email later
 // instead of losing it (see notify.SendMailQueued).
-func notifyJobFailure(job *config.Config, notifications *notify.Registry, jobErr error, state backup.RunState, start time.Time, duration time.Duration, queue *notify.Queue, log *slog.Logger) {
+func notifyJobFailure(job *config.Config, notifications *notify.Registry, jobErr error, state status.RunState, start time.Time, duration time.Duration, queue *notify.Queue, log *slog.Logger) {
 	for _, n := range notifications.Resolve(job.FailureNotifications, log, "job", job.Name) {
 		if n.Webhook != nil {
 			notifyJobFailureWebhook(job, *n.Webhook, jobErr, state, start, duration, log)
@@ -100,7 +100,7 @@ func notifyJobFailure(job *config.Config, notifications *notify.Registry, jobErr
 }
 
 // notifyJobFailureWebhook POSTs job's just-finished failure to wh.
-func notifyJobFailureWebhook(job *config.Config, wh notify.Webhook, jobErr error, state backup.RunState, start time.Time, duration time.Duration, log *slog.Logger) {
+func notifyJobFailureWebhook(job *config.Config, wh notify.Webhook, jobErr error, state status.RunState, start time.Time, duration time.Duration, log *slog.Logger) {
 	body, err := jobFailureWebhookBody(wh, job, jobErr, state, start, duration)
 	if err != nil {
 		log.Warn("job failure webhook: encoding payload failed", "job", job.Name, "err", err)
@@ -124,7 +124,7 @@ func notifyJobFailureWebhook(job *config.Config, wh notify.Webhook, jobErr error
 
 // notifyJobFailureEmail emails job's just-finished failure via email. queue,
 // if non-nil, retries delivery later on failure instead of losing it.
-func notifyJobFailureEmail(job *config.Config, email notify.Email, jobErr error, state backup.RunState, start time.Time, duration time.Duration, queue *notify.Queue, log *slog.Logger) {
+func notifyJobFailureEmail(job *config.Config, email notify.Email, jobErr error, state status.RunState, start time.Time, duration time.Duration, queue *notify.Queue, log *slog.Logger) {
 	subjectTmpl := email.Subject
 	if subjectTmpl == "" {
 		subjectTmpl = defaultJobFailureSubject

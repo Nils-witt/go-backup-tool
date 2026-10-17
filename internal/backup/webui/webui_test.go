@@ -19,6 +19,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -63,12 +64,12 @@ func TestHandleStatusServesJSON(t *testing.T) {
 		t.Errorf("Content-Type = %q, want application/json prefix", ct)
 	}
 
-	var jobs []backup.JobSnapshot
+	var jobs []status.JobSnapshot
 	if err := json.Unmarshal(rec.Body.Bytes(), &jobs); err != nil {
 		t.Fatalf("decoding response body: %v", err)
 	}
 
-	if len(jobs) != 1 || jobs[0].Name != "test" || jobs[0].State != backup.StateRunning {
+	if len(jobs) != 1 || jobs[0].Name != "test" || jobs[0].State != status.StateRunning {
 		t.Errorf("jobs = %+v, want one running job named test", jobs)
 	}
 }
@@ -124,14 +125,14 @@ func TestHandleReceiverStatusIncludesStaleness(t *testing.T) {
 	receivers := map[string]config.ResolvedReceiver{
 		"a": {ID: "a", Path: root, StaleAfter: time.Hour},
 	}
-	store := backup.NewReceiverStatusStore(receivers)
+	store := status.NewReceiverStore(receivers)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers", nil)
 	rec := httptest.NewRecorder()
 
 	handleReceiverStatus(backup.NewReceiverRegistry(receivers), store, discardLogger)(rec, req)
 
-	var snapshots []backup.ReceiverSnapshot
+	var snapshots []status.ReceiverSnapshot
 	if err := json.Unmarshal(rec.Body.Bytes(), &snapshots); err != nil {
 		t.Fatalf("decoding response body: %v", err)
 	}
@@ -154,14 +155,14 @@ func TestHandleReceiverStatusFreshFileIsNotStale(t *testing.T) {
 	receivers := map[string]config.ResolvedReceiver{
 		"a": {ID: "a", Path: root, StaleAfter: time.Hour},
 	}
-	store := backup.NewReceiverStatusStore(receivers)
+	store := status.NewReceiverStore(receivers)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers", nil)
 	rec := httptest.NewRecorder()
 
 	handleReceiverStatus(backup.NewReceiverRegistry(receivers), store, discardLogger)(rec, req)
 
-	var snapshots []backup.ReceiverSnapshot
+	var snapshots []status.ReceiverSnapshot
 	if err := json.Unmarshal(rec.Body.Bytes(), &snapshots); err != nil {
 		t.Fatalf("decoding response body: %v", err)
 	}
@@ -175,14 +176,14 @@ func TestHandleReceiverStatusWithoutStaleAfterOmitsStaleness(t *testing.T) {
 	t.Parallel()
 
 	receivers := map[string]config.ResolvedReceiver{"a": {ID: "a", Path: t.TempDir()}}
-	store := backup.NewReceiverStatusStore(receivers)
+	store := status.NewReceiverStore(receivers)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receivers", nil)
 	rec := httptest.NewRecorder()
 
 	handleReceiverStatus(backup.NewReceiverRegistry(receivers), store, discardLogger)(rec, req)
 
-	var snapshots []backup.ReceiverSnapshot
+	var snapshots []status.ReceiverSnapshot
 	if err := json.Unmarshal(rec.Body.Bytes(), &snapshots); err != nil {
 		t.Fatalf("decoding response body: %v", err)
 	}
@@ -255,7 +256,7 @@ func TestHandleRetryFailedTargetsKicksOffRetry(t *testing.T) {
 		},
 	}
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	statusStore.Starting(job.Name)
 	statusStore.TargetDone(job.Name, 0, context.DeadlineExceeded) // simulate a prior failure
 	statusStore.Finished(job.Name, context.DeadlineExceeded, 0, nil)
@@ -281,7 +282,7 @@ func TestHandleRetryFailedTargetsKicksOffRetry(t *testing.T) {
 			t.Fatal("timed out waiting for the background retry to finish")
 		}
 
-		if statusStore.Snapshot()[0].Targets[0].State == backup.StateOK {
+		if statusStore.Snapshot()[0].Targets[0].State == status.StateOK {
 			break
 		}
 
@@ -332,7 +333,7 @@ func TestHandleRunJobStartsRunAndRejectsOverlap(t *testing.T) {
 		},
 	}
 
-	statusStore := backup.NewStatusStore([]*config.Config{job})
+	statusStore := status.NewStore([]*config.Config{job})
 	jobs := pipeline.StaticJobs([]*config.Config{job})
 	runner := pipeline.NewRunner(discardLogger, statusStore, nil, nil, nil, nil)
 
@@ -361,7 +362,7 @@ func TestHandleRunJobStartsRunAndRejectsOverlap(t *testing.T) {
 			t.Fatal("timed out waiting for the background run to finish")
 		}
 
-		if statusStore.Snapshot()[0].State == backup.StateOK {
+		if statusStore.Snapshot()[0].State == status.StateOK {
 			break
 		}
 

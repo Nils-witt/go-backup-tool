@@ -17,6 +17,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -26,7 +27,7 @@ import (
 // receiver's last activity instead of every receiver reverting to idle
 // until it next serves a request. Called once at startup, before the
 // receiver API's handlers can serve any request.
-func SeedReceiverStatusFromState(ctx context.Context, db *store.Store, receivers map[string]config.ResolvedReceiver, statusStore *backup.ReceiverStatusStore, log *slog.Logger) {
+func SeedReceiverStatusFromState(ctx context.Context, db *store.Store, receivers map[string]config.ResolvedReceiver, statusStore *status.ReceiverStore, log *slog.Logger) {
 	for id := range receivers {
 		seedReceiverStatus(ctx, db, id, statusStore, log)
 	}
@@ -35,7 +36,7 @@ func SeedReceiverStatusFromState(ctx context.Context, db *store.Store, receivers
 // seedReceiverStatus is SeedReceiverStatusFromState for a single receiver
 // id, also used when a receiver is created in the web UI (see
 // Manager.Create), since an id that existed before may have history.
-func seedReceiverStatus(ctx context.Context, db *store.Store, id string, statusStore *backup.ReceiverStatusStore, log *slog.Logger) {
+func seedReceiverStatus(ctx context.Context, db *store.Store, id string, statusStore *status.ReceiverStore, log *slog.Logger) {
 	ev, ok, err := db.GetLastReceiverEvent(ctx, id)
 	if err != nil {
 		log.Warn("reading last receiver event from state db", "id", id, "err", err)

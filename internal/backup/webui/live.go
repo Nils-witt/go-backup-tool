@@ -12,6 +12,7 @@ import (
 	"github.com/coder/websocket"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 )
 
 const (
@@ -47,8 +48,8 @@ const (
 // receiver snapshots /api/status and /api/receivers serve, together.
 type liveStatusJSON struct {
 	Type      string                    `json:"type"`
-	Jobs      []backup.JobSnapshot      `json:"jobs"`
-	Receivers []backup.ReceiverSnapshot `json:"receivers"`
+	Jobs      []status.JobSnapshot      `json:"jobs"`
+	Receivers []status.ReceiverSnapshot `json:"receivers"`
 }
 
 // liveStatusCache builds the encoded liveStatusJSON once per change and
@@ -57,9 +58,9 @@ type liveStatusJSON struct {
 // and marshaling them on every change and ping. receiverStore may be nil,
 // which encodes an empty receiver list. Safe for concurrent use.
 type liveStatusCache struct {
-	statusStore   *backup.StatusStore
+	statusStore   *status.Store
 	receivers     *backup.ReceiverRegistry
-	receiverStore *backup.ReceiverStatusStore
+	receiverStore *status.ReceiverStore
 	log           *slog.Logger
 
 	mu sync.Mutex
@@ -91,7 +92,7 @@ func (c *liveStatusCache) get() (payload []byte, jobsChanged, receiversChanged <
 		return c.payload, jobsChanged, receiversChanged, nil
 	}
 
-	msg := liveStatusJSON{Type: "status", Jobs: c.statusStore.Snapshot(), Receivers: []backup.ReceiverSnapshot{}}
+	msg := liveStatusJSON{Type: "status", Jobs: c.statusStore.Snapshot(), Receivers: []status.ReceiverSnapshot{}}
 	if c.receiverStore != nil {
 		msg.Receivers = receiverSnapshots(c.receivers, c.receiverStore, c.log)
 	}
@@ -197,7 +198,7 @@ func handleMintLiveTicket(tickets *liveTicketStore) http.HandlerFunc {
 
 // handleLive serves GET /api/live?ticket=...: a WebSocket that pushes a
 // liveStatusJSON whenever a job, target or receiver changes state (see
-// backup.StatusStore.Changed/ReceiverStatusStore.Changed), plus once on
+// status.Store.Changed/status.ReceiverStore.Changed), plus once on
 // connect and every livePingInterval. Clients never send anything; any
 // data message from one closes the connection. baseCtx is cancelled by
 // Server.Shutdown, which (unlike ordinary requests) http.Server.Shutdown
@@ -208,7 +209,7 @@ func handleMintLiveTicket(tickets *liveTicketStore) http.HandlerFunc {
 // since a proxy that rewrites Host would otherwise never match it. The
 // socket is closed once logouts records a back-channel logout ending the
 // session of the user who minted the ticket.
-func handleLive(baseCtx context.Context, statusStore *backup.StatusStore, receivers *backup.ReceiverRegistry, receiverStore *backup.ReceiverStatusStore, tickets *liveTicketStore, logouts *ssoLogouts, devMode, trustProxyHeaders bool, log *slog.Logger) http.HandlerFunc {
+func handleLive(baseCtx context.Context, statusStore *status.Store, receivers *backup.ReceiverRegistry, receiverStore *status.ReceiverStore, tickets *liveTicketStore, logouts *ssoLogouts, devMode, trustProxyHeaders bool, log *slog.Logger) http.HandlerFunc {
 	cache := &liveStatusCache{statusStore: statusStore, receivers: receivers, receiverStore: receiverStore, log: log}
 
 	var opts websocket.AcceptOptions

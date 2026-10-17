@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 )
 
 // testWebhookRegistry is a notification registry holding wh as the single
@@ -31,7 +31,7 @@ func TestRenderJobFailurePayload(t *testing.T) {
 
 	got := renderJobFailurePayload(
 		"{server_name}: job {job} {state} after {duration} (started {started_at}): {error}",
-		job, errors.New("boom"), backup.StateFailed, start, 5*time.Second, notify.NoEscape,
+		job, errors.New("boom"), status.StateFailed, start, 5*time.Second, notify.NoEscape,
 	)
 	want := "primary-backup-host: job db-backup failed after 5s (started 2026-01-02T03:04:05Z): boom"
 
@@ -49,7 +49,7 @@ func TestJobFailureWebhookBodyEscapesJSON(t *testing.T) {
 	jobErr := errors.New(`boom","text":"All backups OK","state":"ok`)
 	wh := notify.Webhook{Body: `{"text":"job {job} {state}: {error}"}`}
 
-	body, err := jobFailureWebhookBody(wh, job, jobErr, backup.StateFailed, time.Now(), time.Second)
+	body, err := jobFailureWebhookBody(wh, job, jobErr, status.StateFailed, time.Now(), time.Second)
 	if err != nil {
 		t.Fatalf("jobFailureWebhookBody() error: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestNotifyJobFailureWebhookNoopWhenUnconfigured(t *testing.T) {
 
 	job := &config.Config{Name: "test"} // no FailureNotifications configured
 
-	notifyJobFailure(job, nil, errors.New("boom"), backup.StateFailed, time.Now(), time.Second, nil, discardLogger)
+	notifyJobFailure(job, nil, errors.New("boom"), status.StateFailed, time.Now(), time.Second, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -122,7 +122,7 @@ func TestNotifyJobFailureWebhookDefaultJSONPayload(t *testing.T) {
 		FailureNotifications: []string{"test"},
 	}
 
-	notifyJobFailure(job, notifications, errors.New("boom"), backup.StateIncomplete, time.Now(), time.Second, nil, discardLogger)
+	notifyJobFailure(job, notifications, errors.New("boom"), status.StateIncomplete, time.Now(), time.Second, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -172,7 +172,7 @@ func TestNotifyJobFailureWebhookUsesCustomBody(t *testing.T) {
 		FailureNotifications: []string{"test"},
 	}
 
-	notifyJobFailure(job, notifications, errors.New("boom"), backup.StateFailed, time.Now(), time.Second, nil, discardLogger)
+	notifyJobFailure(job, notifications, errors.New("boom"), status.StateFailed, time.Now(), time.Second, nil, discardLogger)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -200,5 +200,5 @@ func TestNotifyJobFailureEmailUsesDefaultSubjectAndBody(t *testing.T) {
 
 	// Should not panic even though SMTP isn't configured; the resulting
 	// send failure is logged, not returned.
-	notifyJobFailureEmail(job, email, errors.New("boom"), backup.StateFailed, time.Now(), time.Second, nil, discardLogger)
+	notifyJobFailureEmail(job, email, errors.New("boom"), status.StateFailed, time.Now(), time.Second, nil, discardLogger)
 }

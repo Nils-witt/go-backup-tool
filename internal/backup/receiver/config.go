@@ -13,6 +13,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
@@ -44,7 +45,7 @@ type ManagedReceiver struct {
 type Manager struct {
 	db            *store.Store
 	registry      *backup.ReceiverRegistry
-	status        *backup.ReceiverStatusStore
+	status        *status.ReceiverStore
 	notifications *notify.Registry
 	trusted       *trust.Registry
 	serverName    string
@@ -64,9 +65,9 @@ type Manager struct {
 // server registries and serverName (see config.ResolveReceiver) and
 // restricting web UI paths to baseDir (see config.ValidateReceiverPath).
 // Call Load before serving anything.
-func NewManager(db *store.Store, registry *backup.ReceiverRegistry, status *backup.ReceiverStatusStore, notifications *notify.Registry, trusted *trust.Registry, serverName, baseDir string, log *slog.Logger) *Manager {
+func NewManager(db *store.Store, registry *backup.ReceiverRegistry, receiverStatus *status.ReceiverStore, notifications *notify.Registry, trusted *trust.Registry, serverName, baseDir string, log *slog.Logger) *Manager {
 	return &Manager{
-		db: db, registry: registry, status: status,
+		db: db, registry: registry, status: receiverStatus,
 		notifications: notifications, trusted: trusted, serverName: serverName, baseDir: baseDir,
 		log: log, invalid: make(map[string]string),
 	}

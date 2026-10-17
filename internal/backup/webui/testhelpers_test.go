@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -123,9 +123,9 @@ func openTestStateDB(t *testing.T) *store.Store {
 	return db
 }
 
-// newTestStore builds a *backup.StatusStore with a single job, for tests
+// newTestStore builds a *status.Store with a single job, for tests
 // that need one but don't care about its exact configuration.
-func newTestStore() (*backup.StatusStore, *config.Config) {
+func newTestStore() (*status.Store, *config.Config) {
 	cfg := &config.Config{
 		Name:     "test",
 		Interval: time.Minute,
@@ -135,5 +135,5 @@ func newTestStore() (*backup.StatusStore, *config.Config) {
 		},
 	}
 
-	return backup.NewStatusStore([]*config.Config{cfg}), cfg
+	return status.NewStore([]*config.Config{cfg}), cfg
 }

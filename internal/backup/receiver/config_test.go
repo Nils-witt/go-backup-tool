@@ -16,6 +16,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
+	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
@@ -35,7 +36,7 @@ type testManager struct {
 	*Manager
 
 	registry *backup.ReceiverRegistry
-	status   *backup.ReceiverStatusStore
+	status   *status.ReceiverStore
 	db       *store.Store
 	trusted  *trust.Registry
 	baseDir  string
@@ -45,14 +46,14 @@ func newTestManager(t *testing.T, db *store.Store) testManager {
 	t.Helper()
 
 	registry := backup.NewReceiverRegistry(nil)
-	status := backup.NewReceiverStatusStore(nil)
+	receiverStatus := status.NewReceiverStore(nil)
 	baseDir := t.TempDir()
 	notifications := notify.NewRegistry(map[string]notify.Notification{"ops": {ID: "ops", Webhook: &notify.Webhook{URL: "http://example.invalid"}}})
 	trusted := trust.NewRegistry(nil)
 
 	return testManager{
-		Manager:  NewManager(db, registry, status, notifications, trusted, "host", baseDir, discardLogger),
-		registry: registry, status: status, db: db, trusted: trusted, baseDir: baseDir,
+		Manager:  NewManager(db, registry, receiverStatus, notifications, trusted, "host", baseDir, discardLogger),
+		registry: registry, status: receiverStatus, db: db, trusted: trusted, baseDir: baseDir,
 	}
 }
 
