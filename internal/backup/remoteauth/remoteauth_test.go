@@ -40,7 +40,7 @@ func TestSignAndVerifyRemoteAuthToken(t *testing.T) {
 
 	token, err := SignRemoteAuthToken(id.privateKey, id.uuid, "receiver-a", Request{})
 	if err != nil {
-		t.Fatalf("signRemoteAuthToken() unexpected error: %v", err)
+		t.Fatalf("SignRemoteAuthToken() unexpected error: %v", err)
 	}
 
 	if _, err := VerifyRemoteAuthToken(token, &id.privateKey.PublicKey, "receiver-a", ""); err != nil {
@@ -82,7 +82,7 @@ func TestVerifyRemoteAuthTokenWrongPublicKey(t *testing.T) {
 
 	token, err := SignRemoteAuthToken(id.privateKey, id.uuid, "receiver-a", Request{})
 	if err != nil {
-		t.Fatalf("signRemoteAuthToken() unexpected error: %v", err)
+		t.Fatalf("SignRemoteAuthToken() unexpected error: %v", err)
 	}
 
 	if _, err := VerifyRemoteAuthToken(token, &other.privateKey.PublicKey, "receiver-a", ""); err == nil {
@@ -97,7 +97,7 @@ func TestVerifyRemoteAuthTokenWrongAudience(t *testing.T) {
 
 	token, err := SignRemoteAuthToken(id.privateKey, id.uuid, "receiver-a", Request{})
 	if err != nil {
-		t.Fatalf("signRemoteAuthToken() unexpected error: %v", err)
+		t.Fatalf("SignRemoteAuthToken() unexpected error: %v", err)
 	}
 
 	if _, err := VerifyRemoteAuthToken(token, &id.privateKey.PublicKey, "receiver-b", ""); err == nil {

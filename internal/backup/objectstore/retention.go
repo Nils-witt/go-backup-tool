@@ -45,7 +45,7 @@ func RecordLocalWrite(ctx context.Context, db *store.Store, cfg *config.Config, 
 // tracking rather than erroring, since the backup write itself
 // already succeeded and this is auxiliary bookkeeping. The retention basis
 // is cfg.CreatedAt when set (the receiver API's creationTime, or a run's job
-// start time — see pipeline.UploadToRemote/receiver.parseCreationTime), or
+// start time — see remoteclient.Upload/receiver.parseCreationTime), or
 // upload time otherwise.
 func RecordObjectWrite(ctx context.Context, db *store.Store, cfg *config.Config, t *config.Target, log *slog.Logger) error {
 	if t.Retention <= 0 || db == nil {

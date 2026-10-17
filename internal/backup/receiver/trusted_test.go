@@ -16,8 +16,8 @@ import (
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/identity"
-	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/remoteauth"
+	"nilswitt.dev/go-backup-tool/internal/backup/remoteclient"
 	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
 
@@ -116,13 +116,13 @@ func TestRemoteTargetInteropWithTrustedServer(t *testing.T) {
 
 	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
-	if err := pipeline.UploadToRemote(t.Context(), sender, &config.Config{Key: "a.gpg"}, tgt, strings.NewReader("x")); err != nil {
-		t.Fatalf("UploadToRemote() from a trusted, allowed server: %v", err)
+	if err := remoteclient.Upload(t.Context(), sender, &config.Config{Key: "a.gpg"}, tgt, strings.NewReader("x")); err != nil {
+		t.Fatalf("remoteclient.Upload() from a trusted, allowed server: %v", err)
 	}
 
 	stranger, _ := testTrustedSender(t)
-	if err := pipeline.UploadToRemote(t.Context(), stranger, &config.Config{Key: "b.gpg"}, tgt, strings.NewReader("x")); err == nil {
-		t.Fatal("UploadToRemote() from an unknown server succeeded, want 401")
+	if err := remoteclient.Upload(t.Context(), stranger, &config.Config{Key: "b.gpg"}, tgt, strings.NewReader("x")); err == nil {
+		t.Fatal("remoteclient.Upload() from an unknown server succeeded, want 401")
 	}
 }
 
@@ -161,12 +161,12 @@ func TestReceiverTokenReplayRejected(t *testing.T) {
 
 	cfg := &config.Config{Key: "db.gpg", CreatedAt: time.Now().Add(-time.Minute)}
 
-	if err := pipeline.UploadToRemote(t.Context(), sender, cfg, &config.Target{Kind: config.ServerKindRemote, Endpoint: srvB.URL, Bucket: "from-primary"}, strings.NewReader("genuine")); err != nil {
-		t.Fatalf("UploadToRemote(B): %v", err)
+	if err := remoteclient.Upload(t.Context(), sender, cfg, &config.Target{Kind: config.ServerKindRemote, Endpoint: srvB.URL, Bucket: "from-primary"}, strings.NewReader("genuine")); err != nil {
+		t.Fatalf("remoteclient.Upload(B): %v", err)
 	}
 
-	if err := pipeline.UploadToRemote(t.Context(), sender, cfg, &config.Target{Kind: config.ServerKindRemote, Endpoint: srvA.URL, Bucket: "from-primary"}, strings.NewReader("genuine")); err != nil {
-		t.Fatalf("UploadToRemote(A): %v", err)
+	if err := remoteclient.Upload(t.Context(), sender, cfg, &config.Target{Kind: config.ServerKindRemote, Endpoint: srvA.URL, Bucket: "from-primary"}, strings.NewReader("genuine")); err != nil {
+		t.Fatalf("remoteclient.Upload(A): %v", err)
 	}
 
 	creationTime := url.Values{"creationTime": {cfg.CreatedAt.UTC().Format(time.RFC3339)}}.Encode()

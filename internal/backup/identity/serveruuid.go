@@ -11,7 +11,7 @@ import (
 )
 
 // serverUUIDFile is the name ensureServerUUID stores this instance's
-// persistent identity under, inside defaultServerKeyDir (the same directory
+// persistent identity under, inside config.DefaultKeysDir (the same directory
 // ensureServerKeyPair uses for the RSA key pair).
 
 // ensureServerUUID returns dir/server.uuid's contents, generating and

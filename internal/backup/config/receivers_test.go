@@ -112,7 +112,7 @@ func TestBuildReceiversRejectsNonRSAPublicKey(t *testing.T) {
 	t.Parallel()
 
 	// A PEM block of the right type but the wrong key algorithm (an EC key,
-	// rather than RSA) must also be rejected, since signRemoteAuthToken/
+	// rather than RSA) must also be rejected, since SignRemoteAuthToken/
 	// verifyRemoteAuthToken only support RS256.
 	const ecPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEF4MRFTT9HV60ttWqYkFekzGqdpVY

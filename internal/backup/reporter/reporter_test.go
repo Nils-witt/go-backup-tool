@@ -1,4 +1,4 @@
-package pipeline
+package reporter
 
 import (
 	"context"
@@ -29,7 +29,7 @@ func writeFile(t *testing.T, path, contents string) {
 }
 
 // TestReportScheduleNext exercises the report package's actual use of
-// cron.Schedule (RunReportLoop calls Next(time.Now()) each iteration), as a
+// cron.Schedule (Run calls Next(time.Now()) each iteration), as a
 // sanity check that a daily "0 7 * * *" schedule behaves the way the report
 // loop's log/tests assume: today's occurrence if it hasn't passed yet,
 // tomorrow's otherwise — including the exact-match instant, so a report sent
@@ -344,10 +344,10 @@ func TestRenderReportSubjectServerName(t *testing.T) {
 	}
 }
 
-// TestRunReportLoopPicksUpSettingsChanges checks the loop idles while the
+// TestRunPicksUpSettingsChanges checks the loop idles while the
 // report is disabled and starts sending as soon as it's enabled through
 // report.Live — the web UI path — without a restart.
-func TestRunReportLoopPicksUpSettingsChanges(t *testing.T) {
+func TestRunPicksUpSettingsChanges(t *testing.T) {
 	t.Parallel()
 
 	sent := make(chan struct{}, 10)
@@ -364,7 +364,7 @@ func TestRunReportLoopPicksUpSettingsChanges(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	go RunReportLoop(ctx, "", func() []string { return nil }, live, notifications, func() map[string]config.ResolvedReceiver { return map[string]config.ResolvedReceiver{} }, nil, nil, discardLogger)
+	go Run(ctx, "", func() []string { return nil }, live, notifications, func() map[string]config.ResolvedReceiver { return map[string]config.ResolvedReceiver{} }, nil, nil, discardLogger)
 
 	select {
 	case <-sent:

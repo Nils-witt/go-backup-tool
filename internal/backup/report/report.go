@@ -49,7 +49,7 @@ type FileReport struct {
 }
 
 // Settings is fileReport after validation, ready for
-// pipeline.RunReportLoop to act on. Its zero value (Enabled false) means the
+// reporter.Run to act on. Its zero value (Enabled false) means the
 // report is disabled.
 type Settings struct {
 	Enabled bool
@@ -133,7 +133,7 @@ func ResolveSettings(cfg FileReport, notifications *notify.Registry) (Settings, 
 }
 
 // Live holds the report's current Settings, replaced when the report is
-// edited in the web UI. pipeline.RunReportLoop watches Changed to
+// edited in the web UI. reporter.Run watches Changed to
 // reschedule without a restart. Safe for concurrent use.
 type Live struct {
 	mu       sync.Mutex

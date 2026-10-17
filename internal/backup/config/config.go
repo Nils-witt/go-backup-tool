@@ -37,7 +37,7 @@ type Config struct {
 	Key string
 
 	// File is the file under Key a single object read or write addresses
-	// (see objectstore.LocalObjectPath and pipeline.UploadToRemote): one source's
+	// (see objectstore.LocalObjectPath and remoteclient.Upload): one source's
 	// Name, set on a per-file copy of a run's config. Empty addresses Key
 	// itself, as a flat object — how backups were stored before a job could
 	// have more than one command, and how older senders still upload to a
@@ -47,7 +47,7 @@ type Config struct {
 	// CreatedAt is when this run's backup content was actually produced, set
 	// once per run by runner.runOnce/RetryFailedTargets from the same
 	// instant used to resolve the {time} key placeholder. Zero means "use
-	// upload time" — see RecordObjectWrite and pipeline.UploadToRemote.
+	// upload time" — see RecordObjectWrite and remoteclient.Upload.
 	CreatedAt time.Time
 
 	targetRefs []jobTargetRef // raw targets: entries, resolved against servers by resolveJobTargets
@@ -118,8 +118,8 @@ type jobTargetRef struct {
 // fields below apply: local uses only bucket (as a subdirectory of
 // localPath) and localPath itself; remote uses bucket (as the id sent to
 // the destination instance) and endpoint. A remote Target authenticates
-// with the run's own cfg.identity (see uploadToRemote/deleteRemoteObject in
-// pipeline.go), not a field on Target itself.
+// with this instance's identity (see remoteclient.Upload), not a field on
+// Target itself.
 type Target struct {
 	ServerName string // the servers: entry this came from, for diagnostics
 	Kind       ServerKind
@@ -301,7 +301,7 @@ type RunConfig struct {
 	// written, its schedule already validated, kept raw so settings.Manager
 	// can import it into the state db, where the report's settings live
 	// from then on (managed in the web UI). The report itself — a periodic
-	// summary of receiver and job activity, see pipeline.RunReportLoop — is
+	// summary of receiver and job activity, see reporter.Run — is
 	// independent of the web UI.
 	FileReport report.FileReport
 }

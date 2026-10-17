@@ -1,4 +1,9 @@
-package pipeline
+// Package reporter builds and sends the periodic receiver/job report: it
+// waits for the schedule in a report.Live, gathers receiver and job history
+// from the state db and the receivers' on-disk state, and delivers it to the
+// configured notifications. Package report holds the report's settings;
+// this package does the sending.
+package reporter
 
 import (
 	"context"
@@ -19,7 +24,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
-// RunReportLoop sends the receiver/job report on the schedule in live (see
+// Run sends the receiver/job report on the schedule in live (see
 // reportpkg.Settings), evaluated in UTC (see reportpkg.ResolveSettings), until ctx
 // is done, idling while the report is disabled. A change to live (the
 // report edited in the web UI) reschedules immediately. db may be nil (the
@@ -29,7 +34,7 @@ import (
 // (from their live registry) and jobs (from jobNames) are read at each send,
 // so ones managed in the web UI are included.
 // serverName is this instance's {server_name} (see config.RunConfig.ServerName).
-func RunReportLoop(ctx context.Context, serverName string, jobNames func() []string, live *reportpkg.Live, notifications *notify.Registry, receivers func() map[string]config.ResolvedReceiver, db *store.Store, queue *notify.Queue, log *slog.Logger) {
+func Run(ctx context.Context, serverName string, jobNames func() []string, live *reportpkg.Live, notifications *notify.Registry, receivers func() map[string]config.ResolvedReceiver, db *store.Store, queue *notify.Queue, log *slog.Logger) {
 	log = log.With("component", "report")
 
 	var prev time.Time // zero until the first report in this process has been sent

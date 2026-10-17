@@ -1,4 +1,4 @@
-package pipeline
+package remoteclient
 
 import (
 	"crypto/ecdsa"
@@ -21,7 +21,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/remoteauth"
 )
 
-func TestRemoteObjectURL(t *testing.T) {
+func TestObjectURL(t *testing.T) {
 	t.Parallel()
 
 	tgt := &config.Target{Endpoint: "https://backup2.example.com:8443/", Bucket: "from primary"}
@@ -49,14 +49,14 @@ func TestRemoteObjectURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := RemoteObjectURL(tgt, tt.key, tt.file); got != tt.expected {
-				t.Errorf("RemoteObjectURL() = %q, want %q", got, tt.expected)
+			if got := ObjectURL(tgt, tt.key, tt.file); got != tt.expected {
+				t.Errorf("ObjectURL() = %q, want %q", got, tt.expected)
 			}
 		})
 	}
 }
 
-func TestUploadToRemote(t *testing.T) {
+func TestUpload(t *testing.T) {
 	t.Parallel()
 
 	var (
@@ -82,8 +82,8 @@ func TestUploadToRemote(t *testing.T) {
 	cfg := &config.Config{Key: "backup.gpg"}
 	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
-	if err := UploadToRemote(t.Context(), id, cfg, tgt, strings.NewReader("ciphertext")); err != nil {
-		t.Fatalf("UploadToRemote() unexpected error: %v", err)
+	if err := Upload(t.Context(), id, cfg, tgt, strings.NewReader("ciphertext")); err != nil {
+		t.Fatalf("Upload() unexpected error: %v", err)
 	}
 
 	if gotMethod != http.MethodPut {
@@ -108,7 +108,7 @@ func TestUploadToRemote(t *testing.T) {
 	}
 }
 
-func TestUploadToRemoteNoIdentity(t *testing.T) {
+func TestUploadNoIdentity(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -119,13 +119,13 @@ func TestUploadToRemoteNoIdentity(t *testing.T) {
 	cfg := &config.Config{Key: "backup.gpg"} // identity left nil: loadServerIdentity failed at startup
 	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
-	err := UploadToRemote(t.Context(), nil, cfg, tgt, strings.NewReader("x"))
+	err := Upload(t.Context(), nil, cfg, tgt, strings.NewReader("x"))
 	if err == nil || !strings.Contains(err.Error(), "identity") {
-		t.Fatalf("UploadToRemote() with no identity error = %v, want it to mention identity", err)
+		t.Fatalf("Upload() with no identity error = %v, want it to mention identity", err)
 	}
 }
 
-func TestUploadToRemoteUnauthorized(t *testing.T) {
+func TestUploadUnauthorized(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -137,13 +137,13 @@ func TestUploadToRemoteUnauthorized(t *testing.T) {
 	cfg := &config.Config{Key: "backup.gpg"}
 	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
-	err := UploadToRemote(t.Context(), id, cfg, tgt, strings.NewReader("x"))
+	err := Upload(t.Context(), id, cfg, tgt, strings.NewReader("x"))
 	if err == nil || !strings.Contains(err.Error(), "401") {
-		t.Fatalf("UploadToRemote() error = %v, want it to mention 401", err)
+		t.Fatalf("Upload() error = %v, want it to mention 401", err)
 	}
 }
 
-func TestUploadToRemoteFileSendsContentLength(t *testing.T) {
+func TestUploadFileSendsContentLength(t *testing.T) {
 	t.Parallel()
 
 	var (
@@ -178,8 +178,8 @@ func TestUploadToRemoteFileSendsContentLength(t *testing.T) {
 	cfg := &config.Config{Key: "backup.gpg"}
 	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
-	if err := UploadToRemote(t.Context(), id, cfg, tgt, f); err != nil {
-		t.Fatalf("UploadToRemote() unexpected error: %v", err)
+	if err := Upload(t.Context(), id, cfg, tgt, f); err != nil {
+		t.Fatalf("Upload() unexpected error: %v", err)
 	}
 
 	if gotLength != int64(len("ciphertext")) || len(gotEncoding) != 0 {
@@ -219,7 +219,7 @@ func otherCAPEM(t *testing.T) string {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
 
-func TestUploadToRemoteTLS(t *testing.T) {
+func TestUploadTLS(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -258,17 +258,17 @@ func TestUploadToRemoteTLS(t *testing.T) {
 			cfg := &config.Config{Key: "backup.gpg"}
 			tgt := &config.Target{ServerName: "offsite", Kind: config.ServerKindRemote, Endpoint: tt.endpoint, Bucket: "instance-a", TLS: tt.tls}
 
-			err := UploadToRemote(t.Context(), id, cfg, tgt, strings.NewReader("ciphertext"))
+			err := Upload(t.Context(), id, cfg, tgt, strings.NewReader("ciphertext"))
 			if tt.wantErr == "" {
 				if err != nil {
-					t.Fatalf("UploadToRemote() unexpected error: %v", err)
+					t.Fatalf("Upload() unexpected error: %v", err)
 				}
 
 				return
 			}
 
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("UploadToRemote() error = %v, want it to contain %q", err, tt.wantErr)
+				t.Fatalf("Upload() error = %v, want it to contain %q", err, tt.wantErr)
 			}
 		})
 	}

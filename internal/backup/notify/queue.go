@@ -55,7 +55,7 @@ func (q *Queue) Len() int {
 
 // Run retries every email on q once every RetryInterval, until ctx is done.
 // It's meant to run for the lifetime of the process in its own goroutine
-// (mirrors pipeline.RunReportLoop/receiver.MonitorStaleReceivers), started
+// (mirrors reporter.Run/receiver.MonitorStaleReceivers), started
 // once by app.Run.
 func (q *Queue) Run(ctx context.Context, log *slog.Logger) {
 	log = log.With("component", "smtp-queue")

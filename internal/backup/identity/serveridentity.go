@@ -15,8 +15,7 @@ import (
 // ServerIdentity is this instance's persistent identity: a UUID (see
 // ensureServerUUID) and the RSA private key (see ensureServerKeyPair) it
 // signs outgoing type: remote target requests with (see
-// signRemoteAuthToken, used by uploadToRemote/deleteRemoteObject in
-// pipeline.go). A receiver on the other end verifies those requests against
+// remoteauth.SignRemoteAuthToken, used by remoteclient.Upload). A receiver on the other end verifies those requests against
 // this instance's public key, configured on its matching receivers: entry.
 // publicKeyPEM is that same public key, PEM-encoded, so the web UI dashboard
 // (see handleIdentity) can display it for an operator to paste into a
@@ -27,13 +26,11 @@ type ServerIdentity struct {
 	publicKeyPEM string
 }
 
-// LoadServerIdentityAtStartup calls loadServerIdentity, logging (rather than
-// failing the run over) any error and returning nil in that case — a
-// type: remote target's uploads then fail individually (see
-// remoteAuthHeader in pipeline.go) rather than the whole run refusing to
-// start over a problem that may not affect every job. dir is the config
-// file's resolved keys-dir: (see runConfig.keysDir), defaulting to
-// defaultServerKeyDir when unset.
+// LoadServerIdentityAtStartup calls loadServerIdentity, logging any error
+// as a warning and returning it; the caller (runWithContext in app.go)
+// refuses to start without an identity. dir is the config file's resolved
+// keys-dir: (see config.RunConfig.KeysDir), defaulting to
+// config.DefaultKeysDir when unset.
 func LoadServerIdentityAtStartup(log *slog.Logger, dir string) (*ServerIdentity, error) {
 	identity, err := loadServerIdentity(dir, log)
 	if err != nil {
@@ -103,7 +100,7 @@ func (si *ServerIdentity) PrivateKey() *rsa.PrivateKey {
 // SignRequest signs a fresh short-lived JWT (see SignRemoteAuthToken)
 // identifying this instance as issuer, scoped to audience (the destination
 // receiver's id) and bound to req (the one request it authorizes), for
-// uploadToRemote/deleteRemoteObject's Authorization: Bearer header.
+// remoteclient.Upload's Authorization: Bearer header.
 func (si *ServerIdentity) SignRequest(audience string, req remoteauth.Request) (string, error) {
 	return remoteauth.SignRemoteAuthToken(si.privateKey, si.uuid, audience, req)
 }

@@ -181,7 +181,7 @@ type fileConfig struct {
 
 	Timeout  string       `yaml:"timeout"`
 	LogLevel string       `yaml:"log-level"` // debug, info, warn, or error; overridden by -log-level when that flag is explicitly given
-	KeysDir  string       `yaml:"keys-dir"`  // where this instance's persistent identity (RSA key pair + UUID) is stored; defaults to defaultServerKeyDir
+	KeysDir  string       `yaml:"keys-dir"`  // where this instance's persistent identity (RSA key pair + UUID) is stored; defaults to DefaultKeysDir
 	LogFile  string       `yaml:"log-file"`  // if set, log output is also appended to this file (in addition to stderr)
 	Servers  []FileServer `yaml:"servers"`
 	Jobs     []FileJob    `yaml:"jobs"`

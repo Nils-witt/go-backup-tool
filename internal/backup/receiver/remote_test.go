@@ -13,15 +13,15 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/objectstore"
-	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/remoteauth"
+	"nilswitt.dev/go-backup-tool/internal/backup/remoteclient"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 // newReceiverMux builds the same mux webui.StartWebUI registers the
 // receiver routes on, without a real listener, so an interop test can
-// exercise the client (UploadToRemote) against the real
+// exercise the client (remoteclient.Upload) against the real
 // server-side handlers rather than a hand-rolled stand-in.
 func newReceiverMux(receivers map[string]config.ResolvedReceiver) *http.ServeMux {
 	receiverStatus := status.NewReceiverStore(receivers)
@@ -47,8 +47,8 @@ func TestRemoteTargetInteropMultiFileBackup(t *testing.T) {
 	files := map[string]string{"db.gpg": "db bytes", "uploads.gpg": "upload bytes"}
 	for name, content := range files {
 		cfg := &config.Config{Key: "backup-20260101", File: name}
-		if err := pipeline.UploadToRemote(t.Context(), id, cfg, tgt, strings.NewReader(content)); err != nil {
-			t.Fatalf("pipeline.UploadToRemote(%s) unexpected error: %v", name, err)
+		if err := remoteclient.Upload(t.Context(), id, cfg, tgt, strings.NewReader(content)); err != nil {
+			t.Fatalf("remoteclient.Upload(%s) unexpected error: %v", name, err)
 		}
 	}
 
@@ -165,8 +165,8 @@ func TestRemoteTargetInteropWithReceiver(t *testing.T) {
 
 	const content = "encrypted backup bytes"
 
-	if err := pipeline.UploadToRemote(t.Context(), id, cfg, tgt, strings.NewReader(content)); err != nil {
-		t.Fatalf("pipeline.UploadToRemote() unexpected error: %v", err)
+	if err := remoteclient.Upload(t.Context(), id, cfg, tgt, strings.NewReader(content)); err != nil {
+		t.Fatalf("remoteclient.Upload() unexpected error: %v", err)
 	}
 
 	got, err := os.ReadFile(dir + "/backup-20260101.gpg") //nolint:gosec // dir is t.TempDir() plus a fixed test literal
@@ -195,8 +195,8 @@ func TestRemoteTargetInteropWithCreationTime(t *testing.T) {
 	cfg := &config.Config{Key: "backup-20260101.gpg", CreatedAt: createdAt}
 	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
-	if err := pipeline.UploadToRemote(t.Context(), id, cfg, tgt, strings.NewReader("x")); err != nil {
-		t.Fatalf("pipeline.UploadToRemote() unexpected error: %v", err)
+	if err := remoteclient.Upload(t.Context(), id, cfg, tgt, strings.NewReader("x")); err != nil {
+		t.Fatalf("remoteclient.Upload() unexpected error: %v", err)
 	}
 
 	info, err := os.Stat(filepath.Join(dir, "backup-20260101.gpg"))
@@ -225,8 +225,8 @@ func TestRemoteTargetInteropWithoutCreationTimeUsesUploadTime(t *testing.T) {
 	cfg := &config.Config{Key: "backup-20260101.gpg"}
 	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
-	if err := pipeline.UploadToRemote(t.Context(), id, cfg, tgt, strings.NewReader("x")); err != nil {
-		t.Fatalf("pipeline.UploadToRemote() unexpected error: %v", err)
+	if err := remoteclient.Upload(t.Context(), id, cfg, tgt, strings.NewReader("x")); err != nil {
+		t.Fatalf("remoteclient.Upload() unexpected error: %v", err)
 	}
 
 	info, err := os.Stat(filepath.Join(dir, "backup-20260101.gpg"))
@@ -328,9 +328,9 @@ func TestRemoteTargetInteropWrongIdentity(t *testing.T) {
 	cfg := &config.Config{Key: "backup.gpg"}
 	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
-	err := pipeline.UploadToRemote(t.Context(), id, cfg, tgt, strings.NewReader("x"))
+	err := remoteclient.Upload(t.Context(), id, cfg, tgt, strings.NewReader("x"))
 	if err == nil || !strings.Contains(err.Error(), "401") {
-		t.Fatalf("pipeline.UploadToRemote() with the wrong identity error = %v, want it to mention 401", err)
+		t.Fatalf("remoteclient.Upload() with the wrong identity error = %v, want it to mention 401", err)
 	}
 }
 
@@ -375,9 +375,9 @@ func TestRemoteTargetInteropUnknownID(t *testing.T) {
 	cfg := &config.Config{Key: "backup.gpg"}
 	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "no-such-id"}
 
-	err := pipeline.UploadToRemote(t.Context(), id, cfg, tgt, strings.NewReader("x"))
+	err := remoteclient.Upload(t.Context(), id, cfg, tgt, strings.NewReader("x"))
 	if err == nil || !strings.Contains(err.Error(), "404") {
-		t.Fatalf("pipeline.UploadToRemote() with unknown id error = %v, want it to mention 404", err)
+		t.Fatalf("remoteclient.Upload() with unknown id error = %v, want it to mention 404", err)
 	}
 }
 
@@ -419,8 +419,8 @@ func TestHandleReceiveObjectRecordsReceiverEvent(t *testing.T) {
 
 	const content = "ciphertext bytes"
 
-	if err := pipeline.UploadToRemote(t.Context(), id, cfg, tgt, strings.NewReader(content)); err != nil {
-		t.Fatalf("pipeline.UploadToRemote() error: %v", err)
+	if err := remoteclient.Upload(t.Context(), id, cfg, tgt, strings.NewReader(content)); err != nil {
+		t.Fatalf("remoteclient.Upload() error: %v", err)
 	}
 
 	summaries, err := db.SummarizeReceiverEvents(t.Context(), time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
@@ -466,8 +466,8 @@ func TestHandleReceiveObjectRecordsFailedReceiverEvent(t *testing.T) {
 	cfg := &config.Config{Key: "backup.gpg"}
 	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
-	if err := pipeline.UploadToRemote(t.Context(), id, cfg, tgt, strings.NewReader("x")); err == nil {
-		t.Fatal("pipeline.UploadToRemote() error = nil, want a failure since the receiver's root isn't a directory")
+	if err := remoteclient.Upload(t.Context(), id, cfg, tgt, strings.NewReader("x")); err == nil {
+		t.Fatal("remoteclient.Upload() error = nil, want a failure since the receiver's root isn't a directory")
 	}
 
 	errs, err := db.ListReceiverErrorEvents(t.Context(), time.Now().Add(-time.Hour), time.Now().Add(time.Hour))

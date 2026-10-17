@@ -59,7 +59,7 @@ func parseRetention(s string) (time.Duration, error) {
 // retention:, where "delete from the future" isn't meaningful); when false,
 // zero is rejected too (for stale-after:, where "stale after zero time" is
 // always true and so isn't a meaningful setting). Shared by parseRetention
-// and parseStaleAfter (receiver.go), which otherwise duplicate this trim/
+// and parseStaleAfter (receivers.go), which otherwise duplicate this trim/
 // empty/parse/sign-check shape with only the field name and boundary
 // differing.
 func parseOptionalDayDuration(field, s string, allowZero bool) (time.Duration, error) {

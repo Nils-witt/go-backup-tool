@@ -12,9 +12,9 @@ import (
 )
 
 // remoteAuthTokenTTL bounds how long a signed remote-target request token
-// (see signRemoteAuthToken) stays valid for, keeping a leaked or logged
-// token useful to a replay attacker for only a short window. uploadToRemote
-// and deleteRemoteObject (pipeline.go) mint a fresh token for every request
+// (see SignRemoteAuthToken) stays valid for, keeping a leaked or logged
+// token useful to a replay attacker for only a short window.
+// remoteclient.Upload mints a fresh token for every request
 // rather than reusing one, so this only needs to cover request/verification
 // latency, not an entire backup run.
 const remoteAuthTokenTTL = 5 * time.Minute
@@ -47,7 +47,7 @@ func (r Request) IsZero() bool {
 // loadServerIdentity), identifying this instance as issuer (its persistent
 // UUID — see ensureServerUUID), scoped to audience (the destination
 // receiver's id — a serverKindRemote target's bucket) and bound to req (see
-// Request). uploadToRemote/deleteRemoteObject send the result as their
+// Request). remoteclient.Upload sends the result as its
 // Authorization: Bearer header; the receiving instance verifies it with
 // VerifyRemoteAuthToken against this instance's public key, configured as
 // a trusted server allowed on its matching receivers: entry (see

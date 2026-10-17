@@ -26,6 +26,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
+	"nilswitt.dev/go-backup-tool/internal/backup/reporter"
 	"nilswitt.dev/go-backup-tool/internal/backup/settings"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
@@ -276,8 +277,8 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 
 	// Independent of the web UI: a daily report is useful for anyone
 	// monitoring receivers by inbox, not just those watching the dashboard.
-	// RunReportLoop idles while the report is disabled.
-	go pipeline.RunReportLoop(ctx, rc.ServerName, jobsManager.Names, reportSettings, notifications, receivers.Snapshot, stateDB, mailQueue, log)
+	// reporter.Run idles while the report is disabled.
+	go reporter.Run(ctx, rc.ServerName, jobsManager.Names, reportSettings, notifications, receivers.Snapshot, stateDB, mailQueue, log)
 
 	srv := startWebUIIfConfigured(ctx, rc, webui.Deps{
 		Log:             log,
