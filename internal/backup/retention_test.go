@@ -52,10 +52,10 @@ func TestRecordLocalWriteNoRetentionIsNoop(t *testing.T) {
 
 	dir := t.TempDir()
 	db := openTestRetentionDB(t)
-	cfg := &config.Config{Key: "backup.gpg", StateDB: db}
+	cfg := &config.Config{Key: "backup.gpg"}
 	tgt := &config.Target{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir}
 
-	if err := RecordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
+	if err := RecordLocalWrite(t.Context(), db, cfg, tgt, discardLogger); err != nil {
 		t.Fatalf("RecordLocalWrite() unexpected error: %v", err)
 	}
 
@@ -75,7 +75,7 @@ func TestRecordLocalWriteNilStateDBIsNoop(t *testing.T) {
 		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
 	}
 
-	if err := RecordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
+	if err := RecordLocalWrite(t.Context(), nil, cfg, tgt, discardLogger); err != nil {
 		t.Fatalf("RecordLocalWrite() unexpected error: %v", err)
 	}
 }
@@ -85,14 +85,14 @@ func TestRecordLocalWriteTracksObject(t *testing.T) {
 
 	dir := t.TempDir()
 	db := openTestRetentionDB(t)
-	cfg := &config.Config{Key: "backup.gpg", StateDB: db}
+	cfg := &config.Config{Key: "backup.gpg"}
 	tgt := &config.Target{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
 
 	if err := WriteLocalObject(cfg, tgt, strings.NewReader("data")); err != nil {
 		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
 	}
 
-	if err := RecordLocalWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
+	if err := RecordLocalWrite(t.Context(), db, cfg, tgt, discardLogger); err != nil {
 		t.Fatalf("RecordLocalWrite() unexpected error: %v", err)
 	}
 
@@ -115,7 +115,7 @@ func TestRecordLocalWriteSweepsExpiredObjects(t *testing.T) {
 	db := openTestRetentionDB(t)
 	tgt := &config.Target{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
 
-	oldCfg := &config.Config{Key: "old.gpg", StateDB: db}
+	oldCfg := &config.Config{Key: "old.gpg"}
 	if err := WriteLocalObject(oldCfg, tgt, strings.NewReader("stale")); err != nil {
 		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
 	}
@@ -132,12 +132,12 @@ func TestRecordLocalWriteSweepsExpiredObjects(t *testing.T) {
 
 	// A fresh write triggers RecordLocalWrite's sweep, which should now
 	// catch the backdated object above.
-	newCfg := &config.Config{Key: "new.gpg", StateDB: db}
+	newCfg := &config.Config{Key: "new.gpg"}
 	if err := WriteLocalObject(newCfg, tgt, strings.NewReader("fresh")); err != nil {
 		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
 	}
 
-	if err := RecordLocalWrite(t.Context(), newCfg, tgt, discardLogger); err != nil {
+	if err := RecordLocalWrite(t.Context(), db, newCfg, tgt, discardLogger); err != nil {
 		t.Fatalf("RecordLocalWrite() unexpected error: %v", err)
 	}
 
@@ -162,7 +162,7 @@ func TestRecordObjectWriteTracksWithoutSweeping(t *testing.T) {
 	db := openTestRetentionDB(t)
 	tgt := &config.Target{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
 
-	oldCfg := &config.Config{Key: "old.gpg", StateDB: db}
+	oldCfg := &config.Config{Key: "old.gpg"}
 	if err := WriteLocalObject(oldCfg, tgt, strings.NewReader("stale")); err != nil {
 		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
 	}
@@ -177,12 +177,12 @@ func TestRecordObjectWriteTracksWithoutSweeping(t *testing.T) {
 		t.Fatalf("SaveObjectWrite() unexpected error: %v", err)
 	}
 
-	newCfg := &config.Config{Key: "new.gpg", StateDB: db}
+	newCfg := &config.Config{Key: "new.gpg"}
 	if err := WriteLocalObject(newCfg, tgt, strings.NewReader("fresh")); err != nil {
 		t.Fatalf("WriteLocalObject() unexpected error: %v", err)
 	}
 
-	if err := RecordObjectWrite(t.Context(), newCfg, tgt, discardLogger); err != nil {
+	if err := RecordObjectWrite(t.Context(), db, newCfg, tgt, discardLogger); err != nil {
 		t.Fatalf("RecordObjectWrite() unexpected error: %v", err)
 	}
 
@@ -205,7 +205,7 @@ func TestSweepRetentionForTargetIgnoresMissingFile(t *testing.T) {
 
 	dir := t.TempDir()
 	db := openTestRetentionDB(t)
-	cfg := &config.Config{Key: "gone.gpg", StateDB: db}
+	cfg := &config.Config{Key: "gone.gpg"}
 	tgt := &config.Target{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "sub", LocalPath: dir, Retention: time.Hour}
 
 	if err := WriteLocalObject(cfg, tgt, strings.NewReader("data")); err != nil {
@@ -252,25 +252,25 @@ func TestSweepRetentionRemovesEmptyMultiFileBackup(t *testing.T) {
 	old := time.Now().Add(-2 * time.Hour).UTC()
 
 	for _, name := range []string{"a.gpg", "b.gpg"} {
-		cfg := &config.Config{Key: "backup-1", File: name, StateDB: db, CreatedAt: old}
+		cfg := &config.Config{Key: "backup-1", File: name, CreatedAt: old}
 
 		if err := WriteLocalObject(cfg, tgt, strings.NewReader(name)); err != nil {
 			t.Fatalf("WriteLocalObject(%s) unexpected error: %v", name, err)
 		}
 
-		if err := RecordObjectWrite(t.Context(), cfg, tgt, discardLogger); err != nil {
+		if err := RecordObjectWrite(t.Context(), db, cfg, tgt, discardLogger); err != nil {
 			t.Fatalf("RecordObjectWrite(%s) unexpected error: %v", name, err)
 		}
 	}
 
 	// A flat object whose key contains a "/" shares a parent folder with
 	// nothing marked as a backup: that folder must survive its sweep.
-	flat := &config.Config{Key: "plain/backup.gpg", StateDB: db, CreatedAt: old}
+	flat := &config.Config{Key: "plain/backup.gpg", CreatedAt: old}
 	if err := WriteLocalObject(flat, tgt, strings.NewReader("flat")); err != nil {
 		t.Fatalf("WriteLocalObject(flat) unexpected error: %v", err)
 	}
 
-	if err := RecordObjectWrite(t.Context(), flat, tgt, discardLogger); err != nil {
+	if err := RecordObjectWrite(t.Context(), db, flat, tgt, discardLogger); err != nil {
 		t.Fatalf("RecordObjectWrite(flat) unexpected error: %v", err)
 	}
 

@@ -26,7 +26,7 @@ type Runner struct {
 	log      *slog.Logger
 	store    *status.Store
 	stateDB  *store.Store             // nil only if the db couldn't be opened
-	identity *identity.ServerIdentity // nil if loadServerIdentity failed at startup; see Config.Identity
+	identity *identity.ServerIdentity // nil makes remote uploads fail; see runEnv
 	queue    *notify.Queue            // retries a failed job-failure email later; see notify.SendMailQueued
 
 	// notifications is the live registry jobs' failure-notifications ids
@@ -73,6 +73,11 @@ type targetKey struct {
 // every job scheduled through it in this run.
 func NewRunner(log *slog.Logger, statusStore *status.Store, stateDB *store.Store, identity *identity.ServerIdentity, queue *notify.Queue, notifications *notify.Registry) *Runner {
 	return &Runner{log: log, store: statusStore, stateDB: stateDB, identity: identity, queue: queue, notifications: notifications, targetFailures: make(map[targetKey]int)}
+}
+
+// env is the runEnv every run of r uploads with.
+func (r *Runner) env() runEnv {
+	return runEnv{db: r.stateDB, identity: r.identity}
 }
 
 // UseDocker sets the Docker daemon address (see dockerexec.New) that jobs
@@ -397,8 +402,6 @@ func (r *Runner) runOnce(ctx context.Context, job *config.Config) {
 	run := *job
 	run.Key = substituteKeyTime(job.Key, now)
 	run.CreatedAt = now
-	run.StateDB = r.stateDB
-	run.Identity = r.identity
 	run.DockerHost = r.dockerHost
 
 	log := r.log.With("job", job.Name, "key", run.Key)
@@ -421,7 +424,7 @@ func (r *Runner) runOnce(ctx context.Context, job *config.Config) {
 		outcomes.add(&job.Targets[index], terr)
 	}
 
-	bytesWritten, files, err := runPipeline(ctx, &run, log, onTargetDone)
+	bytesWritten, files, err := runPipeline(ctx, r.env(), &run, log, onTargetDone)
 
 	_ = r.finishRun(ctx, job, log, runMessages, start, runResult{bytes: bytesWritten, files: files, err: err}, &outcomes)
 }
@@ -550,8 +553,6 @@ func (r *Runner) RetryFailedTargets(ctx context.Context, job *config.Config, tar
 	run := *job
 	run.Key = substituteKeyTime(job.Key, now)
 	run.CreatedAt = now
-	run.StateDB = r.stateDB
-	run.Identity = r.identity
 	run.DockerHost = r.dockerHost
 	run.Targets = make([]config.Target, len(indices))
 
@@ -584,7 +585,7 @@ func (r *Runner) RetryFailedTargets(ctx context.Context, job *config.Config, tar
 		outcomes.add(&job.Targets[origIndex], terr)
 	}
 
-	bytesWritten, files, err := runPipeline(ctx, &run, log, onTargetDone)
+	bytesWritten, files, err := runPipeline(ctx, r.env(), &run, log, onTargetDone)
 
 	if r.finishRun(ctx, job, log, retryMessages, start, runResult{bytes: bytesWritten, files: files, err: err}, &outcomes) != nil {
 		return err
@@ -760,11 +761,9 @@ func (r *Runner) retryOutstandingUpload(ctx context.Context, lookup JobLookup, r
 	run.Key = row.Key
 	run.File = row.BackupFile
 	run.CreatedAt = row.CreatedAt
-	run.StateDB = r.stateDB
-	run.Identity = r.identity
 	run.DockerHost = r.dockerHost
 
-	if err := uploadTargetAttempt(ctx, &run, &run.Targets[index], row.FileName, log); err != nil {
+	if err := uploadTargetAttempt(ctx, r.env(), &run, &run.Targets[index], row.FileName, log); err != nil {
 		log.Warn("outstanding target upload retry failed", "err", err)
 
 		if err1 := r.stateDB.RescheduleOutstandingTargetUpload(ctx, row.ID, time.Now().Add(TargetUploadRetryInterval)); err1 != nil {

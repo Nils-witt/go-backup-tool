@@ -73,7 +73,7 @@ func HandleReceiveObject(receivers *backup.ReceiverRegistry, receiverStatus *sta
 // is the object's path under the receiver: key/file for a backup's file.
 func receiveObject(receivers *backup.ReceiverRegistry, receiverStatus *status.ReceiverStore, log *slog.Logger, db *store.Store, multiFile bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		recv, cfg, t, bound, ok := resolveReceiverRequest(w, r, receivers, db, log, multiFile)
+		recv, cfg, t, bound, ok := resolveReceiverRequest(w, r, receivers, log, multiFile)
 		if !ok {
 			return
 		}
@@ -116,7 +116,7 @@ func receiveObject(receivers *backup.ReceiverRegistry, receiverStatus *status.Re
 			}
 		}
 
-		if err := backup.RecordObjectWrite(r.Context(), cfg, t, log); err != nil {
+		if err := backup.RecordObjectWrite(r.Context(), db, cfg, t, log); err != nil {
 			log.Warn("receiver: retention tracking failed", "id", recv.ID, "key", key, "err", err)
 		}
 
@@ -304,7 +304,7 @@ func warnUnboundTokenOnce(receiverID, token string, log *slog.Logger) {
 // reporting ok as false if any step fails. On success it also builds the
 // cfg/t pair receiveObject needs to reuse WriteLocalObject as a type: local
 // target would (see backup.ReceiverTarget).
-func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry, db *store.Store, log *slog.Logger, multiFile bool) (recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, bound remoteauth.Request, ok bool) {
+func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *backup.ReceiverRegistry, log *slog.Logger, multiFile bool) (recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, bound remoteauth.Request, ok bool) {
 	recv, bound, ok = authorizeReceiver(w, r, receivers, log)
 	if !ok {
 		return config.ResolvedReceiver{}, nil, nil, remoteauth.Request{}, false
@@ -338,7 +338,7 @@ func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *b
 		return config.ResolvedReceiver{}, nil, nil, remoteauth.Request{}, false
 	}
 
-	return recv, &config.Config{Key: key, File: file, StateDB: db}, backup.ReceiverTarget(recv), bound, true
+	return recv, &config.Config{Key: key, File: file}, backup.ReceiverTarget(recv), bound, true
 }
 
 // bearerToken extracts the token from an "Authorization: Bearer <token>"

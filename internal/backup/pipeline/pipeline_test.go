@@ -137,7 +137,7 @@ func TestUploadStagedToTargetsLocal(t *testing.T) {
 
 	onDone, results := collectTargetDone(len(cfg.Targets))
 
-	err := uploadStagedToTargets(t.Context(), cfg, stageTestContent(t, content), onDone, discardLogger)
+	err := uploadStagedToTargets(t.Context(), runEnv{}, cfg, stageTestContent(t, content), onDone, discardLogger)
 	if err != nil {
 		t.Fatalf("uploadStagedToTargets() unexpected error: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestUploadStagedToTargetsContinuesAfterOneTargetFails(t *testing.T) {
 
 	onDone, results := collectTargetDone(len(cfg.Targets))
 
-	err := uploadStagedToTargets(t.Context(), cfg, stageTestContent(t, content), onDone, discardLogger)
+	err := uploadStagedToTargets(t.Context(), runEnv{}, cfg, stageTestContent(t, content), onDone, discardLogger)
 	if err == nil {
 		t.Fatal("uploadStagedToTargets() error = nil, want non-nil because the bad target failed")
 	}
@@ -220,9 +220,9 @@ func TestUploadStagedToTargetsIsolatesSlowTarget(t *testing.T) {
 
 	dir := t.TempDir()
 
+	id := testServerIdentity(t)
 	cfg := &config.Config{
-		Key:      "backup.gpg",
-		Identity: testServerIdentity(t),
+		Key: "backup.gpg",
 		Targets: []config.Target{
 			{ServerName: "sibling-instance", Kind: config.ServerKindRemote, Endpoint: "http://10.255.255.1:8050", Bucket: "from-primary"},
 			{ServerName: "nas", Kind: config.ServerKindLocal, Bucket: "my-backup-bucket-local", LocalPath: dir},
@@ -236,7 +236,7 @@ func TestUploadStagedToTargetsIsolatesSlowTarget(t *testing.T) {
 
 	onDone, results := collectTargetDone(len(cfg.Targets))
 
-	err := uploadStagedToTargets(ctx, cfg, stageTestContent(t, content), onDone, discardLogger)
+	err := uploadStagedToTargets(ctx, runEnv{identity: id}, cfg, stageTestContent(t, content), onDone, discardLogger)
 	if err == nil {
 		t.Fatal("uploadStagedToTargets() error = nil, want non-nil because the remote target failed")
 	}
@@ -274,16 +274,16 @@ func TestUploadStagedToTargetsSingleAttemptOnFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	id := testServerIdentity(t)
 	cfg := &config.Config{
-		Name:     "job-a",
-		Key:      "backup.gpg",
-		Identity: testServerIdentity(t),
-		Targets:  []config.Target{{ServerName: "always-down", Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}},
+		Name:    "job-a",
+		Key:     "backup.gpg",
+		Targets: []config.Target{{ServerName: "always-down", Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}},
 	}
 
 	onDone, results := collectTargetDone(len(cfg.Targets))
 
-	if err := uploadStagedToTargets(t.Context(), cfg, stageTestContent(t, "hello"), onDone, discardLogger); err == nil {
+	if err := uploadStagedToTargets(t.Context(), runEnv{identity: id}, cfg, stageTestContent(t, "hello"), onDone, discardLogger); err == nil {
 		t.Fatal("uploadStagedToTargets() error = nil, want non-nil")
 	}
 
@@ -464,7 +464,7 @@ func TestRunPipelineStagingFailureDoesNotHang(t *testing.T) {
 	done := make(chan error, 1)
 
 	go func() {
-		_, _, err := runPipeline(context.Background(), cfg, slog.New(slog.DiscardHandler), func(int, error) {})
+		_, _, err := runPipeline(context.Background(), runEnv{}, cfg, slog.New(slog.DiscardHandler), func(int, error) {})
 		done <- err
 	}()
 

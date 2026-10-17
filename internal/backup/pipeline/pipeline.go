@@ -27,6 +27,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/dockerexec"
+	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/remoteauth"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
@@ -87,6 +88,20 @@ func remoteHTTPClient(t *config.Target) (*http.Client, error) {
 // TargetUploadRetryInterval is how long a failed target upload waits before
 // Runner.RunOutstandingUploadRetries attempts it again.
 const TargetUploadRetryInterval = 60 * time.Second
+
+// runEnv is what a run needs beyond its job's Config: the shared state db
+// and this instance's identity. Runner builds it once (see Runner.env) and
+// passes it down the upload chain, instead of copying both onto each run's
+// Config.
+type runEnv struct {
+	// db records retention and outstanding target uploads; nil (the state
+	// db couldn't be opened at startup) disables both.
+	db *store.Store
+
+	// identity signs requests to remote targets; nil makes every remote
+	// upload fail (see remoteAuthHeader).
+	identity *identity.ServerIdentity
+}
 
 // removeStagingFileIfUnreferenced removes path (a staged backup file — see
 // stageBackup) unless a still-outstanding target upload (see
@@ -159,7 +174,7 @@ func removeStagingFileIfUnreferenced(ctx context.Context, db *store.Store, path 
 // target (they all upload from the same staged files), for callers that
 // want to report the backup's size; it's 0 if no file was staged. files is
 // each source's own outcome, in cfg.Sources order.
-func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger, onTargetDone func(index int, err error)) (bytesWritten int64, files []status.FileSnapshot, err error) {
+func runPipeline(ctx context.Context, env runEnv, cfg *config.Config, log *slog.Logger, onTargetDone func(index int, err error)) (bytesWritten int64, files []status.FileSnapshot, err error) {
 	// Guarantees the onTargetDone contract above even on an early return:
 	// uploadStagedToTargets reports each target itself once it starts, so
 	// this only fires when nothing could be staged, and it always sees the
@@ -185,7 +200,7 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger, onTa
 
 		f, err := stageSource(ctx, cfg, src, log.With("file", src.Name))
 		if err == nil {
-			defer removeStagingFileIfUnreferenced(ctx, cfg.StateDB, f.path, log)
+			defer removeStagingFileIfUnreferenced(ctx, env.db, f.path, log)
 
 			staged = append(staged, f)
 			bytesWritten += f.size
@@ -213,7 +228,7 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger, onTa
 
 	uploadStarted = true
 
-	if uploadErr := uploadStagedToTargets(ctx, cfg, staged, onTargetDone, log); uploadErr != nil {
+	if uploadErr := uploadStagedToTargets(ctx, env, cfg, staged, onTargetDone, log); uploadErr != nil {
 		return bytesWritten, files, errors.Join(sourceErr, fmt.Errorf("uploading to targets: %w", uploadErr))
 	}
 
@@ -650,7 +665,7 @@ func buildGPGCommand(ctx context.Context, cfg *config.Config) *exec.Cmd {
 //
 // Each file gets exactly one attempt per target here; a failed upload is
 // reported in its target's outcome for this run (see onTargetDone), but —
-// when cfg.StateDB is set — is also recorded as an outstanding upload for
+// when env.db is set — is also recorded as an outstanding upload for
 // Runner.RunOutstandingUploadRetries to keep retrying in the background
 // every TargetUploadRetryInterval until it eventually succeeds. A target
 // still gets its other files when one fails. onTargetDone (see its doc on
@@ -661,7 +676,7 @@ func buildGPGCommand(ctx context.Context, cfg *config.Config) *exec.Cmd {
 //
 // It returns the combined error via errors.Join, for callers that just want
 // to know whether anything failed.
-func uploadStagedToTargets(ctx context.Context, cfg *config.Config, files []stagedFile, onTargetDone func(index int, err error), log *slog.Logger) error {
+func uploadStagedToTargets(ctx context.Context, env runEnv, cfg *config.Config, files []stagedFile, onTargetDone func(index int, err error), log *slog.Logger) error {
 	targetErrs := make([]error, len(cfg.Targets))
 
 	var wg sync.WaitGroup
@@ -677,7 +692,7 @@ func uploadStagedToTargets(ctx context.Context, cfg *config.Config, files []stag
 			var fileErrs []error
 
 			for _, f := range files {
-				if err := uploadStagedFile(ctx, cfg, t, f, log); err != nil {
+				if err := uploadStagedFile(ctx, env, cfg, t, f, log); err != nil {
 					fileErrs = append(fileErrs, err)
 				}
 			}
@@ -698,23 +713,23 @@ func uploadStagedToTargets(ctx context.Context, cfg *config.Config, files []stag
 
 // uploadStagedFile makes the one in-run attempt to upload f to t, recording
 // a failed attempt as an outstanding upload (see uploadStagedToTargets).
-func uploadStagedFile(ctx context.Context, cfg *config.Config, t *config.Target, f stagedFile, log *slog.Logger) error {
+func uploadStagedFile(ctx context.Context, env runEnv, cfg *config.Config, t *config.Target, f stagedFile, log *slog.Logger) error {
 	fileCfg := *cfg
 	fileCfg.File = f.name
 
-	err := uploadTargetAttempt(ctx, &fileCfg, t, f.path, log)
+	err := uploadTargetAttempt(ctx, env, &fileCfg, t, f.path, log)
 	if err == nil {
 		return nil
 	}
 
 	log.Warn("target upload failed", "target", targetLabel(t), "file", f.name, "err", err)
 
-	if cfg.StateDB != nil {
+	if env.db != nil {
 		row := store.OutstandingTargetUpload{
 			JobName: cfg.Name, Target: t.ServerName, FileName: f.path, Key: cfg.Key, BackupFile: f.name,
 			CreatedAt: cfg.CreatedAt, RetryAt: time.Now().Add(TargetUploadRetryInterval),
 		}
-		if err1 := cfg.StateDB.AddOutstandingTargetUpload(ctx, row); err1 != nil {
+		if err1 := env.db.AddOutstandingTargetUpload(ctx, row); err1 != nil {
 			log.Warn("recording outstanding target upload failed", "target", targetLabel(t), "file", f.name, "err", err1)
 		}
 	}
@@ -724,7 +739,7 @@ func uploadStagedFile(ctx context.Context, cfg *config.Config, t *config.Target,
 
 // uploadTargetAttempt runs a single upload attempt for target t, reading
 // stagingPath fresh from the start.
-func uploadTargetAttempt(ctx context.Context, cfg *config.Config, t *config.Target, stagingPath string, log *slog.Logger) error {
+func uploadTargetAttempt(ctx context.Context, env runEnv, cfg *config.Config, t *config.Target, stagingPath string, log *slog.Logger) error {
 	f, err := os.Open(stagingPath) //nolint:gosec // stagingPath is our own staging file (see stageBackup), not user input
 	if err != nil {
 		return fmt.Errorf("opening staged backup: %w", err)
@@ -737,7 +752,7 @@ func uploadTargetAttempt(ctx context.Context, cfg *config.Config, t *config.Targ
 			return err
 		}
 
-		if err := backup.RecordLocalWrite(ctx, cfg, t, log); err != nil {
+		if err := backup.RecordLocalWrite(ctx, env.db, cfg, t, log); err != nil {
 			// Retention tracking is best-effort auxiliary bookkeeping: the
 			// backup itself already succeeded, so a db hiccup here shouldn't
 			// fail the whole target (or trigger a retry of the upload).
@@ -747,7 +762,7 @@ func uploadTargetAttempt(ctx context.Context, cfg *config.Config, t *config.Targ
 		return nil
 
 	case config.ServerKindRemote:
-		return UploadToRemote(ctx, cfg, t, f)
+		return UploadToRemote(ctx, env.identity, cfg, t, f)
 	}
 
 	return nil
@@ -793,18 +808,17 @@ func remoteObjectURL(t *config.Target, key, file string, query url.Values) strin
 	return u
 }
 
-// remoteAuthHeader signs a fresh JWT with cfg.Identity (this instance's own
-// RSA key and UUID — see loadServerIdentity) scoped to t.Bucket (the
-// destination instance's receiver id) and bound to req (see
+// remoteAuthHeader signs a fresh JWT with id (this instance's own RSA key
+// and UUID — see identity.LoadServerIdentityAtStartup) scoped to t.Bucket
+// (the destination instance's receiver id) and bound to req (see
 // remoteauth.Request), and formats it as an Authorization: Bearer header
-// value, for UploadToRemote. Errors if cfg.Identity is
-// nil, meaning loadServerIdentity failed at startup.
-func remoteAuthHeader(cfg *config.Config, t *config.Target, req remoteauth.Request) (string, error) {
-	if cfg.Identity == nil {
+// value, for UploadToRemote. Errors if id is nil.
+func remoteAuthHeader(id *identity.ServerIdentity, t *config.Target, req remoteauth.Request) (string, error) {
+	if id == nil {
 		return "", errors.New("no server identity available (see startup log for why loadServerIdentity failed)")
 	}
 
-	token, err := cfg.Identity.SignRequest(t.Bucket, req)
+	token, err := id.SignRequest(t.Bucket, req)
 	if err != nil {
 		return "", fmt.Errorf("signing request: %w", err)
 	}
@@ -814,8 +828,8 @@ func remoteAuthHeader(cfg *config.Config, t *config.Target, req remoteauth.Reque
 
 // UploadToRemote streams r as the body of a PUT request to another
 // go-backup-tool instance's receiver API (target t, kind ==
-// config.ServerKindRemote), authenticated with a JWT signed by this instance's own
-// identity (see remoteAuthHeader). r is streamed directly as the request
+// config.ServerKindRemote), authenticated with a JWT signed by id, this
+// instance's own identity (see remoteAuthHeader). r is streamed directly as the request
 // body, never buffered. When cfg.CreatedAt is set, it's sent as the
 // creationTime query parameter (RFC3339), so the receiver bases retention on
 // when this run's backup content was actually produced rather than on
@@ -824,20 +838,20 @@ func remoteAuthHeader(cfg *config.Config, t *config.Target, req remoteauth.Reque
 // r must also implement io.Seeker (the staged *os.File does): it's read
 // once up front to sign its SHA-256 into the request token (see
 // remoteauth.Request), then rewound and streamed.
-func UploadToRemote(ctx context.Context, cfg *config.Config, t *config.Target, r io.Reader) error {
+func UploadToRemote(ctx context.Context, id *identity.ServerIdentity, cfg *config.Config, t *config.Target, r io.Reader) error {
 	var query url.Values
 	if !cfg.CreatedAt.IsZero() {
 		query = url.Values{"creationTime": {cfg.CreatedAt.UTC().Format(time.RFC3339)}}
 	}
 
-	return doAuthenticatedRemoteRequest(ctx, cfg, t, http.MethodPut, r, "application/octet-stream", query)
+	return doAuthenticatedRemoteRequest(ctx, id, cfg, t, http.MethodPut, r, "application/octet-stream", query)
 }
 
 // doAuthenticatedRemoteRequest signs, sends, and status-checks a method
 // request (with body, whose Content-Type is set only when contentType is
 // non-empty, and an optional query string) to target t's receiver API, for
 // UploadToRemote.
-func doAuthenticatedRemoteRequest(ctx context.Context, cfg *config.Config, t *config.Target, method string, body io.Reader, contentType string, query url.Values) error {
+func doAuthenticatedRemoteRequest(ctx context.Context, id *identity.ServerIdentity, cfg *config.Config, t *config.Target, method string, body io.Reader, contentType string, query url.Values) error {
 	bound := remoteauth.Request{Method: method, Key: cfg.Key, File: cfg.File, CreationTime: query.Get("creationTime")}
 
 	if body != nil {
@@ -849,7 +863,7 @@ func doAuthenticatedRemoteRequest(ctx context.Context, cfg *config.Config, t *co
 		bound.BodySHA256 = digest
 	}
 
-	auth, err := remoteAuthHeader(cfg, t, bound)
+	auth, err := remoteAuthHeader(id, t, bound)
 	if err != nil {
 		return err
 	}

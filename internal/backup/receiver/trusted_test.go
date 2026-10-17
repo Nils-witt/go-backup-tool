@@ -116,12 +116,12 @@ func TestRemoteTargetInteropWithTrustedServer(t *testing.T) {
 
 	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"}
 
-	if err := pipeline.UploadToRemote(t.Context(), &config.Config{Key: "a.gpg", Identity: sender}, tgt, strings.NewReader("x")); err != nil {
+	if err := pipeline.UploadToRemote(t.Context(), sender, &config.Config{Key: "a.gpg"}, tgt, strings.NewReader("x")); err != nil {
 		t.Fatalf("UploadToRemote() from a trusted, allowed server: %v", err)
 	}
 
 	stranger, _ := testTrustedSender(t)
-	if err := pipeline.UploadToRemote(t.Context(), &config.Config{Key: "b.gpg", Identity: stranger}, tgt, strings.NewReader("x")); err == nil {
+	if err := pipeline.UploadToRemote(t.Context(), stranger, &config.Config{Key: "b.gpg"}, tgt, strings.NewReader("x")); err == nil {
 		t.Fatal("UploadToRemote() from an unknown server succeeded, want 401")
 	}
 }
@@ -159,13 +159,13 @@ func TestReceiverTokenReplayRejected(t *testing.T) {
 	srvB := httptest.NewServer(newReceiverMux(receivers(dirB)))
 	defer srvB.Close()
 
-	cfg := &config.Config{Key: "db.gpg", Identity: sender, CreatedAt: time.Now().Add(-time.Minute)}
+	cfg := &config.Config{Key: "db.gpg", CreatedAt: time.Now().Add(-time.Minute)}
 
-	if err := pipeline.UploadToRemote(t.Context(), cfg, &config.Target{Kind: config.ServerKindRemote, Endpoint: srvB.URL, Bucket: "from-primary"}, strings.NewReader("genuine")); err != nil {
+	if err := pipeline.UploadToRemote(t.Context(), sender, cfg, &config.Target{Kind: config.ServerKindRemote, Endpoint: srvB.URL, Bucket: "from-primary"}, strings.NewReader("genuine")); err != nil {
 		t.Fatalf("UploadToRemote(B): %v", err)
 	}
 
-	if err := pipeline.UploadToRemote(t.Context(), cfg, &config.Target{Kind: config.ServerKindRemote, Endpoint: srvA.URL, Bucket: "from-primary"}, strings.NewReader("genuine")); err != nil {
+	if err := pipeline.UploadToRemote(t.Context(), sender, cfg, &config.Target{Kind: config.ServerKindRemote, Endpoint: srvA.URL, Bucket: "from-primary"}, strings.NewReader("genuine")); err != nil {
 		t.Fatalf("UploadToRemote(A): %v", err)
 	}
 

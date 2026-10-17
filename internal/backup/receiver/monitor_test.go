@@ -437,7 +437,7 @@ func TestSweepAllReceiversRemovesExpiredObjects(t *testing.T) {
 	receivers := map[string]config.ResolvedReceiver{"a": recv}
 
 	tgt := backup.ReceiverTarget(recv)
-	cfg := &config.Config{Key: "old.gpg", StateDB: db}
+	cfg := &config.Config{Key: "old.gpg"}
 
 	if err := backup.WriteLocalObject(cfg, tgt, strings.NewReader("stale")); err != nil {
 		t.Fatalf("WriteLocalObject() error: %v", err)

@@ -249,10 +249,10 @@ func TestReceiverCreatedAtRuntimeAcceptsUploads(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	cfg := &config.Config{Key: "backup.gpg", Identity: id}
+	cfg := &config.Config{Key: "backup.gpg"}
 	tgt := &config.Target{Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "late"}
 
-	if err := pipeline.UploadToRemote(t.Context(), cfg, tgt, strings.NewReader("x")); err == nil {
+	if err := pipeline.UploadToRemote(t.Context(), id, cfg, tgt, strings.NewReader("x")); err == nil {
 		t.Fatal("upload to a not-yet-created receiver succeeded")
 	}
 
@@ -261,7 +261,7 @@ func TestReceiverCreatedAtRuntimeAcceptsUploads(t *testing.T) {
 		t.Fatalf("Create() error: %v", err)
 	}
 
-	if err := pipeline.UploadToRemote(t.Context(), cfg, tgt, strings.NewReader("x")); err != nil {
+	if err := pipeline.UploadToRemote(t.Context(), id, cfg, tgt, strings.NewReader("x")); err != nil {
 		t.Fatalf("upload after Create() error: %v", err)
 	}
 
@@ -273,7 +273,7 @@ func TestReceiverCreatedAtRuntimeAcceptsUploads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := pipeline.UploadToRemote(t.Context(), cfg, tgt, strings.NewReader("x")); err == nil {
+	if err := pipeline.UploadToRemote(t.Context(), id, cfg, tgt, strings.NewReader("x")); err == nil {
 		t.Error("upload after Delete() succeeded")
 	}
 }

@@ -18,20 +18,20 @@ import (
 // wrote the object at LocalObjectPath(cfg, t) — then sweeps t's server for
 // anything now past its retention window. Only called after a successful
 // write to a local target whose server has retention: set; retention == 0
-// means no tracking (and so nothing to sweep). cfg.StateDB == nil (the state
-// db couldn't be opened at startup) also disables tracking rather than
+// means no tracking (and so nothing to sweep). A nil db (the state db
+// couldn't be opened at startup) also disables tracking rather than
 // erroring, since the backup write itself already succeeded and this is
 // auxiliary bookkeeping.
-func RecordLocalWrite(ctx context.Context, cfg *config.Config, t *config.Target, log *slog.Logger) error {
-	if t.Retention <= 0 || cfg.StateDB == nil {
+func RecordLocalWrite(ctx context.Context, db *store.Store, cfg *config.Config, t *config.Target, log *slog.Logger) error {
+	if t.Retention <= 0 || db == nil {
 		return nil
 	}
 
-	if err := RecordObjectWrite(ctx, cfg, t, log); err != nil {
+	if err := RecordObjectWrite(ctx, db, cfg, t, log); err != nil {
 		return err
 	}
 
-	return sweepRetention(ctx, cfg.StateDB, t, log)
+	return sweepRetention(ctx, db, t, log)
 }
 
 // RecordObjectWrite records, in the shared state db, that cfg's job just
@@ -40,15 +40,15 @@ func RecordLocalWrite(ctx context.Context, cfg *config.Config, t *config.Target,
 // factors out so a caller with its own sweep schedule (see the receiver
 // package's MonitorReceiverRetention, which sweeps every receiver on a
 // one-minute timer instead) can record a write without also paying for a
-// sweep on every single request. retention == 0 means no tracking, and
-// cfg.StateDB == nil (the state db couldn't be opened at startup) also
-// disables tracking rather than erroring, since the backup write itself
+// sweep on every single request. retention == 0 means no tracking, and a
+// nil db (the state db couldn't be opened at startup) also disables
+// tracking rather than erroring, since the backup write itself
 // already succeeded and this is auxiliary bookkeeping. The retention basis
 // is cfg.CreatedAt when set (the receiver API's creationTime, or a run's job
 // start time — see pipeline.UploadToRemote/backup.ParseCreationTime), or
 // upload time otherwise.
-func RecordObjectWrite(ctx context.Context, cfg *config.Config, t *config.Target, log *slog.Logger) error {
-	if t.Retention <= 0 || cfg.StateDB == nil {
+func RecordObjectWrite(ctx context.Context, db *store.Store, cfg *config.Config, t *config.Target, log *slog.Logger) error {
+	if t.Retention <= 0 || db == nil {
 		return nil
 	}
 
@@ -60,7 +60,7 @@ func RecordObjectWrite(ctx context.Context, cfg *config.Config, t *config.Target
 		writtenAt = time.Now().UTC()
 	}
 
-	if err := cfg.StateDB.SaveObjectWrite(ctx, t.ServerName, t.Bucket, path, writtenAt, retentionSeconds); err != nil {
+	if err := db.SaveObjectWrite(ctx, t.ServerName, t.Bucket, path, writtenAt, retentionSeconds); err != nil {
 		return err
 	}
 

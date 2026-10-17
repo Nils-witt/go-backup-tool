@@ -4,10 +4,8 @@ package identity
 
 // Server identity file names and key parameters, all rooted under a
 // configurable keys directory (see config.RunConfig.KeysDir, defaulting to
-// DefaultServerKeyDir).
+// config.DefaultKeysDir).
 const (
-	DefaultServerKeyDir = "data/keys"
-
 	ServerPrivateKeyFile = "server.key"
 	ServerPublicKeyFile  = "server.pub"
 	ServerKeyBits        = 4096

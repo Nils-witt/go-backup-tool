@@ -1182,7 +1182,6 @@ func TestRetryOutstandingUploadSucceedsAfterTargetRecovers(t *testing.T) {
 		GPGBin:     "gpg",
 		GPGHomedir: homedir,
 		StagingDir: stagingDir,
-		Identity:   identity,
 		Targets: []config.Target{
 			{ServerName: "flaky", Kind: config.ServerKindRemote, Endpoint: srv.URL, Bucket: "instance-a"},
 		},

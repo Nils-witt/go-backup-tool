@@ -8,10 +8,8 @@ import (
 	"log/slog"
 	"time"
 
-	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
-	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 // Config holds one backup job's parameters.
@@ -30,8 +28,8 @@ type Config struct {
 	fileRefs []FileJobFile
 
 	// DockerHost is the Docker daemon address (see dockerexec.New), set on
-	// each run's own copy of its job's config by the runner, the same way
-	// StateDB is. Only used by a source with a Container.
+	// each run's own copy of its job's config by the runner. Only used by a
+	// source with a Container.
 	DockerHost string
 
 	// Key names the backup: a folder holding one file per source. It may
@@ -65,23 +63,6 @@ type Config struct {
 	// any target upload starts (see stageBackup); empty means the OS default
 	// temp directory (os.CreateTemp's behavior when given "").
 	StagingDir string
-
-	// StateDB is the shared state/retention sqlite database (see the store
-	// package and retention.go), set on each run's own copy of its job's
-	// config by runner.runOnce so RecordLocalWrite
-	// reaches it without every function in the upload call chain needing its
-	// own db parameter. Nil disables retention tracking for this run (e.g.
-	// the db couldn't be opened at startup) — see RecordLocalWrite.
-	StateDB *store.Store
-
-	// Identity is this instance's own persistent Identity (see
-	// loadServerIdentity), set on each run's own copy of its job's config by
-	// runner.runOnce the same way stateDB is. uploadToRemote/
-	// deleteRemoteObject (pipeline.go) use it to sign a type: remote
-	// target's requests. Nil means loadServerIdentity failed at startup (see
-	// its own doc comment); any job with a remote target then fails that
-	// target's uploads until a later run's Identity loads successfully.
-	Identity *identity.ServerIdentity
 
 	// ServerName is fileConfig.ServerName, this instance's own {server_name}
 	// notification placeholder, copied onto every job at build time (see
@@ -274,9 +255,9 @@ type RunConfig struct {
 	ServerName string
 
 	// KeysDir is where this instance's persistent identity (its RSA key pair
-	// and UUID — see loadServerIdentity) is stored. Defaults to
-	// defaultServerKeyDir when the config file's top-level keys-dir: is
-	// unset.
+	// and UUID — see identity.LoadServerIdentityAtStartup) is stored.
+	// Defaults to DefaultKeysDir when the config file's top-level keys-dir:
+	// is unset.
 	KeysDir string
 
 	// LogViewer enables the web UI's live log viewer (served over

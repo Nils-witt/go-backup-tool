@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"strings"
 
-	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
 )
 
@@ -108,7 +107,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 
 	keysDir := strings.TrimSpace(fileCfg.KeysDir)
 	if keysDir == "" {
-		keysDir = identity.DefaultServerKeyDir
+		keysDir = DefaultKeysDir
 	}
 
 	if _, err := report.ResolveSettings(fileCfg.Report, nil); err != nil {
