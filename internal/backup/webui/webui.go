@@ -28,10 +28,9 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
-	appconfig "nilswitt.dev/go-backup-tool/internal/backup/app/config"
-	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/gpgkeys"
+	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/jobs"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
@@ -854,7 +853,7 @@ func serveEventLog[E, J any](w http.ResponseWriter, r *http.Request, log *slog.L
 	// A limit below 1 (a caller that didn't resolve webui.event-log-limit:,
 	// e.g. a test) falls back to the default rather than serving nothing.
 	if limit < 1 {
-		limit = appconfig.DefaultEventLogLimit
+		limit = config.DefaultEventLogLimit
 	}
 
 	var events []E

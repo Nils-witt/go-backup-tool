@@ -14,10 +14,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
-	"nilswitt.dev/go-backup-tool/internal/backup/remoteAuth"
+	"nilswitt.dev/go-backup-tool/internal/backup/remoteauth"
 	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
 
@@ -51,7 +51,7 @@ func TestVerifyReceiverTokenTrustedServers(t *testing.T) {
 	sign := func(key *rsa.PrivateKey, issuer, audience string) string {
 		t.Helper()
 
-		tok, err := remoteAuth.SignRemoteAuthToken(key, issuer, audience, remoteAuth.Request{})
+		tok, err := remoteauth.SignRemoteAuthToken(key, issuer, audience, remoteauth.Request{})
 		if err != nil {
 			t.Fatalf("SignRemoteAuthToken() error: %v", err)
 		}

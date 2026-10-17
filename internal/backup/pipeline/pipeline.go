@@ -27,7 +27,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/dockerexec"
-	"nilswitt.dev/go-backup-tool/internal/backup/remoteAuth"
+	"nilswitt.dev/go-backup-tool/internal/backup/remoteauth"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 	"nilswitt.dev/go-backup-tool/internal/backup/tarball"
 )
@@ -795,10 +795,10 @@ func remoteObjectURL(t *config.Target, key, file string, query url.Values) strin
 // remoteAuthHeader signs a fresh JWT with cfg.Identity (this instance's own
 // RSA key and UUID — see loadServerIdentity) scoped to t.Bucket (the
 // destination instance's receiver id) and bound to req (see
-// remoteAuth.Request), and formats it as an Authorization: Bearer header
+// remoteauth.Request), and formats it as an Authorization: Bearer header
 // value, for UploadToRemote. Errors if cfg.Identity is
 // nil, meaning loadServerIdentity failed at startup.
-func remoteAuthHeader(cfg *config.Config, t *config.Target, req remoteAuth.Request) (string, error) {
+func remoteAuthHeader(cfg *config.Config, t *config.Target, req remoteauth.Request) (string, error) {
 	if cfg.Identity == nil {
 		return "", errors.New("no server identity available (see startup log for why loadServerIdentity failed)")
 	}
@@ -822,7 +822,7 @@ func remoteAuthHeader(cfg *config.Config, t *config.Target, req remoteAuth.Reque
 // creationTime at all, matching the receiver's own upload-time fallback.
 // r must also implement io.Seeker (the staged *os.File does): it's read
 // once up front to sign its SHA-256 into the request token (see
-// remoteAuth.Request), then rewound and streamed.
+// remoteauth.Request), then rewound and streamed.
 func UploadToRemote(ctx context.Context, cfg *config.Config, t *config.Target, r io.Reader) error {
 	var query url.Values
 	if !cfg.CreatedAt.IsZero() {
@@ -837,7 +837,7 @@ func UploadToRemote(ctx context.Context, cfg *config.Config, t *config.Target, r
 // non-empty, and an optional query string) to target t's receiver API, for
 // UploadToRemote.
 func doAuthenticatedRemoteRequest(ctx context.Context, cfg *config.Config, t *config.Target, method string, body io.Reader, contentType string, query url.Values) error {
-	bound := remoteAuth.Request{Method: method, Key: cfg.Key, File: cfg.File, CreationTime: query.Get("creationTime")}
+	bound := remoteauth.Request{Method: method, Key: cfg.Key, File: cfg.File, CreationTime: query.Get("creationTime")}
 
 	if body != nil {
 		digest, err := bodySHA256(body)

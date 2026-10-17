@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
 )
 
 func TestExtractServiceCommand(t *testing.T) {
@@ -78,7 +80,7 @@ func TestResolveConfigArgAbs(t *testing.T) {
 			name: "no -config flag: one is appended pointing at the default",
 			args: []string{"-job", "db"},
 			want: func(t *testing.T) []string {
-				return []string{"-job", "db", "-config=" + wantAbs(t, defaultConfigPath)}
+				return []string{"-job", "db", "-config=" + wantAbs(t, config.DefaultConfigPath)}
 			},
 		},
 		{

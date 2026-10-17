@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"nilswitt.dev/go-backup-tool/internal/backup/remoteAuth"
+	"nilswitt.dev/go-backup-tool/internal/backup/remoteauth"
 )
 
 // ServerIdentity is this instance's persistent identity: a UUID (see
@@ -104,8 +104,8 @@ func (si *ServerIdentity) PrivateKey() *rsa.PrivateKey {
 // identifying this instance as issuer, scoped to audience (the destination
 // receiver's id) and bound to req (the one request it authorizes), for
 // uploadToRemote/deleteRemoteObject's Authorization: Bearer header.
-func (si *ServerIdentity) SignRequest(audience string, req remoteAuth.Request) (string, error) {
-	return remoteAuth.SignRemoteAuthToken(si.privateKey, si.uuid, audience, req)
+func (si *ServerIdentity) SignRequest(audience string, req remoteauth.Request) (string, error) {
+	return remoteauth.SignRemoteAuthToken(si.privateKey, si.uuid, audience, req)
 }
 
 // loadServerPrivateKey reads and parses dir/server.key (written by

@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
+	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 )
 
 // discardLogger is a *slog.Logger that writes nowhere, for tests that need

@@ -16,7 +16,7 @@ import (
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
 
-	"nilswitt.dev/go-backup-tool/internal/backup/app/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
 )
 
 // serviceName is the Windows service go-backup-tool installs itself as and
@@ -159,12 +159,12 @@ func installService(args []string) error {
 
 // resolveConfigArgAbs rewrites args' -config (or --config) value to an
 // absolute path, resolved against the current working directory, appending
-// one (pointing at defaultConfigPath) if args doesn't set -config at all.
+// one (pointing at config.DefaultConfigPath) if args doesn't set -config at all.
 //
 // The Windows Service Control Manager starts services with
 // %SystemRoot%\System32 as their working directory, not the directory the
 // operator ran -service=install from. Without this, a relative -config
-// path — or the relative defaultConfigPath a bare install falls back to —
+// path — or the relative config.DefaultConfigPath a bare install falls back to —
 // would resolve against the wrong directory once the service actually
 // starts, even though it worked fine from the console at install time.
 func resolveConfigArgAbs(args []string) ([]string, error) {

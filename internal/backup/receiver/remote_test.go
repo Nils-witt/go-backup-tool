@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
-	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
-	"nilswitt.dev/go-backup-tool/internal/backup/remoteAuth"
+	"nilswitt.dev/go-backup-tool/internal/backup/remoteauth"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -76,7 +76,7 @@ func TestRemoteTargetInteropMultiFileBackup(t *testing.T) {
 
 // putBackupFile sends a PUT to the multi-file route for key, with rawQuery
 // attached as-is and a token signed with id for bound.
-func putBackupFile(t *testing.T, baseURL string, id *identity.ServerIdentity, recvID, key, rawQuery string, bound remoteAuth.Request) *http.Response {
+func putBackupFile(t *testing.T, baseURL string, id *identity.ServerIdentity, recvID, key, rawQuery string, bound remoteauth.Request) *http.Response {
 	t.Helper()
 
 	token, err := id.SignRequest(recvID, bound)
@@ -106,21 +106,21 @@ func TestHandleReceiveBackupFileRejects(t *testing.T) {
 
 	const digestOfX = "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
 
-	boundFor := func(file string) remoteAuth.Request {
-		return remoteAuth.Request{Method: http.MethodPut, Key: "k", File: file, BodySHA256: digestOfX}
+	boundFor := func(file string) remoteauth.Request {
+		return remoteauth.Request{Method: http.MethodPut, Key: "k", File: file, BodySHA256: digestOfX}
 	}
 
 	tests := []struct {
 		name     string
 		rawQuery string
-		bound    remoteAuth.Request
+		bound    remoteauth.Request
 		expected int
 	}{
 		{name: "missing file", rawQuery: "", bound: boundFor(""), expected: http.StatusBadRequest},
 		{name: "hidden file", rawQuery: "file=.gbt-backup", bound: boundFor(".gbt-backup"), expected: http.StatusBadRequest},
 		{name: "file with a slash", rawQuery: "file=a%2Fb", bound: boundFor("a/b"), expected: http.StatusBadRequest},
 		{name: "token for another file", rawQuery: "file=a.gpg", bound: boundFor("b.gpg"), expected: http.StatusUnauthorized},
-		{name: "unbound token", rawQuery: "file=a.gpg", bound: remoteAuth.Request{}, expected: http.StatusUnauthorized},
+		{name: "unbound token", rawQuery: "file=a.gpg", bound: remoteauth.Request{}, expected: http.StatusUnauthorized},
 		{name: "valid", rawQuery: "file=a.gpg", bound: boundFor("a.gpg"), expected: http.StatusCreated},
 	}
 
@@ -286,7 +286,7 @@ func TestRemoteTargetInteropMalformedCreationTimeRejected(t *testing.T) {
 func putWithRawQuery(t *testing.T, baseURL string, id *identity.ServerIdentity, recvID, key, rawQuery string) *http.Response {
 	t.Helper()
 
-	token, err := id.SignRequest(recvID, remoteAuth.Request{})
+	token, err := id.SignRequest(recvID, remoteauth.Request{})
 	if err != nil {
 		t.Fatalf("signing request: %v", err)
 	}

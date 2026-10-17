@@ -1,4 +1,4 @@
-package remoteAuth
+package remoteauth
 
 import (
 	"crypto/rand"

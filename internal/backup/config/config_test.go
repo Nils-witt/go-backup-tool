@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	appconfig "nilswitt.dev/go-backup-tool/internal/backup/app/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
@@ -571,7 +570,7 @@ jobs:
 }
 
 // TestParseFlagsEventLogLimit covers webui.event-log-limit: defaulting to
-// appconfig.DefaultEventLogLimit when unset, being taken as given in range,
+// DefaultEventLogLimit when unset, being taken as given in range,
 // and being rejected outside 1..maxEventLogLimit.
 func TestParseFlagsEventLogLimit(t *testing.T) {
 	t.Parallel()
@@ -582,7 +581,7 @@ func TestParseFlagsEventLogLimit(t *testing.T) {
 		want    int
 		wantErr bool
 	}{
-		{name: "unset uses default", setting: "", want: appconfig.DefaultEventLogLimit},
+		{name: "unset uses default", setting: "", want: DefaultEventLogLimit},
 		{name: "explicit value", setting: "event-log-limit: 1000", want: 1000},
 		{name: "maximum", setting: "event-log-limit: 10000", want: 10000},
 		{name: "negative rejected", setting: "event-log-limit: -1", wantErr: true},

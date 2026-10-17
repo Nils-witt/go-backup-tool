@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup"
-	appconfig "nilswitt.dev/go-backup-tool/internal/backup/app/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
@@ -747,7 +746,7 @@ func TestHandleLoginEventsServesJSON(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/login-events", nil)
 	rec := httptest.NewRecorder()
 
-	handleLoginEvents(db, discardLogger, appconfig.DefaultEventLogLimit)(rec, req)
+	handleLoginEvents(db, discardLogger, config.DefaultEventLogLimit)(rec, req)
 
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		t.Errorf("Content-Type = %q, want application/json prefix", ct)
@@ -797,7 +796,7 @@ func TestHandleLoginEventsWithoutDBServesEmptyList(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/login-events", nil)
 	rec := httptest.NewRecorder()
 
-	handleLoginEvents(nil, discardLogger, appconfig.DefaultEventLogLimit)(rec, req)
+	handleLoginEvents(nil, discardLogger, config.DefaultEventLogLimit)(rec, req)
 
 	var got []loginEventJSON
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -996,7 +995,7 @@ func TestHandleDownloadEventsServesJSON(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/download-events", nil)
 	rec := httptest.NewRecorder()
 
-	handleDownloadEvents(db, discardLogger, appconfig.DefaultEventLogLimit)(rec, req)
+	handleDownloadEvents(db, discardLogger, config.DefaultEventLogLimit)(rec, req)
 
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		t.Errorf("Content-Type = %q, want application/json prefix", ct)
@@ -1018,7 +1017,7 @@ func TestHandleDownloadEventsWithoutDBServesEmptyList(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/download-events", nil)
 	rec := httptest.NewRecorder()
 
-	handleDownloadEvents(nil, discardLogger, appconfig.DefaultEventLogLimit)(rec, req)
+	handleDownloadEvents(nil, discardLogger, config.DefaultEventLogLimit)(rec, req)
 
 	var got []downloadEventJSON
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -1042,7 +1041,7 @@ func TestHandleReceiverEventsServesJSON(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receiver-events", nil)
 	rec := httptest.NewRecorder()
 
-	handleReceiverEvents(db, discardLogger, appconfig.DefaultEventLogLimit)(rec, req)
+	handleReceiverEvents(db, discardLogger, config.DefaultEventLogLimit)(rec, req)
 
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		t.Errorf("Content-Type = %q, want application/json prefix", ct)
@@ -1064,7 +1063,7 @@ func TestHandleReceiverEventsWithoutDBServesEmptyList(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/receiver-events", nil)
 	rec := httptest.NewRecorder()
 
-	handleReceiverEvents(nil, discardLogger, appconfig.DefaultEventLogLimit)(rec, req)
+	handleReceiverEvents(nil, discardLogger, config.DefaultEventLogLimit)(rec, req)
 
 	var got []receiverEventJSON
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {

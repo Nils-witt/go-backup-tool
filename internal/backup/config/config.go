@@ -24,8 +24,7 @@ import (
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 
-	appconfig "nilswitt.dev/go-backup-tool/internal/backup/app/config"
-	"nilswitt.dev/go-backup-tool/internal/backup/app/identity"
+	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
@@ -395,7 +394,7 @@ type RunConfig struct {
 	// EventLogLimit is how many of the most recent entries each web UI
 	// event log serves (see fileWebUI.EventLogLimit). Always positive: an
 	// unset webui.event-log-limit: resolves to
-	// appconfig.DefaultEventLogLimit.
+	// DefaultEventLogLimit.
 	EventLogLimit int
 
 	// TrustProxyHeaders, when set, makes the web UI derive the client
@@ -716,7 +715,7 @@ type fileWebUI struct {
 	// web UI's event logs (job runs, target runs, logins, downloads,
 	// receiver events) shows. Every entry stays in the state database
 	// regardless; this only limits how many are served. Unset (0) defaults
-	// to appconfig.DefaultEventLogLimit. Must be between 1 and
+	// to DefaultEventLogLimit. Must be between 1 and
 	// maxEventLogLimit when set.
 	EventLogLimit int `yaml:"event-log-limit"`
 
@@ -854,7 +853,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		logLevel   string
 	)
 
-	fs.StringVar(&configPath, "config", appconfig.DefaultConfigPath, "path to the YAML config file")
+	fs.StringVar(&configPath, "config", DefaultConfigPath, "path to the YAML config file")
 	fs.StringVar(&jobFilter, "job", "", "run only the named job from the config file's jobs: list")
 	fs.StringVar(&logLevel, "log-level", "info", "log verbosity: debug, info, warn, or error (overrides the config file's log-level:)")
 
@@ -973,7 +972,7 @@ func resolveNotifications(fileCfg *fileConfig) (resolvedNotifications, error) {
 		return resolvedNotifications{}, err
 	}
 
-	gpg := notify.GPGSettings{Bin: appconfig.DefaultGPGBin}
+	gpg := notify.GPGSettings{Bin: DefaultGPGBin}
 	applyString(&gpg.Bin, fileCfg.GPGBin)
 	applyString(&gpg.Homedir, fileCfg.GPGHomedir)
 
@@ -1257,11 +1256,11 @@ func resolveCORSGetOrigins(origins []string) ([]string, error) {
 const maxEventLogLimit = 10000
 
 // resolveEventLogLimit validates webui.event-log-limit: (see
-// fileWebUI.EventLogLimit), returning appconfig.DefaultEventLogLimit when
+// fileWebUI.EventLogLimit), returning DefaultEventLogLimit when
 // it's unset.
 func resolveEventLogLimit(n int) (int, error) {
 	if n == 0 {
-		return appconfig.DefaultEventLogLimit, nil
+		return DefaultEventLogLimit, nil
 	}
 
 	if n < 1 || n > maxEventLogLimit {
@@ -2049,8 +2048,8 @@ func hookCommand(commands map[string]Command, id string) (Command, error) {
 // every job before its config file fields are layered on top.
 func newConfigDefaults() *Config {
 	return &Config{
-		Key:    appconfig.DefaultKeyPattern,
-		GPGBin: appconfig.DefaultGPGBin,
+		Key:    DefaultKeyPattern,
+		GPGBin: DefaultGPGBin,
 	}
 }
 
