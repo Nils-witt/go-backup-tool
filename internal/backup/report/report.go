@@ -37,8 +37,8 @@ type FileReport struct {
 	// prefix is rejected. Default "0 7 * * *" (once a day at 07:00 UTC).
 	Schedule string `yaml:"schedule" json:"schedule"`
 
-	// Notifications names top-level notifications: entries (see
-	// notify.Build) to send this report to. A notification's email: block,
+	// Notifications names notifications (managed in the web UI, see the
+	// settings package) to send this report to. A notification's email: block,
 	// if set, receives the full report as its body, with its own
 	// subject:/subject-placeholders (see pipeline.renderReportSubject)
 	// substituted in if set, otherwise defaulting to defaultReportSubject; a

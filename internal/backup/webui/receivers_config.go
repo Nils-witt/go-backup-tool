@@ -68,7 +68,7 @@ func handleListReceiverConfigs(m *receiver.Manager, log *slog.Logger) http.Handl
 		for i, mr := range list {
 			rc := mr.ReceiverConfig
 			out.Receivers[i] = receiverConfigJSON{
-				ID: rc.ID, PublicKey: rc.PublicKey, AllowedServers: nonNil(rc.AllowedServers), Path: rc.Path, Retention: rc.Retention, StaleAfter: rc.StaleAfter,
+				ID: rc.ID, AllowedServers: nonNil(rc.AllowedServers), Path: rc.Path, Retention: rc.Retention, StaleAfter: rc.StaleAfter,
 				StaleNotifications: nonNil(rc.StaleNotifications), DownloadNotifications: nonNil(rc.DownloadNotifications),
 				CreatedAt: rc.CreatedAt, CreatedBy: rc.CreatedBy, UpdatedAt: rc.UpdatedAt, UpdatedBy: rc.UpdatedBy,
 				Error: mr.Error,

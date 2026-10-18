@@ -38,7 +38,6 @@ import EditIcon from "@mui/icons-material/Edit";
 interface ReceiverForm {
   id: string;
   allowed_servers: string[];
-  public_key: string;
   path: string;
   retention: string;
   stale_after: string;
@@ -49,7 +48,6 @@ interface ReceiverForm {
 const EMPTY_FORM: ReceiverForm = {
   id: "",
   allowed_servers: [],
-  public_key: "",
   path: "",
   retention: "",
   stale_after: "",
@@ -79,7 +77,6 @@ function formFrom(r: ReceiverConfigJSON, baseDir: string): ReceiverForm {
   return {
     id: r.id,
     allowed_servers: r.allowed_servers,
-    public_key: r.public_key,
     path: relativePath(baseDir, r.path) ?? "",
     retention: r.retention,
     stale_after: r.stale_after,
@@ -164,7 +161,7 @@ function ReceiverDialog({
   const outsidePath = editing && relativePath(baseDir, editing.path) === null ? editing.path : null;
   const canSave =
     !!form.id.trim() &&
-    (form.allowed_servers.length > 0 || !!form.public_key.trim()) &&
+    form.allowed_servers.length > 0 &&
     (!!form.path.trim() || outsidePath !== null);
 
   return (
@@ -196,7 +193,7 @@ function ReceiverDialog({
                 : "No trusted servers yet — add the sending instance on the Trusted servers page."
             }
             disabled={!trustedServers.length}
-            required={!form.public_key.trim()}
+            required
             slotProps={{
               select: {
                 multiple: true,
@@ -214,19 +211,6 @@ function ReceiverDialog({
               </MenuItem>
             ))}
           </TextField>
-          {form.public_key.trim() ? (
-            <Alert
-              severity="warning"
-              action={
-                <Button color="inherit" size="small" onClick={() => set({ public_key: "" })}>
-                  Remove
-                </Button>
-              }
-            >
-              This receiver still accepts the deprecated single sender public key. Add the sender as
-              a trusted server, allow it above, then remove the old key.
-            </Alert>
-          ) : null}
           <TextField
             label="Path"
             value={form.path}
@@ -429,12 +413,7 @@ export function ReceiverConfigSection() {
                   </TableCell>
                   <TableCell sx={{ overflowWrap: "anywhere" }}>
                     {r.allowed_servers.map((id) => serverLabel(trustedServers, id)).join(", ")}
-                    {r.public_key ? (
-                      <Typography variant="caption" color="warning.main" sx={{ display: "block" }}>
-                        + legacy public key
-                      </Typography>
-                    ) : null}
-                    {!r.allowed_servers.length && !r.public_key ? "—" : null}
+                    {!r.allowed_servers.length ? "—" : null}
                   </TableCell>
                   <TableCell sx={{ overflowWrap: "anywhere" }}>
                     <code>{r.path}</code>

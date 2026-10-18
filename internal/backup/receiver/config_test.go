@@ -1,9 +1,6 @@
 package receiver
 
 import (
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -19,17 +16,6 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
-
-func publicKeyPEM(t *testing.T, key *rsa.PublicKey) string {
-	t.Helper()
-
-	der, err := x509.MarshalPKIXPublicKey(key)
-	if err != nil {
-		t.Fatalf("marshaling public key: %v", err)
-	}
-
-	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
-}
 
 type testManager struct {
 	*Manager
@@ -48,7 +34,7 @@ func newTestManager(t *testing.T, db *store.Store) testManager {
 	receiverStatus := status.NewReceiverStore(nil)
 	baseDir := t.TempDir()
 	notifications := notify.NewRegistry(map[string]notify.Notification{"ops": {ID: "ops", Webhook: &notify.Webhook{URL: "http://example.invalid"}}})
-	trusted := trust.NewRegistry(nil)
+	trusted := trust.NewRegistry(map[string]trust.Server{testSenderUUID: {ID: testSenderUUID, Name: "sender"}})
 
 	return testManager{
 		Manager:  NewManager(db, registry, receiverStatus, notifications, trusted, "host", baseDir, discardLogger),
@@ -61,10 +47,8 @@ func TestManagerCreateUpdateDelete(t *testing.T) {
 
 	m := newTestManager(t, openTestStateDB(t))
 	ctx := t.Context()
-	_, key := testServerIdentityAndKey(t)
-	pemText := publicKeyPEM(t, &key.PublicKey)
 
-	fr := config.FileReceiver{ID: " a ", PublicKey: pemText, Path: filepath.Join(m.baseDir, "a"), Retention: "30d"}
+	fr := config.FileReceiver{ID: " a ", AllowedServers: []string{testSenderUUID}, Path: filepath.Join(m.baseDir, "a"), Retention: "30d"}
 	if err := m.Create(ctx, "erin", fr); err != nil {
 		t.Fatalf("Create() error: %v", err)
 	}
@@ -138,17 +122,14 @@ func TestManagerRejectsInvalidReceivers(t *testing.T) {
 	t.Parallel()
 
 	m := newTestManager(t, openTestStateDB(t))
-	_, key := testServerIdentityAndKey(t)
-	pemText := publicKeyPEM(t, &key.PublicKey)
 	inside := filepath.Join(m.baseDir, "a")
 
 	for name, fr := range map[string]config.FileReceiver{
-		"path outside base dir":  {ID: "a", PublicKey: pemText, Path: t.TempDir()},
-		"path escaping base dir": {ID: "a", PublicKey: pemText, Path: m.baseDir + "/../x"},
-		"bad public key":         {ID: "a", PublicKey: "nope", Path: inside},
-		"unknown notification":   {ID: "a", PublicKey: pemText, Path: inside, DownloadNotifications: []string{"missing"}},
-		"stale without notify":   {ID: "a", PublicKey: pemText, Path: inside, StaleAfter: "1d"},
-		"bad retention":          {ID: "a", PublicKey: pemText, Path: inside, Retention: "soon"},
+		"path outside base dir":  {ID: "a", AllowedServers: []string{testSenderUUID}, Path: t.TempDir()},
+		"path escaping base dir": {ID: "a", AllowedServers: []string{testSenderUUID}, Path: m.baseDir + "/../x"},
+		"unknown notification":   {ID: "a", AllowedServers: []string{testSenderUUID}, Path: inside, DownloadNotifications: []string{"missing"}},
+		"stale without notify":   {ID: "a", AllowedServers: []string{testSenderUUID}, Path: inside, StaleAfter: "1d"},
+		"bad retention":          {ID: "a", AllowedServers: []string{testSenderUUID}, Path: inside, Retention: "soon"},
 	} {
 		if err := m.Create(t.Context(), "erin", fr); !errors.Is(err, ErrInvalidReceiver) {
 			t.Errorf("%s: Create() error = %v, want ErrInvalidReceiver", name, err)
@@ -160,28 +141,30 @@ func TestManagerRejectsInvalidReceivers(t *testing.T) {
 	}
 }
 
-// TestManagerLoadImportsConfigFileReceivers checks that the config file's
-// receivers: are imported once, keep a path outside the base dir editable
-// as long as it's unchanged, and that a stored receiver that no longer
-// resolves is reported rather than activated.
-func TestManagerLoadImportsConfigFileReceivers(t *testing.T) {
+// TestManagerLoadResolvesStoredReceivers checks that stored receivers are
+// activated, that one imported from an older config file keeps a path
+// outside the base dir editable as long as it's unchanged, and that a
+// stored receiver that no longer resolves is reported rather than
+// activated.
+func TestManagerLoadResolvesStoredReceivers(t *testing.T) {
 	t.Parallel()
 
 	db := openTestStateDB(t)
 	ctx := t.Context()
-	_, key := testServerIdentityAndKey(t)
-	pemText := publicKeyPEM(t, &key.PublicKey)
 	legacyPath := t.TempDir()
 
-	if err := db.CreateReceiverConfig(ctx, store.ReceiverConfig{ID: "broken", PublicKey: pemText, Path: legacyPath, DownloadNotifications: []string{"removed"}}); err != nil {
-		t.Fatal(err)
-	}
+	seedReceivers(t, db,
+		store.ReceiverConfig{ID: "broken", AllowedServers: []string{testSenderUUID}, Path: legacyPath, DownloadNotifications: []string{"removed"}},
+		// Imported from a pre-v8 config file's receivers:, with a path
+		// outside webui.receivers-base-dir; such rows stay valid as stored.
+		store.ReceiverConfig{ID: "legacy", AllowedServers: []string{testSenderUUID}, Path: legacyPath, CreatedBy: "config file", UpdatedBy: "config file"},
+	)
 
 	m := newTestManager(t, db)
-	m.Load(ctx, []config.FileReceiver{{ID: "legacy", PublicKey: pemText, Path: legacyPath}})
+	m.Load(ctx)
 
 	if _, ok := m.registry.Get("legacy"); !ok {
-		t.Fatal("imported receiver legacy not active")
+		t.Fatal("stored receiver legacy not active")
 	}
 
 	if _, ok := m.registry.Get("broken"); ok {
@@ -193,19 +176,19 @@ func TestManagerLoadImportsConfigFileReceivers(t *testing.T) {
 		t.Fatalf("List() = %+v, %v, want broken and legacy", list, err)
 	}
 
-	if list[0].ID != "broken" || list[0].Error == "" || list[1].CreatedBy != configFileUser {
+	if list[0].ID != "broken" || list[0].Error == "" || list[1].CreatedBy != "config file" {
 		t.Errorf("List() = %+v, want broken with an error and legacy from the config file", list)
 	}
 
-	if err := m.Update(ctx, "erin", config.FileReceiver{ID: "legacy", PublicKey: pemText, Path: legacyPath, Retention: "7d"}); err != nil {
+	if err := m.Update(ctx, "erin", config.FileReceiver{ID: "legacy", AllowedServers: []string{testSenderUUID}, Path: legacyPath, Retention: "7d"}); err != nil {
 		t.Errorf("Update() keeping the legacy path error: %v", err)
 	}
 
-	if err := m.Update(ctx, "erin", config.FileReceiver{ID: "legacy", PublicKey: pemText, Path: t.TempDir()}); !errors.Is(err, ErrInvalidReceiver) {
+	if err := m.Update(ctx, "erin", config.FileReceiver{ID: "legacy", AllowedServers: []string{testSenderUUID}, Path: t.TempDir()}); !errors.Is(err, ErrInvalidReceiver) {
 		t.Errorf("Update() moving to another path outside the base dir error = %v, want ErrInvalidReceiver", err)
 	}
 
-	if err := m.Update(ctx, "erin", config.FileReceiver{ID: "broken", PublicKey: pemText, Path: legacyPath}); err != nil {
+	if err := m.Update(ctx, "erin", config.FileReceiver{ID: "broken", AllowedServers: []string{testSenderUUID}, Path: legacyPath}); err != nil {
 		t.Fatalf("fixing broken via Update() error: %v", err)
 	}
 
@@ -218,16 +201,14 @@ func TestManagerWithoutStateDB(t *testing.T) {
 	t.Parallel()
 
 	m := newTestManager(t, nil)
-	_, key := testServerIdentityAndKey(t)
-	pemText := publicKeyPEM(t, &key.PublicKey)
 
-	m.Load(t.Context(), []config.FileReceiver{{ID: "legacy", PublicKey: pemText, Path: t.TempDir()}})
+	m.Load(t.Context())
 
-	if _, ok := m.registry.Get("legacy"); !ok {
-		t.Error("config file receiver not active without a state db")
+	if len(m.registry.Snapshot()) != 0 {
+		t.Error("receivers active without a state db, want none")
 	}
 
-	err := m.Create(t.Context(), "erin", config.FileReceiver{ID: "b", PublicKey: pemText, Path: filepath.Join(m.baseDir, "b")})
+	err := m.Create(t.Context(), "erin", config.FileReceiver{ID: "b", AllowedServers: []string{testSenderUUID}, Path: filepath.Join(m.baseDir, "b")})
 	if !errors.Is(err, ErrReceiverStoreUnavailable) {
 		t.Errorf("Create() without a state db error = %v, want ErrReceiverStoreUnavailable", err)
 	}
@@ -241,6 +222,7 @@ func TestReceiverCreatedAtRuntimeAcceptsUploads(t *testing.T) {
 
 	m := newTestManager(t, openTestStateDB(t))
 	id, key := testServerIdentityAndKey(t)
+	m.trusted.Put(trust.Server{ID: testSenderUUID, Name: "sender", PublicKey: &key.PublicKey})
 
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, m.registry, m.status, discardLogger, m.db)
@@ -256,7 +238,7 @@ func TestReceiverCreatedAtRuntimeAcceptsUploads(t *testing.T) {
 	}
 
 	path := filepath.Join(m.baseDir, "late")
-	if err := m.Create(t.Context(), "erin", config.FileReceiver{ID: "late", PublicKey: publicKeyPEM(t, &key.PublicKey), Path: path}); err != nil {
+	if err := m.Create(t.Context(), "erin", config.FileReceiver{ID: "late", AllowedServers: []string{testSenderUUID}, Path: path}); err != nil {
 		t.Fatalf("Create() error: %v", err)
 	}
 
@@ -276,3 +258,18 @@ func TestReceiverCreatedAtRuntimeAcceptsUploads(t *testing.T) {
 		t.Error("upload after Delete() succeeded")
 	}
 }
+
+// seedReceivers stores rcs directly, bypassing the manager's validation.
+func seedReceivers(t *testing.T, db *store.Store, rcs ...store.ReceiverConfig) {
+	t.Helper()
+
+	for _, rc := range rcs {
+		if err := db.CreateReceiverConfig(t.Context(), rc); err != nil {
+			t.Fatalf("CreateReceiverConfig(%q) error: %v", rc.ID, err)
+		}
+	}
+}
+
+// testSenderUUID is the server id every test identity uses (see
+// testServerIdentityAndKey), and so the trusted server test receivers allow.
+const testSenderUUID = "test-sender-uuid"

@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
 func TestJobCommandReference(t *testing.T) {
@@ -43,107 +41,6 @@ jobs:
 	if src.ID != "dump" || src.Cmd != "pg_dump app" || src.Container != "db" || src.ContainerUser != "postgres" ||
 		src.Timeout != 2*time.Hour || !src.TimeoutSet {
 		t.Errorf("Source = %+v", src)
-	}
-
-	if len(rc.Warnings) != 0 {
-		t.Errorf("Warnings = %v, want none", rc.Warnings)
-	}
-}
-
-func TestInlineJobCmdIsConvertedToACommand(t *testing.T) {
-	t.Parallel()
-
-	path := writeConfigFile(t, `
-cmd: "echo default"
-
-servers:
-  - name: nas
-    type: local
-    path: /mnt/backups
-
-commands:
-  - id: job-db
-    cmd: "already taken"
-
-jobs:
-  - name: db
-    cmd: "pg_dump app"
-    targets: [{server: nas, bucket: db}]
-    recipients: [me@example.com]
-  - name: files
-    targets: [{server: nas, bucket: files}]
-    recipients: [me@example.com]
-`)
-
-	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("ParseFlags() error: %v", err)
-	}
-
-	if len(rc.Jobs) != 2 {
-		t.Fatalf("got %d jobs, want 2", len(rc.Jobs))
-	}
-
-	if s := rc.Jobs[0].Sources[0]; s.ID != "job-db-2" || s.Cmd != "pg_dump app" || s.TimeoutSet {
-		t.Errorf("db Source = %+v, want generated command job-db-2 without a timeout", s)
-	}
-
-	if s := rc.Jobs[1].Sources[0]; s.ID != "job-files" || s.Cmd != "echo default" {
-		t.Errorf("files Source = %+v, want the inherited cmd as job-files", s)
-	}
-
-	checkConvertedFileDefs(t, rc)
-
-	if len(rc.Warnings) != 2 {
-		t.Errorf("Warnings = %v, want one per converted job", rc.Warnings)
-	}
-}
-
-// checkConvertedFileDefs checks the raw definitions jobs.Manager imports:
-// jobs name a command and carry no cmd, and the generated commands follow
-// the config file's own.
-func checkConvertedFileDefs(t *testing.T, rc *RunConfig) {
-	t.Helper()
-
-	for _, fj := range rc.FileJobs {
-		if fj.Cmd != "" || fj.Command != "" || len(fj.Files) != 1 {
-			t.Errorf("FileJob %q = cmd %q, command %q, files %+v; want only one file", fj.Name, fj.Cmd, fj.Command, fj.Files)
-		}
-	}
-
-	ids := make([]string, len(rc.FileCommands))
-	for i, fc := range rc.FileCommands {
-		ids[i] = fc.ID
-	}
-
-	if got := strings.Join(ids, ","); got != "job-db,job-db-2,job-files" {
-		t.Errorf("FileCommands = %s", got)
-	}
-}
-
-func TestJobCmdAndCommandConflict(t *testing.T) {
-	t.Parallel()
-
-	path := writeConfigFile(t, `
-servers:
-  - name: nas
-    type: local
-    path: /mnt/backups
-
-commands:
-  - id: dump
-    cmd: "pg_dump app"
-
-jobs:
-  - name: db
-    cmd: "pg_dump app"
-    command: dump
-    targets: [{server: nas, bucket: db}]
-    recipients: [me@example.com]
-`)
-
-	if _, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "not both") {
-		t.Fatalf("ParseFlags() error = %v, want a cmd/command conflict", err)
 	}
 }
 
@@ -210,9 +107,9 @@ jobs:
 			wantErr: `no command "nope"`,
 		},
 		{
-			name:    "files and deprecated command",
+			name:    "removed single command",
 			job:     "    command: dump\n    files: [{command: tar}]\n",
-			wantErr: "set either files or the deprecated command",
+			wantErr: `job "db": command: was removed in v8.0.0`,
 		},
 	}
 
@@ -244,44 +141,6 @@ jobs:
 				t.Errorf("file names = %v, want %v", names, tt.expected)
 			}
 		})
-	}
-}
-
-func TestDeprecatedJobCommandBecomesFile(t *testing.T) {
-	t.Parallel()
-
-	path := writeConfigFile(t, `
-servers:
-  - name: nas
-    type: local
-    path: /mnt/backups
-
-commands:
-  - id: dump
-    cmd: "pg_dump app"
-
-jobs:
-  - name: db
-    command: dump
-    targets: [{server: nas, bucket: db}]
-    recipients: [me@example.com]
-`)
-
-	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("ParseFlags() error: %v", err)
-	}
-
-	if sources := singleJob(t, rc).Sources; len(sources) != 1 || sources[0].ID != "dump" || sources[0].Name != "dump.gpg" {
-		t.Errorf("Sources = %+v, want the one file dump.gpg", sources)
-	}
-
-	if fj := rc.FileJobs[0]; fj.Command != "" || len(fj.Files) != 1 || fj.Files[0].Command != "dump" {
-		t.Errorf("FileJob = %+v, want command moved into files", fj)
-	}
-
-	if len(rc.Warnings) != 1 || !strings.Contains(rc.Warnings[0], "command: is deprecated") || !strings.Contains(rc.Warnings[0], version.DeprecatedConfigRemoval) {
-		t.Errorf("Warnings = %v, want one deprecation warning naming %s", rc.Warnings, version.DeprecatedConfigRemoval)
 	}
 }
 

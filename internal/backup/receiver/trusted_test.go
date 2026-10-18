@@ -39,7 +39,7 @@ func TestVerifyReceiverTokenTrustedServers(t *testing.T) {
 
 	allowed, allowedKey := testTrustedSender(t)
 	other, otherKey := testTrustedSender(t)
-	legacy, legacyKey := testTrustedSender(t)
+	stranger, strangerKey := testTrustedSender(t)
 
 	trusted := trust.NewRegistry(map[string]trust.Server{
 		allowed.UUID(): {ID: allowed.UUID(), Name: "allowed", PublicKey: &allowedKey.PublicKey},
@@ -59,34 +59,28 @@ func TestVerifyReceiverTokenTrustedServers(t *testing.T) {
 		return tok
 	}
 
-	if iss, _, err := verifyReceiverToken(recv, sign(allowedKey, allowed.UUID(), "r")); err != nil || iss != allowed.UUID() {
-		t.Errorf("allowed server: verifyReceiverToken() = %q, %v; want %q, nil", iss, err, allowed.UUID())
+	if _, err := verifyReceiverToken(recv, sign(allowedKey, allowed.UUID(), "r")); err != nil {
+		t.Errorf("allowed server: verifyReceiverToken() error: %v", err)
 	}
 
 	cases := map[string]string{
 		"trusted but not allowed":        sign(otherKey, other.UUID(), "r"),
 		"allowed issuer, wrong key":      sign(otherKey, allowed.UUID(), "r"),
 		"allowed server, wrong audience": sign(allowedKey, allowed.UUID(), "other-receiver"),
-		"no legacy key configured":       sign(legacyKey, legacy.UUID(), "r"),
+		"sender not trusted":             sign(strangerKey, stranger.UUID(), "r"),
 		"garbage":                        "not-a-jwt",
 	}
 
 	for name, tok := range cases {
-		if _, _, err := verifyReceiverToken(recv, tok); err == nil {
+		if _, err := verifyReceiverToken(recv, tok); err == nil {
 			t.Errorf("%s: verifyReceiverToken() = nil error, want rejection", name)
 		}
-	}
-
-	// The deprecated per-receiver key keeps working alongside allowed servers.
-	recv.PublicKey = &legacyKey.PublicKey
-	if iss, _, err := verifyReceiverToken(recv, sign(legacyKey, legacy.UUID(), "r")); err != nil || iss != "" {
-		t.Errorf("legacy key: verifyReceiverToken() = %q, %v; want \"\", nil", iss, err)
 	}
 
 	// Rotating the allowed server's key in the registry applies immediately.
 	trusted.Put(trust.Server{ID: allowed.UUID(), Name: "allowed", PublicKey: &otherKey.PublicKey})
 
-	if _, _, err := verifyReceiverToken(recv, sign(allowedKey, allowed.UUID(), "r")); err == nil {
+	if _, err := verifyReceiverToken(recv, sign(allowedKey, allowed.UUID(), "r")); err == nil {
 		t.Error("after key rotation: old key still accepted")
 	}
 
@@ -94,7 +88,7 @@ func TestVerifyReceiverTokenTrustedServers(t *testing.T) {
 	// still lists it.
 	trusted.Delete(allowed.UUID())
 
-	if _, _, err := verifyReceiverToken(recv, sign(otherKey, allowed.UUID(), "r")); err == nil {
+	if _, err := verifyReceiverToken(recv, sign(otherKey, allowed.UUID(), "r")); err == nil {
 		t.Error("after removal from the registry: token still accepted")
 	}
 }

@@ -200,9 +200,6 @@ export interface DownloadTicketJSON {
 export interface ReceiverConfigJSON {
   id: string;
   allowed_servers: string[];
-  // public_key is the deprecated single sender key, "" unless the receiver
-  // predates trusted servers.
-  public_key: string;
   path: string;
   retention: string;
   stale_after: string;

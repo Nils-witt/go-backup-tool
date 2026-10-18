@@ -20,7 +20,6 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
-	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
 var (
@@ -34,10 +33,6 @@ var (
 	// notification something still references.
 	ErrNotificationInUse = errors.New("notification is still in use")
 )
-
-// configFileUser is recorded as created_by/updated_by on settings imported
-// from the config file.
-const configFileUser = "config file"
 
 // Manager owns the notifications' and report settings' lifecycle: stored in
 // the state db, resolved into the live notification registry and report
@@ -93,29 +88,19 @@ func (m *Manager) SMTPConfigured() bool { return m.smtp.Host != "" }
 // NotificationIDs returns every active notification id, sorted.
 func (m *Manager) NotificationIDs() []string { return m.notifications.IDs() }
 
-// Load imports yamlNotifications/yamlReport (the config file's deprecated
-// notifications:/report:) into the state db — only what isn't stored yet,
-// so edits made in the web UI since are kept — then resolves everything
-// stored into the live registry and report settings. Something stored that
+// Load resolves every notification and the report settings stored in the
+// state db into the live registry and report settings. Something stored that
 // no longer resolves is logged and left inactive (see ListNotifications/
-// GetReport). With no state db, the config file's entries are resolved in
-// memory instead. Jobs' failure-notifications ids are checked once jobs are
-// loaded (see jobs.Manager.Load).
-func (m *Manager) Load(ctx context.Context, yamlNotifications []notify.FileNotification, yamlReport report.FileReport) {
+// GetReport). With no state db there is nothing to load. Jobs'
+// failure-notifications ids are checked once jobs are loaded (see
+// jobs.Manager.Load).
+func (m *Manager) Load(ctx context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.db == nil {
-		for _, fn := range yamlNotifications {
-			m.activateNotificationLocked(fn)
-		}
-
-		m.activateReportLocked(yamlReport)
-
 		return
 	}
-
-	m.importLocked(ctx, yamlNotifications, yamlReport)
 
 	stored, err := m.db.ListNotificationConfigs(ctx)
 	if err != nil {
@@ -131,43 +116,6 @@ func (m *Manager) Load(ctx context.Context, yamlNotifications []notify.FileNotif
 		m.log.Error("reading report settings from the state db", "err", err)
 	} else if ok {
 		m.activateReportLocked(report.FileReport{Enabled: rs.Enabled, Schedule: rs.Schedule, Notifications: rs.Notifications})
-	}
-}
-
-// importLocked carries the config file's deprecated notifications:/report:
-// over into the state db. m.mu must be held.
-func (m *Manager) importLocked(ctx context.Context, yamlNotifications []notify.FileNotification, yamlReport report.FileReport) {
-	now := time.Now()
-
-	if len(yamlNotifications) > 0 {
-		rows := make([]store.NotificationConfig, len(yamlNotifications))
-		for i, fn := range yamlNotifications {
-			rows[i] = store.NotificationConfig{
-				ID: strings.TrimSpace(fn.ID), Webhook: fn.Webhook, Email: fn.Email,
-				CreatedAt: now, CreatedBy: configFileUser, UpdatedAt: now, UpdatedBy: configFileUser,
-			}
-		}
-
-		imported, err := m.db.ImportNotificationConfigs(ctx, rows)
-		if err != nil {
-			m.log.Error("importing config file notifications into the state db", "err", err)
-		}
-
-		m.log.Warn("notifications: in the config file is deprecated and will be removed in "+version.DeprecatedConfigRemoval+": notifications are managed in the web UI now; remove the notifications: section from the config file",
-			"imported", imported, "already_stored", len(yamlNotifications)-len(imported))
-	}
-
-	if yamlReport.Enabled || yamlReport.Schedule != "" || len(yamlReport.Notifications) > 0 {
-		imported, err := m.db.ImportReportSettings(ctx, store.ReportSettings{
-			Enabled: yamlReport.Enabled, Schedule: yamlReport.Schedule, Notifications: yamlReport.Notifications,
-			UpdatedAt: now, UpdatedBy: configFileUser,
-		})
-		if err != nil {
-			m.log.Error("importing config file report: into the state db", "err", err)
-		}
-
-		m.log.Warn("report: in the config file is deprecated and will be removed in "+version.DeprecatedConfigRemoval+": the report is managed in the web UI now; remove the report: section from the config file",
-			"imported", imported)
 	}
 }
 

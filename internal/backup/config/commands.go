@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/tarball"
-	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
 // Command is one top-level commands: entry after validation, ready to be
@@ -75,20 +74,6 @@ func resolveNotificationsAndCommands(fileCfg *fileConfig) (resolvedNotifications
 		return resolvedNotifications{}, nil, err
 	}
 
-	// Jobs' inline cmd: become commands: entries first, so they're built
-	// and validated with the rest.
-	fileCfg.warnings, err = convertInlineJobCommands(fileCfg)
-	if err != nil {
-		return resolvedNotifications{}, nil, err
-	}
-
-	commandWarnings, err := convertSingleJobCommands(fileCfg)
-	if err != nil {
-		return resolvedNotifications{}, nil, err
-	}
-
-	fileCfg.warnings = append(fileCfg.warnings, commandWarnings...)
-
 	commands, err := buildCommands(fileCfg.Commands)
 	if err != nil {
 		return resolvedNotifications{}, nil, err
@@ -104,8 +89,7 @@ const defaultOnErrorCommandTimeout = 30 * time.Second
 // buildCommands resolves fileCfg's top-level commands: entries into an
 // id -> Command map, used to resolve a target's on-error.command and
 // on-recover.command. Validates
-// that every entry has a non-empty, unique id and a non-empty cmd — the
-// same validation shape as notify.Build for notifications:.
+// that every entry has a non-empty, unique id and a non-empty cmd.
 func buildCommands(fileCommands []FileCommand) (map[string]Command, error) {
 	commands := make(map[string]Command, len(fileCommands))
 
@@ -229,106 +213,6 @@ func resolveTarCommand(c *Command, fc FileCommand) error {
 	c.Tar = tarball.Options{Root: filepath.Clean(root), Exclude: exclude, Gzip: compress == compressGzip}
 
 	return nil
-}
-
-// convertInlineJobCommands turns every job's deprecated inline cmd: (its
-// own, or the top-level default it inherits) into a commands: entry of its
-// own — id "job-<name>", suffixed "-2", "-3", ... if taken — which the job
-// then names as its command:, so everything past config parsing only ever
-// sees command: references. A job's own command: takes precedence over an
-// inherited cmd:, and its own cmd: over an inherited command:; setting both
-// at the same level is an error. It returns one deprecation warning per
-// converted job, for the caller to log.
-func convertInlineJobCommands(fileCfg *fileConfig) ([]string, error) {
-	defaults := &fileCfg.FileJob
-	if strings.TrimSpace(defaults.Cmd) != "" && defaults.hasCommand() {
-		return nil, errors.New("set either files or the deprecated cmd, not both")
-	}
-
-	taken := make(map[string]bool, len(fileCfg.Commands))
-	for _, fc := range fileCfg.Commands {
-		taken[strings.TrimSpace(fc.ID)] = true
-	}
-
-	var warnings []string
-
-	for i := range fileCfg.Jobs {
-		fj := &fileCfg.Jobs[i]
-		name := strings.TrimSpace(fj.Name)
-
-		cmd := strings.TrimSpace(fj.Cmd)
-
-		switch {
-		case cmd != "" && fj.hasCommand():
-			return nil, fmt.Errorf("jobs[%d]: set either files or the deprecated cmd, not both", i)
-		case cmd == "" && (fj.hasCommand() || defaults.hasCommand()):
-			continue
-		case cmd == "":
-			cmd = strings.TrimSpace(defaults.Cmd)
-		}
-
-		if cmd == "" {
-			continue
-		}
-
-		id := uniqueCommandID("job-"+name, taken)
-		taken[id] = true
-
-		fileCfg.Commands = append(fileCfg.Commands, FileCommand{ID: id, Cmd: cmd})
-		fj.Files, fj.Cmd = []FileJobFile{{Command: id}}, ""
-
-		warnings = append(warnings, fmt.Sprintf("job %q: cmd: is deprecated and will be removed in %s; it now runs as commands: entry %q, which the job lists under files:", name, version.DeprecatedConfigRemoval, id))
-	}
-
-	defaults.Cmd = ""
-
-	return warnings, nil
-}
-
-// convertSingleJobCommands turns every job's deprecated command: (and the
-// top-level default's) into a one-entry files: list (see
-// FileJob.NormalizeFiles), returning one deprecation warning per converted
-// entry, for the caller to log.
-func convertSingleJobCommands(fileCfg *fileConfig) ([]string, error) {
-	var warnings []string
-
-	convert := func(fj *FileJob, label string) error {
-		hadCommand := strings.TrimSpace(fj.Command) != ""
-
-		if err := fj.NormalizeFiles(); err != nil {
-			return err
-		}
-
-		if hadCommand {
-			warnings = append(warnings, label+": command: is deprecated and will be removed in "+version.DeprecatedConfigRemoval+"; list the command under files: instead")
-		}
-
-		return nil
-	}
-
-	if err := convert(&fileCfg.FileJob, "top-level job defaults"); err != nil {
-		return nil, err
-	}
-
-	for i := range fileCfg.Jobs {
-		fj := &fileCfg.Jobs[i]
-		if err := convert(fj, fmt.Sprintf("job %q", strings.TrimSpace(fj.Name))); err != nil {
-			return nil, fmt.Errorf("jobs[%d]: %w", i, err)
-		}
-	}
-
-	return warnings, nil
-}
-
-// uniqueCommandID returns base, or base with the lowest "-N" suffix (from
-// 2) that isn't in taken.
-func uniqueCommandID(base string, taken map[string]bool) string {
-	id := base
-	for n := 2; taken[id]; n++ {
-		id = fmt.Sprintf("%s-%d", base, n)
-	}
-
-	return id
 }
 
 // hookCommand looks up a target's on-error/on-recover command by id. Only a

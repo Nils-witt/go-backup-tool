@@ -68,12 +68,34 @@ func testPublicKeyPEM(t *testing.T) string {
 func startReceiverConfigWebUI(t *testing.T, idp *testIDP) (*Server, *receiver.Registry, string) {
 	t.Helper()
 
+	return startReceiverConfigWebUIOpts(t, idp, false)
+}
+
+// startReceiverConfigWebUIWithSender is startReceiverConfigWebUI with the
+// trusted server testSenderID already created, for tests whose receivers
+// need an allowed server.
+func startReceiverConfigWebUIWithSender(t *testing.T, idp *testIDP) (*Server, *receiver.Registry, string) {
+	t.Helper()
+
+	return startReceiverConfigWebUIOpts(t, idp, true)
+}
+
+func startReceiverConfigWebUIOpts(t *testing.T, idp *testIDP, withSender bool) (*Server, *receiver.Registry, string) {
+	t.Helper()
+
 	db := openTestStateDB(t)
 	baseDir := t.TempDir()
 	registry := receiver.NewRegistry(nil)
 	receiverStatus := status.NewReceiverStore(nil)
 	notifications := notify.NewRegistry(map[string]notify.Notification{"ops": {ID: "ops", Webhook: &notify.Webhook{URL: "http://example.invalid"}}})
 	trustManager := trust.NewManager(db, trust.NewRegistry(nil), discardLogger)
+
+	if withSender {
+		if err := trustManager.Create(t.Context(), "test", trust.Input{ID: testSenderID, Name: "sender", PublicKey: testPublicKeyPEM(t)}); err != nil {
+			t.Fatalf("creating the test trusted server: %v", err)
+		}
+	}
+
 	manager := receiver.NewManager(db, registry, receiverStatus, notifications, trustManager.Registry(), "", baseDir, discardLogger)
 	statusStore, _ := newTestStore()
 
@@ -135,12 +157,12 @@ func TestReceiverConfigAPI(t *testing.T) {
 	t.Parallel()
 
 	idp := newTestIDP(t)
-	srv, registry, baseDir := startReceiverConfigWebUI(t, idp)
+	srv, registry, baseDir := startReceiverConfigWebUIWithSender(t, idp)
 
 	admin := idp.token(t, "erin", map[string]any{"preferred_username": "erin", "groups": []string{"admins"}})
 	viewer := idp.token(t, "viewer", nil)
 
-	body := config.FileReceiver{ID: "a", PublicKey: testPublicKeyPEM(t), Path: filepath.Join(baseDir, "a"), DownloadNotifications: []string{"ops"}}
+	body := config.FileReceiver{ID: "a", AllowedServers: []string{testSenderID}, Path: filepath.Join(baseDir, "a"), DownloadNotifications: []string{"ops"}}
 	outside := body
 	outside.ID, outside.Path = "b", "/etc"
 	updated := body
@@ -154,7 +176,7 @@ func TestReceiverConfigAPI(t *testing.T) {
 		{"path outside base dir", http.MethodPost, "/api/receiver-configs", admin, outside, http.StatusBadRequest},
 		{"admin update", http.MethodPut, "/api/receiver-configs/a", admin, updated, http.StatusNoContent},
 		{"id change", http.MethodPut, "/api/receiver-configs/a", admin, outside, http.StatusBadRequest},
-		{"update missing", http.MethodPut, "/api/receiver-configs/missing", admin, config.FileReceiver{PublicKey: body.PublicKey, Path: body.Path}, http.StatusNotFound},
+		{"update missing", http.MethodPut, "/api/receiver-configs/missing", admin, config.FileReceiver{AllowedServers: body.AllowedServers, Path: body.Path}, http.StatusNotFound},
 	} {
 		c.run(t, srv)
 	}
@@ -181,3 +203,7 @@ func TestReceiverConfigAPI(t *testing.T) {
 		t.Error("deleted receiver still in registry")
 	}
 }
+
+// testSenderID is the trusted server startReceiverConfigWebUIWithSender
+// creates, for test receivers to allow.
+const testSenderID = "6f1c2a4e-8d3b-4c5a-9e7f-0a1b2c3d4e5f"

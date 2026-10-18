@@ -249,17 +249,6 @@ func (s *Store) DeleteServerConfig(ctx context.Context, name string) error {
 	return deleteRow[serverModel](ctx, s.db, "name", name, "server", ErrServerNotFound)
 }
 
-// ImportServerConfigs stores every entry of cs whose name isn't stored yet,
-// leaving existing rows (possibly edited in the web UI since) untouched, and
-// returns the names it inserted. Used once per startup to carry the config
-// file's deprecated servers: over into the state db.
-func (s *Store) ImportServerConfigs(ctx context.Context, cs []ServerConfig) ([]string, error) {
-	return importRows(ctx, s.db, cs, func(c ServerConfig) serverModel {
-		c.CreatedAt, c.UpdatedAt = c.CreatedAt.UTC(), c.UpdatedAt.UTC()
-		return serverModel(c)
-	}, func(m serverModel) string { return m.Name }, "servers")
-}
-
 // ListCommandConfigs returns every stored command, in id order.
 func (s *Store) ListCommandConfigs(ctx context.Context) ([]CommandConfig, error) {
 	rows, err := listRows[commandModel](ctx, s.read, "id", "commands")
@@ -299,16 +288,6 @@ func (s *Store) UpdateCommandConfig(ctx context.Context, c CommandConfig) error 
 // ErrCommandNotFound if there is none.
 func (s *Store) DeleteCommandConfig(ctx context.Context, id string) error {
 	return deleteRow[commandModel](ctx, s.db, "id", id, "command", ErrCommandNotFound)
-}
-
-// ImportCommandConfigs stores every entry of cs whose id isn't stored yet,
-// leaving existing rows untouched, and returns the ids it inserted — see
-// ImportServerConfigs.
-func (s *Store) ImportCommandConfigs(ctx context.Context, cs []CommandConfig) ([]string, error) {
-	return importRows(ctx, s.db, cs, func(c CommandConfig) commandModel {
-		c.CreatedAt, c.UpdatedAt = c.CreatedAt.UTC(), c.UpdatedAt.UTC()
-		return commandModel(c)
-	}, func(m commandModel) string { return m.ID }, "commands")
 }
 
 // ListJobConfigs returns every stored job, in name order.
@@ -367,33 +346,6 @@ func (s *Store) UpdateJobConfig(ctx context.Context, c JobConfig) error {
 // there is none. Its run history and tracked objects are kept.
 func (s *Store) DeleteJobConfig(ctx context.Context, name string) error {
 	return deleteRow[jobModel](ctx, s.db, "name", name, "job", ErrJobNotFound)
-}
-
-// ImportJobConfigs stores every entry of cs whose name isn't stored yet,
-// leaving existing rows untouched, and returns the names it inserted — see
-// ImportServerConfigs.
-func (s *Store) ImportJobConfigs(ctx context.Context, cs []JobConfig) ([]string, error) {
-	return importRows(ctx, s.db, cs, func(c JobConfig) jobModel {
-		c.CreatedAt, c.UpdatedAt = c.CreatedAt.UTC(), c.UpdatedAt.UTC()
-		return jobModel(c)
-	}, func(m jobModel) string { return m.Name }, "jobs")
-}
-
-// importRows converts every one of cs into its row and inserts those whose
-// key (as id reports it) isn't taken yet (see insertMissing), returning
-// their keys.
-func importRows[C, M any](ctx context.Context, db *gorm.DB, cs []C, toRow func(C) M, id func(M) string, what string) ([]string, error) {
-	rows := make([]M, len(cs))
-	for i, c := range cs {
-		rows[i] = toRow(c)
-	}
-
-	imported, err := insertMissing(ctx, db, rows, id)
-	if err != nil {
-		return nil, fmt.Errorf("importing %s: %w", what, err)
-	}
-
-	return imported, nil
 }
 
 // listRows returns every row of M's table ordered by orderBy.

@@ -6,8 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"strings"
-
-	"nilswitt.dev/go-backup-tool/internal/backup/report"
 )
 
 type stringSlice []string
@@ -41,14 +39,18 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 	fs.SetOutput(out)
 
 	var (
-		configPath string
-		jobFilter  string
-		logLevel   string
+		configPath     string
+		jobFilter      string
+		logLevel       string
+		exportSettings string
+		importSettings string
 	)
 
 	fs.StringVar(&configPath, "config", DefaultConfigPath, "path to the YAML config file")
 	fs.StringVar(&jobFilter, "job", "", "run only the named job from the config file's jobs: list")
 	fs.StringVar(&logLevel, "log-level", "info", "log verbosity: debug, info, warn, or error (overrides the config file's log-level:)")
+	fs.StringVar(&exportSettings, "export-settings", "", "write the web UI-managed settings (trusted servers, notifications, receivers, report) to this YAML file and exit")
+	fs.StringVar(&importSettings, "import-settings", "", "create or update the web UI-managed settings from this YAML file and exit")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -92,11 +94,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		return nil, err
 	}
 
-	// Notification ids are checked against the live registry at startup
-	// (see settings.Manager/receiver.Manager), not here: the config file's
-	// notifications: is deprecated and may already be gone.
-	receivers, err := buildReceivers(fileCfg.Receivers, nil, fileCfg.ServerName)
-	if err != nil {
+	if err := checkJobEditingSections(fileCfg); err != nil {
 		return nil, err
 	}
 
@@ -110,12 +108,9 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		keysDir = DefaultKeysDir
 	}
 
-	if _, err := report.ResolveSettings(fileCfg.Report, nil); err != nil {
-		return nil, err
-	}
-
 	return &RunConfig{
-		Warnings:          fileCfg.warnings,
+		ExportSettings:    exportSettings,
+		ImportSettings:    importSettings,
 		Jobs:              jobs,
 		FileJobs:          flattenFileJobs(fileCfg),
 		FileServers:       fileCfg.Servers,
@@ -128,9 +123,6 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		ConfigPath:        configPath,
 		LogLevel:          level,
 		LogFile:           strings.TrimSpace(fileCfg.LogFile),
-		Receivers:         receivers,
-		FileReceivers:     fileCfg.Receivers,
-		FileNotifications: fileCfg.Notifications,
 		SMTP:              notifications.smtp,
 		GPG:               notifications.gpg,
 		ReceiversBaseDir:  webUI.receiversBaseDir,
@@ -141,7 +133,6 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		DevMode:           fileCfg.WebUI.DevMode,
 		CORSGetOrigins:    webUI.corsGetOrigins,
 		OIDC:              webUI.oidc,
-		FileReport:        fileCfg.Report,
 		ServerName:        fileCfg.ServerName,
 	}, nil
 }

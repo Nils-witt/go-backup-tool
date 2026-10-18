@@ -80,8 +80,8 @@ func SignRemoteAuthToken(privateKey *rsa.PrivateKey, issuer, audience string, re
 }
 
 // VerifyRemoteAuthToken parses raw as a JWT, verifies its RS256 signature
-// against publicKey (the sender's public key: a trusted server's, or a
-// receiver's deprecated public-key:), and checks it's currently valid
+// against publicKey (the sender's public key, from its trusted server
+// entry), and checks it's currently valid
 // (exp/nbf/iat, with jwt.Claims.Validate's default one-minute clock-skew
 // leeway), scoped to audience (this receiver's own id), and — unless issuer
 // is "" — issued by issuer (the trusted server's id). It returns the

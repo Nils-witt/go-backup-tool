@@ -15,7 +15,6 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 	"nilswitt.dev/go-backup-tool/internal/backup/trust"
-	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
 var (
@@ -89,45 +88,15 @@ func (m *Manager) TrustedServers() []trust.Server {
 	return m.trusted.List()
 }
 
-// configFileUser is recorded as created_by/updated_by on receivers imported
-// from the config file's receivers:.
-const configFileUser = "config file"
-
-// Load imports yamlReceivers (the config file's deprecated receivers:
-// entries) into the state db — only ids not stored yet, so edits made in the
-// web UI since are kept — then resolves every stored receiver into the
-// registry and status store. A stored receiver that no longer resolves is
-// logged and left out (see List). With no state db, yamlReceivers are
-// resolved in memory instead.
-func (m *Manager) Load(ctx context.Context, yamlReceivers []config.FileReceiver) {
+// Load resolves every receiver stored in the state db into the registry and
+// status store. A stored receiver that no longer resolves is logged and left
+// out (see List). With no state db there is nothing to load.
+func (m *Manager) Load(ctx context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.db == nil {
-		for _, fr := range yamlReceivers {
-			m.activateLocked(ctx, fr)
-		}
-
 		return
-	}
-
-	if len(yamlReceivers) > 0 {
-		now := time.Now()
-		rows := make([]store.ReceiverConfig, len(yamlReceivers))
-
-		for i, fr := range yamlReceivers {
-			rows[i] = toStoreConfig(fr)
-			rows[i].CreatedAt, rows[i].CreatedBy = now, configFileUser
-			rows[i].UpdatedAt, rows[i].UpdatedBy = now, configFileUser
-		}
-
-		imported, err := m.db.ImportReceiverConfigs(ctx, rows)
-		if err != nil {
-			m.log.Error("importing config file receivers into the state db", "err", err)
-		}
-
-		m.log.Warn("receivers: in the config file is deprecated and will be removed in "+version.DeprecatedConfigRemoval+": receivers are managed in the web UI now; remove the receivers: section from the config file",
-			"imported", imported, "already_stored", len(yamlReceivers)-len(imported))
 	}
 
 	stored, err := m.db.ListReceiverConfigs(ctx)
@@ -322,24 +291,26 @@ func normalizeFileReceiver(fr config.FileReceiver) config.FileReceiver {
 	fr.Retention = strings.TrimSpace(fr.Retention)
 	fr.StaleAfter = strings.TrimSpace(fr.StaleAfter)
 
-	if fr.PublicKey = strings.TrimSpace(fr.PublicKey); fr.PublicKey != "" {
-		fr.PublicKey += "\n"
-	}
-
 	return fr
 }
 
 func toStoreConfig(fr config.FileReceiver) store.ReceiverConfig {
 	return store.ReceiverConfig{
-		ID: strings.TrimSpace(fr.ID), PublicKey: fr.PublicKey, AllowedServers: fr.AllowedServers, Path: fr.Path,
+		ID: strings.TrimSpace(fr.ID), AllowedServers: fr.AllowedServers, Path: fr.Path,
 		Retention: fr.Retention, StaleAfter: fr.StaleAfter,
 		StaleNotifications: fr.StaleNotifications, DownloadNotifications: fr.DownloadNotifications,
 	}
 }
 
+// FileReceiver returns r's stored definition in its file shape, as a
+// settings file exports it (see the settingsfile package).
+func (r ManagedReceiver) FileReceiver() config.FileReceiver {
+	return toFileReceiver(r.ReceiverConfig)
+}
+
 func toFileReceiver(rc store.ReceiverConfig) config.FileReceiver {
 	return config.FileReceiver{
-		ID: rc.ID, PublicKey: rc.PublicKey, AllowedServers: rc.AllowedServers, Path: rc.Path,
+		ID: rc.ID, AllowedServers: rc.AllowedServers, Path: rc.Path,
 		Retention: rc.Retention, StaleAfter: rc.StaleAfter,
 		StaleNotifications: rc.StaleNotifications, DownloadNotifications: rc.DownloadNotifications,
 	}

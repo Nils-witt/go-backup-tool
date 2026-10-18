@@ -10,7 +10,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
-	"nilswitt.dev/go-backup-tool/internal/backup/report"
 )
 
 // FileJob mirrors config's per-job fields for YAML unmarshaling, used both
@@ -33,15 +32,6 @@ type FileJob struct {
 	// the config file's top level with the commands: list itself.
 	Files []FileJobFile `yaml:"files" json:"files"`
 
-	// Command is DEPRECATED: a job's single command, the same as Files with
-	// just that one entry. Setting both is an error.
-	Command string `yaml:"command" json:"command,omitempty"`
-
-	// Cmd is DEPRECATED: a job's own inline shell command. ParseFlags turns
-	// it into a commands: entry of its own (see convertInlineJobCommands),
-	// so it never reaches anything past config parsing.
-	Cmd string `yaml:"cmd" json:"-"`
-
 	Key string `yaml:"key" json:"key"`
 
 	Targets    []FileJobTarget `yaml:"targets" json:"targets"`
@@ -53,8 +43,8 @@ type FileJob struct {
 	StartTime  string          `yaml:"start-time" json:"start_time"`
 	StagingDir string          `yaml:"staging-dir" json:"staging_dir"`
 
-	// FailureNotifications names top-level notifications: entries (see
-	// notify.Build) to fire whenever this job's run ends in an error on any
+	// FailureNotifications names notifications (managed in the web UI, see
+	// the settings package) to fire whenever this job's run ends in an error on any
 	// target — whether every target failed or just some. Optional.
 	FailureNotifications []string `yaml:"failure-notifications" json:"failure_notifications"`
 }
@@ -110,22 +100,24 @@ type FileTargetOnRecover struct {
 // name from any job's targets: list. type: selects the destination kind:
 // "local" for a directory on the local filesystem, using only path; or
 // "remote" for another go-backup-tool instance's receiver API, using only
-// endpoint — auth is this instance's own identity (see loadServerIdentity),
-// not a config field — plus, optionally, server-uuid: the destination
-// instance's own server UUID (shown on its Identity page), recording which
-// instance the endpoint reaches. type: is required; there is no default.
-// Retention (local only) is a duration string (e.g. "7d" or "168h" for 7
-// days, "30m" for 30 minutes) — like time.ParseDuration but with "d" also
-// accepted for days (parsed by parseDayDuration, since the standard library
-// has no day unit; "m" is already minutes in time.ParseDuration, not
-// months); when set, any object this tool writes under path is deleted once
-// it's older than that, tracked in the shared state sqlite database kept
-// alongside the config file (see objectstore/retention.go and the store
-// package). Unset or "0" disables automatic cleanup. A remote server needs no auth field of its
-// own: it authenticates to the destination instance's receiver API with
-// this instance's own persistent identity (see loadServerIdentity), which
-// the destination instance verifies against the public key configured on
-// its matching receivers: entry's public-key: (see fileReceiver).
+// endpoint — auth is this instance's own identity (see
+// identity.LoadServerIdentityAtStartup), not a config field — plus,
+// optionally, server-uuid: the destination instance's own server UUID (shown
+// on its Identity page), recording which instance the endpoint reaches.
+// type: is required; there is no default. Retention (local only) is a
+// duration string (e.g. "7d" or "168h" for 7 days, "30m" for 30 minutes) —
+// like time.ParseDuration but with "d" also accepted for days (parsed by
+// parseDayDuration, since the standard library has no day unit; "m" is
+// already minutes in time.ParseDuration, not months); when set, any object
+// this tool writes under path is deleted once it's older than that, tracked
+// in the shared state sqlite database kept alongside the config file (see
+// objectstore/retention.go and the store package). Unset or "0" disables
+// automatic cleanup. A remote server needs no auth field of its own: it
+// authenticates to the destination instance's receiver API with this
+// instance's own persistent identity (see
+// identity.LoadServerIdentityAtStartup), which the destination instance
+// verifies against the public key configured on this instance's entry under
+// its trusted servers, allowed on the receiver.
 type FileServer struct {
 	Name       string `yaml:"name" json:"name"`
 	Type       string `yaml:"type" json:"type"`
@@ -204,15 +196,9 @@ type fileConfig struct {
 	// notification uses email.
 	SMTP notify.FileSMTP `yaml:"smtp"`
 
-	// Notifications are the named webhook/email destinations referenced by
-	// id from Report.Notifications and a receiver's
-	// StaleNotifications/DownloadNotifications (see notify.Build).
-	Notifications []notify.FileNotification `yaml:"notifications"`
-
 	// Commands are named, reusable shell commands, referenced by id from a
-	// target's on-error.command or on-recover.command (see buildCommands) —
-	// the same "define
-	// once, reference by id" shape as Notifications.
+	// job's files: and a target's on-error.command or on-recover.command (see
+	// buildCommands).
 	Commands []FileCommand `yaml:"commands"`
 
 	// DockerSocket is the Docker daemon a job's or command's container:
@@ -222,18 +208,12 @@ type fileConfig struct {
 	// container grants it root-equivalent control of the host.
 	DockerSocket string `yaml:"docker-socket"`
 
-	Receivers []FileReceiver    `yaml:"receivers"`
-	WebUI     fileWebUI         `yaml:"webui"`
-	Report    report.FileReport `yaml:"report"`
-
-	// warnings collects deprecation notices found while resolving the
-	// file (see convertInlineJobCommands), surfaced as RunConfig.Warnings.
-	warnings []string
+	WebUI fileWebUI `yaml:"webui"`
 }
 
 // fileWebUI is the top-level webui: entry, grouping every setting that
 // controls the optional web UI dashboard (and, since it's served by the same
-// HTTP server, the receiver API — see fileConfig's Receivers).
+// HTTP server, the receiver API).
 type fileWebUI struct {
 	// Enabled turns the web UI on; Listen (e.g. ":8080") is the address it
 	// binds. Unset/false (the default) disables the web UI entirely,
@@ -385,6 +365,15 @@ func loadFileConfig(path string, explicit bool) (*fileConfig, error) {
 		}
 
 		return nil, fmt.Errorf("reading config file %q: %w", path, err)
+	}
+
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("parsing config file %q: %w", path, err)
+	}
+
+	if err := checkRemovedKeys(&doc); err != nil {
+		return nil, fmt.Errorf("config file %q: %w", path, err)
 	}
 
 	var fc fileConfig

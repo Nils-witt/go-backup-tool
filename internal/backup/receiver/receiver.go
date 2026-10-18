@@ -21,7 +21,6 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/remoteauth"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
-	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
 // RegisterRoutes mounts the receiver API's PUT object endpoint on
@@ -154,16 +153,12 @@ func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *Regist
 		return config.ResolvedReceiver{}, remoteauth.Request{}, false
 	}
 
-	issuer, bound, err := verifyReceiverToken(recv, token)
+	bound, err := verifyReceiverToken(recv, token)
 	if err != nil {
 		log.Debug("receiver: rejected request", "id", recv.ID, "err", err)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 
 		return config.ResolvedReceiver{}, remoteauth.Request{}, false
-	}
-
-	if issuer == "" {
-		warnLegacyKeyOnce(recv.ID, token, log)
 	}
 
 	if bound.IsZero() {
@@ -174,42 +169,25 @@ func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *Regist
 }
 
 // verifyReceiverToken verifies token as a request token (see
-// remoteauth.SignRemoteAuthToken) for recv, returning the trusted server id
-// it was verified as coming from. A token whose issuer is one of recv's
-// allowed servers must verify against that server's current key; any other
-// token is checked against recv's deprecated public-key: instead, if set,
-// returning "" as the issuer on success. Either way it also returns the
-// request the token is bound to (see remoteauth.Request).
-func verifyReceiverToken(recv config.ResolvedReceiver, token string) (string, remoteauth.Request, error) {
+// remoteauth.SignRemoteAuthToken) for recv: its issuer must be one of recv's
+// allowed servers, and it must verify against that server's current key.
+// It returns the request the token is bound to (see remoteauth.Request).
+func verifyReceiverToken(recv config.ResolvedReceiver, token string) (remoteauth.Request, error) {
 	issuer, err := remoteauth.UnverifiedIssuer(token)
 	if err != nil {
-		return "", remoteauth.Request{}, err
+		return remoteauth.Request{}, err
 	}
 
-	if slices.Contains(recv.AllowedServers, issuer) {
-		srv, ok := recv.TrustedServers.Get(issuer)
-		if !ok {
-			return "", remoteauth.Request{}, fmt.Errorf("allowed server %q is no longer trusted", issuer)
-		}
-
-		bound, err := remoteauth.VerifyRemoteAuthToken(token, srv.PublicKey, recv.ID, issuer)
-		if err != nil {
-			return "", remoteauth.Request{}, err
-		}
-
-		return issuer, bound, nil
+	if !slices.Contains(recv.AllowedServers, issuer) {
+		return remoteauth.Request{}, fmt.Errorf("issuer %q is not an allowed server", issuer)
 	}
 
-	if recv.PublicKey == nil {
-		return "", remoteauth.Request{}, fmt.Errorf("issuer %q is not an allowed server", issuer)
+	srv, ok := recv.TrustedServers.Get(issuer)
+	if !ok {
+		return remoteauth.Request{}, fmt.Errorf("allowed server %q is no longer trusted", issuer)
 	}
 
-	bound, err := remoteauth.VerifyRemoteAuthToken(token, recv.PublicKey, recv.ID, "")
-	if err != nil {
-		return "", remoteauth.Request{}, err
-	}
-
-	return "", bound, nil
+	return remoteauth.VerifyRemoteAuthToken(token, srv.PublicKey, recv.ID, issuer)
 }
 
 // errBodyDigestMismatch reports that a PUT's body isn't the one its request
@@ -265,20 +243,6 @@ func (d *digestReader) Read(p []byte) (int, error) {
 
 // legacyKeyWarned records the receiver ids warnLegacyKeyOnce has already
 // warned about this run.
-var legacyKeyWarned sync.Map
-
-// warnLegacyKeyOnce logs, once per receiver per run, that recv accepted a
-// request through its deprecated public-key:, naming the (now verified)
-// issuer so the operator can register it as a trusted server.
-func warnLegacyKeyOnce(receiverID, token string, log *slog.Logger) {
-	if _, loaded := legacyKeyWarned.LoadOrStore(receiverID, struct{}{}); loaded {
-		return
-	}
-
-	issuer, _ := remoteauth.UnverifiedIssuer(token)
-	log.Warn("receiver: request authorized by the receiver's deprecated public key, which stops working in "+version.DeprecatedConfigRemoval+"; add the sender as a trusted server and allow it on this receiver instead",
-		"id", receiverID, "sender_server_id", issuer)
-}
 
 // unboundTokenWarned records the receiver ids warnUnboundTokenOnce has
 // already warned about this run.

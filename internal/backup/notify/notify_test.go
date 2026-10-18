@@ -131,7 +131,7 @@ func TestResolveSMTPErrors(t *testing.T) {
 	}
 }
 
-func TestBuildNotifications(t *testing.T) {
+func TestResolveNotificationChannels(t *testing.T) {
 	t.Parallel()
 
 	smtp := SMTPSettings{Host: "smtp.example.com", Username: "backups@example.com"}
@@ -142,10 +142,7 @@ func TestBuildNotifications(t *testing.T) {
 		{ID: "both", Webhook: &FileWebhook{URL: "https://example.com/hook2", Method: "put"}, Email: &FileEmail{To: []string{"a@example.com"}, From: "reports@example.com"}},
 	}
 
-	got, err := Build(fileNotifications, smtp, GPGSettings{Bin: "gpg"})
-	if err != nil {
-		t.Fatalf("Build() error: %v", err)
-	}
+	got := resolveAll(t, fileNotifications, smtp, GPGSettings{Bin: "gpg"})
 
 	want := map[string]Notification{
 		"webhook-only": {ID: "webhook-only", Webhook: &Webhook{URL: "https://example.com/hook", Method: http.MethodPost}},
@@ -158,11 +155,11 @@ func TestBuildNotifications(t *testing.T) {
 	}
 
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("Build() = %+v, want %+v", got, want)
+		t.Errorf("resolved = %+v, want %+v", got, want)
 	}
 }
 
-func TestBuildNotificationsEmailEncrypt(t *testing.T) {
+func TestResolveNotificationEmailEncrypt(t *testing.T) {
 	t.Parallel()
 
 	smtp := SMTPSettings{Host: "smtp.example.com", Username: "backups@example.com"}
@@ -179,10 +176,7 @@ func TestBuildNotificationsEmailEncrypt(t *testing.T) {
 
 	gpg := GPGSettings{Bin: "/usr/local/bin/gpg", Homedir: "/etc/gbt/gnupg"}
 
-	got, err := Build(fileNotifications, smtp, gpg)
-	if err != nil {
-		t.Fatalf("Build() error: %v", err)
-	}
+	got := resolveAll(t, fileNotifications, smtp, gpg)
 
 	want := map[string]Notification{
 		"encrypted": {
@@ -195,11 +189,11 @@ func TestBuildNotificationsEmailEncrypt(t *testing.T) {
 	}
 
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("Build() = %+v, want %+v", got, want)
+		t.Errorf("resolved = %+v, want %+v", got, want)
 	}
 }
 
-func TestBuildNotificationsErrors(t *testing.T) {
+func TestResolveNotificationErrors(t *testing.T) {
 	t.Parallel()
 
 	smtpConfigured := SMTPSettings{Host: "smtp.example.com"}
@@ -214,14 +208,6 @@ func TestBuildNotificationsErrors(t *testing.T) {
 			name:       "missing id",
 			fns:        []FileNotification{{Webhook: &FileWebhook{URL: "https://example.com"}}},
 			wantErrHas: "id is required",
-		},
-		{
-			name: "duplicate id",
-			fns: []FileNotification{
-				{ID: "dup", Webhook: &FileWebhook{URL: "https://example.com/1"}},
-				{ID: "dup", Webhook: &FileWebhook{URL: "https://example.com/2"}},
-			},
-			wantErrHas: `duplicate notification id "dup"`,
 		},
 		{
 			name:       "neither webhook nor email",
@@ -275,10 +261,29 @@ func TestBuildNotificationsErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := Build(tc.fns, tc.smtp, GPGSettings{Bin: "gpg"})
+			_, err := ResolveNotification(tc.fns[0], tc.smtp, GPGSettings{Bin: "gpg"})
 			if err == nil || !strings.Contains(err.Error(), tc.wantErrHas) {
-				t.Fatalf("Build() error = %v, want it to mention %q", err, tc.wantErrHas)
+				t.Fatalf("ResolveNotification() error = %v, want it to mention %q", err, tc.wantErrHas)
 			}
 		})
 	}
+}
+
+// resolveAll resolves each of fns (see ResolveNotification) into a map by
+// id, as settings.Manager does for every stored notification.
+func resolveAll(t *testing.T, fns []FileNotification, smtp SMTPSettings, gpg GPGSettings) map[string]Notification {
+	t.Helper()
+
+	out := make(map[string]Notification, len(fns))
+
+	for _, fn := range fns {
+		n, err := ResolveNotification(fn, smtp, gpg)
+		if err != nil {
+			t.Fatalf("ResolveNotification(%q) error: %v", fn.ID, err)
+		}
+
+		out[n.ID] = n
+	}
+
+	return out
 }

@@ -7,12 +7,14 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -47,6 +49,56 @@ func newRunLogger(stderr io.Writer, rc *config.RunConfig) (*slog.Logger, *webui.
 	logs := webui.NewLogRingBuffer(webui.LogBufferCapacity)
 
 	return newLogger(io.MultiWriter(stderr, logs), rc.LogLevel), logs
+}
+
+// withRunTimeout bounds ctx by the config file's timeout:, if set (> 0),
+// returning the derived context and its cancel func.
+func withRunTimeout(ctx context.Context, timeout time.Duration, log *slog.Logger) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+
+	log.Debug("run timeout set", "timeout", timeout)
+
+	return context.WithTimeout(ctx, timeout)
+}
+
+// checkPublicKeyReceivers refuses a state db holding receivers that still
+// authenticate senders only by a public key (removed in v8.0.0): they would
+// silently reject every upload. -export-settings/-import-settings run
+// before this check, so they can fix such receivers.
+func checkPublicKeyReceivers(ctx context.Context, db *store.Store) error {
+	if db == nil {
+		return nil
+	}
+
+	ids, err := db.ListReceiversRelyingOnPublicKey(ctx)
+	if err != nil {
+		return err
+	}
+
+	if len(ids) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("receivers %s still authenticate senders only by public key, which was removed in v8.0.0: "+
+		"add each sender as a trusted server and allow it on the receiver (run -export-settings, add the sender under trusted-servers: and its id under the receiver's allowed-servers:, then -import-settings), "+
+		"or make the same change or delete the receiver in v7.3's web UI", strings.Join(ids, ", "))
+}
+
+// teeLogFile returns w extended to also write to the log file at path, and
+// a func closing that file; with path empty it returns w and a no-op.
+func teeLogFile(w io.Writer, path string) (io.Writer, func(), error) {
+	if path == "" {
+		return w, func() {}, nil
+	}
+
+	f, err := openLogFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return io.MultiWriter(w, f), func() { _ = f.Close() }, nil
 }
 
 // openLogFile opens path for appending log output, creating it (and its
@@ -138,7 +190,7 @@ func newReceivers(ctx context.Context, rc *config.RunConfig, stateDB *store.Stor
 	registry := receiver.NewRegistry(nil)
 	receiverStatus := status.NewReceiverStore(nil)
 	manager := receiver.NewManager(stateDB, registry, receiverStatus, notifications, trustManager.Registry(), rc.ServerName, rc.ReceiversBaseDir, log)
-	manager.Load(ctx, rc.FileReceivers)
+	manager.Load(ctx)
 
 	return registry, receiverStatus, manager, trustManager
 }
@@ -152,7 +204,7 @@ func newSettings(ctx context.Context, rc *config.RunConfig, stateDB *store.Store
 	notifications := notify.NewRegistry(nil)
 	live := report.NewLive(report.Settings{})
 	manager := settings.NewManager(stateDB, notifications, live, rc.SMTP, rc.GPG, log)
-	manager.Load(ctx, rc.FileNotifications, rc.FileReport)
+	manager.Load(ctx)
 
 	return notifications, live, manager
 }
@@ -175,18 +227,6 @@ func newJobs(ctx context.Context, rc *config.RunConfig, stateDB *store.Store, st
 	return manager, nil
 }
 
-// runWithContext is Run's implementation, taking an externally supplied base
-// context instead of deriving one from OS signals. This lets a Windows
-// service (see service_windows.go) drive shutdown from Service Control
-// Manager stop/shutdown requests, which — unlike Ctrl-C/SIGTERM — aren't
-// delivered to a service process the normal OS-signal way.
-// logWarnings logs each of the config file's deprecation warnings.
-func logWarnings(log *slog.Logger, warnings []string) {
-	for _, w := range warnings {
-		log.Warn(w)
-	}
-}
-
 func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	rc, err := config.ParseFlags(args, stderr)
 	if err != nil {
@@ -202,23 +242,20 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		return 2
 	}
 
-	if rc.LogFile != "" {
-		f, err := openLogFile(rc.LogFile)
-		if err != nil {
-			newLogger(stderr, rc.LogLevel).Error("opening log file", "path", rc.LogFile, "err", err)
+	logOut, closeLog, err := teeLogFile(stderr, rc.LogFile)
+	if err != nil {
+		newLogger(stderr, rc.LogLevel).Error("opening log file", "path", rc.LogFile, "err", err)
 
-			return 1
-		}
-
-		defer func() { _ = f.Close() }()
-
-		stderr = io.MultiWriter(stderr, f)
+		return 1
 	}
+
+	defer closeLog()
+
+	stderr = logOut
 
 	log, logs := newRunLogger(stderr, rc)
 
 	log.Info("go-backup-tool starting", "version", version.Version, "commit", version.Commit)
-	logWarnings(log, rc.Warnings)
 
 	serverIdentity, err := identity.LoadServerIdentityAtStartup(log, rc.KeysDir)
 	if err != nil {
@@ -226,17 +263,20 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		return 1
 	}
 
-	if rc.Timeout > 0 {
-		var cancel context.CancelFunc
-
-		ctx, cancel = context.WithTimeout(ctx, rc.Timeout)
-		defer cancel()
-
-		log.Debug("run timeout set", "timeout", rc.Timeout)
-	}
+	ctx, cancelTimeout := withRunTimeout(ctx, rc.Timeout, log)
+	defer cancelTimeout()
 
 	stateDB, closeStateDB := openStateDB(ctx, rc, log)
 	defer closeStateDB()
+
+	if rc.ExportSettings != "" || rc.ImportSettings != "" {
+		return runSettingsFile(ctx, rc, stateDB, log)
+	}
+
+	if err := checkPublicKeyReceivers(ctx, stateDB); err != nil {
+		log.Error("refusing to start", "err", err)
+		return 1
+	}
 
 	statusStore := status.NewStore(nil)
 

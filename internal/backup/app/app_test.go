@@ -1,12 +1,16 @@
 package app
 
 import (
+	"database/sql"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
 // TestNewRunLoggerLogViewerGate covers newRunLogger's *webui.LogRingBuffer
@@ -72,5 +76,45 @@ func TestOpenLogFileAppends(t *testing.T) {
 
 	if want := "first\nsecond\n"; string(got) != want {
 		t.Errorf("log file contents = %q, want %q", got, want)
+	}
+}
+
+func TestCheckPublicKeyReceivers(t *testing.T) {
+	t.Parallel()
+
+	if err := checkPublicKeyReceivers(t.Context(), nil); err != nil {
+		t.Errorf("checkPublicKeyReceivers(nil db) = %v, want nil", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "state.db")
+
+	db, err := store.Open(t.Context(), path)
+	if err != nil {
+		t.Fatalf("store.Open() error: %v", err)
+	}
+
+	t.Cleanup(func() { _ = db.Close() })
+
+	if err := checkPublicKeyReceivers(t.Context(), db); err != nil {
+		t.Errorf("checkPublicKeyReceivers(empty db) = %v, want nil", err)
+	}
+
+	// A receiver as v7.x stored it: authorized only by a public key.
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+
+	defer func() { _ = raw.Close() }()
+
+	now := time.Now().UTC()
+	if _, err := raw.ExecContext(t.Context(),
+		"INSERT INTO receivers (id, public_key, path, created_at, created_by, updated_at, updated_by) VALUES ('legacy', 'pem', '/srv/legacy', ?, '', ?, '')", now, now); err != nil {
+		t.Fatalf("inserting a legacy receiver: %v", err)
+	}
+
+	err = checkPublicKeyReceivers(t.Context(), db)
+	if err == nil || !strings.Contains(err.Error(), "receivers legacy still authenticate senders only by public key") || !strings.Contains(err.Error(), "-import-settings") {
+		t.Fatalf("checkPublicKeyReceivers() = %v, want it to name receiver legacy and the fix", err)
 	}
 }

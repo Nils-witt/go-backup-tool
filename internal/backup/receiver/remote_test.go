@@ -1,6 +1,7 @@
 package receiver
 
 import (
+	"crypto/rsa"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/remoteclient"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
+	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
 
 // newReceiverMux builds the same mux webui.StartWebUI registers the
@@ -37,7 +39,7 @@ func TestRemoteTargetInteropMultiFileBackup(t *testing.T) {
 
 	dir := t.TempDir()
 	id, key := testServerIdentityAndKey(t)
-	recv := config.ResolvedReceiver{ID: "instance-a", PublicKey: &key.PublicKey, Path: dir}
+	recv := config.ResolvedReceiver{ID: "instance-a", AllowedServers: []string{testSenderUUID}, TrustedServers: trustSender(&key.PublicKey), Path: dir}
 
 	srv := httptest.NewServer(newReceiverMux(map[string]config.ResolvedReceiver{recv.ID: recv}))
 	defer srv.Close()
@@ -132,7 +134,7 @@ func TestHandleReceiveBackupFileRejects(t *testing.T) {
 			dir := t.TempDir()
 			id, key := testServerIdentityAndKey(t)
 			receivers := map[string]config.ResolvedReceiver{
-				"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: dir},
+				"instance-a": {ID: "instance-a", AllowedServers: []string{testSenderUUID}, TrustedServers: trustSender(&key.PublicKey), Path: dir},
 			}
 
 			srv := httptest.NewServer(newReceiverMux(receivers))
@@ -154,7 +156,7 @@ func TestRemoteTargetInteropWithReceiver(t *testing.T) {
 	dir := t.TempDir()
 	id, key := testServerIdentityAndKey(t)
 	receivers := map[string]config.ResolvedReceiver{
-		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: dir},
+		"instance-a": {ID: "instance-a", AllowedServers: []string{testSenderUUID}, TrustedServers: trustSender(&key.PublicKey), Path: dir},
 	}
 
 	srv := httptest.NewServer(newReceiverMux(receivers))
@@ -185,7 +187,7 @@ func TestRemoteTargetInteropWithCreationTime(t *testing.T) {
 	dir := t.TempDir()
 	id, key := testServerIdentityAndKey(t)
 	receivers := map[string]config.ResolvedReceiver{
-		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: dir},
+		"instance-a": {ID: "instance-a", AllowedServers: []string{testSenderUUID}, TrustedServers: trustSender(&key.PublicKey), Path: dir},
 	}
 
 	srv := httptest.NewServer(newReceiverMux(receivers))
@@ -215,7 +217,7 @@ func TestRemoteTargetInteropWithoutCreationTimeUsesUploadTime(t *testing.T) {
 	dir := t.TempDir()
 	id, key := testServerIdentityAndKey(t)
 	receivers := map[string]config.ResolvedReceiver{
-		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: dir},
+		"instance-a": {ID: "instance-a", AllowedServers: []string{testSenderUUID}, TrustedServers: trustSender(&key.PublicKey), Path: dir},
 	}
 
 	srv := httptest.NewServer(newReceiverMux(receivers))
@@ -244,7 +246,7 @@ func TestRemoteTargetInteropFutureCreationTimeRejected(t *testing.T) {
 
 	id, key := testServerIdentityAndKey(t)
 	receivers := map[string]config.ResolvedReceiver{
-		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: t.TempDir()},
+		"instance-a": {ID: "instance-a", AllowedServers: []string{testSenderUUID}, TrustedServers: trustSender(&key.PublicKey), Path: t.TempDir()},
 	}
 
 	srv := httptest.NewServer(newReceiverMux(receivers))
@@ -265,7 +267,7 @@ func TestRemoteTargetInteropMalformedCreationTimeRejected(t *testing.T) {
 
 	id, key := testServerIdentityAndKey(t)
 	receivers := map[string]config.ResolvedReceiver{
-		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: t.TempDir()},
+		"instance-a": {ID: "instance-a", AllowedServers: []string{testSenderUUID}, TrustedServers: trustSender(&key.PublicKey), Path: t.TempDir()},
 	}
 
 	srv := httptest.NewServer(newReceiverMux(receivers))
@@ -315,7 +317,7 @@ func TestRemoteTargetInteropWrongIdentity(t *testing.T) {
 	dir := t.TempDir()
 	_, key := testServerIdentityAndKey(t)
 	receivers := map[string]config.ResolvedReceiver{
-		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: dir},
+		"instance-a": {ID: "instance-a", AllowedServers: []string{testSenderUUID}, TrustedServers: trustSender(&key.PublicKey), Path: dir},
 	}
 
 	srv := httptest.NewServer(newReceiverMux(receivers))
@@ -339,7 +341,7 @@ func TestRemoteTargetInteropNoAuthorizationHeader(t *testing.T) {
 
 	_, key := testServerIdentityAndKey(t)
 	receivers := map[string]config.ResolvedReceiver{
-		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: t.TempDir()},
+		"instance-a": {ID: "instance-a", AllowedServers: []string{testSenderUUID}, TrustedServers: trustSender(&key.PublicKey), Path: t.TempDir()},
 	}
 
 	srv := httptest.NewServer(newReceiverMux(receivers))
@@ -366,7 +368,7 @@ func TestRemoteTargetInteropUnknownID(t *testing.T) {
 
 	id, key := testServerIdentityAndKey(t)
 	receivers := map[string]config.ResolvedReceiver{
-		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: t.TempDir()},
+		"instance-a": {ID: "instance-a", AllowedServers: []string{testSenderUUID}, TrustedServers: trustSender(&key.PublicKey), Path: t.TempDir()},
 	}
 
 	srv := httptest.NewServer(newReceiverMux(receivers))
@@ -408,7 +410,7 @@ func TestHandleReceiveObjectRecordsReceiverEvent(t *testing.T) {
 
 	id, key := testServerIdentityAndKey(t)
 	receivers := map[string]config.ResolvedReceiver{
-		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: filepath.Join(dir, "objects")},
+		"instance-a": {ID: "instance-a", AllowedServers: []string{testSenderUUID}, TrustedServers: trustSender(&key.PublicKey), Path: filepath.Join(dir, "objects")},
 	}
 
 	srv := httptest.NewServer(newReceiverMuxWithDB(receivers, db))
@@ -457,7 +459,7 @@ func TestHandleReceiveObjectRecordsFailedReceiverEvent(t *testing.T) {
 
 	id, key := testServerIdentityAndKey(t)
 	receivers := map[string]config.ResolvedReceiver{
-		"instance-a": {ID: "instance-a", PublicKey: &key.PublicKey, Path: root},
+		"instance-a": {ID: "instance-a", AllowedServers: []string{testSenderUUID}, TrustedServers: trustSender(&key.PublicKey), Path: root},
 	}
 
 	srv := httptest.NewServer(newReceiverMuxWithDB(receivers, db))
@@ -478,4 +480,10 @@ func TestHandleReceiveObjectRecordsFailedReceiverEvent(t *testing.T) {
 	if len(errs) != 1 || errs[0].ReceiverID != "instance-a" || errs[0].Kind != store.ReceiverEventReceive {
 		t.Fatalf("ReadReceiverErrorEvents() = %+v, want one failed receive for instance-a", errs)
 	}
+}
+
+// trustSender is a trust registry holding the test sender (see
+// testServerIdentityAndKey) with key, for a receiver that allows it.
+func trustSender(key *rsa.PublicKey) *trust.Registry {
+	return trust.NewRegistry(map[string]trust.Server{testSenderUUID: {ID: testSenderUUID, Name: "sender", PublicKey: key}})
 }

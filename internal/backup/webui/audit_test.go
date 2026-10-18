@@ -20,12 +20,12 @@ func TestAuditLogRecordsChanges(t *testing.T) {
 	t.Parallel()
 
 	idp := newTestIDP(t)
-	srv, _, baseDir := startReceiverConfigWebUI(t, idp)
+	srv, _, baseDir := startReceiverConfigWebUIWithSender(t, idp)
 
 	admin := idp.token(t, "erin", map[string]any{"preferred_username": "erin", "groups": []string{"admins"}})
 	viewer := idp.token(t, "viewer", nil)
 
-	body := config.FileReceiver{ID: "a", PublicKey: testPublicKeyPEM(t), Path: filepath.Join(baseDir, "a")}
+	body := config.FileReceiver{ID: "a", AllowedServers: []string{testSenderID}, Path: filepath.Join(baseDir, "a")}
 	updated := body
 	updated.Retention = "7d"
 

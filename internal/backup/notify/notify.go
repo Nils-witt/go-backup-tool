@@ -21,9 +21,9 @@ import (
 // trigger's {placeholder} syntax.
 type FileWebhook struct {
 	URL     string            `yaml:"url" json:"url"`
-	Method  string            `yaml:"method" json:"method"`
-	Headers map[string]string `yaml:"headers" json:"headers,omitempty"`
-	Body    string            `yaml:"body" json:"body"`
+	Method  string            `yaml:"method,omitempty" json:"method"`
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	Body    string            `yaml:"body,omitempty" json:"body"`
 }
 
 // FileEmail is a notification's email: block. To is required; From defaults
@@ -32,15 +32,15 @@ type FileWebhook struct {
 // trigger's webhook.body accepts.
 type FileEmail struct {
 	To      []string `yaml:"to" json:"to"`
-	From    string   `yaml:"from" json:"from"`
-	Subject string   `yaml:"subject" json:"subject"`
-	Body    string   `yaml:"body" json:"body"`
+	From    string   `yaml:"from,omitempty" json:"from"`
+	Subject string   `yaml:"subject,omitempty" json:"subject"`
+	Body    string   `yaml:"body,omitempty" json:"body"`
 
 	// Encrypt, if set, GPG-encrypts this email's body (as OpenPGP/MIME, RFC
 	// 3156) before it's sent, so the notification's contents aren't readable
 	// in transit or at rest in a mail provider's inbox. The subject line
 	// itself is never encrypted (SMTP headers are always plaintext).
-	Encrypt *FileEmailEncrypt `yaml:"encrypt" json:"encrypt,omitempty"`
+	Encrypt *FileEmailEncrypt `yaml:"encrypt,omitempty" json:"encrypt,omitempty"`
 }
 
 // FileEmailEncrypt is a notification's email.encrypt: block. Recipients
@@ -60,8 +60,8 @@ type FileEmailEncrypt struct {
 // notification is referenced.
 type FileNotification struct {
 	ID      string       `yaml:"id" json:"id"`
-	Webhook *FileWebhook `yaml:"webhook" json:"webhook"`
-	Email   *FileEmail   `yaml:"email" json:"email"`
+	Webhook *FileWebhook `yaml:"webhook,omitempty" json:"webhook"`
+	Email   *FileEmail   `yaml:"email,omitempty" json:"email"`
 }
 
 // FileSMTP is the top-level smtp: entry, describing how to reach the
@@ -245,36 +245,6 @@ func defaultSMTPPort(security SMTPSecurity) int {
 	}
 
 	return 587
-}
-
-// Build validates fileNotifications (the config file's top-level
-// notifications: list) and builds an id -> Notification map, requiring every
-// entry to have a unique, non-empty id and at least one of webhook: or
-// email:. smtp is the already-resolved top-level smtp: entry (see
-// ResolveSMTP), required (non-zero) by any entry with an email: block. gpg is
-// used by any entry whose email: block sets encrypt:.
-func Build(fileNotifications []FileNotification, smtp SMTPSettings, gpg GPGSettings) (map[string]Notification, error) {
-	notifications := make(map[string]Notification, len(fileNotifications))
-
-	for i, fn := range fileNotifications {
-		id := strings.TrimSpace(fn.ID)
-		if id == "" {
-			return nil, fmt.Errorf("notifications[%d]: id is required", i)
-		}
-
-		if _, exists := notifications[id]; exists {
-			return nil, fmt.Errorf("notifications[%d]: duplicate notification id %q", i, id)
-		}
-
-		n, err := ResolveNotification(fn, smtp, gpg)
-		if err != nil {
-			return nil, fmt.Errorf("notification %q: %w", id, err)
-		}
-
-		notifications[id] = n
-	}
-
-	return notifications, nil
 }
 
 // ResolveNotification validates one notification definition — from the

@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -41,20 +42,17 @@ func testReceiverPublicKeyPEM(t *testing.T) (string, *rsa.PublicKey) {
 func TestBuildReceivers(t *testing.T) {
 	t.Parallel()
 
-	pemA, pubA := testReceiverPublicKeyPEM(t)
-	pemB, pubB := testReceiverPublicKeyPEM(t)
-
 	receivers, err := buildReceivers([]FileReceiver{
-		{ID: "a", PublicKey: pemA, Path: "/mnt/a"},
-		{ID: "b", PublicKey: pemB, Path: "/mnt/b", Retention: "7d"},
+		{ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a"},
+		{ID: "b", AllowedServers: []string{testSenderID}, Path: "/mnt/b", Retention: "7d"},
 	}, nil, "")
 	if err != nil {
 		t.Fatalf("buildReceivers() unexpected error: %v", err)
 	}
 
 	want := map[string]ResolvedReceiver{
-		"a": {ID: "a", PublicKey: pubA, Path: "/mnt/a"},
-		"b": {ID: "b", PublicKey: pubB, Path: "/mnt/b", Retention: 7 * 24 * time.Hour},
+		"a": {ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a"},
+		"b": {ID: "b", AllowedServers: []string{testSenderID}, Path: "/mnt/b", Retention: 7 * 24 * time.Hour},
 	}
 
 	if len(receivers) != len(want) {
@@ -71,57 +69,31 @@ func TestBuildReceivers(t *testing.T) {
 func TestBuildReceiversRequiresID(t *testing.T) {
 	t.Parallel()
 
-	pemText, _ := testReceiverPublicKeyPEM(t)
-
-	_, err := buildReceivers([]FileReceiver{{PublicKey: pemText, Path: "/mnt/a"}}, nil, "")
+	_, err := buildReceivers([]FileReceiver{{AllowedServers: []string{testSenderID}, Path: "/mnt/a"}}, nil, "")
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for missing id, got nil")
+	}
+}
+
+// testSenderID is the trusted server every test receiver allows. With no
+// trust registry, ResolveReceiver accepts any id, so it needn't exist.
+const testSenderID = "6f1c2a4e-8d3b-4c5a-9e7f-0a1b2c3d4e5f"
+
+func TestBuildReceiversRequiresAllowedServer(t *testing.T) {
+	t.Parallel()
+
+	_, err := buildReceivers([]FileReceiver{{ID: "a", Path: "/mnt/a"}}, nil, "")
+	if err == nil || !strings.Contains(err.Error(), "an allowed server is required") {
+		t.Fatalf("buildReceivers() error = %v, want an allowed server to be required", err)
 	}
 }
 
 func TestBuildReceiversRequiresPath(t *testing.T) {
 	t.Parallel()
 
-	pemText, _ := testReceiverPublicKeyPEM(t)
-
-	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText}}, nil, "")
+	_, err := buildReceivers([]FileReceiver{{ID: "a", AllowedServers: []string{testSenderID}}}, nil, "")
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for missing path, got nil")
-	}
-}
-
-func TestBuildReceiversRequiresPublicKey(t *testing.T) {
-	t.Parallel()
-
-	_, err := buildReceivers([]FileReceiver{{ID: "a", Path: "/mnt/a"}}, nil, "")
-	if err == nil {
-		t.Fatal("buildReceivers() expected error for missing public-key, got nil")
-	}
-}
-
-func TestBuildReceiversRejectsInvalidPublicKey(t *testing.T) {
-	t.Parallel()
-
-	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: "not a PEM key", Path: "/mnt/a"}}, nil, "")
-	if err == nil {
-		t.Fatal("buildReceivers() expected error for invalid public-key, got nil")
-	}
-}
-
-func TestBuildReceiversRejectsNonRSAPublicKey(t *testing.T) {
-	t.Parallel()
-
-	// A PEM block of the right type but the wrong key algorithm (an EC key,
-	// rather than RSA) must also be rejected, since SignRemoteAuthToken/
-	// verifyRemoteAuthToken only support RS256.
-	const ecPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEF4MRFTT9HV60ttWqYkFekzGqdpVY
-If1SoUSBRfFVHGlXZJjmfRQxikr35aLMtrCtQ4GvhyLhd81I0HfA3+H0gg==
------END PUBLIC KEY-----`
-
-	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: ecPublicKeyPEM, Path: "/mnt/a"}}, nil, "")
-	if err == nil {
-		t.Fatal("buildReceivers() expected error for a non-RSA public-key, got nil")
 	}
 }
 
@@ -167,20 +139,18 @@ func testNotification(id, url string) notify.Notification {
 func TestBuildReceiversStaleAfterAndNotifications(t *testing.T) {
 	t.Parallel()
 
-	pemText, pub := testReceiverPublicKeyPEM(t)
-
 	pagerduty := testNotification("pagerduty", "https://example.com/hook")
 	notifications := notify.NewRegistry(map[string]notify.Notification{"pagerduty": pagerduty})
 
 	receivers, err := buildReceivers([]FileReceiver{
-		{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h", StaleNotifications: []string{"pagerduty"}},
+		{ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a", StaleAfter: "6h", StaleNotifications: []string{"pagerduty"}},
 	}, notifications, "")
 	if err != nil {
 		t.Fatalf("buildReceivers() unexpected error: %v", err)
 	}
 
 	want := ResolvedReceiver{
-		ID: "a", PublicKey: pub, Path: "/mnt/a",
+		ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a",
 		StaleAfter:         6 * time.Hour,
 		StaleNotifications: []string{"pagerduty"},
 		Notifications:      notifications,
@@ -194,9 +164,7 @@ func TestBuildReceiversStaleAfterAndNotifications(t *testing.T) {
 func TestBuildReceiversStaleAfterRequiresNotifications(t *testing.T) {
 	t.Parallel()
 
-	pemText, _ := testReceiverPublicKeyPEM(t)
-
-	_, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h"}}, nil, "")
+	_, err := buildReceivers([]FileReceiver{{ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a", StaleAfter: "6h"}}, nil, "")
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for stale-after without stale-notifications, got nil")
 	}
@@ -205,13 +173,11 @@ func TestBuildReceiversStaleAfterRequiresNotifications(t *testing.T) {
 func TestBuildReceiversNotificationsRequireStaleAfter(t *testing.T) {
 	t.Parallel()
 
-	pemText, _ := testReceiverPublicKeyPEM(t)
-
 	pagerduty := testNotification("pagerduty", "https://example.com/hook")
 	notifications := notify.NewRegistry(map[string]notify.Notification{"pagerduty": pagerduty})
 
 	_, err := buildReceivers([]FileReceiver{
-		{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleNotifications: []string{"pagerduty"}},
+		{ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a", StaleNotifications: []string{"pagerduty"}},
 	}, notifications, "")
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for stale-notifications without stale-after, got nil")
@@ -221,10 +187,8 @@ func TestBuildReceiversNotificationsRequireStaleAfter(t *testing.T) {
 func TestBuildReceiversUnknownStaleNotificationID(t *testing.T) {
 	t.Parallel()
 
-	pemText, _ := testReceiverPublicKeyPEM(t)
-
 	_, err := buildReceivers([]FileReceiver{
-		{ID: "a", PublicKey: pemText, Path: "/mnt/a", StaleAfter: "6h", StaleNotifications: []string{"nope"}},
+		{ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a", StaleAfter: "6h", StaleNotifications: []string{"nope"}},
 	}, notify.NewRegistry(nil), "")
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for unknown stale-notifications id, got nil")
@@ -234,20 +198,18 @@ func TestBuildReceiversUnknownStaleNotificationID(t *testing.T) {
 func TestBuildReceiversDownloadNotificationsIndependentOfStaleAfter(t *testing.T) {
 	t.Parallel()
 
-	pemText, pub := testReceiverPublicKeyPEM(t)
-
 	slack := testNotification("slack", "https://example.com/downloaded")
 	notifications := notify.NewRegistry(map[string]notify.Notification{"slack": slack})
 
 	receivers, err := buildReceivers([]FileReceiver{
-		{ID: "a", PublicKey: pemText, Path: "/mnt/a", DownloadNotifications: []string{"slack"}},
+		{ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a", DownloadNotifications: []string{"slack"}},
 	}, notifications, "")
 	if err != nil {
 		t.Fatalf("buildReceivers() unexpected error: %v", err)
 	}
 
 	want := ResolvedReceiver{
-		ID: "a", PublicKey: pub, Path: "/mnt/a",
+		ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a",
 		DownloadNotifications: []string{"slack"},
 		Notifications:         notifications,
 	}
@@ -260,15 +222,13 @@ func TestBuildReceiversDownloadNotificationsIndependentOfStaleAfter(t *testing.T
 func TestBuildReceiversDownloadAndStaleNotificationsCoexist(t *testing.T) {
 	t.Parallel()
 
-	pemText, _ := testReceiverPublicKeyPEM(t)
-
 	pagerduty := testNotification("pagerduty", "https://example.com/stale")
 	slack := testNotification("slack", "https://example.com/downloaded")
 	notifications := notify.NewRegistry(map[string]notify.Notification{"pagerduty": pagerduty, "slack": slack})
 
 	receivers, err := buildReceivers([]FileReceiver{
 		{
-			ID: "a", PublicKey: pemText, Path: "/mnt/a",
+			ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a",
 			StaleAfter:            "6h",
 			StaleNotifications:    []string{"pagerduty"},
 			DownloadNotifications: []string{"slack"},
@@ -291,10 +251,8 @@ func TestBuildReceiversDownloadAndStaleNotificationsCoexist(t *testing.T) {
 func TestBuildReceiversUnknownDownloadNotificationID(t *testing.T) {
 	t.Parallel()
 
-	pemText, _ := testReceiverPublicKeyPEM(t)
-
 	_, err := buildReceivers([]FileReceiver{
-		{ID: "a", PublicKey: pemText, Path: "/mnt/a", DownloadNotifications: []string{"nope"}},
+		{ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a", DownloadNotifications: []string{"nope"}},
 	}, notify.NewRegistry(nil), "")
 	if err == nil {
 		t.Fatal("buildReceivers() expected error for unknown download-notifications id, got nil")
@@ -304,9 +262,7 @@ func TestBuildReceiversUnknownDownloadNotificationID(t *testing.T) {
 func TestBuildReceiversNoNotificationsResolveToNil(t *testing.T) {
 	t.Parallel()
 
-	pemText, _ := testReceiverPublicKeyPEM(t)
-
-	receivers, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a"}}, nil, "")
+	receivers, err := buildReceivers([]FileReceiver{{ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a"}}, nil, "")
 	if err != nil {
 		t.Fatalf("buildReceivers() unexpected error: %v", err)
 	}
@@ -323,9 +279,7 @@ func TestBuildReceiversNoNotificationsResolveToNil(t *testing.T) {
 func TestBuildReceiversServerNamePropagatesToNotificationPlaceholder(t *testing.T) {
 	t.Parallel()
 
-	pemText, _ := testReceiverPublicKeyPEM(t)
-
-	receivers, err := buildReceivers([]FileReceiver{{ID: "a", PublicKey: pemText, Path: "/mnt/a"}}, nil, "primary-backup-host")
+	receivers, err := buildReceivers([]FileReceiver{{ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a"}}, nil, "primary-backup-host")
 	if err != nil {
 		t.Fatalf("buildReceivers() unexpected error: %v", err)
 	}
@@ -418,9 +372,7 @@ func TestValidateReceiverPath(t *testing.T) {
 func TestResolveReceiverRequiresID(t *testing.T) {
 	t.Parallel()
 
-	pemText, _ := testReceiverPublicKeyPEM(t)
-
-	if _, err := ResolveReceiver(FileReceiver{ID: "  ", PublicKey: pemText, Path: "/mnt/a"}, nil, nil, ""); err == nil {
+	if _, err := ResolveReceiver(FileReceiver{ID: "  ", AllowedServers: []string{testSenderID}, Path: "/mnt/a"}, nil, nil, ""); err == nil {
 		t.Fatal("ResolveReceiver() expected error for blank id, got nil")
 	}
 }
@@ -430,7 +382,7 @@ func TestResolveReceiverAllowedServers(t *testing.T) {
 
 	const id = "0b8e1d5c-5a4e-4f43-9d6b-1d2a3b4c5d6e"
 
-	pemText, pub := testReceiverPublicKeyPEM(t)
+	_, pub := testReceiverPublicKeyPEM(t)
 	trusted := trust.NewRegistry(map[string]trust.Server{id: {ID: id, Name: "nas", PublicKey: pub}})
 
 	// Allowed servers alone suffice; ids are normalized and deduplicated.
@@ -439,14 +391,14 @@ func TestResolveReceiverAllowedServers(t *testing.T) {
 		t.Fatalf("ResolveReceiver() error: %v", err)
 	}
 
-	if !reflect.DeepEqual(recv.AllowedServers, []string{id}) || recv.PublicKey != nil || recv.TrustedServers != trusted {
+	if !reflect.DeepEqual(recv.AllowedServers, []string{id}) || recv.TrustedServers != trusted {
 		t.Errorf("ResolveReceiver() = %+v, want AllowedServers [%s], no public key, the trusted registry", recv, id)
 	}
 
 	cases := map[string]FileReceiver{
 		"unknown server":       {ID: "a", AllowedServers: []string{"6f1c0e0a-0000-4000-8000-000000000000"}, Path: "/mnt/a"},
 		"neither key nor list": {ID: "a", Path: "/mnt/a"},
-		"empty id in list":     {ID: "a", AllowedServers: []string{" "}, PublicKey: pemText, Path: "/mnt/a"},
+		"empty id in list":     {ID: "a", AllowedServers: []string{" "}, Path: "/mnt/a"},
 	}
 
 	for name, fr := range cases {
@@ -454,9 +406,33 @@ func TestResolveReceiverAllowedServers(t *testing.T) {
 			t.Errorf("%s: ResolveReceiver() = nil error, want one", name)
 		}
 	}
+}
 
-	// The deprecated public key still works on its own, and alongside.
-	if recv, err := ResolveReceiver(FileReceiver{ID: "a", AllowedServers: []string{id}, PublicKey: pemText, Path: "/mnt/a"}, nil, trusted, ""); err != nil || !recv.PublicKey.Equal(pub) {
-		t.Errorf("ResolveReceiver() with both = %+v, %v", recv, err)
+// buildReceivers is a test harness for ResolveReceiver: it resolves
+// fileReceivers into an id -> ResolvedReceiver map, requiring every entry to
+// have a unique, non-empty id. notifications, if non-nil, is checked for
+// every stale-notifications:/download-notifications: id, and serverName is
+// copied onto every receiver (see ResolveReceiver).
+func buildReceivers(fileReceivers []FileReceiver, notifications *notify.Registry, serverName string) (map[string]ResolvedReceiver, error) {
+	receivers := make(map[string]ResolvedReceiver, len(fileReceivers))
+
+	for i, fr := range fileReceivers {
+		id := strings.TrimSpace(fr.ID)
+		if id == "" {
+			return nil, fmt.Errorf("receivers[%d]: id is required", i)
+		}
+
+		if _, exists := receivers[id]; exists {
+			return nil, fmt.Errorf("receivers[%d]: duplicate receiver id %q", i, id)
+		}
+
+		recv, err := ResolveReceiver(fr, notifications, nil, serverName)
+		if err != nil {
+			return nil, fmt.Errorf("receiver %q: %w", id, err)
+		}
+
+		receivers[id] = recv
 	}
+
+	return receivers, nil
 }

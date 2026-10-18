@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"time"
-
-	"gorm.io/gorm/clause"
 )
 
 // reportSettingsModel is report_settings: the single row (id 1) holding the
@@ -61,20 +59,6 @@ func (s *Store) SaveReportSettings(ctx context.Context, r ReportSettings) error 
 	}
 
 	return nil
-}
-
-// ImportReportSettings stores r only if no report settings are saved yet,
-// reporting whether it did. Used once per startup to carry the config
-// file's deprecated report: over into the state db.
-func (s *Store) ImportReportSettings(ctx context.Context, r ReportSettings) (bool, error) {
-	m := reportSettingsModelFrom(r)
-
-	res := s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&m)
-	if res.Error != nil {
-		return false, fmt.Errorf("importing report settings: %w", res.Error)
-	}
-
-	return res.RowsAffected > 0, nil
 }
 
 func reportSettingsModelFrom(r ReportSettings) reportSettingsModel {

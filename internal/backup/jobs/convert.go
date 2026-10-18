@@ -36,18 +36,14 @@ func normalizeCommand(fc config.FileCommand) config.FileCommand {
 	return fc
 }
 
-// normalizeJob trims fj's fields, drops empty list entries, and moves a
-// deprecated single command into its files (see config.FileJob.NormalizeFiles;
-// when both are set, they're kept for config.ResolveJob to reject).
+// normalizeJob trims fj's fields and files: entries and drops empty list
+// entries.
 func normalizeJob(fj config.FileJob) config.FileJob {
-	for _, f := range []*string{&fj.Name, &fj.Command, &fj.Key, &fj.GPGBin, &fj.GPGHomedir, &fj.Interval, &fj.StartTime, &fj.StagingDir} {
+	for _, f := range []*string{&fj.Name, &fj.Key, &fj.GPGBin, &fj.GPGHomedir, &fj.Interval, &fj.StartTime, &fj.StagingDir} {
 		*f = strings.TrimSpace(*f)
 	}
 
-	normalized := fj
-	if err := normalized.NormalizeFiles(); err == nil {
-		fj = normalized
-	}
+	fj.NormalizeFiles()
 
 	fj.Recipients = trimAll(fj.Recipients)
 	fj.FailureNotifications = trimAll(fj.FailureNotifications)
@@ -127,7 +123,7 @@ func toStoreJob(fj config.FileJob) store.JobConfig {
 	}
 
 	return store.JobConfig{
-		Name: fj.Name, Command: fj.Command, Files: toStoreFiles(fj.Files), Key: fj.Key, Targets: targets, Recipients: slices.Clone(fj.Recipients), Armor: fj.Armor,
+		Name: fj.Name, Files: toStoreFiles(fj.Files), Key: fj.Key, Targets: targets, Recipients: slices.Clone(fj.Recipients), Armor: fj.Armor,
 		GPGBin: fj.GPGBin, GPGHomedir: fj.GPGHomedir, Interval: fj.Interval, StartTime: fj.StartTime, StagingDir: fj.StagingDir,
 		FailureNotifications: slices.Clone(fj.FailureNotifications),
 	}
@@ -160,7 +156,7 @@ func toStoreTarget(t config.FileJobTarget) store.JobTarget {
 // entered as, e.g. to send it to the web UI's edit form.
 func FileJobFrom(jc store.JobConfig) config.FileJob {
 	fj := config.FileJob{
-		Name: jc.Name, Command: jc.Command, Key: jc.Key, Recipients: slices.Clone(jc.Recipients), Armor: jc.Armor,
+		Name: jc.Name, Key: jc.Key, Recipients: slices.Clone(jc.Recipients), Armor: jc.Armor,
 		Files:  make([]config.FileJobFile, len(jc.Files)),
 		GPGBin: jc.GPGBin, GPGHomedir: jc.GPGHomedir, Interval: jc.Interval, StartTime: jc.StartTime, StagingDir: jc.StagingDir,
 		FailureNotifications: slices.Clone(jc.FailureNotifications),

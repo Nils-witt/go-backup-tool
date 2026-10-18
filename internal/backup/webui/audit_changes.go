@@ -55,7 +55,7 @@ func auditResources(db *store.Store, keyring *gpgkeys.Keyring) map[string]auditR
 		}},
 		"receiver-configs": {snapshot: getStored(db.GetReceiverConfig, func(rc store.ReceiverConfig) config.FileReceiver {
 			return config.FileReceiver{
-				ID: rc.ID, AllowedServers: rc.AllowedServers, PublicKey: rc.PublicKey, Path: rc.Path, Retention: rc.Retention,
+				ID: rc.ID, AllowedServers: rc.AllowedServers, Path: rc.Path, Retention: rc.Retention,
 				StaleAfter: rc.StaleAfter, StaleNotifications: rc.StaleNotifications, DownloadNotifications: rc.DownloadNotifications,
 			}
 		})},

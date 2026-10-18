@@ -3,7 +3,6 @@ package store
 import (
 	"errors"
 	"reflect"
-	"slices"
 	"testing"
 	"time"
 )
@@ -57,7 +56,7 @@ func TestJobConfigCreateAndUpdate(t *testing.T) {
 	}
 }
 
-func TestJobConfigImportAndDelete(t *testing.T) {
+func TestJobConfigDelete(t *testing.T) {
 	t.Parallel()
 
 	db := openTestStore(t)
@@ -67,9 +66,8 @@ func TestJobConfigImportAndDelete(t *testing.T) {
 		t.Fatalf("CreateJobConfig() error: %v", err)
 	}
 
-	imported, err := db.ImportJobConfigs(ctx, []JobConfig{{Name: "db", Command: "other"}, {Name: "files", Command: "tar"}})
-	if err != nil || !slices.Equal(imported, []string{"files"}) {
-		t.Errorf("ImportJobConfigs() = %v, %v; want [files]", imported, err)
+	if err := db.CreateJobConfig(ctx, JobConfig{Name: "files", Command: "tar"}); err != nil {
+		t.Fatalf("CreateJobConfig() error: %v", err)
 	}
 
 	if err := db.DeleteJobConfig(ctx, "db"); err != nil {
@@ -188,12 +186,12 @@ func TestServerConfigTLS(t *testing.T) {
 	}
 
 	other := ServerConfig{Name: "other", Type: "remote", Endpoint: "https://y", TLSInsecureSkipVerify: true}
-	if imported, err := db.ImportServerConfigs(ctx, []ServerConfig{other}); err != nil || !slices.Equal(imported, []string{"other"}) {
-		t.Fatalf("ImportServerConfigs() = %v, %v", imported, err)
+	if err := db.CreateServerConfig(ctx, other); err != nil {
+		t.Fatalf("CreateServerConfig() error: %v", err)
 	}
 
 	if got := onlyServerTLS(t, db, "other"); got != serverTLSOf(other) {
-		t.Errorf("TLS after import = %v, want %v", got, serverTLSOf(other))
+		t.Errorf("TLS after create = %v, want %v", got, serverTLSOf(other))
 	}
 }
 
@@ -203,9 +201,8 @@ func TestCommandConfigCRUD(t *testing.T) {
 	db := openTestStore(t)
 	ctx := t.Context()
 
-	imported, err := db.ImportCommandConfigs(ctx, []CommandConfig{{ID: "page", Cmd: "echo", Timeout: "5s"}})
-	if err != nil || !slices.Equal(imported, []string{"page"}) {
-		t.Fatalf("ImportCommandConfigs() = %v, %v", imported, err)
+	if err := db.CreateCommandConfig(ctx, CommandConfig{ID: "page", Cmd: "echo", Timeout: "5s"}); err != nil {
+		t.Fatalf("CreateCommandConfig() error: %v", err)
 	}
 
 	if err := db.UpdateCommandConfig(ctx, CommandConfig{ID: "page", Cmd: "echo 2"}); err != nil {

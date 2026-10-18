@@ -69,30 +69,6 @@ func checkDeleteNotificationConfig(t *testing.T, db *Store, id string) {
 	}
 }
 
-func TestImportNotificationConfigsKeepsExistingRows(t *testing.T) {
-	t.Parallel()
-
-	db := openTestStore(t)
-	ctx := t.Context()
-
-	if err := db.CreateNotificationConfig(ctx, NotificationConfig{ID: "a", Webhook: &notify.FileWebhook{URL: "https://edited"}}); err != nil {
-		t.Fatal(err)
-	}
-
-	imported, err := db.ImportNotificationConfigs(ctx, []NotificationConfig{
-		{ID: "a", Webhook: &notify.FileWebhook{URL: "https://from-yaml"}},
-		{ID: "b", Webhook: &notify.FileWebhook{URL: "https://b"}},
-	})
-	if err != nil || !slices.Equal(imported, []string{"b"}) {
-		t.Fatalf("ImportNotificationConfigs() = %v, %v, want [b]", imported, err)
-	}
-
-	list, err := db.ListNotificationConfigs(ctx)
-	if err != nil || len(list) != 2 || list[0].Webhook.URL != "https://edited" {
-		t.Errorf("notifications = %+v, %v, want a (edited url kept) and b", list, err)
-	}
-}
-
 func TestReportSettingsUnsetOnFreshDB(t *testing.T) {
 	t.Parallel()
 
@@ -107,13 +83,8 @@ func TestReportSettings(t *testing.T) {
 	db := openTestStore(t)
 	ctx := t.Context()
 
-	imported, err := db.ImportReportSettings(ctx, ReportSettings{Enabled: true, Schedule: "@daily", Notifications: []string{"ops"}, UpdatedBy: "config file"})
-	if err != nil || !imported {
-		t.Fatalf("ImportReportSettings() = %v, %v, want imported", imported, err)
-	}
-
-	if imported, err := db.ImportReportSettings(ctx, ReportSettings{Schedule: "@hourly"}); err != nil || imported {
-		t.Errorf("second ImportReportSettings() = %v, %v, want skipped", imported, err)
+	if err := db.SaveReportSettings(ctx, ReportSettings{Enabled: true, Schedule: "@daily", Notifications: []string{"ops"}, UpdatedBy: "erin"}); err != nil {
+		t.Fatalf("first SaveReportSettings() error: %v", err)
 	}
 
 	if err := db.SaveReportSettings(ctx, ReportSettings{Enabled: false, Schedule: "0 6 * * *", UpdatedBy: "erin"}); err != nil {

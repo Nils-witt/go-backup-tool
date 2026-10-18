@@ -95,13 +95,13 @@ func TestBuildReportSummarizesReceiverEvents(t *testing.T) {
 		}
 	}
 
-	rc := &config.RunConfig{Receivers: map[string]config.ResolvedReceiver{
+	receivers := map[string]config.ResolvedReceiver{
 		"recv-a": {ID: "recv-a"},
 		"recv-b": {ID: "recv-b"},
 		"recv-c": {ID: "recv-c"}, // no events at all in the window
-	}}
+	}
 
-	report := buildReport(ctx, rc.ServerName, jobNamesOf(rc), rc.Receivers, db, start, end, discardLogger)
+	report := buildReport(ctx, "", nil, receivers, db, start, end, discardLogger)
 
 	if len(report.receivers) != 3 {
 		t.Fatalf("report.receivers = %+v, want 3 entries (one per configured receiver)", report.receivers)
@@ -172,7 +172,7 @@ func TestBuildReportSummarizesJobRuns(t *testing.T) {
 		{Name: "job-b"}, // no runs at all in the window
 	}}
 
-	report := buildReport(ctx, rc.ServerName, jobNamesOf(rc), rc.Receivers, db, start, end, discardLogger)
+	report := buildReport(ctx, rc.ServerName, jobNamesOf(rc), nil, db, start, end, discardLogger)
 
 	if len(report.jobs) != 2 {
 		t.Fatalf("report.jobs = %+v, want 2 entries (one per configured job)", report.jobs)
@@ -219,14 +219,14 @@ func TestBuildReportDetectsStaleReceiver(t *testing.T) {
 
 	neverDir := t.TempDir()
 
-	rc := &config.RunConfig{Receivers: map[string]config.ResolvedReceiver{
+	receivers := map[string]config.ResolvedReceiver{
 		"fresh": {ID: "fresh", Path: freshDir, StaleAfter: time.Hour},
 		"stale": {ID: "stale", Path: staleDir, StaleAfter: time.Hour},
 		"never": {ID: "never", Path: neverDir, StaleAfter: time.Hour},
-	}}
+	}
 
 	now := time.Now()
-	report := buildReport(ctx, rc.ServerName, jobNamesOf(rc), rc.Receivers, nil, now.Add(-24*time.Hour), now, discardLogger)
+	report := buildReport(ctx, "", nil, receivers, nil, now.Add(-24*time.Hour), now, discardLogger)
 
 	if len(report.stale) != 1 || report.stale[0].id != "stale" {
 		t.Errorf("report.stale = %+v, want only \"stale\" (fresh isn't stale, never has nothing to be stale)", report.stale)

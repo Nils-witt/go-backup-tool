@@ -2,11 +2,9 @@ package config
 
 import (
 	"bytes"
-	"crypto/rsa"
 	"errors"
 	"flag"
 	"log/slog"
-	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,50 +15,7 @@ import (
 
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
-	"nilswitt.dev/go-backup-tool/internal/backup/report"
-	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
-
-// testConfigRSAPublicKeyPEM is a fixed RSA public key, PEM-encoded the same
-// way ensureServerKeyPair writes server.pub, for embedding as a receivers:
-// entry's public-key: in raw YAML config fixtures below (see
-// indentYAMLBlock) — a fixed value keeps these fixtures readable, since the
-// tests that need it don't care whose key it is, only that it's a valid
-// one. testConfigRSAPublicKey parses it back, for building the
-// resolvedReceiver a test expects ParseFlags to produce.
-const testConfigRSAPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0tEcLZdvrCAVooY+qTwb
-0Er/KU65mc7jhrs6OV5yhDjzpdLD8/oN1stMyp47XAUbIwL7Sm0EaFmqbTPkgE+E
-Q+3czxCDSTnRLMLBk7qK/QdTQ03zNTmq/ZGatISUl+OWeJP+EdC4vMTHrMKtBquM
-rHOPc29Qc+KTTrRyqGJlFsfpFx6RuSphXDqC0rEuxcdxXf6/Nesux1r6yA1lJqcX
-Tik8xq6oBBbbnF7CK4oUPMgSKlrOs2+TrYEv1jG4zmv6XFWu70z2mYbll5LvguIT
-wnccZSbEZ0rr3WTuW3NGjGYJFXx1f1IzoCbt4LxjT3sLvqyWlmCXSnhAZkVvN5YQ
-MQIDAQAB
------END PUBLIC KEY-----
-`
-
-func testConfigRSAPublicKey(t *testing.T) *rsa.PublicKey {
-	t.Helper()
-
-	pub, err := trust.ParsePublicKey(testConfigRSAPublicKeyPEM)
-	if err != nil {
-		t.Fatalf("parsing testConfigRSAPublicKeyPEM: %v", err)
-	}
-
-	return pub
-}
-
-// indentYAMLBlock indents every line of text by indent, for embedding a
-// multi-line PEM value under a YAML public-key: |  block scalar in the raw
-// config fixtures below.
-func indentYAMLBlock(text, indent string) string {
-	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
-	for i, l := range lines {
-		lines[i] = indent + l
-	}
-
-	return strings.Join(lines, "\n")
-}
 
 // writeConfigFile writes contents to a config.yaml inside t.TempDir() and
 // returns its path.
@@ -110,22 +65,22 @@ func TestParseFlags(t *testing.T) {
 		},
 		{
 			name:    "missing targets",
-			yaml:    "jobs:\n  - name: test\n    cmd: echo hi\n    recipients: [me@example.com]\n",
+			yaml:    "commands:\n  - id: job-test\n    cmd: echo hi\njobs:\n  - name: test\n    files: [{command: job-test}]\n    recipients: [me@example.com]\n",
 			wantErr: "at least one target is required",
 		},
 		{
 			name:    "target references unknown server",
-			yaml:    "jobs:\n  - name: test\n    cmd: echo hi\n    recipients: [me@example.com]\n    targets: [{server: nope, bucket: b}]\n",
+			yaml:    "commands:\n  - id: job-test\n    cmd: echo hi\njobs:\n  - name: test\n    files: [{command: job-test}]\n    recipients: [me@example.com]\n    targets: [{server: nope, bucket: b}]\n",
 			wantErr: `no server named "nope"`,
 		},
 		{
 			name:    "no recipients",
-			yaml:    "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\njobs:\n  - name: test\n    cmd: echo hi\n    targets: [{server: s, bucket: b}]\n",
+			yaml:    "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\ncommands:\n  - id: job-test\n    cmd: echo hi\njobs:\n  - name: test\n    files: [{command: job-test}]\n    targets: [{server: s, bucket: b}]\n",
 			wantErr: "specify at least one recipient",
 		},
 		{
 			name: "valid recipient config",
-			yaml: "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\njobs:\n  - name: test\n    cmd: echo hi\n    targets: [{server: s, bucket: b}]\n    recipients: [me@example.com]\n",
+			yaml: "servers:\n  - name: s\n    type: local\n    path: /mnt/backups\ncommands:\n  - id: job-test\n    cmd: echo hi\njobs:\n  - name: test\n    files: [{command: job-test}]\n    targets: [{server: s, bucket: b}]\n    recipients: [me@example.com]\n",
 		},
 	}
 
@@ -200,9 +155,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
     key: "prefix-{time}-suffix.gpg"
@@ -229,9 +188,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients:
       - a@example.com
@@ -271,9 +234,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo from-file"
+
 jobs:
   - name: test
-    cmd: "echo from-file"
+    files: [{command: job-test}]
     targets: [{server: primary, bucket: file-bucket}]
     recipients:
       - file@example.com
@@ -317,9 +284,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -346,9 +317,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -371,9 +346,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -415,9 +394,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -452,9 +435,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -496,9 +483,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -521,9 +512,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -552,9 +547,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -603,9 +602,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -665,9 +668,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -703,9 +710,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -731,9 +742,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -759,9 +774,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -819,9 +838,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -847,12 +870,18 @@ servers:
     type: local
     path: /mnt/secondary
 
+commands:
+  - id: job-database
+    cmd: "mysqldump db"
+  - id: job-files
+    cmd: "tar czf - /data"
+
 jobs:
   - name: database
-    cmd: "mysqldump db"
+    files: [{command: job-database}]
     targets: [{server: primary, bucket: db-bucket}]
   - name: files
-    cmd: "tar czf - /data"
+    files: [{command: job-files}]
     targets: [{server: secondary, bucket: files-bucket}]
     recipients:
       - files-only@example.com
@@ -906,9 +935,13 @@ servers:
     type: remote
     endpoint: "https://minio.example.com"
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     recipients: [me@example.com]
     targets:
       - server: primary
@@ -944,9 +977,13 @@ func TestParseFlagsTargetMissingServer(t *testing.T) {
 	t.Parallel()
 
 	path := writeConfigFile(t, `
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     recipients: [me@example.com]
     targets:
       - bucket: b
@@ -967,9 +1004,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     recipients: [me@example.com]
     targets:
       - server: s
@@ -989,9 +1030,13 @@ servers:
   - type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -1014,9 +1059,13 @@ servers:
     type: local
     path: /mnt/b
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: dup, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -1034,9 +1083,13 @@ func TestParseFlagsServerTypeRequired(t *testing.T) {
 servers:
   - name: s
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -1058,9 +1111,13 @@ servers:
     type: local
     path: `+dir+`
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: nas, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -1086,9 +1143,13 @@ servers:
   - name: nas
     type: local
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: nas, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -1111,9 +1172,13 @@ servers:
     path: `+dir+`
     retention: 168h
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: nas, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -1143,9 +1208,13 @@ servers:
     path: `+dir+`
     retention: 7d
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: nas, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -1173,9 +1242,13 @@ servers:
     path: /mnt/backups
     retention: -1h
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: nas, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -1218,9 +1291,13 @@ servers:
     path: `+dir+`
     retention: 7d
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: nas, bucket: b, `+tt.retentionLine+`}]
     recipients: [me@example.com]
 `)
@@ -1243,11 +1320,7 @@ jobs:
 func TestParseFlagsJobTargetRetentionErrors(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name    string
-		yaml    string
-		wantErr string
-	}{
+	tests := []parseErrorCase{
 		{
 			name: "negative duration",
 			yaml: `
@@ -1256,9 +1329,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: nas, bucket: b, retention: -1h}]
     recipients: [me@example.com]
 `,
@@ -1272,9 +1349,13 @@ servers:
     type: remote
     endpoint: "https://backup2.example.com:8443"
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: sib, bucket: b, retention: 168h}]
     recipients: [me@example.com]
 `,
@@ -1282,18 +1363,7 @@ jobs:
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			path := writeConfigFile(t, tt.yaml)
-
-			_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("ParseFlags() error = %v, want substring %q", err, tt.wantErr)
-			}
-		})
-	}
+	checkParseErrors(t, tests)
 }
 
 func TestParseFlagsLocalServerRejectsRemoteFields(t *testing.T) {
@@ -1306,9 +1376,13 @@ servers:
     path: /mnt/backups
     endpoint: "https://example.com"
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: nas, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -1327,9 +1401,13 @@ servers:
   - name: s
     type: ftp
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -1349,8 +1427,12 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-unnamed-0
+    cmd: "echo hi"
+
 jobs:
-  - cmd: "echo hi"
+  - files: [{command: job-unnamed-0}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -1370,13 +1452,19 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-dup
+    cmd: "echo hi"
+  - id: job-dup-2
+    cmd: "echo bye"
+
 jobs:
   - name: dup
-    cmd: "echo hi"
+    files: [{command: job-dup}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
   - name: dup
-    cmd: "echo bye"
+    files: [{command: job-dup-2}]
     targets: [{server: s, bucket: b2}]
     recipients: [me@example.com]
 `)
@@ -1396,13 +1484,19 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-database
+    cmd: "mysqldump db"
+  - id: job-files
+    cmd: "tar czf - /data"
+
 jobs:
   - name: database
-    cmd: "mysqldump db"
+    files: [{command: job-database}]
     targets: [{server: s, bucket: db-bucket}]
     recipients: [me@example.com]
   - name: files
-    cmd: "tar czf - /data"
+    files: [{command: job-files}]
     targets: [{server: s, bucket: files-bucket}]
     recipients: [me@example.com]
 `)
@@ -1427,9 +1521,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-database
+    cmd: "mysqldump db"
+
 jobs:
   - name: database
-    cmd: "mysqldump db"
+    files: [{command: job-database}]
     targets: [{server: s, bucket: db-bucket}]
     recipients: [me@example.com]
 `)
@@ -1455,7 +1553,7 @@ func TestParseFlagsFlattensFileJobs(t *testing.T) {
 
 	path := writeConfigFile(t, `
 gpg-bin: /usr/bin/gpg2
-cmd: "echo default"
+files: [{command: shared}]
 recipients: [me@example.com]
 interval: 1h
 armor: true
@@ -1465,10 +1563,16 @@ servers:
     path: /mnt/backups
 targets: [{server: s, bucket: shared}]
 
+commands:
+  - id: shared
+    cmd: "echo default"
+  - id: job-b
+    cmd: "echo b"
+
 jobs:
   - name: a
   - name: b
-    cmd: "echo b"
+    files: [{command: job-b}]
     gpg-homedir: /keys
     recipients: [other@example.com]
 `)
@@ -1484,7 +1588,7 @@ jobs:
 
 	a, b := rc.FileJobs[0], rc.FileJobs[1]
 
-	if !slices.Equal(a.Files, []FileJobFile{{Command: "job-a"}}) || a.Interval != "1h" || !a.Armor || len(a.Targets) != 1 || a.Recipients[0] != "me@example.com" {
+	if !slices.Equal(a.Files, []FileJobFile{{Command: "shared"}}) || a.Interval != "1h" || !a.Armor || len(a.Targets) != 1 || a.Recipients[0] != "me@example.com" {
 		t.Errorf("job a = %+v, want the top-level defaults layered in", a)
 	}
 
@@ -1519,7 +1623,7 @@ func TestResolveJob(t *testing.T) {
 	gpg := notify.GPGSettings{Bin: "gpg", Homedir: "/keys"}
 
 	job, err := ResolveJob(FileJob{
-		Name: " db ", Command: "page", Recipients: []string{"me@example.com"}, Interval: "1h",
+		Name: " db ", Files: []FileJobFile{{Command: "page"}}, Recipients: []string{"me@example.com"}, Interval: "1h",
 		Targets: []FileJobTarget{{Server: "nas", Bucket: "b", OnError: &FileTargetOnError{Command: "page", After: 2}}},
 	}, gpg, servers, commands, "primary")
 	if err != nil {
@@ -1549,7 +1653,7 @@ func TestResolveJobRemoteTLS(t *testing.T) {
 	}
 
 	job, err := ResolveJob(FileJob{
-		Name: "db", Command: "page", Recipients: []string{"me@example.com"},
+		Name: "db", Files: []FileJobFile{{Command: "page"}}, Recipients: []string{"me@example.com"},
 		Targets: []FileJobTarget{{Server: "offsite", Bucket: "b"}},
 	}, notify.GPGSettings{Bin: "gpg"}, map[string]ResolvedServer{"offsite": remote}, map[string]Command{"page": cmd}, "primary")
 	if err != nil {
@@ -1577,11 +1681,11 @@ func TestResolveJobErrors(t *testing.T) {
 		fj   FileJob
 		want string
 	}{
-		{"no name", FileJob{Command: "x"}, "name is required"},
+		{"no name", FileJob{Files: []FileJobFile{{Command: "x"}}}, "name is required"},
 		{"no command", FileJob{Name: "x", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "nas", Bucket: "b"}}}, "at least one file"},
-		{"unknown job command", FileJob{Name: "x", Command: "gone", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "nas", Bucket: "b"}}}, `no command "gone" defined`},
-		{"unknown server", FileJob{Name: "x", Command: "x", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "gone", Bucket: "b"}}}, "no server named"},
-		{"unknown command", FileJob{Name: "x", Command: "x", Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "nas", Bucket: "b", OnRecover: &FileTargetOnRecover{Command: "gone"}}}}, "no command named"},
+		{"unknown job command", FileJob{Name: "x", Files: []FileJobFile{{Command: "gone"}}, Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "nas", Bucket: "b"}}}, `no command "gone" defined`},
+		{"unknown server", FileJob{Name: "x", Files: []FileJobFile{{Command: "x"}}, Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "gone", Bucket: "b"}}}, "no server named"},
+		{"unknown command", FileJob{Name: "x", Files: []FileJobFile{{Command: "x"}}, Recipients: []string{"r"}, Targets: []FileJobTarget{{Server: "nas", Bucket: "b", OnRecover: &FileTargetOnRecover{Command: "gone"}}}}, "no command named"},
 	} {
 		if _, err := ResolveJob(tc.fj, gpg, servers, nil, ""); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: ResolveJob() error = %v, want substring %q", tc.name, err, tc.want)
@@ -1619,9 +1723,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
     interval: 24h
@@ -1647,9 +1755,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -1673,9 +1785,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
     interval: -1h
@@ -1698,18 +1814,26 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-hourly
+    cmd: "echo hi"
+  - id: job-daily
+    cmd: "echo bye"
+  - id: job-once
+    cmd: "echo once"
+
 jobs:
   - name: hourly
-    cmd: "echo hi"
+    files: [{command: job-hourly}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
   - name: daily
-    cmd: "echo bye"
+    files: [{command: job-daily}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
     interval: 24h
   - name: once
-    cmd: "echo once"
+    files: [{command: job-once}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
     interval: 0
@@ -1737,9 +1861,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
     interval: "not-a-duration"
@@ -1760,9 +1888,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
     interval: 1h
@@ -1791,9 +1923,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
     interval: 1h
@@ -1822,9 +1958,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -1848,9 +1988,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
     interval: 1h
@@ -1872,9 +2016,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
     start-time: "2026-01-01T03:00:00Z"
@@ -1895,9 +2043,13 @@ servers:
     type: remote
     endpoint: "https://backup2.example.com:8443"
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: sibling, bucket: from-primary}]
     recipients: [me@example.com]
 `)
@@ -1930,9 +2082,13 @@ servers:
     endpoint: https://backup2.example.com:8443
     server-uuid: " 6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b "
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: sibling, bucket: from-primary}]
     recipients: [me@example.com]
 `)
@@ -1979,9 +2135,13 @@ servers:
   - name: sibling
     type: remote
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: sibling, bucket: from-primary}]
     recipients: [me@example.com]
 `)
@@ -2002,9 +2162,13 @@ servers:
     endpoint: "https://backup2.example.com:8443"
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: sibling, bucket: from-primary}]
     recipients: [me@example.com]
 `)
@@ -2012,189 +2176,6 @@ jobs:
 	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "are not valid for type: remote") {
 		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "are not valid for type: remote")
-	}
-}
-
-func TestParseFlagsReceivers(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-
-	path := writeConfigFile(t, `
-servers:
-  - name: s
-    type: local
-    path: /mnt/backups
-
-receivers:
-  - id: from-primary
-    public-key: |
-`+indentYAMLBlock(testConfigRSAPublicKeyPEM, "      ")+`
-    path: `+dir+`
-    retention: 30d
-
-jobs:
-  - name: test
-    cmd: echo hi
-    targets: [{server: s, bucket: b}]
-    recipients: [me@example.com]
-`)
-
-	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("ParseFlags() unexpected error: %v", err)
-	}
-
-	recv, ok := rc.Receivers["from-primary"]
-	if !ok {
-		t.Fatalf("rc.Receivers = %+v, want an entry for %q", rc.Receivers, "from-primary")
-	}
-
-	want := ResolvedReceiver{ID: "from-primary", PublicKey: testConfigRSAPublicKey(t), Path: dir, Retention: 30 * 24 * time.Hour}
-	if !reflect.DeepEqual(recv, want) {
-		t.Errorf("rc.Receivers[%q] = %+v, want %+v", "from-primary", recv, want)
-	}
-}
-
-func TestParseFlagsReceiverRequiresPublicKey(t *testing.T) {
-	t.Parallel()
-
-	path := writeConfigFile(t, `
-servers:
-  - name: s
-    type: local
-    path: /mnt/backups
-
-receivers:
-  - id: from-primary
-    path: /mnt/backups
-
-jobs:
-  - name: test
-    cmd: echo hi
-    targets: [{server: s, bucket: b}]
-    recipients: [me@example.com]
-`)
-
-	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), `receiver "from-primary": public-key is required`) {
-		t.Fatalf("ParseFlags() error = %v, want substring %q", err, `receiver "from-primary": public-key is required`)
-	}
-}
-
-func TestParseFlagsReceiverDuplicateID(t *testing.T) {
-	t.Parallel()
-
-	path := writeConfigFile(t, `
-servers:
-  - name: s
-    type: local
-    path: /mnt/backups
-
-receivers:
-  - id: dup
-    public-key: |
-`+indentYAMLBlock(testConfigRSAPublicKeyPEM, "      ")+`
-    path: /mnt/a
-  - id: dup
-    public-key: |
-`+indentYAMLBlock(testConfigRSAPublicKeyPEM, "      ")+`
-    path: /mnt/b
-
-jobs:
-  - name: test
-    cmd: echo hi
-    targets: [{server: s, bucket: b}]
-    recipients: [me@example.com]
-`)
-
-	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), `duplicate receiver id "dup"`) {
-		t.Fatalf("ParseFlags() error = %v, want substring %q", err, `duplicate receiver id "dup"`)
-	}
-}
-
-func TestParseFlagsReceiverStaleAfterAndNotifications(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-
-	path := writeConfigFile(t, `
-servers:
-  - name: s
-    type: local
-    path: /mnt/backups
-
-notifications:
-  - id: alerts
-    webhook:
-      url: "https://alerts.example.com/hook"
-      method: put
-      headers:
-        Authorization: "Bearer webhook-token"
-      body: '{"text":"{receiver_id} is stale"}'
-
-receivers:
-  - id: from-primary
-    public-key: |
-`+indentYAMLBlock(testConfigRSAPublicKeyPEM, "      ")+`
-    path: `+dir+`
-    stale-after: 6h
-    stale-notifications: [alerts]
-
-jobs:
-  - name: test
-    cmd: echo hi
-    targets: [{server: s, bucket: b}]
-    recipients: [me@example.com]
-`)
-
-	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("ParseFlags() unexpected error: %v", err)
-	}
-
-	recv, ok := rc.Receivers["from-primary"]
-	if !ok {
-		t.Fatalf("rc.Receivers = %+v, want an entry for %q", rc.Receivers, "from-primary")
-	}
-
-	want := ResolvedReceiver{
-		ID: "from-primary", PublicKey: testConfigRSAPublicKey(t), Path: dir,
-		StaleAfter:         6 * time.Hour,
-		StaleNotifications: []string{"alerts"},
-	}
-	if !reflect.DeepEqual(recv, want) {
-		t.Errorf("rc.Receivers[%q] = %+v, want %+v", "from-primary", recv, want)
-	}
-}
-
-func TestParseFlagsReceiverStaleAfterRequiresNotifications(t *testing.T) {
-	t.Parallel()
-
-	path := writeConfigFile(t, `
-servers:
-  - name: s
-    type: local
-    path: /mnt/backups
-
-receivers:
-  - id: from-primary
-    public-key: |
-`+indentYAMLBlock(testConfigRSAPublicKeyPEM, "      ")+`
-    path: /mnt/backups
-    stale-after: 6h
-
-jobs:
-  - name: test
-    cmd: echo hi
-    targets: [{server: s, bucket: b}]
-    recipients: [me@example.com]
-`)
-
-	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "stale-after and stale-notifications must be set together") {
-		t.Fatalf("ParseFlags() error = %v, want substring %q", err, "stale-after and stale-notifications must be set together")
 	}
 }
 
@@ -2207,9 +2188,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -2234,9 +2219,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: echo hi
+
 jobs:
   - name: test
-    cmd: echo hi
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
     staging-dir: /var/lib/go-backup-tool/staging
@@ -2265,13 +2254,19 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-default-gpg
+    cmd: echo hi
+  - id: job-custom-gpg
+    cmd: echo hi
+
 jobs:
   - name: default-gpg
-    cmd: echo hi
+    files: [{command: job-default-gpg}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
   - name: custom-gpg
-    cmd: echo hi
+    files: [{command: job-custom-gpg}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
     gpg-bin: /opt/gpg/bin/gpg
@@ -2314,9 +2309,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -2360,9 +2359,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -2395,9 +2398,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -2425,9 +2432,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -2457,9 +2468,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -2511,9 +2526,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -2539,9 +2558,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -2553,192 +2576,6 @@ jobs:
 
 	if rc.OIDC.Enabled {
 		t.Error("rc.OIDC.Enabled = true, want false (oidc: not configured)")
-	}
-}
-
-func TestParseFlagsReportSettings(t *testing.T) {
-	t.Setenv("TEST_SMTP_PASSWORD", "s3cr3t")
-
-	path := writeConfigFile(t, `
-smtp:
-  host: smtp.example.com
-  port: 2525
-  username: backups@example.com
-  password-env: TEST_SMTP_PASSWORD
-  security: none
-
-notifications:
-  - id: ops-email
-    email:
-      to: ["ops@example.com"]
-
-report:
-  enabled: true
-  schedule: "30 6 * * *"
-  notifications: [ops-email]
-
-servers:
-  - name: s
-    type: local
-    path: /mnt/backups
-
-jobs:
-  - name: test
-    cmd: "echo hi"
-    targets: [{server: s, bucket: b}]
-    recipients: [me@example.com]
-`)
-
-	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("ParseFlags() unexpected error: %v", err)
-	}
-
-	want := report.FileReport{Enabled: true, Schedule: "30 6 * * *", Notifications: []string{"ops-email"}}
-	if !reflect.DeepEqual(rc.FileReport, want) {
-		t.Errorf("rc.FileReport = %+v, want %+v", rc.FileReport, want)
-	}
-
-	wantSMTP := notify.SMTPSettings{Host: "smtp.example.com", Port: 2525, Username: "backups@example.com", Password: "s3cr3t", Security: notify.SMTPSecurityNone}
-	if rc.SMTP != wantSMTP {
-		t.Errorf("rc.SMTP = %+v, want %+v", rc.SMTP, wantSMTP)
-	}
-}
-
-func TestParseFlagsReportDisabledByDefault(t *testing.T) {
-	t.Parallel()
-
-	path := writeConfigFile(t, `
-servers:
-  - name: s
-    type: local
-    path: /mnt/backups
-
-jobs:
-  - name: test
-    cmd: "echo hi"
-    targets: [{server: s, bucket: b}]
-    recipients: [me@example.com]
-`)
-
-	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("ParseFlags() unexpected error: %v", err)
-	}
-
-	if rc.FileReport.Enabled {
-		t.Error("rc.FileReport.Enabled = true, want false (report: not configured)")
-	}
-}
-
-func TestParseFlagsReportEnabledRequiresNotifications(t *testing.T) {
-	t.Parallel()
-
-	path := writeConfigFile(t, `
-report:
-  enabled: true
-
-servers:
-  - name: s
-    type: local
-    path: /mnt/backups
-
-jobs:
-  - name: test
-    cmd: "echo hi"
-    targets: [{server: s, bucket: b}]
-    recipients: [me@example.com]
-`)
-
-	_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "report.notifications") {
-		t.Fatalf("ParseFlags() error = %v, want it to mention report.notifications", err)
-	}
-}
-
-// TestParseFlagsNotificationSharedAcrossTriggers exercises the reusable
-// notifications: design end to end: one notification combining both a
-// webhook: and an email: channel, referenced by id from both a receiver's
-// stale-notifications: and report.notifications:, confirming both keep
-// the id (resolved against the live registry at fire time) and the
-// notification itself resolves with both channels.
-func TestParseFlagsNotificationSharedAcrossTriggers(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-
-	path := writeConfigFile(t, `
-smtp:
-  host: smtp.example.com
-  username: backups@example.com
-  password: hunter2
-
-notifications:
-  - id: ops
-    webhook:
-      url: "https://example.com/hook"
-    email:
-      to: ["ops@example.com"]
-
-servers:
-  - name: s
-    type: local
-    path: /mnt/backups
-
-receivers:
-  - id: from-primary
-    public-key: |
-`+indentYAMLBlock(testConfigRSAPublicKeyPEM, "      ")+`
-    path: `+dir+`
-    stale-after: 6h
-    stale-notifications: [ops]
-
-report:
-  enabled: true
-  notifications: [ops]
-
-jobs:
-  - name: test
-    cmd: echo hi
-    targets: [{server: s, bucket: b}]
-    recipients: [me@example.com]
-`)
-
-	rc, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("ParseFlags() unexpected error: %v", err)
-	}
-
-	recv, ok := rc.Receivers["from-primary"]
-	if !ok {
-		t.Fatalf("rc.Receivers = %+v, want an entry for %q", rc.Receivers, "from-primary")
-	}
-
-	want := notify.Notification{
-		ID:      "ops",
-		Webhook: &notify.Webhook{URL: "https://example.com/hook", Method: http.MethodPost},
-		Email: &notify.Email{
-			To:   []string{"ops@example.com"},
-			From: "backups@example.com",
-			SMTP: notify.SMTPSettings{Host: "smtp.example.com", Port: 587, Username: "backups@example.com", Password: "hunter2", Security: notify.SMTPSecurityStartTLS},
-		},
-	}
-
-	if len(rc.FileNotifications) != 1 {
-		t.Fatalf("rc.FileNotifications = %+v, want just ops", rc.FileNotifications)
-	}
-
-	got, err := notify.ResolveNotification(rc.FileNotifications[0], rc.SMTP, rc.GPG)
-	if err != nil || !reflect.DeepEqual(got, want) {
-		t.Errorf("ResolveNotification(ops) = %+v, %v, want %+v", got, err, want)
-	}
-
-	if !reflect.DeepEqual(recv.StaleNotifications, []string{"ops"}) {
-		t.Errorf("recv.StaleNotifications = %+v, want [ops]", recv.StaleNotifications)
-	}
-
-	if !reflect.DeepEqual(rc.FileReport.Notifications, []string{"ops"}) {
-		t.Errorf("rc.FileReport.Notifications = %+v, want [ops]", rc.FileReport.Notifications)
 	}
 }
 
@@ -2758,15 +2595,13 @@ servers:
     type: local
     path: /mnt/backups
 
-receivers:
-  - id: from-primary
-    public-key: |
-`+indentYAMLBlock(testConfigRSAPublicKeyPEM, "      ")+`
-    path: /mnt/remote
+commands:
+  - id: job-test
+    cmd: "echo hi"
 
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -2779,10 +2614,6 @@ jobs:
 	if rc.ServerName != "primary-backup-host" {
 		t.Errorf("rc.ServerName = %q, want %q", rc.ServerName, "primary-backup-host")
 	}
-
-	if got := rc.Receivers["from-primary"].ServerName; got != "primary-backup-host" {
-		t.Errorf("rc.Receivers[from-primary].ServerName = %q, want %q", got, "primary-backup-host")
-	}
 }
 
 func TestParseFlagsServerNameDefaultsEmpty(t *testing.T) {
@@ -2794,9 +2625,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -2822,14 +2657,14 @@ servers:
     type: local
     path: /mnt/backups
 
-notifications:
-  - id: ops-email
-    webhook:
-      url: "https://alerts.example.com/hook"
+
+commands:
+  - id: job-test
+    cmd: "echo hi"
 
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
     failure-notifications: [ops-email]
@@ -2863,21 +2698,20 @@ servers:
     type: local
     path: /mnt/backups
 
-notifications:
-  - id: shared
-    webhook:
-      url: "https://shared.example.com/hook"
-  - id: override
-    webhook:
-      url: "https://override.example.com/hook"
+
+commands:
+  - id: job-inherits
+    cmd: "echo hi"
+  - id: job-overrides
+    cmd: "echo hi"
 
 jobs:
   - name: inherits
-    cmd: "echo hi"
+    files: [{command: job-inherits}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
   - name: overrides
-    cmd: "echo hi"
+    files: [{command: job-overrides}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
     failure-notifications: [override]
@@ -2916,9 +2750,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
     failure-notifications: [nope]
@@ -2939,6 +2777,8 @@ func TestParseFlagsCommandsDuplicateID(t *testing.T) {
 
 	path := writeConfigFile(t, `
 commands:
+  - id: job-test
+    cmd: "echo hi"
   - id: dup
     cmd: "echo one"
   - id: dup
@@ -2951,7 +2791,7 @@ servers:
 
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -2967,6 +2807,8 @@ func TestParseFlagsCommandsMissingCmd(t *testing.T) {
 
 	path := writeConfigFile(t, `
 commands:
+  - id: job-test
+    cmd: "echo hi"
   - id: empty
 
 servers:
@@ -2976,7 +2818,7 @@ servers:
 
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -2992,6 +2834,8 @@ func TestParseFlagsCommandsTimeoutDefault(t *testing.T) {
 
 	path := writeConfigFile(t, `
 commands:
+  - id: job-test
+    cmd: "echo hi"
   - id: alert
     cmd: "echo hi"
 
@@ -3002,7 +2846,7 @@ servers:
 
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets:
       - server: s
         bucket: b
@@ -3032,6 +2876,8 @@ func TestParseFlagsCommandsTimeoutRejectsNonPositive(t *testing.T) {
 
 	path := writeConfigFile(t, `
 commands:
+  - id: job-test
+    cmd: "echo hi"
   - id: alert
     cmd: "echo hi"
     timeout: "0s"
@@ -3043,7 +2889,7 @@ servers:
 
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -3059,6 +2905,8 @@ func TestParseFlagsTargetOnErrorResolves(t *testing.T) {
 
 	path := writeConfigFile(t, `
 commands:
+  - id: job-test
+    cmd: "echo hi"
   - id: restart-nas
     cmd: "systemctl restart nas"
     timeout: 10s
@@ -3070,7 +2918,7 @@ servers:
 
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets:
       - server: s
         bucket: b
@@ -3106,6 +2954,8 @@ func TestParseFlagsTargetOnErrorRepeatFalse(t *testing.T) {
 
 	path := writeConfigFile(t, `
 commands:
+  - id: job-test
+    cmd: "echo hi"
   - id: alert
     cmd: "echo hi"
 
@@ -3116,7 +2966,7 @@ servers:
 
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets:
       - server: s
         bucket: b
@@ -3143,9 +2993,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets:
       - server: s
         bucket: b
@@ -3164,6 +3018,8 @@ func TestParseFlagsTargetOnErrorAfterMustBePositive(t *testing.T) {
 
 	path := writeConfigFile(t, `
 commands:
+  - id: job-test
+    cmd: "echo hi"
   - id: alert
     cmd: "echo hi"
 
@@ -3174,7 +3030,7 @@ servers:
 
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets:
       - server: s
         bucket: b
@@ -3197,9 +3053,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets:
       - server: s
         bucket: b
@@ -3218,6 +3078,8 @@ func TestParseFlagsTargetOnRecoverResolves(t *testing.T) {
 
 	path := writeConfigFile(t, `
 commands:
+  - id: job-test
+    cmd: "echo hi"
   - id: all-clear
     cmd: "echo recovered"
     timeout: 10s
@@ -3229,7 +3091,7 @@ servers:
 
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets:
       - server: s
         bucket: b
@@ -3264,9 +3126,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets:
       - server: s
         bucket: b
@@ -3289,9 +3155,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets:
       - server: s
         bucket: b
@@ -3316,9 +3186,13 @@ servers:
     type: local
     path: /mnt/backups
 
+commands:
+  - id: job-test
+    cmd: "echo hi"
+
 jobs:
   - name: test
-    cmd: "echo hi"
+    files: [{command: job-test}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
 `)
@@ -3336,11 +3210,7 @@ jobs:
 func TestParseFlagsRejectsUnknownKeys(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name    string
-		yaml    string
-		wantErr string
-	}{
+	tests := []parseErrorCase{
 		{
 			name:    "top level",
 			yaml:    "gpg-binary: gpg\n",
@@ -3353,46 +3223,22 @@ servers:
   - name: s
     type: local
     path: /mnt/backups
+commands:
+  - id: job-j
+    cmd: echo hi
+
 jobs:
   - name: j
-    cmd: echo hi
+    files: [{command: job-j}]
     targets: [{server: s, bucket: b}]
     recipients: [me@example.com]
     recipent: typo@example.com
 `,
 			wantErr: "recipent",
 		},
-		{
-			name: "removed email.encrypt gpg-bin",
-			yaml: `
-smtp:
-  host: mail.example.com
-  username: backups@example.com
-  password: secret
-notifications:
-  - id: n
-    email:
-      to: [ops@example.com]
-      encrypt:
-        recipients: [ops@example.com]
-        gpg-bin: /usr/local/bin/gpg
-`,
-			wantErr: "gpg-bin",
-		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			path := writeConfigFile(t, tc.yaml)
-
-			_, err := ParseFlags([]string{"-config", path}, &bytes.Buffer{})
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("ParseFlags() error = %v, want it to mention %q", err, tc.wantErr)
-			}
-		})
-	}
+	checkParseErrors(t, tests)
 }
 
 func TestLoadFileConfigEmptyFile(t *testing.T) {
@@ -3407,5 +3253,29 @@ func TestLoadFileConfigEmptyFile(t *testing.T) {
 
 	if fc == nil {
 		t.Fatal("loadFileConfig() = nil, want an empty config")
+	}
+}
+
+// parseErrorCase is a config file that ParseFlags must reject with an error
+// containing wantErr.
+type parseErrorCase struct {
+	name    string
+	yaml    string
+	wantErr string
+}
+
+// checkParseErrors runs each of tests as a parallel subtest.
+func checkParseErrors(t *testing.T, tests []parseErrorCase) {
+	t.Helper()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := ParseFlags([]string{"-config", writeConfigFile(t, tt.yaml)}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("ParseFlags() error = %v, want it to contain %q", err, tt.wantErr)
+			}
+		})
 	}
 }

@@ -1734,9 +1734,7 @@ components:
         Short-lived JWT signed by the sending instance's private key, issued
         by its server id and scoped to the receiver id. Accepted when the
         issuer is one of the receiver's allowed trusted servers and the
-        signature verifies against that server's public key, or — for
-        receivers predating trusted servers — when it verifies against the
-        receiver's deprecated public_key (see
+        signature verifies against that server's public key (see
         remoteauth.SignRemoteAuthToken/VerifyRemoteAuthToken). The token is
         also bound to the one request it authorizes, via the claims `htm`
         (HTTP method), `key` (object key), `ctm` (the `creationTime` query
@@ -2208,12 +2206,6 @@ components:
             type: string
             format: uuid
           description: Ids of the trusted servers allowed to send to this receiver.
-        public_key:
-          type: string
-          description: >
-            Deprecated: PEM-encoded RSA public key of a single sending
-            instance, accepted from any issuer. Kept for receivers predating
-            trusted servers; send "" to remove it.
         path:
           type: string
           description: Absolute directory incoming objects are written under.
@@ -2235,9 +2227,9 @@ components:
           description: Notification ids fired on every dashboard download from this receiver.
       required: [id, path]
       description: >
-        A receiver's editable fields, with the same syntax as the former
-        `receivers:` config entries. At least one of allowed_servers or
-        public_key must be set.
+        A receiver's editable fields, with the same syntax as a settings
+        file's `receivers:` entries (see -import-settings). At least one
+        allowed server must be set.
 
     ReceiverConfig:
       allOf:
@@ -2557,10 +2549,6 @@ components:
             standard output is stored as one file under the backup's key.
           items:
             $ref: "#/components/schemas/JobFile"
-        command:
-          type: string
-          deprecated: true
-          description: A single command's id, the same as `files` with just that entry. Setting both is an error.
         key:
           type: string
           description: The backup's key, a folder holding one file per command; "{time}" becomes the run's UTC timestamp. Empty means "backup-{time}".

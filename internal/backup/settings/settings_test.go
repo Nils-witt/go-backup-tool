@@ -59,14 +59,21 @@ func webhookInput(id, url string, headers map[string]*string) NotificationInput 
 	return NotificationInput{ID: id, Webhook: &WebhookInput{URL: url, Headers: headers}}
 }
 
-func TestLoadImportsConfigFile(t *testing.T) {
+func TestLoadResolvesStoredSettings(t *testing.T) {
 	t.Parallel()
 
 	db := openTestStateDB(t)
 	ctx := t.Context()
 
-	// Stored before: edits made in the web UI win over the config file.
 	if err := db.CreateNotificationConfig(ctx, store.NotificationConfig{ID: "ops", Webhook: &notify.FileWebhook{URL: "https://edited"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.CreateNotificationConfig(ctx, store.NotificationConfig{ID: "slack", Webhook: &notify.FileWebhook{URL: "https://slack"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.SaveReportSettings(ctx, store.ReportSettings{Enabled: true, Schedule: "@daily", Notifications: []string{"ops"}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -76,10 +83,7 @@ func TestLoadImportsConfigFile(t *testing.T) {
 	}
 
 	m := newTestManager(t, db)
-	m.Load(ctx,
-		[]notify.FileNotification{{ID: "ops", Webhook: &notify.FileWebhook{URL: "https://yaml"}}, {ID: "slack", Webhook: &notify.FileWebhook{URL: "https://slack"}}},
-		report.FileReport{Enabled: true, Schedule: "@daily", Notifications: []string{"ops"}},
-	)
+	m.Load(ctx)
 
 	checkLoadedState(t, m)
 
@@ -93,8 +97,8 @@ func TestLoadImportsConfigFile(t *testing.T) {
 	}
 }
 
-// checkLoadedState checks the live state TestLoadImportsConfigFile's Load
-// should leave behind.
+// checkLoadedState checks the live state TestLoadResolvesStoredSettings'
+// Load should leave behind.
 func checkLoadedState(t *testing.T, m testManager) {
 	t.Helper()
 
@@ -103,7 +107,7 @@ func checkLoadedState(t *testing.T, m testManager) {
 	}
 
 	if _, ok := m.registry.Get("slack"); !ok {
-		t.Error("imported notification slack not active")
+		t.Error("stored notification slack not active")
 	}
 
 	if _, ok := m.registry.Get("mail"); ok {
@@ -173,7 +177,7 @@ func TestDeleteNotificationRefusedWhileInUse(t *testing.T) {
 		}
 	}
 
-	if err := db.CreateReceiverConfig(ctx, store.ReceiverConfig{ID: "a", PublicKey: "pem", Path: "/srv/a", DownloadNotifications: []string{"recv"}}); err != nil {
+	if err := db.CreateReceiverConfig(ctx, store.ReceiverConfig{ID: "a", AllowedServers: []string{"s1"}, Path: "/srv/a", DownloadNotifications: []string{"recv"}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -247,14 +251,14 @@ func TestWithoutStateDB(t *testing.T) {
 	t.Parallel()
 
 	m := newTestManager(t, nil)
-	m.Load(t.Context(), []notify.FileNotification{{ID: "ops", Webhook: &notify.FileWebhook{URL: "https://x"}}}, report.FileReport{Enabled: true, Notifications: []string{"ops"}})
+	m.Load(t.Context())
 
-	if _, ok := m.registry.Get("ops"); !ok {
-		t.Error("config file notification not active without a state db")
+	if ids := m.registry.IDs(); len(ids) != 0 {
+		t.Errorf("registry = %v without a state db, want empty", ids)
 	}
 
-	if !m.live.Get().Enabled {
-		t.Error("config file report not active without a state db")
+	if m.live.Get().Enabled {
+		t.Error("report enabled without a state db, want disabled")
 	}
 
 	if err := m.CreateNotification(t.Context(), "erin", webhookInput("b", "https://x", nil)); !errors.Is(err, ErrStoreUnavailable) {

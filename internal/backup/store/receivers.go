@@ -16,8 +16,9 @@ import (
 // validated (config.ResolveReceiver) on every load rather than once on save.
 type receiverModel struct {
 	ID string `gorm:"column:id;primaryKey"`
-	// PublicKey is the deprecated single sender key, "" once a receiver
-	// only names AllowedServers.
+	// PublicKey is the single sender key receivers used before trusted
+	// servers, removed in v8.0.0. It's always written empty (an update
+	// clears it) and only read by ListReceiversRelyingOnPublicKey.
 	PublicKey             string    `gorm:"column:public_key;not null"`
 	AllowedServers        []string  `gorm:"column:allowed_servers;serializer:json"`
 	Path                  string    `gorm:"column:path;not null"`
@@ -36,7 +37,6 @@ func (receiverModel) TableName() string { return "receivers" }
 // ReceiverConfig is one stored receiver definition (see receiverModel).
 type ReceiverConfig struct {
 	ID                    string
-	PublicKey             string
 	AllowedServers        []string
 	Path                  string
 	Retention             string
@@ -47,6 +47,24 @@ type ReceiverConfig struct {
 	CreatedBy             string
 	UpdatedAt             time.Time
 	UpdatedBy             string
+}
+
+// newReceiverModel maps r onto its stored row, with no public key.
+func newReceiverModel(r ReceiverConfig) receiverModel {
+	return receiverModel{
+		ID: r.ID, AllowedServers: r.AllowedServers, Path: r.Path, Retention: r.Retention, StaleAfter: r.StaleAfter,
+		StaleNotifications: r.StaleNotifications, DownloadNotifications: r.DownloadNotifications,
+		CreatedAt: r.CreatedAt, CreatedBy: r.CreatedBy, UpdatedAt: r.UpdatedAt, UpdatedBy: r.UpdatedBy,
+	}
+}
+
+// config maps a stored row back onto the ReceiverConfig callers see.
+func (m receiverModel) config() ReceiverConfig {
+	return ReceiverConfig{
+		ID: m.ID, AllowedServers: m.AllowedServers, Path: m.Path, Retention: m.Retention, StaleAfter: m.StaleAfter,
+		StaleNotifications: m.StaleNotifications, DownloadNotifications: m.DownloadNotifications,
+		CreatedAt: m.CreatedAt, CreatedBy: m.CreatedBy, UpdatedAt: m.UpdatedAt, UpdatedBy: m.UpdatedBy,
+	}
 }
 
 var (
@@ -68,7 +86,7 @@ func (s *Store) ListReceiverConfigs(ctx context.Context) ([]ReceiverConfig, erro
 
 	out := make([]ReceiverConfig, len(rows))
 	for i, m := range rows {
-		out[i] = ReceiverConfig(m)
+		out[i] = m.config()
 	}
 
 	return out, nil
@@ -87,13 +105,13 @@ func (s *Store) GetReceiverConfig(ctx context.Context, id string) (ReceiverConfi
 		return ReceiverConfig{}, false, fmt.Errorf("reading receiver: %w", err)
 	}
 
-	return ReceiverConfig(m), true, nil
+	return m.config(), true, nil
 }
 
 // CreateReceiverConfig stores a new receiver, returning ErrReceiverExists if
 // its id is already taken.
 func (s *Store) CreateReceiverConfig(ctx context.Context, r ReceiverConfig) error {
-	m := receiverModel(normalizeReceiverTimes(r))
+	m := newReceiverModel(normalizeReceiverTimes(r))
 
 	res := s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&m)
 	if res.Error != nil {
@@ -116,7 +134,7 @@ func (s *Store) UpdateReceiverConfig(ctx context.Context, r ReceiverConfig) erro
 	res := s.db.WithContext(ctx).Model(&receiverModel{}).Where("id = ?", r.ID).
 		Select("public_key", "allowed_servers", "path", "retention", "stale_after", "stale_notifications", "download_notifications", "updated_at", "updated_by").
 		Updates(&receiverModel{
-			PublicKey: r.PublicKey, AllowedServers: r.AllowedServers, Path: r.Path, Retention: r.Retention, StaleAfter: r.StaleAfter,
+			AllowedServers: r.AllowedServers, Path: r.Path, Retention: r.Retention, StaleAfter: r.StaleAfter,
 			StaleNotifications: r.StaleNotifications, DownloadNotifications: r.DownloadNotifications,
 			UpdatedAt: r.UpdatedAt, UpdatedBy: r.UpdatedBy,
 		})
@@ -147,27 +165,31 @@ func (s *Store) DeleteReceiverConfig(ctx context.Context, id string) error {
 	return nil
 }
 
-// ImportReceiverConfigs stores every entry of rs whose id isn't stored yet,
-// leaving existing rows (possibly edited in the web UI since) untouched, and
-// returns the ids it inserted. Used once per startup to carry the config
-// file's deprecated receivers: entries over into the state db.
-func (s *Store) ImportReceiverConfigs(ctx context.Context, rs []ReceiverConfig) ([]string, error) {
-	rows := make([]receiverModel, len(rs))
-	for i, r := range rs {
-		rows[i] = receiverModel(normalizeReceiverTimes(r))
-	}
-
-	imported, err := insertMissing(ctx, s.db, rows, func(m receiverModel) string { return m.ID })
-	if err != nil {
-		return nil, fmt.Errorf("importing receivers: %w", err)
-	}
-
-	return imported, nil
-}
-
 func normalizeReceiverTimes(r ReceiverConfig) ReceiverConfig {
 	r.CreatedAt = r.CreatedAt.UTC()
 	r.UpdatedAt = r.UpdatedAt.UTC()
 
 	return r
+}
+
+// ListReceiversRelyingOnPublicKey returns the ids of stored receivers that
+// still authenticate senders only by a public key, which v8.0.0 removed: a
+// public key and no allowed servers. They can no longer accept uploads
+// until a sender is added as a trusted server and allowed on them.
+func (s *Store) ListReceiversRelyingOnPublicKey(ctx context.Context) ([]string, error) {
+	var rows []receiverModel
+
+	if err := s.read.WithContext(ctx).Where("public_key <> ''").Order("id").Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("reading receivers: %w", err)
+	}
+
+	var ids []string
+
+	for _, m := range rows {
+		if len(m.AllowedServers) == 0 {
+			ids = append(ids, m.ID)
+		}
+	}
+
+	return ids, nil
 }

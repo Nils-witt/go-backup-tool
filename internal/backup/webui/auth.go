@@ -17,7 +17,8 @@
 //
 // None of this applies to the receiver API (internal/backup/receiver),
 // which shares the same HTTP server but authenticates each sending
-// instance with its own per-receiver public-key-verified JWT.
+// instance by a JWT signed with its key, as one of the receiver's trusted
+// servers.
 
 package webui
 

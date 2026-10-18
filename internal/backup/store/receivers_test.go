@@ -15,7 +15,7 @@ func TestReceiverConfigCRUD(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 
 	r := ReceiverConfig{
-		ID: "a", PublicKey: "pem", Path: "/srv/a", Retention: "30d", StaleAfter: "1d",
+		ID: "a", AllowedServers: []string{"s1"}, Path: "/srv/a", Retention: "30d", StaleAfter: "1d",
 		StaleNotifications: []string{"ops"}, CreatedAt: now, CreatedBy: "erin", UpdatedAt: now, UpdatedBy: "erin",
 	}
 
@@ -57,7 +57,7 @@ func TestReceiverConfigNotFoundAndDelete(t *testing.T) {
 		t.Errorf("UpdateReceiverConfig(missing) error = %v, want ErrReceiverNotFound", err)
 	}
 
-	if err := db.CreateReceiverConfig(ctx, ReceiverConfig{ID: "a", PublicKey: "pem", Path: "/srv/a"}); err != nil {
+	if err := db.CreateReceiverConfig(ctx, ReceiverConfig{ID: "a", AllowedServers: []string{"s1"}, Path: "/srv/a"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -75,34 +75,40 @@ func TestReceiverConfigNotFoundAndDelete(t *testing.T) {
 	}
 }
 
-func TestImportReceiverConfigsKeepsExistingRows(t *testing.T) {
+func TestListReceiversRelyingOnPublicKey(t *testing.T) {
 	t.Parallel()
 
 	db := openTestStore(t)
 	ctx := t.Context()
+	now := time.Now()
 
-	if err := db.CreateReceiverConfig(ctx, ReceiverConfig{ID: "a", PublicKey: "pem", Path: "/edited", CreatedBy: "erin", UpdatedBy: "erin"}); err != nil {
-		t.Fatal(err)
+	// Rows as receivers from before v8.0.0 stored them, with a public key.
+	for _, m := range []receiverModel{
+		{ID: "key-only", PublicKey: "pem", Path: "/srv/a", CreatedAt: now, UpdatedAt: now},
+		{ID: "key-and-server", PublicKey: "pem", AllowedServers: []string{"s1"}, Path: "/srv/b", CreatedAt: now, UpdatedAt: now},
+		{ID: "server-only", AllowedServers: []string{"s1"}, Path: "/srv/c", CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := db.db.WithContext(ctx).Create(&m).Error; err != nil {
+			t.Fatalf("seeding %q: %v", m.ID, err)
+		}
 	}
 
-	imported, err := db.ImportReceiverConfigs(ctx, []ReceiverConfig{
-		{ID: "a", PublicKey: "pem", Path: "/from-yaml", CreatedBy: "config file", UpdatedBy: "config file"},
-		{ID: "b", PublicKey: "pem", Path: "/b", CreatedBy: "config file", UpdatedBy: "config file"},
-	})
-	if err != nil {
-		t.Fatalf("ImportReceiverConfigs() error: %v", err)
+	ids, err := db.ListReceiversRelyingOnPublicKey(ctx)
+	if err != nil || !slices.Equal(ids, []string{"key-only"}) {
+		t.Fatalf("ListReceiversRelyingOnPublicKey() = %v, %v, want [key-only]", ids, err)
 	}
 
-	if !slices.Equal(imported, []string{"b"}) {
-		t.Errorf("imported = %v, want [b]", imported)
+	// Allowing a server (an update) clears the key, which fixes the receiver.
+	if err := db.UpdateReceiverConfig(ctx, ReceiverConfig{ID: "key-only", AllowedServers: []string{"s1"}, Path: "/srv/a", UpdatedAt: now}); err != nil {
+		t.Fatalf("UpdateReceiverConfig() error: %v", err)
 	}
 
-	list, err := db.ListReceiverConfigs(ctx)
-	if err != nil {
-		t.Fatal(err)
+	if ids, err := db.ListReceiversRelyingOnPublicKey(ctx); err != nil || len(ids) != 0 {
+		t.Errorf("after the update ListReceiversRelyingOnPublicKey() = %v, %v, want none", ids, err)
 	}
 
-	if len(list) != 2 || list[0].ID != "a" || list[0].Path != "/edited" || list[1].ID != "b" {
-		t.Errorf("receivers = %+v, want a (edited path kept) and b", list)
+	var key string
+	if err := db.read.Raw("SELECT public_key FROM receivers WHERE id = ?", "key-only").Scan(&key).Error; err != nil || key != "" {
+		t.Errorf("public_key after the update = %q, %v, want it cleared", key, err)
 	}
 }

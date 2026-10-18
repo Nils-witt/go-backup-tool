@@ -219,24 +219,6 @@ func (s *Store) DeleteNotificationConfig(ctx context.Context, id string) error {
 	return nil
 }
 
-// ImportNotificationConfigs stores every entry of ns whose id isn't stored
-// yet, leaving existing rows (possibly edited in the web UI since)
-// untouched, and returns the ids it inserted. Used once per startup to
-// carry the config file's deprecated notifications: over into the state db.
-func (s *Store) ImportNotificationConfigs(ctx context.Context, ns []NotificationConfig) ([]string, error) {
-	rows := make([]notificationModel, len(ns))
-	for i, n := range ns {
-		rows[i] = newNotificationModel(normalizeNotificationTimes(n))
-	}
-
-	imported, err := insertMissing(ctx, s.db, rows, func(m notificationModel) string { return m.ID })
-	if err != nil {
-		return nil, fmt.Errorf("importing notifications: %w", err)
-	}
-
-	return imported, nil
-}
-
 func normalizeNotificationTimes(n NotificationConfig) NotificationConfig {
 	n.CreatedAt = n.CreatedAt.UTC()
 	n.UpdatedAt = n.UpdatedAt.UTC()

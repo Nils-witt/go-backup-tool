@@ -26,12 +26,10 @@
 #   and commands: below are read at every startup, and the web UI
 #   (Settings > Jobs/Servers/Commands, admin only) only shows them.
 # - On: the state db is, and admins manage them in the web UI, where changes
-#   apply without a restart. Entries still listed here are imported once at
-#   startup — each job with the top-level defaults below folded in — and a
-#   name already stored is left alone, so web UI edits win; remove the
-#   sections once imported. This import is DEPRECATED and will be removed
-#   in v8.0.0. Switching back off later makes this file the source again
-#   (what's in the state db is then ignored).
+#   apply without a restart. servers:, jobs: and commands: must then be left
+#   out of this file: since v8.0.0 they're no longer imported, and startup
+#   fails while they're present. Switching back off later makes this file
+#   the source again (what's in the state db is then ignored).
 #
 # gpg-bin/gpg-homedir stay top-level settings every job falls back to either
 # way.
@@ -44,16 +42,18 @@
 # type: selects the destination kind (required; there is no default): "local"
 # for a directory on the local filesystem (e.g. a mounted NFS share, external
 # disk, or another backup tool's watched directory), or "remote" for another
-# go-backup-tool instance's receiver API (see receivers: below). A local
+# go-backup-tool instance's receiver API. A local
 # server only needs path; a target's bucket is still required and is used
 # as a subdirectory under it, so the object ends up at path/bucket/key. A
 # remote server only needs endpoint; a target's bucket is still required
 # and is sent as the id identifying which of the destination instance's
-# receivers: entries to write to. Unlike a local server, a remote server
+# receivers to write to. Unlike a local server, a remote server
 # needs no auth field of its own: every go-backup-tool instance generates
 # its own persistent RSA key pair and UUID on first run (under ./data/keys,
-# next to this file) and signs each request to a remote server with it; see
-# receivers: below for how the destination instance is told to trust it.
+# next to this file) and signs each request to a remote server with it. The
+# destination instance trusts it by adding this instance as a trusted server
+# and allowing it on the receiver (in its web UI, or its settings file; see
+# settings.example.yaml).
 #
 # A local server may also set retention: (e.g. "7d" for 7 days, "168h",
 # "90m" for 90 minutes — "d" for days works alongside every unit Go's
@@ -65,7 +65,7 @@
 # write to that server, and once at startup. Omit retention (the default)
 # to keep objects forever.
 # A remote server has no retention: of its own — that's configured on the
-# destination instance's matching receivers: entry instead.
+# destination instance's matching receiver instead.
 #
 # A job's own targets: entry may set retention: too (same syntax, local
 # servers only), overriding the server's retention: for that job's writes
@@ -152,7 +152,7 @@ servers:
 # pair + UUID, generated on first run — see type: remote above) is stored.
 # Defaults to ./data/keys, next to this file.
 
-# server-name identifies this instance in notifications: (see below) — a
+# server-name identifies this instance in notifications — a
 # {server_name} placeholder, substituted the same way as a stale/download
 # notification's other placeholders or a report notification's, is
 # available in every notification webhook.body/email.subject/email.body.
@@ -166,8 +166,8 @@ servers:
 # webui: configures the optional web UI dashboard (http://host:port/),
 # showing every job's and target's live status (idle/running/ok/failed, last
 # run time, duration, error), and — since it's served by the same HTTP
-# server — the receiver API used by any type: remote targets: (see
-# receivers: below). Omit this section entirely (the default) to disable
+# server — the receiver API used by any type: remote targets:. Omit this
+# section entirely (the default) to disable
 # the web UI. When enabled, the process stays alive to keep serving the
 # dashboard even after every job has finished its (possibly one-shot) run,
 # until stopped (Ctrl-C/SIGTERM) or the config file's timeout elapses.
@@ -180,8 +180,8 @@ servers:
 #   # ticket — needs a signed-in SSO user. Without oidc enabled, nobody can
 #   # sign in and the dashboard stays locked; the receiver API (used by
 #   # other go-backup-tool instances, not browsers) is unaffected either
-#   # way, since it authenticates each request with its own per-receiver
-#   # public-key-verified JSON Web Token.
+#   # way, since it authenticates each request by a JSON Web Token signed by
+#   # one of the receiver's trusted servers.
 #
 #   # log-viewer adds a "Logs" section to the dashboard, showing this
 #   # process's own recent log output (polled from /api/logs) to every user
@@ -307,12 +307,6 @@ jobs:
     # armor: true); names must be unique within the job and can't contain
     # "/" or start with ".". If one command fails, the files that were
     # produced are still uploaded and the run is reported incomplete.
-    #
-    # A job's single command: (command: dump-database) is DEPRECATED and
-    # will be removed in v8.0.0: it still works, as a files: list with just
-    # that entry, with a warning logged. A job's own inline cmd: is
-    # DEPRECATED too, and also removed in v8.0.0: it's turned into a
-    # commands: entry of its own at startup (id "job-<name>").
     files:
       - command: dump-database
       - command: dump-schema
@@ -329,7 +323,7 @@ jobs:
     # gpg-bin: gpg
     # gpg-homedir: ""
     # failure-notifications (optional) names notifications (by id, as
-    # managed in the web UI — see notifications: below) to fire whenever
+    # managed in the web UI or a settings file) to fire whenever
     # this job's run ends in an error on any target — every target failing
     # or just some. An id that doesn't exist is logged at startup and
     # skipped when firing. Accepts the {job}, {error}, {state} ("failed"
@@ -361,8 +355,7 @@ jobs:
     # A local server works the same way (see "nas" above): the file is
     # written to /mnt/backups/my-backup-bucket-local/uploads-<time>/dump-uploads.tar.gz.gpg. A
     # remote server (see "sibling-instance" above) sends bucket as the id
-    # naming which of the destination instance's receivers: entries to
-    # write to.
+    # naming which of the destination instance's receivers to write to.
     targets:
       - server: nas
         bucket: my-backup-bucket-local
@@ -383,65 +376,14 @@ jobs:
         # on-recover:
         #   command: resolve-oncall
       - server: sibling-instance
-        bucket: from-primary # = id of a receivers: entry on sibling-instance
+        bucket: from-primary # = id of a receiver on sibling-instance
     # no interval: this job runs once and doesn't repeat, even though
     # "database" above keeps the whole process alive
 
-# receivers: is DEPRECATED and will be removed in v8.0.0. Receivers — the
-# destination side of another go-backup-tool instance's type: remote target
-# above — are managed in the web UI now (Receiver settings, admin only),
-# stored in the state db, and take effect immediately without a restart. Any
-# receivers: entries still listed here are imported into the state db once at
-# startup (an id already stored is left alone, so web UI edits win) and a
-# warning is logged; remove the section once imported. The receiver API is
-# only reachable when webui.enabled: true is set (it's served by the same
-# HTTP server as the dashboard), and receiver paths set from the web UI must
-# lie inside webui.receivers-base-dir: (see webui: above).
-#
-# Each receiver's id is what a sender's target names as its bucket.
-# public-key is DEPRECATED and will be removed in v8.0.0: add the sender as a
-# trusted server and allow it on the receiver in the web UI instead. Until
-# then, public-key must be the sending instance's own public key — the
-# contents of that instance's ./data/keys/server.pub (see "sibling-instance"
-# above) — so this instance can verify the JSON Web Token every request from
-# it is signed with, instead of a shared secret (imported receivers accept it
-# alongside any trusted servers later allowed on them in the web UI, which
-# replace it); path is the root directory incoming objects for this id are
-# written under (object ends up at path/key, mirroring a local server's
-# path/bucket/key); retention (optional, same syntax as a local server's)
-# deletes objects here once they're older than that.
-#
-# stale-after and stale-notifications (optional, set together) monitor this
-# receiver for a sender that's stopped showing up: once at least one file has
-# been received under path, if the most recent one is older than stale-after
-# (same duration syntax as retention), go-backup-tool fires every
-# notifications: entry named in stale-notifications (see notifications:
-# below). A receiver that has never received anything at all never fires —
-# there's no file to be stale — so this only alerts on a sender that
-# stopped, not one that never started. It's checked about once a minute and
-# fires once per gap, not on every check — a fresh file resets it so it can
-# fire again on the next gap.
-#
-# download-notifications (optional, independent of stale-after/
-# stale-notifications) names notifications: entries to fire every time a
-# file is successfully downloaded from this receiver through the dashboard.
-#
-# Both accept the {receiver_id}, {path}, {stale_after}, {last_received} (an
-# RFC 3339 timestamp) placeholders (stale-notifications) or {user}, {file},
-# {receiver}, {time} (an RFC 3339 timestamp) placeholders
-# (download-notifications) in a notification's webhook.body/email.subject/
-# email.body — see notifications: below.
-# receivers:
-#   - id: from-primary
-#     public-key: |
-#       -----BEGIN PUBLIC KEY-----
-#       ...paste sibling-instance's own data/keys/server.pub here...
-#       -----END PUBLIC KEY-----
-#     path: /mnt/remote-backups/from-primary
-#     retention: 30d
-#     stale-after: 26h # alert if sibling-instance's daily job hasn't shown up
-#     stale-notifications: [pagerduty]
-#     download-notifications: [slack-downloads]
+# Receivers, notifications and the report are managed in the web UI (or a
+# settings file, see settings.example.yaml and -import-settings). v8.0.0
+# removed their receivers:, notifications: and report: sections from this
+# file.
 
 # A job's key keeps its {time} placeholder each time it (re-)runs, so a
 # repeating job gets a fresh object on every run instead of overwriting the
@@ -449,7 +391,7 @@ jobs:
 # {time} placeholder at all.
 
 # smtp: is the outgoing mail server used by any notification with an email
-# channel (see notifications: below). It stays in this file — it isn't
+# channel (see settings.example.yaml). It stays in this file — it isn't
 # configurable in the web UI — and changing it needs a restart. Omit
 # entirely if no notification uses email.
 # smtp:
@@ -469,60 +411,6 @@ jobs:
 #   # never encrypts, for a trusted local relay only.
 #   security: starttls
 
-# notifications: is DEPRECATED and will be removed in v8.0.0. Notifications
-# are managed in the web UI now (Settings > Notifications, admin only),
-# stored in the state db, and edits apply immediately without a restart. Any
-# entries still listed here are imported into the state db once at startup
-# (an id already stored is left alone, so web UI edits win) and a warning is
-# logged; remove the section once imported. A notification can't be deleted
-# in the web UI while a job, receiver, or the report still references it.
-# Webhook header values are write-only there: they're never shown again after
-# saving. The format below is what the import reads.
-#
-# notifications: are named, reusable webhook/email destinations, referenced
-# by id from report.notifications: below and a receivers: entry's
-# stale-notifications:/download-notifications: above. Each entry needs at
-# least one of webhook: or email: — set both to fire both channels for that
-# id. webhook.url is the only required field; webhook.method defaults to
-# POST, webhook.headers (optional) is a map of header name to value, and
-# webhook.body (optional) is the request body — if unset, it defaults to a
-# JSON summary of whatever fired it. email.to is the only required field;
-# email.from defaults to smtp.username, and email.subject/email.body
-# (optional) default to the firing trigger's own text — set them to
-# override with the same {placeholder} syntax webhook.body accepts. Every
-# trigger's placeholders (stale/download/report, see receivers: and report:
-# below) also include {server_name}, this instance's top-level server-name:
-# (see above), "" if unset.
-#
-# email.encrypt (optional) GPG-encrypts that email's body as OpenPGP/MIME
-# (RFC 3156) before sending, so a notification's contents (which may include
-# receiver/download detail) aren't readable in transit or sitting in an
-# inbox provider — only the subject line stays in the clear, since SMTP/MIME
-# headers are never covered by this. encrypt.recipients names the GPG
-# identities (fingerprint or email address) to encrypt to; each must already
-# have its public key imported into the keyring the top-level
-# gpg-bin/gpg-homedir (see above) resolve to (`gpg --import their-key.asc`) —
-# encrypted emails use the same gpg binary and keyring as backups.
-# notifications:
-#   - id: ops-email
-#     email:
-#       to: ["ops@example.com"]
-#   - id: ops-email-encrypted
-#     email:
-#       to: ["ops@example.com"]
-#       encrypt:
-#         recipients: ["ops@example.com"]
-#   - id: pagerduty
-#     webhook:
-#       url: "https://events.eu.pagerduty.com/v2/enqueue"
-#       method: POST
-#       headers:
-#         Content-Type: application/json
-#       body: '{"payload":{"summary":"from-primary backup stale, last file {last_received}","severity":"critical","source":"go-backup-tool"},"routing_key":"replace-with-your-pagerduty-routing-key","event_action":"trigger"}'
-#   - id: slack-downloads
-#     webhook:
-#       url: "https://hooks.slack.com/services/replace-with-your-webhook-path"
-#       body: '{"text":"{user} downloaded {file} from {receiver} at {time}"}'
 
 # docker-socket is the Docker daemon a command's container: runs
 # through: a Unix socket path (optionally written unix:///path) or a
@@ -536,12 +424,12 @@ jobs:
 
 # commands: are named, reusable commands, referenced by id from a
 # job's files: (its backup sources) and from a job target's
-# on-error.command or on-recover.command (see targets: above) — the same
-# "define once, reference by id" shape as notifications: above. id is
+# on-error.command or on-recover.command (see targets: above). id is
 # required and must be unique; cmd is required and is run through the
 # platform shell (sh -c on Linux/macOS, cmd /C on Windows) — it's
 # operator-supplied config, not sanitized in any way. Like jobs, commands
-# are imported into the state db once webui.job-editing is on.
+# move to the web UI once webui.job-editing is on (see the top of this
+# file).
 #
 # timeout (optional, same duration syntax as retention:) bounds how long one
 # run may take. As an on-error/on-recover hook it defaults to 30s; as one of
@@ -603,34 +491,3 @@ commands:
 #     container: my-app
 #   - id: resolve-oncall
 #     cmd: "curl -fsS -X POST https://events.example.com/resolve -d \"target=$GBT_TARGET&failures=$GBT_CONSECUTIVE_FAILURES\""
-
-# report: is DEPRECATED and will be removed in v8.0.0. The report is
-# configured in the web UI now (Settings > Report, admin only), stored in the
-# state db, and a changed schedule applies immediately. A report: section
-# still here is imported into the state db once, only if none is stored yet,
-# and a warning is logged; remove it once imported.
-#
-# report: configures an optional summary of this instance's receiver
-# activity: how many files each configured receivers: entry received since
-# the previous report, any receiver API errors, and any receiver currently
-# stale (see receivers: above). Independent of webui: — it's sent regardless
-# of whether the dashboard is enabled, as long as at least one receivers:
-# entry exists to report on. Omit this section entirely (the default) to
-# disable it.
-# report:
-#   enabled: true
-#   # schedule: a standard 5-field cron expression (minute hour
-#   # day-of-month month day-of-week), always evaluated in UTC regardless
-#   # of this machine's time zone (a CRON_TZ=/TZ= prefix is rejected); also
-#   # accepts cron's descriptor shorthands (e.g. "@daily", "@every 6h").
-#   # Default "0 7 * * *" (once a day at 07:00 UTC).
-#   schedule: "0 7 * * *"
-#   # notifications: names notifications: entries (see above) to send this
-#   # report to. An email: channel receives the full report as its body,
-#   # with its subject: (default "go-backup-tool report - {end}")
-#   # substituted the same way a stale/download notification's placeholders
-#   # are — {start}/{end} are the report window's bounds in UTC, formatted
-#   # "2006-01-02 15:04"; {receivers}, {errors}, {stale}, {jobs}, and
-#   # {job-errors} are counts of each section. A webhook: channel receives a
-#   # JSON summary of the same counts, or its own body: template.
-#   notifications: [ops-email]

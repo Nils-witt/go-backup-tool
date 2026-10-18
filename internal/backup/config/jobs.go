@@ -133,26 +133,8 @@ func defaultFileExt(c Command) string {
 	}
 }
 
-// hasCommand reports whether fj names any command, through files: or the
-// deprecated command:.
-func (fj *FileJob) hasCommand() bool {
-	return strings.TrimSpace(fj.Command) != "" || len(fj.Files) > 0
-}
-
-// NormalizeFiles moves fj's deprecated single Command into Files, as its
-// only entry, and trims every entry's fields. Setting both is an error.
-func (fj *FileJob) NormalizeFiles() error {
-	command := strings.TrimSpace(fj.Command)
-	if command != "" && len(fj.Files) > 0 {
-		return errors.New("set either files or the deprecated command, not both")
-	}
-
-	if command != "" {
-		fj.Files = []FileJobFile{{Command: command}}
-	}
-
-	fj.Command = ""
-
+// NormalizeFiles trims fj's files: entries' command ids and names.
+func (fj *FileJob) NormalizeFiles() {
 	files := make([]FileJobFile, len(fj.Files))
 	for i, f := range fj.Files {
 		files[i] = FileJobFile{Command: strings.TrimSpace(f.Command), Name: strings.TrimSpace(f.Name)}
@@ -161,8 +143,6 @@ func (fj *FileJob) NormalizeFiles() error {
 	if len(files) > 0 {
 		fj.Files = files
 	}
-
-	return nil
 }
 
 // ValidateFileName reports whether name can be one file of a backup: a
@@ -357,9 +337,7 @@ func ResolveJob(fj FileJob, gpg notify.GPGSettings, servers map[string]ResolvedS
 		return nil, errors.New("name is required")
 	}
 
-	if err := fj.NormalizeFiles(); err != nil {
-		return nil, err
-	}
+	fj.NormalizeFiles()
 
 	cfg := newConfigDefaults()
 	cfg.Name = name

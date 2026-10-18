@@ -69,7 +69,7 @@ func runCommands(extra ...config.FileCommand) []config.FileCommand {
 // time far in the future, so it never actually runs during a test.
 func job(name, server string) config.FileJob {
 	return config.FileJob{
-		Name: name, Command: "run", Recipients: []string{"me@example.com"},
+		Name: name, Files: []config.FileJobFile{{Command: "run"}}, Recipients: []string{"me@example.com"},
 		Interval: "1h", StartTime: "2999-01-01T00:00:00Z",
 		Targets: []config.FileJobTarget{{Server: server, Bucket: "b"}},
 	}
@@ -84,29 +84,28 @@ func statusNames(s *status.Store) []string {
 	return names
 }
 
-func TestLoadImportsConfigFile(t *testing.T) {
+func TestLoadResolvesStoredDefinitions(t *testing.T) {
 	t.Parallel()
 
 	db := openTestStateDB(t)
 	ctx := t.Context()
 
-	// Stored before: edits made in the web UI win over the config file.
+	// db's stored definition names a server that doesn't exist.
 	if err := db.CreateJobConfig(ctx, toStoreJob(normalizeJob(job("db", "edited")))); err != nil {
 		t.Fatal(err)
 	}
 
 	m := newTestManager(t, db, Settings{Editing: true})
 
-	err := m.Load(ctx,
+	err := loadStored(t, m,
 		[]config.FileServer{localServer("nas"), {Name: "broken", Type: "nope"}},
 		runCommands(config.FileCommand{ID: "page", Cmd: "echo"}),
-		[]config.FileJob{job("db", "nas"), job("files", "nas"), job("orphan", "broken")},
+		[]config.FileJob{job("files", "nas"), job("orphan", "broken")},
 	)
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	// db keeps its stored (edited) definition, whose server doesn't exist.
 	if got := m.Names(); !slices.Equal(got, []string{"files"}) {
 		t.Errorf("Names() = %v, want [files]", got)
 	}
@@ -118,7 +117,7 @@ func TestLoadImportsConfigFile(t *testing.T) {
 	checkLoadedLists(t, m)
 }
 
-// checkLoadedLists checks TestLoadImportsConfigFile's listings: only job
+// checkLoadedLists checks TestLoadResolvesStoredDefinitions' listings: only job
 // files resolves, server broken doesn't, and nas is used by files.
 func checkLoadedLists(t *testing.T, m testManager) {
 	t.Helper()
@@ -264,7 +263,7 @@ func TestCreateJobValidates(t *testing.T) {
 	m := newTestManager(t, openTestStateDB(t), Settings{Editing: true})
 	ctx := t.Context()
 
-	if err := m.Load(ctx, nil, runCommands(), nil); err != nil {
+	if err := loadStored(t, m, nil, runCommands(), nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -294,7 +293,7 @@ func TestJobCRUD(t *testing.T) {
 	m := newTestManager(t, openTestStateDB(t), Settings{Editing: true})
 	ctx := t.Context()
 
-	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, runCommands(), nil); err != nil {
+	if err := loadStored(t, m, []config.FileServer{localServer("nas")}, runCommands(), nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -307,7 +306,7 @@ func TestJobCRUD(t *testing.T) {
 	}
 
 	updated := job("db", "nas")
-	updated.Command = "new"
+	updated.Files = []config.FileJobFile{{Command: "new"}}
 
 	if err := m.UpdateJob(ctx, "frank", updated); err != nil {
 		t.Fatalf("UpdateJob() error: %v", err)
@@ -328,7 +327,7 @@ func TestDeleteJob(t *testing.T) {
 	m := newTestManager(t, openTestStateDB(t), Settings{Editing: true})
 	ctx := t.Context()
 
-	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, runCommands(), []config.FileJob{job("db", "nas")}); err != nil {
+	if err := loadStored(t, m, []config.FileServer{localServer("nas")}, runCommands(), []config.FileJob{job("db", "nas")}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -359,7 +358,7 @@ func TestServerAndCommandEditsApplyToJobs(t *testing.T) {
 	j.Targets[0].Retention = "30d"
 	j.Targets[0].OnRecover = &config.FileTargetOnRecover{Command: "resolve"}
 
-	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, runCommands(config.FileCommand{ID: "resolve", Cmd: "echo old"}), []config.FileJob{j}); err != nil {
+	if err := loadStored(t, m, []config.FileServer{localServer("nas")}, runCommands(config.FileCommand{ID: "resolve", Cmd: "echo old"}), []config.FileJob{j}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -424,7 +423,7 @@ func TestScheduling(t *testing.T) {
 	m := newTestManager(t, openTestStateDB(t), Settings{Editing: true})
 	ctx := t.Context()
 
-	if err := m.Load(ctx, []config.FileServer{localServer("nas")}, runCommands(), nil); err != nil {
+	if err := loadStored(t, m, []config.FileServer{localServer("nas")}, runCommands(), nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -439,7 +438,7 @@ func TestScheduling(t *testing.T) {
 
 	first := waitForRun(t, m.status, "db", time.Time{})
 
-	j.Command = "fail2"
+	j.Files = []config.FileJobFile{{Command: "fail2"}}
 	if err := m.UpdateJob(ctx, "erin", j); err != nil {
 		t.Fatalf("UpdateJob() error: %v", err)
 	}
@@ -500,4 +499,32 @@ func waitForRun(t *testing.T, s *status.Store, name string, since time.Time) tim
 	t.Fatalf("job %s didn't run", name)
 
 	return time.Time{}
+}
+
+// loadStored stores servers, commands and jobs as the web UI would, then
+// loads m. With job-editing on, the state db is the only source of them.
+func loadStored(t *testing.T, m testManager, servers []config.FileServer, commands []config.FileCommand, jobs []config.FileJob) error {
+	t.Helper()
+
+	ctx := t.Context()
+
+	for _, fs := range servers {
+		if err := m.db.CreateServerConfig(ctx, toStoreServer(normalizeServer(fs))); err != nil {
+			t.Fatalf("CreateServerConfig(%q) error: %v", fs.Name, err)
+		}
+	}
+
+	for _, fc := range commands {
+		if err := m.db.CreateCommandConfig(ctx, toStoreCommand(normalizeCommand(fc))); err != nil {
+			t.Fatalf("CreateCommandConfig(%q) error: %v", fc.ID, err)
+		}
+	}
+
+	for _, fj := range jobs {
+		if err := m.db.CreateJobConfig(ctx, toStoreJob(normalizeJob(fj))); err != nil {
+			t.Fatalf("CreateJobConfig(%q) error: %v", fj.Name, err)
+		}
+	}
+
+	return m.Load(ctx, nil, nil, nil)
 }

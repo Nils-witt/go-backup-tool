@@ -21,7 +21,6 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
-	"nilswitt.dev/go-backup-tool/internal/version"
 )
 
 var (
@@ -169,7 +168,6 @@ func (m *Manager) Load(ctx context.Context, fileServers []config.FileServer, fil
 
 		m.warnIgnoredStoredLocked(ctx)
 	} else {
-		m.importLocked(ctx, fileServers, fileCommands, fileJobs)
 		m.readStoredLocked(ctx)
 	}
 
@@ -196,54 +194,6 @@ func (m *Manager) Load(ctx context.Context, fileServers []config.FileServer, fil
 	}
 
 	return nil
-}
-
-// importLocked carries the config file's deprecated sections over into the
-// state db. m.mu must be held.
-func (m *Manager) importLocked(ctx context.Context, fileServers []config.FileServer, fileCommands []config.FileCommand, fileJobs []config.FileJob) {
-	now := time.Now()
-
-	if len(fileServers) > 0 {
-		rows := make([]store.ServerConfig, len(fileServers))
-		for i, fs := range fileServers {
-			rows[i] = toStoreServer(normalizeServer(fs))
-			rows[i].CreatedAt, rows[i].CreatedBy, rows[i].UpdatedAt, rows[i].UpdatedBy = now, configFileUser, now, configFileUser
-		}
-
-		imported, err := m.db.ImportServerConfigs(ctx, rows)
-		m.logImport("servers", len(rows), imported, err)
-	}
-
-	if len(fileCommands) > 0 {
-		rows := make([]store.CommandConfig, len(fileCommands))
-		for i, fc := range fileCommands {
-			rows[i] = toStoreCommand(normalizeCommand(fc))
-			rows[i].CreatedAt, rows[i].CreatedBy, rows[i].UpdatedAt, rows[i].UpdatedBy = now, configFileUser, now, configFileUser
-		}
-
-		imported, err := m.db.ImportCommandConfigs(ctx, rows)
-		m.logImport("commands", len(rows), imported, err)
-	}
-
-	if len(fileJobs) > 0 {
-		rows := make([]store.JobConfig, len(fileJobs))
-		for i, fj := range fileJobs {
-			rows[i] = toStoreJob(normalizeJob(fj))
-			rows[i].CreatedAt, rows[i].CreatedBy, rows[i].UpdatedAt, rows[i].UpdatedBy = now, configFileUser, now, configFileUser
-		}
-
-		imported, err := m.db.ImportJobConfigs(ctx, rows)
-		m.logImport("jobs", len(rows), imported, err)
-	}
-}
-
-func (m *Manager) logImport(section string, total int, imported []string, err error) {
-	if err != nil {
-		m.log.Error("importing config file "+section+" into the state db", "err", err)
-	}
-
-	m.log.Warn(section+": in the config file is ignored once imported, since webui.job-editing manages "+section+" in the web UI, and won't be imported at all from "+version.DeprecatedConfigRemoval+"; remove the "+section+": section from the config file",
-		"imported", imported, "already_stored", total-len(imported))
 }
 
 // warnIgnoredStoredLocked warns when the state db still holds jobs from an
@@ -712,8 +662,6 @@ func (m *Manager) usersLocked(byServer bool) map[string][]string {
 
 	for _, name := range slices.Sorted(maps.Keys(m.jobDefs)) {
 		if !byServer {
-			add(strings.TrimSpace(m.jobDefs[name].Command), name)
-
 			for _, f := range m.jobDefs[name].Files {
 				add(strings.TrimSpace(f.Command), name)
 			}

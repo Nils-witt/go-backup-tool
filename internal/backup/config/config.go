@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
-	"nilswitt.dev/go-backup-tool/internal/backup/report"
 )
 
 // Config holds one backup job's parameters.
@@ -218,25 +217,14 @@ type RunConfig struct {
 	DockerSocket string
 	ConfigPath   string // where the config file was loaded from; state db lives alongside it
 	LogLevel     slog.Level
-	LogFile      string                      // empty disables file logging; otherwise log output is also appended here
-	Receivers    map[string]ResolvedReceiver // the config file's (deprecated) receivers: entries, keyed by id; imported into the state db at startup, see receiver.Manager
+	LogFile      string // empty disables file logging; otherwise log output is also appended here
 
-	// FileReceivers are the config file's receivers: entries as written,
-	// already validated into Receivers above, kept raw so receiver.Manager
-	// can import them into the state db's receivers table, which is where
-	// every receiver lives from then on (managed in the web UI).
-	FileReceivers []FileReceiver
-
-	// FileNotifications are the config file's (deprecated) notifications:
-	// entries as written, already validated, kept raw so settings.Manager
-	// can import them into the state db, where every notification lives
-	// from then on (managed in the web UI).
-	FileNotifications []notify.FileNotification
-
-	// Warnings are deprecation notices found while parsing the config
-	// file (e.g. a job's inline cmd:, see convertInlineJobCommands), for
-	// the caller to log once logging is set up.
-	Warnings []string
+	// ExportSettings and ImportSettings (-export-settings/-import-settings)
+	// name a settings file (see the settingsfile package) to write or apply
+	// instead of running jobs; the process exits once that's done. At most
+	// one is set.
+	ExportSettings string
+	ImportSettings string
 
 	// SMTP is the config file's resolved smtp: entry, and GPG its
 	// gpg-bin/gpg-homedir: what every email notification — including ones
@@ -296,12 +284,4 @@ type RunConfig struct {
 	// internal/backup/webui. Disabled leaves the dashboard locked (see
 	// resolveOIDCSettings).
 	OIDC OIDCSettings
-
-	// FileReport is the config file's (deprecated) report: entry as
-	// written, its schedule already validated, kept raw so settings.Manager
-	// can import it into the state db, where the report's settings live
-	// from then on (managed in the web UI). The report itself — a periodic
-	// summary of receiver and job activity, see reporter.Run — is
-	// independent of the web UI.
-	FileReport report.FileReport
 }

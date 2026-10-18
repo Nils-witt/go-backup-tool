@@ -75,7 +75,7 @@ func checkTrustedServerLists(t *testing.T, srv *Server, admin, id string) {
 	}
 
 	if len(receivers.TrustedServers) != 1 || receivers.TrustedServers[0] != (trustedServerOptionJSON{ID: id, Name: "nas-2"}) ||
-		len(receivers.Receivers) != 1 || len(receivers.Receivers[0].AllowedServers) != 1 || receivers.Receivers[0].PublicKey != "" {
+		len(receivers.Receivers) != 1 || len(receivers.Receivers[0].AllowedServers) != 1 {
 		t.Errorf("receiver list = %+v", receivers)
 	}
 }
