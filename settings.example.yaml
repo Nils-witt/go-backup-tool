@@ -109,6 +109,23 @@
 # fires once per gap, not on every check — a fresh file resets it so it can
 # fire again on the next gap.
 #
+# type (optional) is "backup" (the default) or "directory". A backup
+# receiver stores whole backups from backup jobs, as described above. A
+# directory receiver accepts single files from on-change jobs (see
+# config.example.yaml) under the path each was sent with: the versions of
+# docs/a.txt are kept in path/docs/a.txt.gbtv/, one file per version named
+# <version>-<sha256 of the plaintext>.gpg. When a file arrives whose
+# content equals its newest version, nothing new is stored. Each receiver
+# type only accepts its own kind of upload, and a receiver's type can't be
+# changed once created.
+#
+# A directory receiver has two retention rules: keep-versions keeps the
+# newest N versions of every file, and retention keeps every version
+# received less than that long ago. A version is deleted only once neither
+# rule that's set keeps it any more; the newest version of a file is never
+# deleted, and with neither rule set nothing is. keep-versions is only valid
+# on a directory receiver.
+#
 # download-notifications (optional, independent of stale-after/
 # stale-notifications) names notifications: entries to fire every time a
 # file is successfully downloaded from this receiver through the dashboard.
@@ -126,6 +143,12 @@
 #     stale-after: 26h # alert if sibling-instance's daily job hasn't shown up
 #     stale-notifications: [pagerduty]
 #     download-notifications: [slack-downloads]
+#   - id: documents
+#     type: directory
+#     allowed-servers: [6f1c2a4e-8d3b-4c5a-9e7f-0a1b2c3d4e5f]
+#     path: /mnt/remote-backups/documents
+#     keep-versions: 5 # keep the 5 newest versions of every file ...
+#     retention: 90d   # ... and every version from the last 90 days
 
 # report: configures an optional summary of this instance's receiver
 # activity: how many files each configured receivers: entry received since

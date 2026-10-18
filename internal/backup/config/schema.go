@@ -26,6 +26,15 @@ import (
 type FileJob struct {
 	Name string `yaml:"name" json:"name"`
 
+	// Type is the job's kind: "backup" (the default when unset) runs
+	// files: and uploads their output as one backup; "on-change" uploads
+	// every changed file under Source instead (see JobKindOnChange).
+	Type string `yaml:"type,omitempty" json:"type"`
+
+	// Source is an on-change job's directory tree (see FileJobSource). Not
+	// valid on a backup job.
+	Source *FileJobSource `yaml:"source,omitempty" json:"source,omitempty"`
+
 	// Files are the backup's files, each one a commands: entry (by id) whose
 	// encrypted output is stored under the backup's key, run in order. The
 	// key is files:, not commands:, since the top-level job defaults share

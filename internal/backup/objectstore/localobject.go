@@ -53,6 +53,13 @@ func WriteLocalObject(cfg *config.Config, t *config.Target, r io.Reader) error {
 		}
 	}
 
+	return writeFileAtomically(dir, dst, r)
+}
+
+// writeFileAtomically streams r into a temp file in dir (which must exist),
+// syncs it, and renames it to dst, so a reader never observes a partially
+// written file and a failure leaves nothing at dst.
+func writeFileAtomically(dir, dst string, r io.Reader) error {
 	tmp, err := os.CreateTemp(dir, ".*.tmp")
 	if err != nil {
 		return fmt.Errorf("creating temp file in %q: %w", dir, err)

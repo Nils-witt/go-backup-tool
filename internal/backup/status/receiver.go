@@ -1,6 +1,7 @@
 package status
 
 import (
+	"cmp"
 	"slices"
 	"sort"
 	"sync"
@@ -16,15 +17,17 @@ import (
 // they reflect what's actually on disk (like LastReceivedAt) rather than
 // live state this process tracks as requests come in.
 type ReceiverSnapshot struct {
-	ID         string    `json:"id"`
-	Path       string    `json:"path"`
-	Retention  string    `json:"retention,omitempty"`
-	State      RunState  `json:"state"` // idle until the first object is received
-	LastKey    string    `json:"last_key,omitempty"`
-	LastSeen   time.Time `json:"last_seen"` // zero if nothing has been received yet
-	Error      string    `json:"error,omitempty"`
-	StaleAfter string    `json:"stale_after,omitempty"` // set only when this receiver has stale-after: configured
-	Stale      bool      `json:"stale,omitempty"`       // true once the most recent file is older than StaleAfter; always false when StaleAfter is unset
+	ID           string    `json:"id"`
+	Kind         string    `json:"kind"` // the receiver's type: "backup" or "directory"
+	Path         string    `json:"path"`
+	Retention    string    `json:"retention,omitempty"`
+	KeepVersions int       `json:"keep_versions,omitempty"` // a directory receiver's keep-versions:
+	State        RunState  `json:"state"`                   // idle until the first object is received
+	LastKey      string    `json:"last_key,omitempty"`
+	LastSeen     time.Time `json:"last_seen"` // zero if nothing has been received yet
+	Error        string    `json:"error,omitempty"`
+	StaleAfter   string    `json:"stale_after,omitempty"` // set only when this receiver has stale-after: configured
+	Stale        bool      `json:"stale,omitempty"`       // true once the most recent file is older than StaleAfter; always false when StaleAfter is unset
 }
 
 // ReceiverStore tracks the live state of every configured receiver,
@@ -54,7 +57,8 @@ func NewReceiverStore(receivers map[string]config.ResolvedReceiver) *ReceiverSto
 
 	for _, id := range ids {
 		recv := receivers[id]
-		s.byID[id] = &ReceiverSnapshot{ID: id, Path: recv.Path, Retention: intervalString(recv.Retention), State: StateIdle}
+		s.byID[id] = &ReceiverSnapshot{ID: id, State: StateIdle}
+		s.byID[id].setConfig(recv)
 	}
 
 	return s
@@ -145,15 +149,23 @@ func (s *ReceiverStore) Upsert(recv config.ResolvedReceiver) {
 	defer s.notifyLocked()
 
 	if r, ok := s.byID[recv.ID]; ok {
-		r.Path = recv.Path
-		r.Retention = intervalString(recv.Retention)
+		r.setConfig(recv)
 
 		return
 	}
 
-	s.byID[recv.ID] = &ReceiverSnapshot{ID: recv.ID, Path: recv.Path, Retention: intervalString(recv.Retention), State: StateIdle}
+	s.byID[recv.ID] = &ReceiverSnapshot{ID: recv.ID, State: StateIdle}
+	s.byID[recv.ID].setConfig(recv)
 	s.order = append(s.order, recv.ID)
 	sort.Strings(s.order)
+}
+
+// setConfig copies recv's configured settings onto r.
+func (r *ReceiverSnapshot) setConfig(recv config.ResolvedReceiver) {
+	r.Kind = string(cmp.Or(recv.Kind, config.ReceiverKindBackup))
+	r.Path = recv.Path
+	r.Retention = intervalString(recv.Retention)
+	r.KeepVersions = recv.KeepVersions
 }
 
 // Remove drops receiver id from the store, a no-op if it isn't present.

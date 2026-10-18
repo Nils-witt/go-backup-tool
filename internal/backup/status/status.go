@@ -7,6 +7,7 @@
 package status
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"sync"
@@ -45,7 +46,15 @@ type TargetSnapshot struct {
 
 // JobSnapshot is one job's current status, as reported over /api/status.
 type JobSnapshot struct {
-	Name      string           `json:"name"`
+	Name string `json:"name"`
+
+	// Kind is the job's type: "backup" or "on-change". Source and Watching
+	// are an on-change job's source path and whether it's watched for
+	// changes between scans.
+	Kind     string `json:"kind"`
+	Source   string `json:"source,omitempty"`
+	Watching bool   `json:"watching,omitempty"`
+
 	Interval  string           `json:"interval,omitempty"`
 	State     RunState         `json:"state"`
 	LastStart time.Time        `json:"last_start"`
@@ -145,11 +154,19 @@ func NewStore(jobs []*config.Config) *Store {
 // newJobSnapshot is job's idle, never-run entry.
 func newJobSnapshot(job *config.Config) *JobSnapshot {
 	snap := &JobSnapshot{Name: job.Name, Interval: intervalString(job.Interval), State: StateIdle, Targets: idleTargets(job)}
+	snap.setKind(job)
+
 	if !job.StartTime.IsZero() {
 		snap.NextRun = job.StartTime
 	}
 
 	return snap
+}
+
+// setKind copies job's type and, for an on-change job, its source onto j.
+func (j *JobSnapshot) setKind(job *config.Config) {
+	j.Kind = string(cmp.Or(job.Kind, config.JobKindBackup))
+	j.Source, j.Watching = job.Source.Path, job.Source.Watch
 }
 
 func idleTargets(job *config.Config) []TargetSnapshot {
@@ -180,6 +197,7 @@ func (s *Store) Upsert(job *config.Config) {
 	}
 
 	j.Interval = intervalString(job.Interval)
+	j.setKind(job)
 
 	targets := idleTargets(job)
 	for i := range targets {

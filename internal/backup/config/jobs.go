@@ -309,6 +309,10 @@ func validateJob(cfg *Config) error {
 // checkJob is validateJob without the job name prefix, for ResolveJob,
 // whose caller already knows which job it asked about.
 func checkJob(cfg *Config) error {
+	if cfg.Kind == JobKindOnChange {
+		return checkOnChangeJob(cfg)
+	}
+
 	switch {
 	case len(cfg.Sources) == 0:
 		return errors.New("at least one file (a command under files:) is required")
@@ -389,6 +393,7 @@ func flattenFileJob(defaults, fj FileJob) FileJob {
 		dst *string
 		def string
 	}{
+		{&out.Type, defaults.Type},
 		{&out.Key, defaults.Key},
 		{&out.Interval, defaults.Interval},
 		{&out.StartTime, defaults.StartTime},
@@ -397,6 +402,12 @@ func flattenFileJob(defaults, fj FileJob) FileJob {
 		if *f.dst == "" {
 			*f.dst = f.def
 		}
+	}
+
+	if out.Source == nil && defaults.Source != nil {
+		src := *defaults.Source
+		src.Exclude = slices.Clone(src.Exclude)
+		out.Source = &src
 	}
 
 	if len(out.Files) == 0 {
@@ -481,6 +492,10 @@ func newJobTargetRef(t FileJobTarget) (jobTargetRef, error) {
 // startup and looked up there when the job fails (see
 // Config.FailureNotifications).
 func applyFileJob(cfg *Config, fj *FileJob) error {
+	if err := applyJobKind(cfg, fj); err != nil {
+		return err
+	}
+
 	if len(fj.Files) > 0 {
 		cfg.fileRefs = make([]FileJobFile, len(fj.Files))
 		for i, f := range fj.Files {
@@ -535,6 +550,37 @@ func applyFileJob(cfg *Config, fj *FileJob) error {
 		// every schedule (and every next-run time it reports) is UTC-based.
 		cfg.StartTime = t.UTC()
 	}
+
+	return nil
+}
+
+// applyJobKind applies fj's type: and source: to cfg. An unset type: keeps
+// cfg's current kind (the top-level default's, if any); source: is only
+// valid on an on-change job, and resolved once the kind is known.
+func applyJobKind(cfg *Config, fj *FileJob) error {
+	if strings.TrimSpace(fj.Type) != "" || cfg.Kind == "" {
+		kind, err := parseJobKind(fj.Type)
+		if err != nil {
+			return err
+		}
+
+		cfg.Kind = kind
+	}
+
+	if fj.Source == nil {
+		return nil
+	}
+
+	if cfg.Kind != JobKindOnChange {
+		return errors.New("source is only valid for an on-change job (type: on-change)")
+	}
+
+	src, err := resolveOnChangeSource(fj.Source)
+	if err != nil {
+		return err
+	}
+
+	cfg.Source = src
 
 	return nil
 }

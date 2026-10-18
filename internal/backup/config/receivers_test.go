@@ -51,8 +51,8 @@ func TestBuildReceivers(t *testing.T) {
 	}
 
 	want := map[string]ResolvedReceiver{
-		"a": {ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a"},
-		"b": {ID: "b", AllowedServers: []string{testSenderID}, Path: "/mnt/b", Retention: 7 * 24 * time.Hour},
+		"a": {ID: "a", Kind: ReceiverKindBackup, AllowedServers: []string{testSenderID}, Path: "/mnt/a"},
+		"b": {ID: "b", Kind: ReceiverKindBackup, AllowedServers: []string{testSenderID}, Path: "/mnt/b", Retention: 7 * 24 * time.Hour},
 	}
 
 	if len(receivers) != len(want) {
@@ -150,7 +150,7 @@ func TestBuildReceiversStaleAfterAndNotifications(t *testing.T) {
 	}
 
 	want := ResolvedReceiver{
-		ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a",
+		ID: "a", Kind: ReceiverKindBackup, AllowedServers: []string{testSenderID}, Path: "/mnt/a",
 		StaleAfter:         6 * time.Hour,
 		StaleNotifications: []string{"pagerduty"},
 		Notifications:      notifications,
@@ -209,7 +209,7 @@ func TestBuildReceiversDownloadNotificationsIndependentOfStaleAfter(t *testing.T
 	}
 
 	want := ResolvedReceiver{
-		ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a",
+		ID: "a", Kind: ReceiverKindBackup, AllowedServers: []string{testSenderID}, Path: "/mnt/a",
 		DownloadNotifications: []string{"slack"},
 		Notifications:         notifications,
 	}

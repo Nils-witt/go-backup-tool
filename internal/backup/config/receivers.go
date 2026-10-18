@@ -22,6 +22,18 @@ import (
 type FileReceiver struct {
 	ID string `yaml:"id" json:"id"`
 
+	// Type is the receiver's kind: "backup" (the default when unset)
+	// accepts whole backups from backup jobs; "directory" accepts single
+	// files from on-change jobs and keeps their versions (see
+	// ReceiverKindDirectory). It can't change once the receiver exists.
+	Type string `yaml:"type,omitempty" json:"type"`
+
+	// KeepVersions (directory receivers only) keeps at least this many of
+	// the newest versions of every path. Together with Retention, a
+	// version is deleted only once no rule set keeps it any more (see
+	// objectstore.SweepFileVersions). 0 sets no version rule.
+	KeepVersions int `yaml:"keep-versions,omitempty" json:"keep_versions"`
+
 	// AllowedServers names the trusted servers (see internal/backup/trust)
 	// allowed to write to this receiver, by server UUID. Every request must
 	// present a JSON Web Token issued by one of them and signed with that
@@ -51,6 +63,14 @@ type FileReceiver struct {
 // the receiver API's handlers.
 type ResolvedReceiver struct {
 	ID string
+
+	// Kind is the receiver's type:. ResolveReceiver always sets it; an
+	// empty Kind is treated as ReceiverKindBackup.
+	Kind ReceiverKind
+
+	// KeepVersions is a directory receiver's keep-versions:; 0 for a
+	// backup receiver.
+	KeepVersions int
 
 	// AllowedServers are the trusted server ids allowed to write to this
 	// receiver, looked up in TrustedServers on every request, so a key
@@ -116,6 +136,11 @@ func ResolveReceiver(fr FileReceiver, notifications *notify.Registry, trusted *t
 		return ResolvedReceiver{}, err
 	}
 
+	kind, err := resolveReceiverKind(fr)
+	if err != nil {
+		return ResolvedReceiver{}, err
+	}
+
 	staleAfter, err := parseStaleAfter(fr.StaleAfter)
 	if err != nil {
 		return ResolvedReceiver{}, err
@@ -135,6 +160,8 @@ func ResolveReceiver(fr FileReceiver, notifications *notify.Registry, trusted *t
 
 	return ResolvedReceiver{
 		ID:                    id,
+		Kind:                  kind,
+		KeepVersions:          fr.KeepVersions,
 		AllowedServers:        allowed,
 		TrustedServers:        trusted,
 		Path:                  fr.Path,
@@ -145,6 +172,52 @@ func ResolveReceiver(fr FileReceiver, notifications *notify.Registry, trusted *t
 		Notifications:         notifications,
 		ServerName:            serverName,
 	}, nil
+}
+
+// ReceiverKind distinguishes a receiver's type:.
+type ReceiverKind string
+
+// The ReceiverKind values a receiver's type: can resolve to.
+const (
+	// ReceiverKindBackup (type: backup, or unset) stores whole backups
+	// uploaded by backup jobs' remote targets.
+	ReceiverKindBackup ReceiverKind = "backup"
+
+	// ReceiverKindDirectory (type: directory) stores single files uploaded
+	// by on-change jobs under the path they were sent with, keeping a new
+	// version whenever a path's content changes.
+	ReceiverKindDirectory ReceiverKind = "directory"
+)
+
+// ParseReceiverKind validates a FileReceiver's Type field; "" is
+// ReceiverKindBackup.
+func ParseReceiverKind(t string) (ReceiverKind, error) {
+	switch strings.TrimSpace(t) {
+	case "", string(ReceiverKindBackup):
+		return ReceiverKindBackup, nil
+	case string(ReceiverKindDirectory):
+		return ReceiverKindDirectory, nil
+	default:
+		return "", fmt.Errorf("unknown type %q (want %q or %q)", t, ReceiverKindBackup, ReceiverKindDirectory)
+	}
+}
+
+// resolveReceiverKind validates fr's type: and the keep-versions: that only
+// a directory receiver may set.
+func resolveReceiverKind(fr FileReceiver) (ReceiverKind, error) {
+	kind, err := ParseReceiverKind(fr.Type)
+	if err != nil {
+		return "", err
+	}
+
+	switch {
+	case fr.KeepVersions < 0:
+		return "", fmt.Errorf("keep-versions must not be negative, got %d", fr.KeepVersions)
+	case fr.KeepVersions > 0 && kind != ReceiverKindDirectory:
+		return "", errors.New("keep-versions is only valid for a directory receiver (type: directory)")
+	}
+
+	return kind, nil
 }
 
 // ValidateReceiverPath reports whether path — a receiver path set from the

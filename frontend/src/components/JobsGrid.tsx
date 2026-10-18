@@ -27,6 +27,25 @@ const jobActionPrompts: Record<JobAction, { message: string; confirmLabel: strin
   retry: { message: "Retry failed targets for", confirmLabel: "Retry" },
 };
 
+// maxOnChangeFiles is how many of an on-change job's last-run files its
+// card lists.
+const maxOnChangeFiles = 5;
+
+// scheduleText describes when j runs.
+function scheduleText(j: JobSnapshot): string {
+  if (j.kind === "on-change") {
+    const parts = [j.watching ? "on change" : "", j.interval ? "scan every " + j.interval : ""];
+    return parts.filter(Boolean).join(", ") || "once";
+  }
+  return j.interval ? "every " + j.interval : "once";
+}
+
+// shownFiles is the part of j's files its card lists.
+function shownFiles(j: JobSnapshot) {
+  const files = j.files ?? [];
+  return j.kind === "on-change" ? files.slice(0, maxOnChangeFiles) : files;
+}
+
 interface JobsGridProps {
   // jobs may come from several instances (see Sourced); remote ones never
   // offer a run or retry, which their API token can't reach.
@@ -117,7 +136,7 @@ export function JobsGrid({ jobs, canRetry, refreshNow, runsByJob }: JobsGridProp
                       mb: 1.5,
                     }}
                   >
-                    <Fact label="Schedule">{j.interval ? "every " + j.interval : "once"}</Fact>
+                    <Fact label="Schedule">{scheduleText(j)}</Fact>
                     <Fact label="Last run" title={fmtTime(j.last_start)}>
                       {fmtRelative(j.last_start)}
                     </Fact>
@@ -137,13 +156,27 @@ export function JobsGrid({ jobs, canRetry, refreshNow, runsByJob }: JobsGridProp
                     </Box>
                   ) : null}
 
+                  {j.kind === "on-change" && j.source ? (
+                    <>
+                      <Typography variant="caption" color="text.secondary">
+                        Source
+                      </Typography>
+                      <Typography
+                        variant="body2"
+                        sx={{ mt: 0.5, mb: 1.5, overflowWrap: "anywhere" }}
+                      >
+                        {j.source}
+                      </Typography>
+                    </>
+                  ) : null}
+
                   {j.files?.length ? (
                     <>
                       <Typography variant="caption" color="text.secondary">
-                        Files
+                        {j.kind === "on-change" ? "Last run's files" : "Files"}
                       </Typography>
                       <Stack spacing={0.5} sx={{ mt: 0.5, mb: 1.5 }}>
-                        {j.files.map((f) => (
+                        {shownFiles(j).map((f) => (
                           <Stack
                             key={f.name}
                             direction="row"
@@ -160,6 +193,11 @@ export function JobsGrid({ jobs, canRetry, refreshNow, runsByJob }: JobsGridProp
                             <StatusChip state={f.state} error={f.error} />
                           </Stack>
                         ))}
+                        {j.files.length > shownFiles(j).length ? (
+                          <Typography variant="caption" color="text.secondary">
+                            and {j.files.length - shownFiles(j).length} more
+                          </Typography>
+                        ) : null}
                       </Stack>
                     </>
                   ) : null}

@@ -19,7 +19,11 @@ type receiverModel struct {
 	// PublicKey is the single sender key receivers used before trusted
 	// servers, removed in v8.0.0. It's always written empty (an update
 	// clears it) and only read by ListReceiversRelyingOnPublicKey.
-	PublicKey             string    `gorm:"column:public_key;not null"`
+	PublicKey string `gorm:"column:public_key;not null"`
+	// Type is the receiver's kind as entered: "" or "backup", or
+	// "directory". KeepVersions is a directory receiver's keep-versions:.
+	Type                  string    `gorm:"column:type;not null;default:''"`
+	KeepVersions          int       `gorm:"column:keep_versions;not null;default:0"`
 	AllowedServers        []string  `gorm:"column:allowed_servers;serializer:json"`
 	Path                  string    `gorm:"column:path;not null"`
 	Retention             string    `gorm:"column:retention;not null;default:''"`
@@ -37,6 +41,8 @@ func (receiverModel) TableName() string { return "receivers" }
 // ReceiverConfig is one stored receiver definition (see receiverModel).
 type ReceiverConfig struct {
 	ID                    string
+	Type                  string
+	KeepVersions          int
 	AllowedServers        []string
 	Path                  string
 	Retention             string
@@ -52,7 +58,7 @@ type ReceiverConfig struct {
 // newReceiverModel maps r onto its stored row, with no public key.
 func newReceiverModel(r ReceiverConfig) receiverModel {
 	return receiverModel{
-		ID: r.ID, AllowedServers: r.AllowedServers, Path: r.Path, Retention: r.Retention, StaleAfter: r.StaleAfter,
+		ID: r.ID, Type: r.Type, KeepVersions: r.KeepVersions, AllowedServers: r.AllowedServers, Path: r.Path, Retention: r.Retention, StaleAfter: r.StaleAfter,
 		StaleNotifications: r.StaleNotifications, DownloadNotifications: r.DownloadNotifications,
 		CreatedAt: r.CreatedAt, CreatedBy: r.CreatedBy, UpdatedAt: r.UpdatedAt, UpdatedBy: r.UpdatedBy,
 	}
@@ -61,7 +67,7 @@ func newReceiverModel(r ReceiverConfig) receiverModel {
 // config maps a stored row back onto the ReceiverConfig callers see.
 func (m receiverModel) config() ReceiverConfig {
 	return ReceiverConfig{
-		ID: m.ID, AllowedServers: m.AllowedServers, Path: m.Path, Retention: m.Retention, StaleAfter: m.StaleAfter,
+		ID: m.ID, Type: m.Type, KeepVersions: m.KeepVersions, AllowedServers: m.AllowedServers, Path: m.Path, Retention: m.Retention, StaleAfter: m.StaleAfter,
 		StaleNotifications: m.StaleNotifications, DownloadNotifications: m.DownloadNotifications,
 		CreatedAt: m.CreatedAt, CreatedBy: m.CreatedBy, UpdatedAt: m.UpdatedAt, UpdatedBy: m.UpdatedBy,
 	}
@@ -132,8 +138,9 @@ func (s *gormStore) UpdateReceiverConfig(ctx context.Context, r ReceiverConfig) 
 	r = normalizeReceiverTimes(r)
 
 	res := s.db.WithContext(ctx).Model(&receiverModel{}).Where("id = ?", r.ID).
-		Select("public_key", "allowed_servers", "path", "retention", "stale_after", "stale_notifications", "download_notifications", "updated_at", "updated_by").
+		Select("public_key", "type", "keep_versions", "allowed_servers", "path", "retention", "stale_after", "stale_notifications", "download_notifications", "updated_at", "updated_by").
 		Updates(&receiverModel{
+			Type: r.Type, KeepVersions: r.KeepVersions,
 			AllowedServers: r.AllowedServers, Path: r.Path, Retention: r.Retention, StaleAfter: r.StaleAfter,
 			StaleNotifications: r.StaleNotifications, DownloadNotifications: r.DownloadNotifications,
 			UpdatedAt: r.UpdatedAt, UpdatedBy: r.UpdatedBy,

@@ -125,6 +125,15 @@ type JobFile struct {
 	Name    string `json:"name,omitempty"`
 }
 
+// JobSource is an on-change job's source: block, as entered. Stored as
+// JSON inside its job's row.
+type JobSource struct {
+	Path     string   `json:"path"`
+	Exclude  []string `json:"exclude,omitempty"`
+	Watch    bool     `json:"watch,omitempty"`
+	Debounce string   `json:"debounce,omitempty"`
+}
+
 // jobModel is jobs: every backup job this instance runs (see
 // internal/backup/jobs' Manager), managed in the web UI. Kept as entered —
 // durations, server names, and command/notification ids unparsed — and
@@ -133,6 +142,10 @@ type JobFile struct {
 // renamed.
 type jobModel struct {
 	Name string `gorm:"column:name;primaryKey"`
+	// Type is the job's kind as entered: "" or "backup", or "on-change".
+	Type string `gorm:"column:type;not null;default:''"`
+	// Source is an on-change job's directory tree; nil for a backup job.
+	Source *JobSource `gorm:"column:source;serializer:json"`
 	// Command is the job's single command (by id), from before a job
 	// listed its files; Open moves any still set into Files (see
 	// migrateSingleJobCommands), so it's always "" afterwards.
@@ -165,6 +178,8 @@ func (jobModel) TableName() string { return "jobs" }
 // JobConfig is one stored job (see jobModel).
 type JobConfig struct {
 	Name                 string
+	Type                 string
+	Source               *JobSource
 	Command              string // always "" once Open has migrated it; see jobModel
 	Files                []JobFile
 	LegacyCmd            string // always "" once Open has migrated it; see jobModel
@@ -337,7 +352,7 @@ func (s *gormStore) UpdateJobConfig(ctx context.Context, c JobConfig) error {
 	m := jobModel(c)
 
 	return updateRow(ctx, s.db, &m, "name", c.Name, []string{
-		"command", "files", "cmd", "key", "targets", "recipients", "armor", "gpg_bin", "gpg_homedir",
+		"type", "source", "command", "files", "cmd", "key", "targets", "recipients", "armor", "gpg_bin", "gpg_homedir",
 		"interval", "start_time", "staging_dir", "failure_notifications",
 	}, "job", ErrJobNotFound)
 }

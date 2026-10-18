@@ -66,7 +66,8 @@ type schedule struct {
 	done      chan struct{}
 	interval  time.Duration
 	startTime time.Time
-	stopped   bool // canceled, though a run in flight may still be finishing
+	source    config.OnChangeSource // an on-change job's source, which its watcher watches
+	stopped   bool                  // canceled, though a run in flight may still be finishing
 }
 
 // Manager owns every job's, server's, and command's lifecycle: stored in the
@@ -429,8 +430,16 @@ func (m *Manager) activateJobLocked(ctx context.Context, name string, fresh bool
 	}
 
 	if m.runCtx != nil && !m.scheduledLocked(job) {
-		m.scheduleLocked(job, existed && !fresh)
+		// A moved source starts over with a full scan.
+		sourceMoved := m.schedules[name] != nil && m.schedules[name].source.Path != job.Source.Path
+		m.scheduleLocked(job, existed && !fresh && !sourceMoved)
 	}
+}
+
+// sameSource reports whether a and b are the same on-change source, as far
+// as watching it goes.
+func sameSource(a, b config.OnChangeSource) bool {
+	return a.Path == b.Path && a.Watch == b.Watch && a.Debounce == b.Debounce && slices.Equal(a.Exclude, b.Exclude)
 }
 
 // scheduledLocked reports whether job's schedule is running unchanged: then
@@ -438,7 +447,7 @@ func (m *Manager) activateJobLocked(ctx context.Context, name string, fresh bool
 // must be held.
 func (m *Manager) scheduledLocked(job *config.Config) bool {
 	s := m.schedules[job.Name]
-	if s == nil || s.stopped || s.interval != job.Interval || !s.startTime.Equal(job.StartTime) {
+	if s == nil || s.stopped || s.interval != job.Interval || !s.startTime.Equal(job.StartTime) || !sameSource(s.source, job.Source) {
 		return false
 	}
 
@@ -462,7 +471,7 @@ func (m *Manager) scheduleLocked(job *config.Config, resumed bool) {
 	}
 
 	stop, cancel := context.WithCancel(m.runCtx)
-	s := &schedule{cancel: cancel, done: make(chan struct{}), interval: job.Interval, startTime: job.StartTime}
+	s := &schedule{cancel: cancel, done: make(chan struct{}), interval: job.Interval, startTime: job.StartTime, source: job.Source}
 	m.schedules[job.Name] = s
 
 	m.wg.Go(func() {
@@ -622,6 +631,12 @@ func (m *Manager) DeleteJob(ctx context.Context, user, name string) error {
 
 	if err := m.db.DeleteJobConfig(ctx, name); err != nil {
 		return err
+	}
+
+	// A re-created job of the same name starts over, uploading every file
+	// again, rather than trusting what a deleted job's targets received.
+	if err := m.db.DeleteOnChangeFiles(ctx, name); err != nil {
+		m.log.Warn("forgetting deleted job's uploaded files", "job", name, "error", err)
 	}
 
 	delete(m.jobDefs, name)

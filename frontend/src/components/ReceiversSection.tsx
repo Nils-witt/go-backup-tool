@@ -23,6 +23,7 @@ import TableCell from "@mui/material/TableCell";
 import TableHead from "@mui/material/TableHead";
 import TableRow from "@mui/material/TableRow";
 import Toolbar from "@mui/material/Toolbar";
+import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import { useTheme } from "@mui/material/styles";
 
@@ -51,16 +52,40 @@ function objectPath(f: ReceiverFile): string {
 }
 
 // FileGroup is one backup in the listing: a flat object (one file, no
-// file name), or a multi-file backup's files under their shared key.
+// file name), or a multi-file backup's files under their shared key — or,
+// on a directory receiver, one file's versions under its path.
 interface FileGroup {
   key: string;
   isMultiFile: boolean;
+  isVersions?: boolean;
   files: ReceiverFile[];
+}
+
+// groupVersions groups a directory receiver's versions by path, in path
+// order, each path's newest version first.
+function groupVersions(files: ReceiverFile[]): FileGroup[] {
+  const byPath = new Map<string, FileGroup>();
+
+  for (const f of files) {
+    const path = f.path ?? f.key;
+    let g = byPath.get(path);
+    if (!g) {
+      g = { key: path, isMultiFile: true, isVersions: true, files: [] };
+      byPath.set(path, g);
+    }
+    g.files.push(f);
+  }
+
+  const groups = [...byPath.values()].sort((a, b) => a.key.localeCompare(b.key));
+  for (const g of groups) g.files.sort((a, b) => (b.version ?? 0) - (a.version ?? 0));
+  return groups;
 }
 
 // groupFiles groups files by backup, keeping the listing's (oldest-first)
 // order by each backup's first file.
 function groupFiles(files: ReceiverFile[]): FileGroup[] {
+  if (files.some((f) => f.version)) return groupVersions(files);
+
   const groups: FileGroup[] = [];
   const byKey = new Map<string, FileGroup>();
 
@@ -156,7 +181,14 @@ function FileListDialog({
                     <TableCell>{fmtSize(g.files.reduce((n, f) => n + f.size, 0))}</TableCell>
                     <TableCell colSpan={3}>
                       <Typography variant="caption" color="text.secondary">
-                        {g.files.length} {g.files.length === 1 ? "file" : "files"}
+                        {g.files.length}{" "}
+                        {g.isVersions
+                          ? g.files.length === 1
+                            ? "version"
+                            : "versions"
+                          : g.files.length === 1
+                            ? "file"
+                            : "files"}
                       </Typography>
                     </TableCell>
                   </TableRow>
@@ -164,7 +196,16 @@ function FileListDialog({
                 ...g.files.map((f) => (
                   <TableRow key={objectPath(f)}>
                     <TableCell sx={{ overflowWrap: "anywhere", pl: g.isMultiFile ? 4 : undefined }}>
-                      {f.file ?? f.key}
+                      {g.isVersions ? (
+                        <Tooltip title={f.sha256 ? "SHA-256 of the content: " + f.sha256 : ""}>
+                          <span>
+                            version {f.version}
+                            {f === g.files[0] ? " (newest)" : ""}
+                          </span>
+                        </Tooltip>
+                      ) : (
+                        (f.file ?? f.key)
+                      )}
                     </TableCell>
                     <TableCell>{fmtSize(f.size)}</TableCell>
                     <TableCell>{fmtTime(f.mod_time)}</TableCell>
@@ -249,7 +290,11 @@ export function ReceiversCard({
             >
               {fmtRelative(receiver.last_seen)}
             </Fact>
+            {receiver.kind === "directory" ? <Fact label="Type">directory</Fact> : null}
             <Fact label="Retention">{receiver.retention || "—"}</Fact>
+            {receiver.keep_versions ? (
+              <Fact label="Keep versions">{receiver.keep_versions}</Fact>
+            ) : null}
             {receiver.stale_after ? <Fact label="Stale after">{receiver.stale_after}</Fact> : null}
           </Box>
 

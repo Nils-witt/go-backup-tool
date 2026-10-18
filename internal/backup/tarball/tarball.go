@@ -188,7 +188,15 @@ func (a *archiver) header(p, name string, info fs.FileInfo) (*tar.Header, error)
 // excluded reports whether rel, a slash-separated path relative to the
 // root, matches one of the exclude patterns (already validated by Write).
 func (a *archiver) excluded(rel string) bool {
-	for _, p := range a.opts.Exclude {
+	return Excluded(a.opts.Exclude, rel)
+}
+
+// Excluded reports whether rel, a slash-separated path relative to a root,
+// matches one of patterns (see Options.Exclude) by its full relative path
+// or by its base name. Malformed patterns (see ValidatePattern) match
+// nothing.
+func Excluded(patterns []string, rel string) bool {
+	for _, p := range patterns {
 		if ok, _ := path.Match(p, rel); ok {
 			return true
 		}

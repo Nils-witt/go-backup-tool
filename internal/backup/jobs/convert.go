@@ -39,11 +39,20 @@ func normalizeCommand(fc config.FileCommand) config.FileCommand {
 // normalizeJob trims fj's fields and files: entries and drops empty list
 // entries.
 func normalizeJob(fj config.FileJob) config.FileJob {
-	for _, f := range []*string{&fj.Name, &fj.Key, &fj.GPGBin, &fj.GPGHomedir, &fj.Interval, &fj.StartTime, &fj.StagingDir} {
+	for _, f := range []*string{&fj.Name, &fj.Type, &fj.Key, &fj.GPGBin, &fj.GPGHomedir, &fj.Interval, &fj.StartTime, &fj.StagingDir} {
 		*f = strings.TrimSpace(*f)
 	}
 
 	fj.NormalizeFiles()
+
+	if src := fj.Source; src != nil {
+		fj.Source = &config.FileJobSource{
+			Path:     strings.TrimSpace(src.Path),
+			Exclude:  trimAll(src.Exclude),
+			Watch:    src.Watch,
+			Debounce: strings.TrimSpace(src.Debounce),
+		}
+	}
 
 	fj.Recipients = trimAll(fj.Recipients)
 	fj.FailureNotifications = trimAll(fj.FailureNotifications)
@@ -123,10 +132,18 @@ func toStoreJob(fj config.FileJob) store.JobConfig {
 	}
 
 	return store.JobConfig{
-		Name: fj.Name, Files: toStoreFiles(fj.Files), Key: fj.Key, Targets: targets, Recipients: slices.Clone(fj.Recipients), Armor: fj.Armor,
+		Name: fj.Name, Type: fj.Type, Source: toStoreSource(fj.Source), Files: toStoreFiles(fj.Files), Key: fj.Key, Targets: targets, Recipients: slices.Clone(fj.Recipients), Armor: fj.Armor,
 		GPGBin: fj.GPGBin, GPGHomedir: fj.GPGHomedir, Interval: fj.Interval, StartTime: fj.StartTime, StagingDir: fj.StagingDir,
 		FailureNotifications: slices.Clone(fj.FailureNotifications),
 	}
+}
+
+func toStoreSource(src *config.FileJobSource) *store.JobSource {
+	if src == nil {
+		return nil
+	}
+
+	return &store.JobSource{Path: src.Path, Exclude: slices.Clone(src.Exclude), Watch: src.Watch, Debounce: src.Debounce}
 }
 
 func toStoreFiles(files []config.FileJobFile) []store.JobFile {
@@ -156,11 +173,15 @@ func toStoreTarget(t config.FileJobTarget) store.JobTarget {
 // entered as, e.g. to send it to the web UI's edit form.
 func FileJobFrom(jc store.JobConfig) config.FileJob {
 	fj := config.FileJob{
-		Name: jc.Name, Key: jc.Key, Recipients: slices.Clone(jc.Recipients), Armor: jc.Armor,
+		Name: jc.Name, Type: jc.Type, Key: jc.Key, Recipients: slices.Clone(jc.Recipients), Armor: jc.Armor,
 		Files:  make([]config.FileJobFile, len(jc.Files)),
 		GPGBin: jc.GPGBin, GPGHomedir: jc.GPGHomedir, Interval: jc.Interval, StartTime: jc.StartTime, StagingDir: jc.StagingDir,
 		FailureNotifications: slices.Clone(jc.FailureNotifications),
 		Targets:              make([]config.FileJobTarget, len(jc.Targets)),
+	}
+
+	if src := jc.Source; src != nil {
+		fj.Source = &config.FileJobSource{Path: src.Path, Exclude: slices.Clone(src.Exclude), Watch: src.Watch, Debounce: src.Debounce}
 	}
 
 	for i, f := range jc.Files {

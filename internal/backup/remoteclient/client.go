@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -155,6 +156,58 @@ func Upload(ctx context.Context, id *identity.ServerIdentity, cfg *config.Config
 	return doAuthenticatedRemoteRequest(ctx, id, cfg, t, http.MethodPut, r, "application/octet-stream", query)
 }
 
+// FileUploadResult is a directory receiver's answer to UploadFile.
+type FileUploadResult struct {
+	// Stored is false when the path's newest version already had this
+	// content, so the receiver kept nothing new.
+	Stored bool `json:"stored"`
+
+	// Version is the path's newest version number after the upload.
+	Version int `json:"version"`
+}
+
+// maxFileUploadResponse bounds how much of a directory receiver's reply
+// UploadFile reads.
+const maxFileUploadResponse = 4096
+
+// FileURL returns the URL an on-change job uploads relPath (a
+// slash-separated path relative to its source) at on remote target t:
+// t.Endpoint's /api/v1/files/{bucket}/{relPath}, each path segment escaped
+// on its own so the receiver sees the same segments.
+func FileURL(t *config.Target, relPath string) string {
+	segments := strings.Split(relPath, "/")
+	for i, seg := range segments {
+		segments[i] = url.PathEscape(seg)
+	}
+
+	return fmt.Sprintf("%s/api/v1/files/%s/%s",
+		strings.TrimSuffix(t.Endpoint, "/"), url.PathEscape(t.Bucket), strings.Join(segments, "/"))
+}
+
+// UploadFile streams r, one encrypted file of an on-change job, to the
+// directory receiver behind remote target t as relPath. plainSHA256 is the
+// hex SHA-256 of the file before encryption: the receiver keeps a new
+// version only when it differs from relPath's newest one. Both it and the
+// body's own digest are bound into the request token (see
+// remoteauth.Request); r must be seekable, as for Upload.
+func UploadFile(ctx context.Context, id *identity.ServerIdentity, t *config.Target, relPath, plainSHA256 string, r io.Reader) (FileUploadResult, error) {
+	bound := remoteauth.Request{Method: http.MethodPut, Key: relPath, PlainSHA256: plainSHA256}
+	u := FileURL(t, relPath) + "?" + url.Values{"sha256": {plainSHA256}}.Encode()
+
+	resp, err := sendSignedRequest(ctx, id, t, bound, u, r, "application/octet-stream")
+	if err != nil {
+		return FileUploadResult{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var res FileUploadResult
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxFileUploadResponse)).Decode(&res); err != nil {
+		return FileUploadResult{}, fmt.Errorf("reading receiver response: %w", err)
+	}
+
+	return res, nil
+}
+
 // doAuthenticatedRemoteRequest signs, sends, and status-checks a method
 // request (with body, whose Content-Type is set only when contentType is
 // non-empty, and an optional query string) to target t's receiver API, for
@@ -162,10 +215,23 @@ func Upload(ctx context.Context, id *identity.ServerIdentity, cfg *config.Config
 func doAuthenticatedRemoteRequest(ctx context.Context, id *identity.ServerIdentity, cfg *config.Config, t *config.Target, method string, body io.Reader, contentType string, query url.Values) error {
 	bound := remoteauth.Request{Method: method, Key: cfg.Key, File: cfg.File, CreationTime: query.Get("creationTime")}
 
+	resp, err := sendSignedRequest(ctx, id, t, bound, remoteObjectURL(t, cfg.Key, cfg.File, query), body, contentType)
+	if err != nil {
+		return err
+	}
+
+	return resp.Body.Close()
+}
+
+// sendSignedRequest sends a bound.Method request with body to u on target
+// t's receiver API, authenticated with a token bound to bound plus body's
+// SHA-256, and returns the response when its status is 2xx; the caller
+// closes its body. Any other status is an error.
+func sendSignedRequest(ctx context.Context, id *identity.ServerIdentity, t *config.Target, bound remoteauth.Request, u string, body io.Reader, contentType string) (*http.Response, error) {
 	if body != nil {
 		digest, err := bodySHA256(body)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		bound.BodySHA256 = digest
@@ -173,12 +239,12 @@ func doAuthenticatedRemoteRequest(ctx context.Context, id *identity.ServerIdenti
 
 	auth, err := remoteAuthHeader(id, t, bound)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, remoteObjectURL(t, cfg.Key, cfg.File, query), body)
+	req, err := http.NewRequestWithContext(ctx, bound.Method, u, body)
 	if err != nil {
-		return fmt.Errorf("building request: %w", err)
+		return nil, fmt.Errorf("building request: %w", err)
 	}
 
 	req.Header.Set("Authorization", auth)
@@ -190,20 +256,21 @@ func doAuthenticatedRemoteRequest(ctx context.Context, id *identity.ServerIdenti
 
 	client, err := remoteHTTPClient(t)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("sending request: %w", err)
+		return nil, fmt.Errorf("sending request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return remoteResponseError(resp)
+		defer func() { _ = resp.Body.Close() }()
+
+		return nil, remoteResponseError(resp)
 	}
 
-	return nil
+	return resp, nil
 }
 
 // bodySHA256 returns the hex SHA-256 of body's remaining content, then

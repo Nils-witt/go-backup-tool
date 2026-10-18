@@ -118,6 +118,37 @@ func checkManagerDelete(t *testing.T, m testManager, id string) {
 	}
 }
 
+func TestManagerDirectoryReceiverTypeIsFixed(t *testing.T) {
+	t.Parallel()
+
+	m := newTestManager(t, openTestStateDB(t))
+	ctx := t.Context()
+
+	fr := config.FileReceiver{ID: "docs", Type: "directory", KeepVersions: 3, AllowedServers: []string{testSenderUUID}, Path: filepath.Join(m.baseDir, "docs")}
+	if err := m.Create(ctx, "erin", fr); err != nil {
+		t.Fatalf("Create() error: %v", err)
+	}
+
+	if recv, _ := m.registry.Get("docs"); recv.Kind != config.ReceiverKindDirectory || recv.KeepVersions != 3 {
+		t.Errorf("registry docs = %+v, want a directory receiver keeping 3 versions", recv)
+	}
+
+	list, err := m.List(ctx)
+	if err != nil || len(list) != 1 || list[0].FileReceiver().Type != "directory" || list[0].FileReceiver().KeepVersions != 3 {
+		t.Errorf("List() = %+v, %v, want the type and keep-versions stored", list, err)
+	}
+
+	fr.KeepVersions = 5
+	if err := m.Update(ctx, "erin", fr); err != nil {
+		t.Errorf("Update(keep-versions) error: %v", err)
+	}
+
+	fr.Type, fr.KeepVersions = "", 0
+	if err := m.Update(ctx, "erin", fr); !errors.Is(err, ErrInvalidReceiver) {
+		t.Errorf("Update(type change) error = %v, want ErrInvalidReceiver", err)
+	}
+}
+
 func TestManagerRejectsInvalidReceivers(t *testing.T) {
 	t.Parallel()
 

@@ -65,6 +65,12 @@ type Store interface {
 	DeleteObjectWrite(ctx context.Context, path string) error
 	ExpiredObjectPaths(ctx context.Context, server string, now time.Time, fallbackRetention time.Duration) ([]string, error)
 
+	// What each on-change job's targets last received
+	// (onchange_files.go).
+	ListOnChangeFiles(ctx context.Context, jobName, target string) ([]OnChangeFile, error)
+	SaveOnChangeFile(ctx context.Context, f OnChangeFile) error
+	DeleteOnChangeFiles(ctx context.Context, jobName string) error
+
 	// Login, download, and receiver event logs (events.go) and the audit
 	// log (audit.go).
 	SaveLoginEvent(ctx context.Context, ev LoginEvent) error
@@ -179,7 +185,7 @@ func newGormConfig() *gorm.Config {
 func migrate(ctx context.Context, gdb *gorm.DB) error {
 	if err := gdb.WithContext(ctx).AutoMigrate(
 		&jobRunModel{}, &targetRunModel{}, &outstandingTargetUploadModel{},
-		&objectModel{},
+		&objectModel{}, &onChangeFileModel{},
 		&loginEventModel{}, &downloadEventModel{}, &receiverEventModel{}, &auditEventModel{},
 		&apiTokenModel{}, &tokenSigningKeyModel{},
 		&receiverModel{}, &notificationModel{}, &reportSettingsModel{}, &reportModel{}, &logRetentionSettingsModel{},

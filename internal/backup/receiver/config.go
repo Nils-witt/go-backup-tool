@@ -219,6 +219,12 @@ func (m *Manager) Update(ctx context.Context, user string, fr config.FileReceive
 		return err
 	}
 
+	// What's on disk is laid out for the receiver's type (see
+	// objectstore.WriteFileVersion), so it can't change under it.
+	if existingKind, _ := config.ParseReceiverKind(existing.Type); existingKind != recv.Kind {
+		return fmt.Errorf("%w: type can't change from %s to %s; create a new receiver instead", ErrInvalidReceiver, existingKind, recv.Kind)
+	}
+
 	fr.AllowedServers = recv.AllowedServers
 	rc := toStoreConfig(fr)
 	rc.UpdatedAt, rc.UpdatedBy = time.Now(), user
@@ -282,6 +288,7 @@ func (m *Manager) validate(fr config.FileReceiver, unchangedPath string) (config
 // so the stored value is what's actually used.
 func normalizeFileReceiver(fr config.FileReceiver) config.FileReceiver {
 	fr.ID = strings.TrimSpace(fr.ID)
+	fr.Type = strings.TrimSpace(fr.Type)
 	fr.Path = strings.TrimSpace(fr.Path)
 
 	if fr.Path != "" {
@@ -296,7 +303,7 @@ func normalizeFileReceiver(fr config.FileReceiver) config.FileReceiver {
 
 func toStoreConfig(fr config.FileReceiver) store.ReceiverConfig {
 	return store.ReceiverConfig{
-		ID: strings.TrimSpace(fr.ID), AllowedServers: fr.AllowedServers, Path: fr.Path,
+		ID: strings.TrimSpace(fr.ID), Type: fr.Type, KeepVersions: fr.KeepVersions, AllowedServers: fr.AllowedServers, Path: fr.Path,
 		Retention: fr.Retention, StaleAfter: fr.StaleAfter,
 		StaleNotifications: fr.StaleNotifications, DownloadNotifications: fr.DownloadNotifications,
 	}
@@ -310,7 +317,7 @@ func (r ManagedReceiver) FileReceiver() config.FileReceiver {
 
 func toFileReceiver(rc store.ReceiverConfig) config.FileReceiver {
 	return config.FileReceiver{
-		ID: rc.ID, AllowedServers: rc.AllowedServers, Path: rc.Path,
+		ID: rc.ID, Type: rc.Type, KeepVersions: rc.KeepVersions, AllowedServers: rc.AllowedServers, Path: rc.Path,
 		Retention: rc.Retention, StaleAfter: rc.StaleAfter,
 		StaleNotifications: rc.StaleNotifications, DownloadNotifications: rc.DownloadNotifications,
 	}

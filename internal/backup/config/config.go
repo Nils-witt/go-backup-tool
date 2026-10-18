@@ -15,6 +15,14 @@ import (
 type Config struct {
 	Name string // job name, from its jobs: entry; always set
 
+	// Kind is the job's type:. A JobKindOnChange job has Source set and no
+	// Sources; it uploads changed files one by one (see
+	// pipeline.runOnChange) instead of running commands.
+	Kind JobKind
+
+	// Source is an on-change job's directory tree; zero for a backup job.
+	Source OnChangeSource
+
 	// Sources are the job's files: entries, resolved, in run order: each
 	// one's stdout, encrypted, becomes one file of the backup, named Name
 	// under the backup's Key (see pipeline.runPipeline). A source's Timeout

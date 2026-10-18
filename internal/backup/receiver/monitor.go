@@ -87,12 +87,10 @@ const receiverRetentionSweepInterval = time.Minute
 // immediately, then every receiverRetentionSweepInterval, until ctx is
 // done. Receivers are read from the registry on every sweep, so ones added
 // or edited in the web UI are picked up. A nil db (retention tracking
-// unavailable this run) is a no-op.
+// unavailable this run) skips backup receivers; a directory receiver's
+// versions are swept from what's on disk alone (see
+// objectstore.SweepFileVersions).
 func MonitorReceiverRetention(ctx context.Context, db store.Store, receivers *Registry, log *slog.Logger) {
-	if db == nil {
-		return
-	}
-
 	periodic.Run(ctx, receiverRetentionSweepInterval, true, func() {
 		sweepAllReceivers(ctx, db, receivers.Snapshot(), log)
 	})
@@ -104,7 +102,12 @@ func MonitorReceiverRetention(ctx context.Context, db store.Store, receivers *Re
 // exercised directly in tests without also driving RunPeriodically's timing.
 func sweepAllReceivers(ctx context.Context, db store.Store, receivers map[string]config.ResolvedReceiver, log *slog.Logger) {
 	for _, recv := range receivers {
-		if recv.Retention <= 0 {
+		if recv.Kind == config.ReceiverKindDirectory {
+			sweepDirectoryReceiver(recv, log)
+			continue
+		}
+
+		if recv.Retention <= 0 || db == nil {
 			continue
 		}
 
@@ -115,6 +118,21 @@ func sweepAllReceivers(ctx context.Context, db store.Store, receivers map[string
 		if err := objectstore.SweepRetentionForTarget(ctx, db, t, log); err != nil {
 			log.Warn("receiver retention sweep failed", "id", recv.ID, "err", err)
 		}
+	}
+}
+
+// sweepDirectoryReceiver deletes the versions under directory receiver
+// recv that neither its retention: nor its keep-versions: keeps any more.
+func sweepDirectoryReceiver(recv config.ResolvedReceiver, log *slog.Logger) {
+	policy := objectstore.VersionRetention{KeepVersions: recv.KeepVersions, MaxAge: recv.Retention}
+	if policy == (objectstore.VersionRetention{}) {
+		return
+	}
+
+	log.Debug("receiver version sweep", "id", recv.ID, "path", recv.Path, "retention", recv.Retention, "keep_versions", recv.KeepVersions)
+
+	if _, err := objectstore.SweepFileVersions(recv.Path, policy, time.Now(), log.With("id", recv.ID)); err != nil {
+		log.Warn("receiver version sweep failed", "id", recv.ID, "err", err)
 	}
 }
 

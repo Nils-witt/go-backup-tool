@@ -461,6 +461,32 @@ func TestSweepAllReceiversRemovesExpiredObjects(t *testing.T) {
 	}
 }
 
+func TestSweepAllReceiversDirectoryReceiver(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	receivers := map[string]config.ResolvedReceiver{"docs": {ID: "docs", Kind: config.ReceiverKindDirectory, Path: dir, KeepVersions: 1}}
+
+	for _, content := range []string{"v1", "v2"} {
+		if _, _, err := objectstore.WriteFileVersion(dir, "a.txt", sha256Hex(content), strings.NewReader(content)); err != nil {
+			t.Fatalf("WriteFileVersion() error: %v", err)
+		}
+	}
+
+	// Directory receivers are swept from disk alone, so even without a
+	// state db the older version goes.
+	sweepAllReceivers(t.Context(), nil, receivers, discardLogger)
+
+	versions, err := objectstore.ListFileVersions(dir)
+	if err != nil {
+		t.Fatalf("ListFileVersions() error: %v", err)
+	}
+
+	if len(versions) != 1 || versions[0].Version != 2 {
+		t.Errorf("after sweep: %+v, want only version 2", versions)
+	}
+}
+
 func TestMonitorReceiverRetentionNilDBIsNoop(t *testing.T) {
 	t.Parallel()
 

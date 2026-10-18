@@ -408,6 +408,38 @@ jobs:
         bucket: from-primary # = id of a receiver on sibling-instance
     # no interval: this job runs once and doesn't repeat, even though
     # "database" above keeps the whole process alive
+  # type: on-change uploads a directory tree file by file instead of
+  # running commands: every regular file under source.path is encrypted on
+  # its own and uploaded to a directory receiver (type: directory, see
+  # settings.example.yaml) on a remote server, under its path relative to
+  # source.path. A local state db row per file and target remembers its
+  # size, modification time and content hash, so a file is only read again
+  # once its size or modification time changes, and only uploaded again once
+  # its content does; the receiver keeps every content as a new version.
+  # A failed upload isn't remembered, so the next scan or change retries it.
+  # Deleting a file here keeps its versions on the receiver.
+  #
+  # source.watch uploads changes as they happen (filesystem events, waiting
+  # source.debounce — default 5s — after the last one); interval: adds a
+  # full scan every interval, which also catches anything the watcher
+  # missed. At least one of them is required. Without interval:, the job
+  # scans everything once at startup. files:, key: and local targets don't
+  # apply. Symlinks are skipped, and a path segment ending in ".gbtv" is
+  # reserved. On macOS the watcher holds one file descriptor per watched
+  # file and directory, so very large trees are better served by interval:
+  # alone.
+  # - name: documents
+  #   type: on-change
+  #   source:
+  #     path: /srv/documents
+  #     exclude: ["*.tmp", ".cache"] # matched like a tar command's exclude:
+  #     watch: true
+  #     # debounce: 10s
+  #   interval: 24h
+  #   recipients: [me@example.com]
+  #   targets:
+  #     - server: sibling-instance
+  #       bucket: documents # = id of a type: directory receiver on sibling-instance
 
 # Receivers, notifications and the report are managed in the web UI (or a
 # settings file, see settings.example.yaml and -import-settings). v8.0.0

@@ -208,9 +208,21 @@ func (r *Runner) Schedule(ctx context.Context, job *config.Config) {
 // fresh: without start-time, it then doesn't run immediately but waits out
 // its interval from its last run's start — and a job that doesn't repeat
 // doesn't run again at all.
+//
+// An on-change job with source.watch also has its source watched for as
+// long as stop isn't done (see watchOnChange), so ScheduleLive only
+// returns then, even when its interval schedule has nothing more to run.
 func (r *Runner) ScheduleLive(runCtx, stop context.Context, job *config.Config, lookup JobLookup, resumed bool) {
 	name := job.Name
 	log := r.log.With("job", name)
+
+	if job.Kind == config.JobKindOnChange && job.Source.Watch {
+		var wg sync.WaitGroup
+
+		wg.Go(func() { r.watchOnChange(runCtx, stop, name, job.Source, lookup, log) })
+
+		defer wg.Wait()
+	}
 
 	run := func() bool {
 		if stop.Err() != nil {
@@ -397,6 +409,11 @@ func (r *Runner) RunNow(ctx context.Context, job *config.Config) error {
 // key first so a repeating job doesn't overwrite the same object on every
 // run, and reports the outcome to r.log.
 func (r *Runner) runOnce(ctx context.Context, job *config.Config) {
+	if job.Kind == config.JobKindOnChange {
+		_ = r.runOnChangeOnce(ctx, job, nil, nil)
+		return
+	}
+
 	now := time.Now().UTC()
 
 	run := *job
@@ -442,6 +459,15 @@ type runResult struct {
 	bytes int64
 	files []status.FileSnapshot
 	err   error
+
+	// unrecorded leaves the run out of the state db's run log: an on-change
+	// job's watch-triggered run that had nothing to upload.
+	unrecorded bool
+
+	// silent fires no failure notifications for the run: an on-change
+	// job's watch-triggered run, which can come every few seconds. Its
+	// full scans still notify.
+	silent bool
 }
 
 // finishMessages are the outcome log lines finishRun writes.
@@ -482,23 +508,28 @@ func (r *Runner) finishRun(ctx context.Context, job *config.Config, log *slog.Lo
 	bytesWritten, err := res.bytes, res.err
 	state := r.store.Finished(job.Name, err, bytesWritten, res.files)
 
-	var jobErr error
+	var (
+		jobErr  error
+		errText string
+	)
 
 	if err != nil {
 		r.failed.Store(true)
 
 		jobErr = config.JobError(job, err)
+		errText = jobErr.Error()
 
 		if state == status.StateIncomplete {
 			log.Warn(msgs.incomplete, "duration", duration, "err", jobErr)
 		} else {
 			log.Error(msgs.failed, "duration", duration, "err", jobErr)
 		}
-
-		r.recordJobRun(ctx, job.Name, state, false, start, bytesWritten, jobErr.Error())
 	} else {
 		log.Info(msgs.finished, "duration", duration, "bytes", bytesWritten)
-		r.recordJobRun(ctx, job.Name, state, true, start, bytesWritten, "")
+	}
+
+	if !res.unrecorded {
+		r.recordJobRun(ctx, job.Name, state, err == nil, start, bytesWritten, errText)
 	}
 
 	var wg sync.WaitGroup
@@ -507,7 +538,7 @@ func (r *Runner) finishRun(ctx context.Context, job *config.Config, log *slog.Lo
 		wg.Go(func() { r.handleTargetOutcome(ctx, job.Name, o.target, o.err, log) })
 	}
 
-	if err != nil {
+	if err != nil && !res.silent {
 		notifyJobFailure(job, r.notifications, err, state, start, duration, r.queue, log)
 	}
 
@@ -546,6 +577,10 @@ func (r *Runner) RetryFailedTargets(ctx context.Context, job *config.Config, tar
 
 	if len(indices) == 0 {
 		return fmt.Errorf("no matching targets to retry among %v", targetNames)
+	}
+
+	if job.Kind == config.JobKindOnChange {
+		return r.runOnChangeOnce(ctx, job, nil, indices)
 	}
 
 	now := time.Now().UTC()

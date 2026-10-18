@@ -5,6 +5,8 @@ import type {
   JobConfigListJSON,
   JobDefinitionJSON,
   JobFileJSON,
+  JobKind,
+  JobSourceJSON,
   JobTargetJSON,
   ServerOptionJSON,
 } from "../api/types";
@@ -46,9 +48,18 @@ import Box from "@mui/material/Box";
 
 // JobForm is the create/edit dialog's state: a job's definition, with its
 // lists as editable text (one entry per line).
-interface JobForm extends Omit<JobDefinitionJSON, "recipients"> {
+interface JobForm extends Omit<JobDefinitionJSON, "recipients" | "type" | "source"> {
+  type: JobKind;
   recipients: string;
+  source: SourceForm;
 }
+
+// SourceForm is an on-change job's source as edited: excludes one per line.
+interface SourceForm extends Omit<JobSourceJSON, "exclude"> {
+  exclude: string;
+}
+
+const EMPTY_SOURCE: SourceForm = { path: "", exclude: "", watch: true, debounce: "" };
 
 const EMPTY_TARGET: JobTargetJSON = {
   server: "",
@@ -62,6 +73,8 @@ const EMPTY_FILE: JobFileJSON = { command: "", name: "" };
 
 const EMPTY_FORM: JobForm = {
   name: "",
+  type: "backup",
+  source: EMPTY_SOURCE,
   files: [EMPTY_FILE],
   key: "",
   targets: [EMPTY_TARGET],
@@ -78,6 +91,15 @@ const EMPTY_FORM: JobForm = {
 function formFrom(j: JobConfigJSON): JobForm {
   return {
     name: j.name,
+    type: j.type || "backup",
+    source: j.source
+      ? {
+          path: j.source.path,
+          exclude: (j.source.exclude ?? []).join("\n"),
+          watch: j.source.watch,
+          debounce: j.source.debounce ?? "",
+        }
+      : EMPTY_SOURCE,
     files: j.files?.length
       ? j.files.map((f) => ({ command: f.command, name: f.name ?? "" }))
       : [EMPTY_FILE],
@@ -94,7 +116,31 @@ function formFrom(j: JobConfigJSON): JobForm {
   };
 }
 
+function splitLines(text: string, separators = /\n/): string[] {
+  return text
+    .split(separators)
+    .map((r) => r.trim())
+    .filter(Boolean);
+}
+
 function definitionOf(form: JobForm): JobDefinitionJSON {
+  const recipients = splitLines(form.recipients, /[\n,]/);
+  if (form.type === "on-change") {
+    // An on-change job uploads its source; files and key don't apply.
+    return {
+      ...form,
+      name: form.name.trim(),
+      files: [],
+      key: "",
+      recipients,
+      source: {
+        path: form.source.path.trim(),
+        exclude: splitLines(form.source.exclude),
+        watch: form.source.watch,
+        debounce: form.source.debounce.trim(),
+      },
+    };
+  }
   return {
     ...form,
     name: form.name.trim(),
@@ -102,10 +148,8 @@ function definitionOf(form: JobForm): JobDefinitionJSON {
       const name = f.name?.trim();
       return name ? { command: f.command, name } : { command: f.command };
     }),
-    recipients: form.recipients
-      .split(/[\n,]/)
-      .map((r) => r.trim())
-      .filter(Boolean),
+    recipients,
+    source: null,
   };
 }
 
@@ -114,6 +158,11 @@ function errorText(err: unknown): string {
 }
 
 function scheduleText(j: JobDefinitionJSON): string {
+  if (j.type === "on-change") {
+    const watch = j.source?.watch ? "on change" : "";
+    const scan = j.interval ? `scan every ${j.interval}` : "";
+    return [watch, scan].filter(Boolean).join(", ") || "once";
+  }
   if (!j.interval) return "once";
   return j.start_time ? `every ${j.interval} from ${fmtTime(j.start_time)}` : `every ${j.interval}`;
 }
@@ -256,6 +305,69 @@ function FilesEditor({
       >
         Add file
       </Button>
+    </Stack>
+  );
+}
+
+// SourceEditor edits an on-change job's source: the directory whose files
+// are uploaded one by one, and how changes are picked up.
+function SourceEditor({
+  source,
+  onChange,
+}: {
+  source: SourceForm;
+  onChange: (s: SourceForm) => void;
+}) {
+  const set = (patch: Partial<SourceForm>) => onChange({ ...source, ...patch });
+
+  return (
+    <Stack spacing={2}>
+      <Typography variant="subtitle2">Source</Typography>
+      <Typography variant="caption" color="text.secondary">
+        Every file under this directory is encrypted on its own and uploaded to directory receivers.
+        A file is only uploaded again once its content changes; the receiver keeps each content as a
+        new version.
+      </Typography>
+      <TextField
+        label="Directory"
+        value={source.path}
+        onChange={(e) => set({ path: e.target.value })}
+        placeholder="/srv/documents"
+        helperText="Absolute path on this machine."
+        required
+        slotProps={{ htmlInput: { spellCheck: false } }}
+      />
+      <TextField
+        label="Exclude"
+        value={source.exclude}
+        onChange={(e) => set({ exclude: e.target.value })}
+        helperText='Patterns matched against the relative path or the name, one per line, e.g. "*.tmp" or "cache". A matching directory is skipped entirely.'
+        multiline
+        minRows={2}
+        slotProps={{ htmlInput: { spellCheck: false } }}
+      />
+      <Stack
+        direction={{ xs: "column", sm: "row" }}
+        spacing={2}
+        sx={{ alignItems: { sm: "center" } }}
+      >
+        <FormControlLabel
+          control={
+            <Switch checked={source.watch} onChange={(e) => set({ watch: e.target.checked })} />
+          }
+          label="Upload changes as they happen"
+        />
+        <TextField
+          size="small"
+          label="Debounce"
+          value={source.debounce}
+          onChange={(e) => set({ debounce: e.target.value })}
+          placeholder="5s"
+          helperText="Wait this long after the last change."
+          disabled={!source.watch}
+          sx={{ width: { sm: 200 } }}
+        />
+      </Stack>
     </Stack>
   );
 }
@@ -409,12 +521,18 @@ function JobDialog({
   const set = (patch: Partial<JobForm>) => onChange({ ...form, ...patch });
   const setTarget = (i: number, t: JobTargetJSON) =>
     set({ targets: form.targets.map((old, j) => (j === i ? t : old)) });
+  const isOnChange = form.type === "on-change";
   const fileNames = form.files.map((f) => fileName(f, form.armor));
-  const canSave =
-    !!form.name.trim() &&
+  // An on-change job uploads only to directory receivers, i.e. remote servers.
+  const servers = isOnChange ? data.servers.filter((s) => s.type === "remote") : data.servers;
+  const sourceOK = !!form.source.path.trim() && (form.source.watch || !!form.interval.trim());
+  const filesOK =
     form.files.length > 0 &&
     form.files.every((f) => f.command) &&
-    new Set(fileNames).size === fileNames.length &&
+    new Set(fileNames).size === fileNames.length;
+  const canSave =
+    !!form.name.trim() &&
+    (isOnChange ? sourceOK : filesOK) &&
     !!form.recipients.trim() &&
     form.targets.every((t) => t.server && t.bucket.trim());
 
@@ -433,29 +551,53 @@ function JobDialog({
             autoFocus={!editing}
             required
           />
-          {!data.commands.length ? (
-            <Alert severity="warning">No commands yet — create one on the Commands page.</Alert>
-          ) : null}
-          <FilesEditor
-            files={form.files}
-            commands={data.commands}
-            armor={form.armor}
-            onChange={(files) => set({ files })}
-          />
           <TextField
-            label="Key"
-            value={form.key}
-            onChange={(e) => set({ key: e.target.value })}
-            placeholder="backup-{time}"
-            helperText="The backup's name: a folder holding one file per command. {time} becomes the run's UTC timestamp, so repeats don't overwrite each other."
-            slotProps={{ htmlInput: { spellCheck: false } }}
-          />
+            select
+            label="Type"
+            value={form.type}
+            onChange={(e) => set({ type: e.target.value as JobKind })}
+            helperText={
+              isOnChange
+                ? "Uploads each changed file of a directory, encrypted on its own, to directory receivers."
+                : "Runs its commands and uploads their encrypted output as one backup."
+            }
+          >
+            <MenuItem value="backup">Backup</MenuItem>
+            <MenuItem value="on-change">On change</MenuItem>
+          </TextField>
+          {isOnChange ? (
+            <SourceEditor source={form.source} onChange={(source) => set({ source })} />
+          ) : (
+            <>
+              {!data.commands.length ? (
+                <Alert severity="warning">No commands yet — create one on the Commands page.</Alert>
+              ) : null}
+              <FilesEditor
+                files={form.files}
+                commands={data.commands}
+                armor={form.armor}
+                onChange={(files) => set({ files })}
+              />
+              <TextField
+                label="Key"
+                value={form.key}
+                onChange={(e) => set({ key: e.target.value })}
+                placeholder="backup-{time}"
+                helperText="The backup's name: a folder holding one file per command. {time} becomes the run's UTC timestamp, so repeats don't overwrite each other."
+                slotProps={{ htmlInput: { spellCheck: false } }}
+              />
+            </>
+          )}
           <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
             <TextField
-              label="Interval"
+              label={isOnChange ? "Full scan interval" : "Interval"}
               value={form.interval}
               onChange={(e) => set({ interval: e.target.value })}
-              helperText='Repeat every, e.g. "6h". Empty runs once.'
+              helperText={
+                isOnChange
+                  ? 'Also scan everything every, e.g. "6h". Empty scans only at start.'
+                  : 'Repeat every, e.g. "6h". Empty runs once.'
+              }
               sx={{ flex: 1 }}
             />
             <TextField
@@ -471,14 +613,18 @@ function JobDialog({
 
           <Stack spacing={1}>
             <Typography variant="subtitle2">Targets</Typography>
-            {!data.servers.length ? (
-              <Alert severity="warning">No servers yet — create one on the Servers page.</Alert>
+            {!servers.length ? (
+              <Alert severity="warning">
+                {isOnChange
+                  ? "No remote servers yet — an on-change job uploads to a directory receiver on a remote server. Create one on the Servers page."
+                  : "No servers yet — create one on the Servers page."}
+              </Alert>
             ) : null}
             {form.targets.map((t, i) => (
               <TargetEditor
                 key={i}
                 target={t}
-                servers={data.servers}
+                servers={servers}
                 commands={data.commands}
                 onChange={(nt) => setTarget(i, nt)}
                 onRemove={
@@ -702,6 +848,11 @@ export function JobConfigSection() {
                     ) : null}
                   </TableCell>
                   <TableCell sx={{ overflowWrap: "anywhere", maxWidth: 280 }}>
+                    {j.type === "on-change" && j.source ? (
+                      <Typography variant="caption" sx={{ display: "block" }}>
+                        on change: <code>{j.source.path}</code>
+                      </Typography>
+                    ) : null}
                     {(j.files ?? []).map((f, i) => (
                       <Typography key={i} variant="caption" sx={{ display: "block" }}>
                         <code>{f.command}</code> → {fileName(f, j.armor)}

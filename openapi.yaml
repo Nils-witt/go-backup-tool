@@ -1875,6 +1875,90 @@ paths:
               schema:
                 type: string
 
+  /api/v1/files/{id}/{path}:
+    put:
+      tags: [receiver-api]
+      summary: Upload one file of an on-change job to a directory receiver
+      operationId: putFileVersion
+      description: >
+        Called by another go-backup-tool instance's on-change job for each
+        changed file under its source. The body is the file, encrypted on
+        its own. `path` is the file's slash-separated path relative to the
+        job's source; no segment may end in `.gbtv`. When the path's newest
+        stored version already has the plaintext hash `sha256`, nothing new
+        is stored (200); otherwise the body becomes the path's next version
+        (201), stored at `<path>.gbtv/<version>-<sha256>.gpg` under the
+        receiver. The bearer token must be bound to this request: method,
+        path (as `key`), the body's digest (`sha256` claim) and the
+        plaintext hash (`psha` claim).
+      security:
+        - receiverBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ReceiverId"
+        - name: path
+          in: path
+          required: true
+          description: The file's path relative to the job's source, each segment escaped on its own.
+          schema:
+            type: string
+        - name: sha256
+          in: query
+          required: true
+          description: Hex SHA-256 of the file's plaintext.
+          schema:
+            type: string
+            pattern: "^[0-9a-f]{64}$"
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: The path's newest version already has this content; nothing stored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileUploadResult"
+        "201":
+          description: Stored as the path's new newest version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileUploadResult"
+        "400":
+          description: Invalid path or hash, or a body that doesn't match the token's `sha256` claim
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          description: Missing, invalid, or unbound bearer token, or one bound to another request
+          content:
+            text/plain:
+              schema:
+                type: string
+        "404":
+          description: Unknown receiver id
+          content:
+            text/plain:
+              schema:
+                type: string
+        "409":
+          description: The receiver is a backup receiver, which doesn't accept files
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          description: Writing the file failed
+          content:
+            text/plain:
+              schema:
+                type: string
+
 components:
   securitySchemes:
     webUIBearer:
@@ -2204,6 +2288,15 @@ components:
       properties:
         name:
           type: string
+        kind:
+          type: string
+          enum: [backup, on-change]
+        source:
+          type: string
+          description: An on-change job's source directory.
+        watching:
+          type: boolean
+          description: Whether an on-change job's source is watched for changes between scans.
         interval:
           type: string
         state:
@@ -2273,10 +2366,16 @@ components:
       properties:
         id:
           type: string
+        kind:
+          type: string
+          enum: [backup, directory]
         path:
           type: string
         retention:
           type: string
+        keep_versions:
+          type: integer
+          description: A directory receiver's keep-versions, when set.
         state:
           allOf:
             - $ref: "#/components/schemas/RunState"
@@ -2314,7 +2413,31 @@ components:
         mod_time:
           type: string
           format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          description: Zero time when no expiry is known yet.
+        path:
+          type: string
+          description: Directory receivers only — the file's path as its sender gave it. `key` is then this version's download path.
+        version:
+          type: integer
+          description: Directory receivers only — the version number, from 1, newest highest.
+        sha256:
+          type: string
+          description: Directory receivers only — the hex SHA-256 of the version's plaintext.
       required: [key, size, mod_time]
+
+    FileUploadResult:
+      type: object
+      properties:
+        stored:
+          type: boolean
+          description: False when the path's newest version already had this content.
+        version:
+          type: integer
+          description: The path's newest version number after the upload.
+      required: [stored, version]
 
     LoginEvent:
       type: object
@@ -2363,6 +2486,22 @@ components:
         id:
           type: string
           description: What the sender's remote target names as its bucket. Immutable once created.
+        type:
+          type: string
+          enum: [backup, directory]
+          description: >
+            `backup` (the default when empty) stores whole backups from backup
+            jobs; `directory` stores single files from on-change jobs, keeping
+            a new version whenever a path's content changes. Immutable once
+            created.
+        keep_versions:
+          type: integer
+          minimum: 0
+          description: >
+            Directory receivers only: keep at least this many of the newest
+            versions of every path. A version is deleted only once neither
+            this nor `retention` keeps it; a path's newest version is always
+            kept. 0 sets no version rule.
         allowed_servers:
           type: array
           items:
@@ -2374,7 +2513,10 @@ components:
           description: Absolute directory incoming objects are written under.
         retention:
           type: string
-          description: Optional, e.g. "30d" or "12h"; empty keeps objects forever.
+          description: >
+            Optional, e.g. "30d" or "12h"; empty keeps objects forever. On a
+            directory receiver, versions received less than this long ago
+            are kept (see keep_versions).
         stale_after:
           type: string
           description: Optional, e.g. "26h"; set together with stale_notifications.
@@ -2850,12 +2992,41 @@ components:
         name:
           type: string
           description: Immutable once created; the job's run history is keyed by it.
+        type:
+          type: string
+          enum: ["", backup, on-change]
+          description: >
+            `backup` (the default when empty) runs `files` and uploads their
+            output as one backup. `on-change` uploads every changed file
+            under `source`, each encrypted on its own, to directory
+            receivers on remote servers; it sets no `files` or `key`, and
+            needs `source.watch`, an `interval`, or both.
+        source:
+          type: object
+          nullable: true
+          description: An on-change job's directory tree; only valid with type on-change.
+          properties:
+            path:
+              type: string
+              description: Absolute directory to back up.
+            exclude:
+              type: array
+              items:
+                type: string
+              description: Patterns (path.Match) matched against a file's relative path or its name; a matching directory is skipped entirely.
+            watch:
+              type: boolean
+              description: Upload changes as they happen (filesystem events), on top of interval scans.
+            debounce:
+              type: string
+              description: How long to wait after the last change before uploading, e.g. "10s". Defaults to 5s.
+          required: [path]
         files:
           type: array
-          minItems: 1
           description: >
             The backup's files, run in order: each a command whose encrypted
             standard output is stored as one file under the backup's key.
+            At least one for a backup job; empty for an on-change job.
           items:
             $ref: "#/components/schemas/JobFile"
         key:

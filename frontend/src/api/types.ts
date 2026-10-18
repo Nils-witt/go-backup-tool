@@ -19,6 +19,12 @@ export interface TargetSnapshot {
 
 export interface JobSnapshot {
   name: string;
+  // kind is the job's type; source/watching are an on-change job's source
+  // path and whether it's watched for changes between scans. Absent from
+  // older instances, meaning "backup".
+  kind?: JobKind;
+  source?: string;
+  watching?: boolean;
   interval?: string;
   state: RunState;
   last_start: string;
@@ -45,8 +51,11 @@ export interface FileSnapshot {
 
 export interface ReceiverSnapshot {
   id: string;
+  // kind is absent from older instances, meaning "backup".
+  kind?: ReceiverKind;
   path: string;
   retention?: string;
+  keep_versions?: number;
   state: RunState;
   last_key?: string;
   last_seen: string;
@@ -65,14 +74,26 @@ export interface LiveStatusMessage {
 
 // ReceiverFile mirrors backup.ReceiverFile. file is set for one file of a
 // multi-file backup, key then being the backup's key; a flat object has
-// only key. Its download path is key/file.
+// only key. Its download path is key/file. On a directory receiver each
+// entry is one version of a file: path is the file's path as sent, version
+// and sha256 (of the plaintext) identify the version, and key is the
+// version's own download path.
 export interface ReceiverFile {
   key: string;
   file?: string;
   size: number;
   mod_time: string;
   expires_at: string;
+  path?: string;
+  version?: number;
+  sha256?: string;
 }
+
+// JobKind mirrors config.JobKind: a job's type.
+export type JobKind = "backup" | "on-change";
+
+// ReceiverKind mirrors config.ReceiverKind: a receiver's type.
+export type ReceiverKind = "backup" | "directory";
 
 export interface IdentityJSON {
   uuid: string;
@@ -199,6 +220,10 @@ export interface DownloadTicketJSON {
 // plus error when it no longer resolves and so isn't currently active.
 export interface ReceiverConfigJSON {
   id: string;
+  type: ReceiverKind;
+  // keep_versions is a directory receiver's keep-versions: 0 sets no
+  // version rule.
+  keep_versions: number;
   allowed_servers: string[];
   path: string;
   retention: string;
@@ -377,8 +402,21 @@ export interface JobFileJSON {
 
 // JobDefinitionJSON mirrors config.FileJob's JSON form: a job's editable
 // fields, as sent to POST/PUT /api/job-configs.
+// JobSourceJSON mirrors config.FileJobSource: an on-change job's directory
+// tree.
+export interface JobSourceJSON {
+  path: string;
+  exclude: string[];
+  watch: boolean;
+  debounce: string;
+}
+
 export interface JobDefinitionJSON {
   name: string;
+  // type is "backup" (or "", the default) or "on-change". An on-change job
+  // has source instead of files and key.
+  type: JobKind | "";
+  source?: JobSourceJSON | null;
   // files are the backup's files: each a commands entry (by id) whose
   // encrypted output is stored as name (default "<command>.gpg", ".asc"
   // with armor) under the backup's key.

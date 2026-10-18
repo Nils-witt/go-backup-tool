@@ -64,12 +64,20 @@ func ReceiverTarget(recv config.ResolvedReceiver) *config.Target {
 // name under it; a flat object has only Key. ExpiresAt is the zero
 // time.Time (see hasTime in the frontend's format.ts) when the receiver has
 // no retention: configured, since there's then nothing to expire.
+//
+// On a directory receiver every entry is one version of a file (see
+// FileVersion): Key is the version's own path below the receiver, Path the
+// file's, and Version and SHA256 identify the version.
 type ReceiverFile struct {
 	Key       string    `json:"key"`
 	File      string    `json:"file,omitempty"`
 	Size      int64     `json:"size"`
 	ModTime   time.Time `json:"mod_time"`
 	ExpiresAt time.Time `json:"expires_at"`
+
+	Path    string `json:"path,omitempty"`
+	Version int    `json:"version,omitempty"`
+	SHA256  string `json:"sha256,omitempty"`
 }
 
 // ListReceiverFiles walks recv.Path and returns every object currently
@@ -87,6 +95,10 @@ type ReceiverFile struct {
 // it can disagree with the state db's own sweep if retention: changed after
 // the file was written.
 func ListReceiverFiles(recv config.ResolvedReceiver) ([]ReceiverFile, error) {
+	if recv.Kind == config.ReceiverKindDirectory {
+		return listDirectoryReceiverFiles(recv)
+	}
+
 	if _, err := os.Stat(recv.Path); err != nil {
 		if os.IsNotExist(err) {
 			return []ReceiverFile{}, nil
@@ -136,6 +148,35 @@ func ListReceiverFiles(recv config.ResolvedReceiver) ([]ReceiverFile, error) {
 	}
 
 	sort.Slice(files, func(i, j int) bool { return files[i].ModTime.Before(files[j].ModTime) })
+
+	return files, nil
+}
+
+// listDirectoryReceiverFiles is ListReceiverFiles for a directory receiver:
+// every stored version, oldest first. ExpiresAt is set only where it's
+// already certain: a version other than its path's newest, on a receiver
+// with retention: but no keep-versions: (whose protection depends on
+// versions yet to come).
+func listDirectoryReceiverFiles(recv config.ResolvedReceiver) ([]ReceiverFile, error) {
+	versions, err := ListFileVersions(recv.Path)
+	if err != nil {
+		return nil, err
+	}
+
+	files := make([]ReceiverFile, len(versions))
+
+	for i, v := range versions {
+		f := ReceiverFile{Key: v.Key, Size: v.Size, ModTime: v.ReceivedAt, Path: v.Path, Version: v.Version, SHA256: v.SHA256}
+
+		newest := i == len(versions)-1 || versions[i+1].Path != v.Path
+		if !newest && recv.Retention > 0 && recv.KeepVersions == 0 {
+			f.ExpiresAt = v.ReceivedAt.Add(recv.Retention)
+		}
+
+		files[i] = f
+	}
+
+	sort.SliceStable(files, func(i, j int) bool { return files[i].ModTime.Before(files[j].ModTime) })
 
 	return files, nil
 }

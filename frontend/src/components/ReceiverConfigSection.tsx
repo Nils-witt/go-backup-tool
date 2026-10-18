@@ -3,6 +3,7 @@ import { apiFetchJSON, apiFetchOK } from "../api/client";
 import type {
   ReceiverConfigJSON,
   ReceiverConfigListJSON,
+  ReceiverKind,
   TrustedServerOptionJSON,
 } from "../api/types";
 import { StatusChip } from "./StatusChip";
@@ -37,6 +38,9 @@ import EditIcon from "@mui/icons-material/Edit";
 // relative to the base dir here (see joinPath).
 interface ReceiverForm {
   id: string;
+  type: ReceiverKind;
+  // keep_versions is edited as text; "" or "0" sets no version rule.
+  keep_versions: string;
   allowed_servers: string[];
   path: string;
   retention: string;
@@ -47,6 +51,8 @@ interface ReceiverForm {
 
 const EMPTY_FORM: ReceiverForm = {
   id: "",
+  type: "backup",
+  keep_versions: "",
   allowed_servers: [],
   path: "",
   retention: "",
@@ -76,6 +82,8 @@ function joinPath(baseDir: string, rel: string): string {
 function formFrom(r: ReceiverConfigJSON, baseDir: string): ReceiverForm {
   return {
     id: r.id,
+    type: r.type || "backup",
+    keep_versions: r.keep_versions ? String(r.keep_versions) : "",
     allowed_servers: r.allowed_servers,
     path: relativePath(baseDir, r.path) ?? "",
     retention: r.retention,
@@ -83,6 +91,16 @@ function formFrom(r: ReceiverConfigJSON, baseDir: string): ReceiverForm {
     stale_notifications: r.stale_notifications,
     download_notifications: r.download_notifications,
   };
+}
+
+// retentionText summarizes r's retention rules for the table.
+function retentionText(r: ReceiverConfigJSON): string {
+  if (r.type !== "directory") return r.retention || "forever";
+  const rules = [
+    r.keep_versions ? `${r.keep_versions} versions` : "",
+    r.retention ? `${r.retention}` : "",
+  ].filter(Boolean);
+  return rules.length ? `newest + ${rules.join(" or ")}` : "forever";
 }
 
 function errorText(err: unknown): string {
@@ -159,10 +177,14 @@ function ReceiverDialog({
   // outsidePath is the edited receiver's stored path when it isn't inside
   // baseDir; leaving the path empty keeps it.
   const outsidePath = editing && relativePath(baseDir, editing.path) === null ? editing.path : null;
+  const directory = form.type === "directory";
+  const keepVersions = form.keep_versions.trim();
+  const keepVersionsOK = !keepVersions || /^\d+$/.test(keepVersions);
   const canSave =
     !!form.id.trim() &&
     form.allowed_servers.length > 0 &&
-    (!!form.path.trim() || outsidePath !== null);
+    (!!form.path.trim() || outsidePath !== null) &&
+    keepVersionsOK;
 
   return (
     <Dialog open onClose={onCancel} fullWidth maxWidth="sm">
@@ -179,6 +201,28 @@ function ReceiverDialog({
             autoFocus={!editing}
             required
           />
+          <TextField
+            select
+            label="Type"
+            value={form.type}
+            onChange={(e) =>
+              set({
+                type: e.target.value as ReceiverKind,
+                keep_versions: e.target.value === "directory" ? form.keep_versions : "",
+              })
+            }
+            helperText={
+              editing
+                ? "What's stored on disk depends on it, so it can't be changed later."
+                : directory
+                  ? "Stores files sent by on-change jobs under their paths, keeping a new version whenever one's content changes."
+                  : "Stores whole backups sent by backup jobs."
+            }
+            disabled={!!editing}
+          >
+            <MenuItem value="backup">Backup</MenuItem>
+            <MenuItem value="directory">Directory</MenuItem>
+          </TextField>
           <TextField
             select
             label="Allowed servers"
@@ -233,12 +277,31 @@ function ReceiverDialog({
               },
             }}
           />
-          <TextField
-            label="Retention"
-            value={form.retention}
-            onChange={(e) => set({ retention: e.target.value })}
-            helperText='Delete objects older than this, e.g. "30d" or "12h". Empty keeps them forever.'
-          />
+          {directory ? (
+            <>
+              <TextField
+                label="Keep versions"
+                value={form.keep_versions}
+                onChange={(e) => set({ keep_versions: e.target.value })}
+                error={!keepVersionsOK}
+                helperText="Keep at least this many of the newest versions of every file. Empty sets no version rule."
+                slotProps={{ htmlInput: { inputMode: "numeric" } }}
+              />
+              <TextField
+                label="Retention"
+                value={form.retention}
+                onChange={(e) => set({ retention: e.target.value })}
+                helperText='Keep every version received less than this long ago, e.g. "30d". A version is deleted only once no rule keeps it; the newest version of a file is always kept, and with neither rule set nothing is deleted.'
+              />
+            </>
+          ) : (
+            <TextField
+              label="Retention"
+              value={form.retention}
+              onChange={(e) => set({ retention: e.target.value })}
+              helperText='Delete objects older than this, e.g. "30d" or "12h". Empty keeps them forever.'
+            />
+          )}
           <TextField
             label="Stale after"
             value={form.stale_after}
@@ -319,7 +382,12 @@ export function ReceiverConfigSection() {
         {
           method: editing ? "PUT" : "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...form, id: form.id.trim(), path }),
+          body: JSON.stringify({
+            ...form,
+            id: form.id.trim(),
+            path,
+            keep_versions: Number(form.keep_versions.trim() || 0),
+          }),
         },
         "saving receiver failed",
       );
@@ -389,6 +457,7 @@ export function ReceiverConfigSection() {
             <TableHead>
               <TableRow>
                 <TableCell>ID</TableCell>
+                <TableCell>Type</TableCell>
                 <TableCell>Allowed servers</TableCell>
                 <TableCell>Path</TableCell>
                 <TableCell>Retention</TableCell>
@@ -411,6 +480,7 @@ export function ReceiverConfigSection() {
                       </Tooltip>
                     ) : null}
                   </TableCell>
+                  <TableCell>{r.type === "directory" ? "directory" : "backup"}</TableCell>
                   <TableCell sx={{ overflowWrap: "anywhere" }}>
                     {r.allowed_servers.map((id) => serverLabel(trustedServers, id)).join(", ")}
                     {!r.allowed_servers.length ? "—" : null}
@@ -418,7 +488,7 @@ export function ReceiverConfigSection() {
                   <TableCell sx={{ overflowWrap: "anywhere" }}>
                     <code>{r.path}</code>
                   </TableCell>
-                  <TableCell>{r.retention || "forever"}</TableCell>
+                  <TableCell>{retentionText(r)}</TableCell>
                   <TableCell>{r.stale_after || "—"}</TableCell>
                   <TableCell>
                     {r.stale_notifications.length ? (

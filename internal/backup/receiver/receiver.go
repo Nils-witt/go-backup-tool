@@ -32,6 +32,7 @@ import (
 func RegisterRoutes(mux *http.ServeMux, receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db store.Store) {
 	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(receivers, receiverStatus, log, db))
 	mux.HandleFunc("PUT /api/v1/backups/{id}/{key...}", HandleReceiveBackupFile(receivers, receiverStatus, log, db))
+	mux.HandleFunc("PUT /api/v1/files/{id}/{path...}", HandleReceiveFile(receivers, receiverStatus, log, db))
 }
 
 // HandleReceiveBackupFile serves PUT /api/v1/backups/{id}/{key...}?file=: one
@@ -215,6 +216,10 @@ func checkRequestBinding(r *http.Request, key, file string, bound remoteauth.Req
 		return errors.New("token is for a different creationTime")
 	case r.Method == http.MethodPut && bound.BodySHA256 == "":
 		return errors.New("token has no body digest for a PUT")
+	case bound.PlainSHA256 != "":
+		// Minted for a directory receiver's file upload (see
+		// HandleReceiveFile), never for a backup's object.
+		return errors.New("token is for a file upload")
 	}
 
 	return nil
@@ -272,6 +277,11 @@ func warnUnboundTokenOnce(receiverID, token string, log *slog.Logger) {
 func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *Registry, log *slog.Logger, multiFile bool) (recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, bound remoteauth.Request, ok bool) {
 	recv, bound, ok = authorizeReceiver(w, r, receivers, log)
 	if !ok {
+		return config.ResolvedReceiver{}, nil, nil, remoteauth.Request{}, false
+	}
+
+	if recv.Kind == config.ReceiverKindDirectory {
+		http.Error(w, fmt.Sprintf("receiver %q is a directory receiver: it accepts files from on-change jobs, not backups", recv.ID), http.StatusConflict)
 		return config.ResolvedReceiver{}, nil, nil, remoteauth.Request{}, false
 	}
 
