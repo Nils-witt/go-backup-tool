@@ -15,12 +15,12 @@ import (
 // openTestRetentionDB opens a fresh shared state db for a retention test, in
 // its own temp directory rather than sharing openTestStateDB's, since some
 // assertions below want to point it at a distinct temp file.
-func openTestRetentionDB(t *testing.T) *store.Store {
+func openTestRetentionDB(t *testing.T) store.Store {
 	t.Helper()
 
-	db, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"))
+	db, err := store.OpenSQLite(t.Context(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() unexpected error: %v", err)
+		t.Fatalf("store.OpenSQLite() unexpected error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = db.Close() })
@@ -34,7 +34,7 @@ func openTestRetentionDB(t *testing.T) *store.Store {
 // that any row on server — no matter its own retention_seconds — is bound
 // to show up, which is as close to "SELECT COUNT(*)" as this test can get
 // through store's own exported API.
-func hasRetentionRow(t *testing.T, db *store.Store, server, path string) bool {
+func hasRetentionRow(t *testing.T, db store.Store, server, path string) bool {
 	t.Helper()
 
 	farFuture := time.Now().Add(100 * 365 * 24 * time.Hour)

@@ -41,9 +41,9 @@ func TestOpenDropsObsoleteTables(t *testing.T) {
 
 	// Twice: the second Open (nothing left to drop) must be a no-op.
 	for range 2 {
-		db, err := Open(ctx, path)
+		db, err := openSQLite(ctx, path)
 		if err != nil {
-			t.Fatalf("Open() error: %v", err)
+			t.Fatalf("openSQLite() error: %v", err)
 		}
 
 		for _, table := range obsoleteTables {
@@ -66,9 +66,9 @@ func TestOpenMigratesCommandsWithoutType(t *testing.T) {
 
 	createLegacyCommandsDB(t, path)
 
-	db, err := Open(ctx, path)
+	db, err := openSQLite(ctx, path)
 	if err != nil {
-		t.Fatalf("Open() error: %v", err)
+		t.Fatalf("openSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = db.Close() })
@@ -93,9 +93,9 @@ func TestOpenMigratesCommandsWithoutType(t *testing.T) {
 func createLegacyCommandsDB(t *testing.T, path string) {
 	t.Helper()
 
-	db, err := Open(t.Context(), path)
+	db, err := openSQLite(t.Context(), path)
 	if err != nil {
-		t.Fatalf("Open() error: %v", err)
+		t.Fatalf("openSQLite() error: %v", err)
 	}
 
 	if err := db.Close(); err != nil {

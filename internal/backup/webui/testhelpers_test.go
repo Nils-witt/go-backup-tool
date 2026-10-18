@@ -108,14 +108,14 @@ Expire-Date: 0
 
 // openTestStateDB opens a fresh state db under t.TempDir(), closed
 // automatically when the test ends.
-func openTestStateDB(t *testing.T) *store.Store {
+func openTestStateDB(t *testing.T) store.Store {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "state.db")
 
-	db, err := store.Open(context.Background(), path)
+	db, err := store.OpenSQLite(context.Background(), path)
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = db.Close() })

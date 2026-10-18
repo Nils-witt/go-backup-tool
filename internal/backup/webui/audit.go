@@ -34,7 +34,7 @@ const auditDetailLimit = 512
 // never recorded, since it may carry secrets. A write failure there is
 // only logged — a change must never be blocked by an audit-log hiccup. A
 // nil db records nothing, matching StartWebUI's optional db.
-func recordChange(db *store.Store, resources map[string]auditResource, log *slog.Logger, trustProxyHeaders bool, next http.HandlerFunc) http.HandlerFunc {
+func recordChange(db store.Store, resources map[string]auditResource, log *slog.Logger, trustProxyHeaders bool, next http.HandlerFunc) http.HandlerFunc {
 	if db == nil {
 		return next
 	}
@@ -240,9 +240,9 @@ type auditEventJSON struct {
 // db nil (state tracking unavailable) serves an empty list rather than
 // failing the request, matching handleLoginEvents's own tolerance for a
 // missing dependency.
-func handleAuditEvents(db *store.Store, log *slog.Logger, limit int) http.HandlerFunc {
+func handleAuditEvents(db store.Store, log *slog.Logger, limit int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		serveEventLog(w, r, log, db, limit, db.ListAuditEvents,
+		serveEventLog(w, r, log, db, limit, store.Store.ListAuditEvents,
 			func(ev store.AuditEvent) auditEventJSON { return auditEventJSON(ev) },
 			"reading audit events failed")
 	}

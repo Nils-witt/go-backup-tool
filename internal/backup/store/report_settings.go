@@ -37,7 +37,7 @@ type ReportSettings struct {
 
 // GetReportSettings returns the stored report settings, reporting false if
 // none have been saved yet (the report is then disabled).
-func (s *Store) GetReportSettings(ctx context.Context) (ReportSettings, bool, error) {
+func (s *gormStore) GetReportSettings(ctx context.Context) (ReportSettings, bool, error) {
 	var m reportSettingsModel
 
 	if err := s.read.WithContext(ctx).Take(&m, reportSettingsID).Error; err != nil {
@@ -53,7 +53,7 @@ func (s *Store) GetReportSettings(ctx context.Context) (ReportSettings, bool, er
 
 // SaveReportSettings stores r as the report settings, replacing any saved
 // before.
-func (s *Store) SaveReportSettings(ctx context.Context, r ReportSettings) error {
+func (s *gormStore) SaveReportSettings(ctx context.Context, r ReportSettings) error {
 	m := reportSettingsModelFrom(r)
 
 	if err := s.db.WithContext(ctx).Save(&m).Error; err != nil {

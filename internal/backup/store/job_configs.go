@@ -207,7 +207,7 @@ var (
 var updatedColumns = []string{"updated_at", "updated_by"}
 
 // ListServerConfigs returns every stored server, in name order.
-func (s *Store) ListServerConfigs(ctx context.Context) ([]ServerConfig, error) {
+func (s *gormStore) ListServerConfigs(ctx context.Context) ([]ServerConfig, error) {
 	rows, err := listRows[serverModel](ctx, s.read, "name", "servers")
 	if err != nil {
 		return nil, err
@@ -223,7 +223,7 @@ func (s *Store) ListServerConfigs(ctx context.Context) ([]ServerConfig, error) {
 
 // CreateServerConfig stores a new server, returning ErrServerExists if its
 // name is already taken.
-func (s *Store) CreateServerConfig(ctx context.Context, c ServerConfig) error {
+func (s *gormStore) CreateServerConfig(ctx context.Context, c ServerConfig) error {
 	c.CreatedAt, c.UpdatedAt = c.CreatedAt.UTC(), c.UpdatedAt.UTC()
 	m := serverModel(c)
 
@@ -232,7 +232,7 @@ func (s *Store) CreateServerConfig(ctx context.Context, c ServerConfig) error {
 
 // UpdateServerConfig replaces server c.Name's definition, keeping its
 // CreatedAt/CreatedBy, and returns ErrServerNotFound if there is none.
-func (s *Store) UpdateServerConfig(ctx context.Context, c ServerConfig) error {
+func (s *gormStore) UpdateServerConfig(ctx context.Context, c ServerConfig) error {
 	c.UpdatedAt = c.UpdatedAt.UTC()
 	m := serverModel(c)
 
@@ -245,12 +245,12 @@ func (s *Store) UpdateServerConfig(ctx context.Context, c ServerConfig) error {
 // DeleteServerConfig removes the stored server name, returning
 // ErrServerNotFound if there is none. Objects already written to it are
 // kept, as is their retention tracking.
-func (s *Store) DeleteServerConfig(ctx context.Context, name string) error {
+func (s *gormStore) DeleteServerConfig(ctx context.Context, name string) error {
 	return deleteRow[serverModel](ctx, s.db, "name", name, "server", ErrServerNotFound)
 }
 
 // ListCommandConfigs returns every stored command, in id order.
-func (s *Store) ListCommandConfigs(ctx context.Context) ([]CommandConfig, error) {
+func (s *gormStore) ListCommandConfigs(ctx context.Context) ([]CommandConfig, error) {
 	rows, err := listRows[commandModel](ctx, s.read, "id", "commands")
 	if err != nil {
 		return nil, err
@@ -266,7 +266,7 @@ func (s *Store) ListCommandConfigs(ctx context.Context) ([]CommandConfig, error)
 
 // CreateCommandConfig stores a new command, returning ErrCommandExists if
 // its id is already taken.
-func (s *Store) CreateCommandConfig(ctx context.Context, c CommandConfig) error {
+func (s *gormStore) CreateCommandConfig(ctx context.Context, c CommandConfig) error {
 	c.CreatedAt, c.UpdatedAt = c.CreatedAt.UTC(), c.UpdatedAt.UTC()
 	m := commandModel(c)
 
@@ -275,7 +275,7 @@ func (s *Store) CreateCommandConfig(ctx context.Context, c CommandConfig) error 
 
 // UpdateCommandConfig replaces command c.ID's definition, keeping its
 // CreatedAt/CreatedBy, and returns ErrCommandNotFound if there is none.
-func (s *Store) UpdateCommandConfig(ctx context.Context, c CommandConfig) error {
+func (s *gormStore) UpdateCommandConfig(ctx context.Context, c CommandConfig) error {
 	c.UpdatedAt = c.UpdatedAt.UTC()
 	m := commandModel(c)
 
@@ -286,12 +286,12 @@ func (s *Store) UpdateCommandConfig(ctx context.Context, c CommandConfig) error 
 
 // DeleteCommandConfig removes the stored command id, returning
 // ErrCommandNotFound if there is none.
-func (s *Store) DeleteCommandConfig(ctx context.Context, id string) error {
+func (s *gormStore) DeleteCommandConfig(ctx context.Context, id string) error {
 	return deleteRow[commandModel](ctx, s.db, "id", id, "command", ErrCommandNotFound)
 }
 
 // ListJobConfigs returns every stored job, in name order.
-func (s *Store) ListJobConfigs(ctx context.Context) ([]JobConfig, error) {
+func (s *gormStore) ListJobConfigs(ctx context.Context) ([]JobConfig, error) {
 	rows, err := listRows[jobModel](ctx, s.read, "name", "jobs")
 	if err != nil {
 		return nil, err
@@ -307,7 +307,7 @@ func (s *Store) ListJobConfigs(ctx context.Context) ([]JobConfig, error) {
 
 // GetJobConfig looks up the stored job name, reporting false if there is
 // none.
-func (s *Store) GetJobConfig(ctx context.Context, name string) (JobConfig, bool, error) {
+func (s *gormStore) GetJobConfig(ctx context.Context, name string) (JobConfig, bool, error) {
 	var m jobModel
 
 	if err := s.read.WithContext(ctx).Take(&m, "name = ?", name).Error; err != nil {
@@ -323,7 +323,7 @@ func (s *Store) GetJobConfig(ctx context.Context, name string) (JobConfig, bool,
 
 // CreateJobConfig stores a new job, returning ErrJobExists if its name is
 // already taken.
-func (s *Store) CreateJobConfig(ctx context.Context, c JobConfig) error {
+func (s *gormStore) CreateJobConfig(ctx context.Context, c JobConfig) error {
 	c.CreatedAt, c.UpdatedAt = c.CreatedAt.UTC(), c.UpdatedAt.UTC()
 	m := jobModel(c)
 
@@ -332,7 +332,7 @@ func (s *Store) CreateJobConfig(ctx context.Context, c JobConfig) error {
 
 // UpdateJobConfig replaces job c.Name's definition, keeping its
 // CreatedAt/CreatedBy, and returns ErrJobNotFound if there is none.
-func (s *Store) UpdateJobConfig(ctx context.Context, c JobConfig) error {
+func (s *gormStore) UpdateJobConfig(ctx context.Context, c JobConfig) error {
 	c.UpdatedAt = c.UpdatedAt.UTC()
 	m := jobModel(c)
 
@@ -344,7 +344,7 @@ func (s *Store) UpdateJobConfig(ctx context.Context, c JobConfig) error {
 
 // DeleteJobConfig removes the stored job name, returning ErrJobNotFound if
 // there is none. Its run history and tracked objects are kept.
-func (s *Store) DeleteJobConfig(ctx context.Context, name string) error {
+func (s *gormStore) DeleteJobConfig(ctx context.Context, name string) error {
 	return deleteRow[jobModel](ctx, s.db, "name", name, "job", ErrJobNotFound)
 }
 

@@ -77,7 +77,7 @@ type schedule struct {
 // uses) from its next run on, and is only rescheduled when its interval or
 // start-time changed.
 type Manager struct {
-	db            *store.Store
+	db            store.Store
 	status        *status.Store
 	runner        *pipeline.Runner
 	notifications *notify.Registry
@@ -120,7 +120,7 @@ const (
 // opened), mirroring jobs into status and running them on runner. Job
 // failure-notifications are checked against notifications. Call Load, then
 // Start.
-func NewManager(db *store.Store, statusStore *status.Store, runner *pipeline.Runner, notifications *notify.Registry, settings Settings, log *slog.Logger) *Manager {
+func NewManager(db store.Store, statusStore *status.Store, runner *pipeline.Runner, notifications *notify.Registry, settings Settings, log *slog.Logger) *Manager {
 	return &Manager{
 		db: db, status: statusStore, runner: runner, notifications: notifications, settings: settings, log: log,
 		serverDefs: make(map[string]config.FileServer), commandDefs: make(map[string]config.FileCommand), jobDefs: make(map[string]config.FileJob),

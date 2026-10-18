@@ -52,7 +52,7 @@ type Server struct {
 // fresh LogRingBuffer.
 type Deps struct {
 	Log             *slog.Logger
-	DB              *store.Store
+	DB              store.Store
 	Status          *status.Store
 	Jobs            *jobs.Manager
 	Runner          *pipeline.Runner

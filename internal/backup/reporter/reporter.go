@@ -40,7 +40,7 @@ type Deps struct {
 	Settings      *reportpkg.Live
 	Notifications *notify.Registry
 	Receivers     func() map[string]config.ResolvedReceiver
-	DB            *store.Store
+	DB            store.Store
 	Queue         *notify.Queue
 	Log           *slog.Logger
 }
@@ -301,7 +301,7 @@ type reportContent struct {
 // query failure is logged and leaves that section empty rather than failing
 // the whole report — a partial report is better than none, matching this
 // codebase's usual failure handling.
-func buildReport(ctx context.Context, serverName string, jobNames []string, receivers map[string]config.ResolvedReceiver, db *store.Store, start, end time.Time, log *slog.Logger) reportContent {
+func buildReport(ctx context.Context, serverName string, jobNames []string, receivers map[string]config.ResolvedReceiver, db store.Store, start, end time.Time, log *slog.Logger) reportContent {
 	report := reportContent{start: start, end: end, serverName: serverName}
 
 	report.receivers, report.stale, report.errors = buildReceiverReport(ctx, receivers, db, start, end, log)
@@ -318,7 +318,7 @@ func buildReport(ctx context.Context, serverName string, jobNames []string, rece
 // logged and leaves that section empty rather than failing the whole
 // report — a partial report is better than none, matching this codebase's
 // usual failure handling.
-func buildReceiverReport(ctx context.Context, receivers map[string]config.ResolvedReceiver, db *store.Store, start, end time.Time, log *slog.Logger) ([]receiverReportLine, []staleReceiverLine, []store.ReceiverErrorEvent) {
+func buildReceiverReport(ctx context.Context, receivers map[string]config.ResolvedReceiver, db store.Store, start, end time.Time, log *slog.Logger) ([]receiverReportLine, []staleReceiverLine, []store.ReceiverErrorEvent) {
 	ids := make([]string, 0, len(receivers))
 	for id := range receivers {
 		ids = append(ids, id)
@@ -381,7 +381,7 @@ func buildReceiverReport(ctx context.Context, receivers map[string]config.Resolv
 // from start to end: runs completed and errors from job_runs (db, skipped
 // if nil), mirroring buildReceiverReport. A query failure is logged and
 // leaves that section empty rather than failing the whole report.
-func buildJobReport(ctx context.Context, jobNames []string, db *store.Store, start, end time.Time, log *slog.Logger) ([]jobReportLine, []store.JobRunErrorEvent) {
+func buildJobReport(ctx context.Context, jobNames []string, db store.Store, start, end time.Time, log *slog.Logger) ([]jobReportLine, []store.JobRunErrorEvent) {
 	ids := slices.Sorted(slices.Values(jobNames))
 
 	byID := make(map[string]store.JobRunDaySummary, len(ids))

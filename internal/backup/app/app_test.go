@@ -88,9 +88,9 @@ func TestCheckPublicKeyReceivers(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "state.db")
 
-	db, err := store.Open(t.Context(), path)
+	db, err := store.OpenSQLite(t.Context(), path)
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = db.Close() })

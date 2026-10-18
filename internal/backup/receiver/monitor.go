@@ -28,7 +28,7 @@ import (
 // receiver's last activity instead of every receiver reverting to idle
 // until it next serves a request. Called once at startup, before the
 // receiver API's handlers can serve any request.
-func SeedReceiverStatusFromState(ctx context.Context, db *store.Store, receivers map[string]config.ResolvedReceiver, statusStore *status.ReceiverStore, log *slog.Logger) {
+func SeedReceiverStatusFromState(ctx context.Context, db store.Store, receivers map[string]config.ResolvedReceiver, statusStore *status.ReceiverStore, log *slog.Logger) {
 	for id := range receivers {
 		seedReceiverStatus(ctx, db, id, statusStore, log)
 	}
@@ -37,7 +37,7 @@ func SeedReceiverStatusFromState(ctx context.Context, db *store.Store, receivers
 // seedReceiverStatus is SeedReceiverStatusFromState for a single receiver
 // id, also used when a receiver is created in the web UI (see
 // Manager.Create), since an id that existed before may have history.
-func seedReceiverStatus(ctx context.Context, db *store.Store, id string, statusStore *status.ReceiverStore, log *slog.Logger) {
+func seedReceiverStatus(ctx context.Context, db store.Store, id string, statusStore *status.ReceiverStore, log *slog.Logger) {
 	ev, ok, err := db.GetLastReceiverEvent(ctx, id)
 	if err != nil {
 		log.Warn("reading last receiver event from state db", "id", id, "err", err)
@@ -58,7 +58,7 @@ func seedReceiverStatus(ctx context.Context, db *store.Store, id string, statusS
 // matching every other state-db write; a write failure is logged rather
 // than returned, since it shouldn't affect the response the request already
 // committed to.
-func recordReceiverEventBestEffort(ctx context.Context, db *store.Store, log *slog.Logger, receiverID, kind, key string, size int64, recvErr error) {
+func recordReceiverEventBestEffort(ctx context.Context, db store.Store, log *slog.Logger, receiverID, kind, key string, size int64, recvErr error) {
 	if db == nil {
 		return
 	}
@@ -88,7 +88,7 @@ const receiverRetentionSweepInterval = time.Minute
 // done. Receivers are read from the registry on every sweep, so ones added
 // or edited in the web UI are picked up. A nil db (retention tracking
 // unavailable this run) is a no-op.
-func MonitorReceiverRetention(ctx context.Context, db *store.Store, receivers *Registry, log *slog.Logger) {
+func MonitorReceiverRetention(ctx context.Context, db store.Store, receivers *Registry, log *slog.Logger) {
 	if db == nil {
 		return
 	}
@@ -102,7 +102,7 @@ func MonitorReceiverRetention(ctx context.Context, db *store.Store, receivers *R
 // across every entry in receivers with retention: set, factored out of
 // MonitorReceiverRetention's periodic loop so a single sweep pass can be
 // exercised directly in tests without also driving RunPeriodically's timing.
-func sweepAllReceivers(ctx context.Context, db *store.Store, receivers map[string]config.ResolvedReceiver, log *slog.Logger) {
+func sweepAllReceivers(ctx context.Context, db store.Store, receivers map[string]config.ResolvedReceiver, log *slog.Logger) {
 	for _, recv := range receivers {
 		if recv.Retention <= 0 {
 			continue

@@ -36,7 +36,7 @@ type SSOLogout struct {
 }
 
 // SaveSSOLogout records an accepted back-channel logout.
-func (s *Store) SaveSSOLogout(ctx context.Context, l SSOLogout) error {
+func (s *gormStore) SaveSSOLogout(ctx context.Context, l SSOLogout) error {
 	m := ssoLogoutModel{
 		Issuer: l.Issuer, Subject: l.Subject, SessionID: l.SessionID,
 		LoggedOutAt: l.LoggedOutAt.UTC(), ExpiresAt: l.ExpiresAt.UTC(),
@@ -51,7 +51,7 @@ func (s *Store) SaveSSOLogout(ctx context.Context, l SSOLogout) error {
 
 // ListSSOLogouts returns every back-channel logout from issuer that is
 // still in effect at now, oldest first.
-func (s *Store) ListSSOLogouts(ctx context.Context, issuer string, now time.Time) ([]SSOLogout, error) {
+func (s *gormStore) ListSSOLogouts(ctx context.Context, issuer string, now time.Time) ([]SSOLogout, error) {
 	var rows []ssoLogoutModel
 
 	err := s.read.WithContext(ctx).
@@ -75,7 +75,7 @@ func (s *Store) ListSSOLogouts(ctx context.Context, issuer string, now time.Time
 
 // DeleteExpiredSSOLogouts removes every back-channel logout no longer in
 // effect at now.
-func (s *Store) DeleteExpiredSSOLogouts(ctx context.Context, now time.Time) error {
+func (s *gormStore) DeleteExpiredSSOLogouts(ctx context.Context, now time.Time) error {
 	if err := s.db.WithContext(ctx).Where("expires_at <= ?", now.UTC()).Delete(&ssoLogoutModel{}).Error; err != nil {
 		return fmt.Errorf("deleting expired sso logouts: %w", err)
 	}

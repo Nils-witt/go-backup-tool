@@ -25,7 +25,7 @@ import (
 type Runner struct {
 	log      *slog.Logger
 	store    *status.Store
-	stateDB  *store.Store             // nil only if the db couldn't be opened
+	stateDB  store.Store              // nil only if the db couldn't be opened
 	identity *identity.ServerIdentity // nil makes remote uploads fail; see runEnv
 	queue    *notify.Queue            // retries a failed job-failure email later; see notify.SendMailQueued
 
@@ -71,7 +71,7 @@ type targetKey struct {
 
 // NewRunner builds a Runner sharing store/stateDB/identity/queue across
 // every job scheduled through it in this run.
-func NewRunner(log *slog.Logger, statusStore *status.Store, stateDB *store.Store, identity *identity.ServerIdentity, queue *notify.Queue, notifications *notify.Registry) *Runner {
+func NewRunner(log *slog.Logger, statusStore *status.Store, stateDB store.Store, identity *identity.ServerIdentity, queue *notify.Queue, notifications *notify.Registry) *Runner {
 	return &Runner{log: log, store: statusStore, stateDB: stateDB, identity: identity, queue: queue, notifications: notifications, targetFailures: make(map[targetKey]int)}
 }
 
@@ -103,7 +103,7 @@ func (r *Runner) Failed() bool {
 // show when each job last ran instead of every job reverting to "never"
 // until it next runs. Called once at startup, before the jobs' own
 // goroutines start.
-func SeedStatusFromState(ctx context.Context, db *store.Store, jobs []*config.Config, statusStore *status.Store, log *slog.Logger) {
+func SeedStatusFromState(ctx context.Context, db store.Store, jobs []*config.Config, statusStore *status.Store, log *slog.Logger) {
 	for _, j := range jobs {
 		run, ok, err := db.GetLastRun(ctx, j.Name)
 		if err != nil {
@@ -835,7 +835,7 @@ func WarnIfKeyWontChange(log *slog.Logger, job *config.Config) {
 // to it — potentially long after files there actually expired, e.g. right
 // after go-backup-tool restarts following a period of downtime. A nil db
 // (retention tracking unavailable this run) is a no-op.
-func SweepStartupRetention(ctx context.Context, db *store.Store, jobs []*config.Config, log *slog.Logger) {
+func SweepStartupRetention(ctx context.Context, db store.Store, jobs []*config.Config, log *slog.Logger) {
 	if db == nil {
 		return
 	}

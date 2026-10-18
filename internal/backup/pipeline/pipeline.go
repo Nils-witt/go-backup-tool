@@ -40,7 +40,7 @@ const TargetUploadRetryInterval = 60 * time.Second
 type runEnv struct {
 	// db records retention and outstanding target uploads; nil (the state
 	// db couldn't be opened at startup) disables both.
-	db *store.Store
+	db store.Store
 
 	// identity signs requests to remote targets; nil makes every remote
 	// upload fail (see remoteclient.Upload).
@@ -54,7 +54,7 @@ type runEnv struct {
 // that last reference removes it instead. A nil db (no persistence
 // available, so no retry can happen either) always removes the file, same
 // as before this function existed.
-func removeStagingFileIfUnreferenced(ctx context.Context, db *store.Store, path string, log *slog.Logger) {
+func removeStagingFileIfUnreferenced(ctx context.Context, db store.Store, path string, log *slog.Logger) {
 	if db != nil {
 		n, err := db.CountOutstandingTargetUploadsForFile(ctx, path)
 		if err != nil {

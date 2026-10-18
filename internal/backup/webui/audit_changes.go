@@ -40,9 +40,9 @@ type auditResource struct {
 // keyring), the same stored definitions the managers apply. A collection
 // missing here (e.g. a job retry, which changes nothing stored) is
 // recorded without field changes.
-func auditResources(db *store.Store, keyring *gpgkeys.Keyring) map[string]auditResource {
+func auditResources(db store.Store, keyring *gpgkeys.Keyring) map[string]auditResource {
 	res := map[string]auditResource{
-		"job-configs": {snapshot: getStored(db.GetJobConfig, jobs.FileJobFrom)},
+		"job-configs": {snapshot: getStored(db, store.Store.GetJobConfig, jobs.FileJobFrom)},
 		"server-configs": {snapshot: func(ctx context.Context, name string) (any, bool, error) {
 			return findStored(ctx, db.ListServerConfigs, func(sc store.ServerConfig) (config.FileServer, bool) {
 				return jobs.FileServerFrom(sc), sc.Name == name
@@ -53,7 +53,7 @@ func auditResources(db *store.Store, keyring *gpgkeys.Keyring) map[string]auditR
 				return jobs.FileCommandFrom(cc), cc.ID == id
 			})
 		}},
-		"receiver-configs": {snapshot: getStored(db.GetReceiverConfig, func(rc store.ReceiverConfig) config.FileReceiver {
+		"receiver-configs": {snapshot: getStored(db, store.Store.GetReceiverConfig, func(rc store.ReceiverConfig) config.FileReceiver {
 			return config.FileReceiver{
 				ID: rc.ID, AllowedServers: rc.AllowedServers, Path: rc.Path, Retention: rc.Retention,
 				StaleAfter: rc.StaleAfter, StaleNotifications: rc.StaleNotifications, DownloadNotifications: rc.DownloadNotifications,
@@ -65,7 +65,7 @@ func auditResources(db *store.Store, keyring *gpgkeys.Keyring) map[string]auditR
 			})
 		}},
 		"notification-configs": {
-			snapshot: getStored(db.GetNotificationConfig, func(nc store.NotificationConfig) notify.FileNotification {
+			snapshot: getStored(db, store.Store.GetNotificationConfig, func(nc store.NotificationConfig) notify.FileNotification {
 				return notify.FileNotification{ID: nc.ID, Webhook: nc.Webhook, Email: nc.Email}
 			}),
 			// A webhook's URL often embeds its credential (e.g. a chat
@@ -75,7 +75,7 @@ func auditResources(db *store.Store, keyring *gpgkeys.Keyring) map[string]auditR
 				return field == "webhook.url" || strings.HasPrefix(field, "webhook.headers.")
 			},
 		},
-		"report-config": {snapshot: getStored(func(ctx context.Context, _ string) (store.ReportSettings, bool, error) {
+		"report-config": {snapshot: getStored(db, func(db store.Store, ctx context.Context, _ string) (store.ReportSettings, bool, error) {
 			return db.GetReportSettings(ctx)
 		}, func(rs store.ReportSettings) report.FileReport {
 			return report.FileReport{Enabled: rs.Enabled, Schedule: rs.Schedule, Notifications: rs.Notifications, HistoryDays: rs.HistoryDays}
@@ -112,11 +112,13 @@ func auditResources(db *store.Store, keyring *gpgkeys.Keyring) map[string]auditR
 	return res
 }
 
-// getStored adapts a store Get* lookup into an auditResource snapshot,
-// converting the stored row with conv.
-func getStored[R, T any](get func(context.Context, string) (R, bool, error), conv func(R) T) func(context.Context, string) (any, bool, error) {
+// getStored adapts a store Get* lookup (a method expression such as
+// store.Store.GetJobConfig) into an auditResource snapshot that runs it
+// against db, converting the stored row with conv. db is only used once the
+// snapshot runs, so building one with a nil db is safe.
+func getStored[R, T any](db store.Store, get func(store.Store, context.Context, string) (R, bool, error), conv func(R) T) func(context.Context, string) (any, bool, error) {
 	return func(ctx context.Context, key string) (any, bool, error) {
-		row, ok, err := get(ctx, key)
+		row, ok, err := get(db, ctx, key)
 		if !ok || err != nil {
 			return nil, false, err
 		}

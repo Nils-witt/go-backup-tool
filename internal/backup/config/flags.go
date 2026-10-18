@@ -79,6 +79,11 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 
 	listen := webUI.listen
 
+	database, err := resolveDatabase(fileCfg.Database)
+	if err != nil {
+		return nil, err
+	}
+
 	notifications, commands, err := resolveNotificationsAndCommands(fileCfg)
 	if err != nil {
 		return nil, err
@@ -120,6 +125,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		Timeout:           timeout,
 		Listen:            listen,
 		DockerSocket:      strings.TrimSpace(fileCfg.DockerSocket),
+		Database:          database,
 		ConfigPath:        configPath,
 		LogLevel:          level,
 		LogFile:           strings.TrimSpace(fileCfg.LogFile),

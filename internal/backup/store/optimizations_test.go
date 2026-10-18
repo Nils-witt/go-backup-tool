@@ -12,7 +12,7 @@ import (
 func TestOpenEnablesWAL(t *testing.T) {
 	t.Parallel()
 
-	db := openTestStore(t)
+	db := openSQLiteTestStore(t)
 
 	var mode string
 	if err := db.db.Raw("PRAGMA journal_mode").Scan(&mode).Error; err != nil {
@@ -27,7 +27,7 @@ func TestOpenEnablesWAL(t *testing.T) {
 func TestReadPoolIsQueryOnly(t *testing.T) {
 	t.Parallel()
 
-	db := openTestStore(t)
+	db := openSQLiteTestStore(t)
 
 	err := db.read.Exec("INSERT INTO login_events (at, username, method, success, remote_addr) VALUES (?, 'u', 'oidc', 1, '')", time.Now()).Error
 	if err == nil {
@@ -38,7 +38,7 @@ func TestReadPoolIsQueryOnly(t *testing.T) {
 func TestReadPoolSeesCommittedWrites(t *testing.T) {
 	t.Parallel()
 
-	db := openTestStore(t)
+	db := openSQLiteTestStore(t)
 	ctx := context.Background()
 	start := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
 
@@ -68,9 +68,9 @@ func TestOpenDropsObsoleteObjectsServerIndex(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "state.db")
 
-	db, err := Open(ctx, path)
+	db, err := openSQLite(ctx, path)
 	if err != nil {
-		t.Fatalf("Open() error: %v", err)
+		t.Fatalf("openSQLite() error: %v", err)
 	}
 
 	// Recreate the index an older version declared on objects.server.
@@ -82,7 +82,7 @@ func TestOpenDropsObsoleteObjectsServerIndex(t *testing.T) {
 		t.Fatalf("Close() error: %v", err)
 	}
 
-	db, err = Open(ctx, path)
+	db, err = openSQLite(ctx, path)
 	if err != nil {
 		t.Fatalf("reopening: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestOpenDropsObsoleteObjectsServerIndex(t *testing.T) {
 func TestExpiredObjectPathsUsesExpiryIndex(t *testing.T) {
 	t.Parallel()
 
-	db := openTestStore(t)
+	db := openSQLiteTestStore(t)
 
 	var plan []struct {
 		Detail string `gorm:"column:detail"`
@@ -138,7 +138,7 @@ func TestExpiredObjectPathsUsesExpiryIndex(t *testing.T) {
 func TestExpiredObjectPathsPerRowRetention(t *testing.T) {
 	t.Parallel()
 
-	db := openTestStore(t)
+	db := openSQLiteTestStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
 	day := int64(24 * 60 * 60)
@@ -178,7 +178,7 @@ func TestExpiredObjectPathsPerRowRetention(t *testing.T) {
 func TestPruneEventsRemovesOnlyOlderRows(t *testing.T) {
 	t.Parallel()
 
-	db := openTestStore(t)
+	db := openSQLiteTestStore(t)
 	ctx := context.Background()
 	cutoff := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	before, after := cutoff.Add(-time.Hour), cutoff.Add(time.Hour)

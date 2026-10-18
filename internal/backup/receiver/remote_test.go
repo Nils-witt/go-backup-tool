@@ -387,7 +387,7 @@ func TestRemoteTargetInteropUnknownID(t *testing.T) {
 // HandleReceiveObject instead of nil, so a
 // test can inspect what they recorded to it (retention tracking,
 // receiver_events).
-func newReceiverMuxWithDB(receivers map[string]config.ResolvedReceiver, db *store.Store) *http.ServeMux {
+func newReceiverMuxWithDB(receivers map[string]config.ResolvedReceiver, db store.Store) *http.ServeMux {
 	receiverStatus := status.NewReceiverStore(receivers)
 
 	mux := http.NewServeMux()
@@ -401,9 +401,9 @@ func TestHandleReceiveObjectRecordsReceiverEvent(t *testing.T) {
 
 	dir := t.TempDir()
 
-	db, err := store.Open(t.Context(), filepath.Join(dir, "state.db"))
+	db, err := store.OpenSQLite(t.Context(), filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = db.Close() })
@@ -444,9 +444,9 @@ func TestHandleReceiveObjectRecordsFailedReceiverEvent(t *testing.T) {
 
 	dir := t.TempDir()
 
-	db, err := store.Open(t.Context(), filepath.Join(dir, "state.db"))
+	db, err := store.OpenSQLite(t.Context(), filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = db.Close() })

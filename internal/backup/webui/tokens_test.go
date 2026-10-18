@@ -51,7 +51,7 @@ func postJSON(t *testing.T, srv *Server, path, token string, body, out any) int 
 // startTokenWebUI starts an SSO-enabled web UI backed by its own state db,
 // returned too so tests can inspect it, with one receiver "a" holding
 // backup.gpg.
-func startTokenWebUI(t *testing.T, idp *testIDP) (*Server, *store.Store) {
+func startTokenWebUI(t *testing.T, idp *testIDP) (*Server, store.Store) {
 	t.Helper()
 
 	root := t.TempDir()

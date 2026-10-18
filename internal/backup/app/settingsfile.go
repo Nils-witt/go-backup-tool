@@ -19,7 +19,7 @@ const settingsFileUser = "settings file"
 // web UI-managed settings from stateDB through their managers, writes or
 // applies the settings file, and returns the process exit code. It needs
 // the state db, so a run without one fails.
-func runSettingsFile(ctx context.Context, rc *config.RunConfig, stateDB *store.Store, log *slog.Logger) int {
+func runSettingsFile(ctx context.Context, rc *config.RunConfig, stateDB store.Store, log *slog.Logger) int {
 	if rc.ExportSettings != "" && rc.ImportSettings != "" {
 		log.Error("-export-settings and -import-settings can't be combined")
 		return 2

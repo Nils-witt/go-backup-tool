@@ -133,7 +133,7 @@ func (m *Manager) UpdateServer(ctx context.Context, user string, fs config.FileS
 // while a stored job's target names it. What was written to it is kept. An
 // unknown name returns store.ErrServerNotFound.
 func (m *Manager) DeleteServer(ctx context.Context, user, name string) error {
-	return deleteReferenced(ctx, m, user, kindServer, name, m.db.DeleteServerConfig, m.serverDefs, m.servers)
+	return deleteReferenced(ctx, m, user, kindServer, name, store.Store.DeleteServerConfig, m.serverDefs, m.servers)
 }
 
 // ManagedCommand is one stored command as the web UI lists it: its
@@ -235,7 +235,7 @@ func (m *Manager) UpdateCommand(ctx context.Context, user string, fc config.File
 // on-recover. An unknown id
 // returns store.ErrCommandNotFound.
 func (m *Manager) DeleteCommand(ctx context.Context, user, id string) error {
-	return deleteReferenced(ctx, m, user, kindCommand, id, m.db.DeleteCommandConfig, m.commandDefs, m.commands)
+	return deleteReferenced(ctx, m, user, kindCommand, id, store.Store.DeleteCommandConfig, m.commandDefs, m.commands)
 }
 
 // listReferenced lists every stored server or command (kind) via list,
@@ -264,7 +264,7 @@ func listReferenced[S, O any](ctx context.Context, m *Manager, kind string, list
 // deleteReferenced removes stored server or command (kind) key via del,
 // refusing (ErrInUse, naming the jobs) while a stored job uses it, and
 // forgets it from defs and active.
-func deleteReferenced[D, R any](ctx context.Context, m *Manager, user, kind, key string, del func(context.Context, string) error, defs map[string]D, active map[string]R) error {
+func deleteReferenced[D, R any](ctx context.Context, m *Manager, user, kind, key string, del func(store.Store, context.Context, string) error, defs map[string]D, active map[string]R) error {
 	if err := m.checkMutable(); err != nil {
 		return err
 	}
@@ -276,7 +276,7 @@ func deleteReferenced[D, R any](ctx context.Context, m *Manager, user, kind, key
 		return fmt.Errorf("%s %w by %s", kind, ErrInUse, strings.Join(u, ", "))
 	}
 
-	if err := del(ctx, key); err != nil {
+	if err := del(m.db, ctx, key); err != nil {
 		return err
 	}
 

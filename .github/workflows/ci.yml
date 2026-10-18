@@ -108,6 +108,42 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  # The store package's tests again, against PostgreSQL instead of SQLite
+  # (see openTestStore in internal/backup/store/testhelpers_test.go).
+  test-postgres:
+    name: Test store (PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+
+      - uses: ./.github/actions/go-cache
+        with:
+          name: test-postgres
+
+      - name: Run store tests
+        env:
+          TEST_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+        run: go test -race -shuffle=on ./internal/backup/store/...
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

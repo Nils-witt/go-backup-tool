@@ -22,12 +22,12 @@ type testManager struct {
 
 	registry *Registry
 	status   *status.ReceiverStore
-	db       *store.Store
+	db       store.Store
 	trusted  *trust.Registry
 	baseDir  string
 }
 
-func newTestManager(t *testing.T, db *store.Store) testManager {
+func newTestManager(t *testing.T, db store.Store) testManager {
 	t.Helper()
 
 	registry := NewRegistry(nil)
@@ -260,7 +260,7 @@ func TestReceiverCreatedAtRuntimeAcceptsUploads(t *testing.T) {
 }
 
 // seedReceivers stores rcs directly, bypassing the manager's validation.
-func seedReceivers(t *testing.T, db *store.Store, rcs ...store.ReceiverConfig) {
+func seedReceivers(t *testing.T, db store.Store, rcs ...store.ReceiverConfig) {
 	t.Helper()
 
 	for _, rc := range rcs {

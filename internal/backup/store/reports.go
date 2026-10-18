@@ -117,7 +117,7 @@ type Report struct {
 
 // SaveReport stores r as a new report, ignoring r.ID and the counts (both
 // derived here), and returns it as stored.
-func (s *Store) SaveReport(ctx context.Context, r Report) (Report, error) {
+func (s *gormStore) SaveReport(ctx context.Context, r Report) (Report, error) {
 	m := reportModel{
 		GeneratedAt: r.GeneratedAt.UTC(), PeriodStart: r.PeriodStart.UTC(), PeriodEnd: r.PeriodEnd.UTC(),
 		Trigger: r.Trigger, TriggeredBy: r.TriggeredBy, Notifications: r.Notifications,
@@ -135,7 +135,7 @@ func (s *Store) SaveReport(ctx context.Context, r Report) (Report, error) {
 
 // ListReports returns up to limit stored reports, newest first, without
 // their content.
-func (s *Store) ListReports(ctx context.Context, limit int) ([]ReportSummary, error) {
+func (s *gormStore) ListReports(ctx context.Context, limit int) ([]ReportSummary, error) {
 	var rows []reportModel
 
 	err := s.read.WithContext(ctx).Omit("content").Order("generated_at DESC, id DESC").Limit(limit).Find(&rows).Error
@@ -152,7 +152,7 @@ func (s *Store) ListReports(ctx context.Context, limit int) ([]ReportSummary, er
 }
 
 // GetReport returns the stored report id, or ErrReportNotFound.
-func (s *Store) GetReport(ctx context.Context, id uint) (Report, error) {
+func (s *gormStore) GetReport(ctx context.Context, id uint) (Report, error) {
 	var m reportModel
 
 	if err := s.read.WithContext(ctx).Take(&m, id).Error; err != nil {
@@ -168,7 +168,7 @@ func (s *Store) GetReport(ctx context.Context, id uint) (Report, error) {
 
 // DeleteReportsBefore deletes every report generated before cutoff,
 // returning how many it removed.
-func (s *Store) DeleteReportsBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+func (s *gormStore) DeleteReportsBefore(ctx context.Context, cutoff time.Time) (int64, error) {
 	res := s.db.WithContext(ctx).Where("generated_at < ?", cutoff.UTC()).Delete(&reportModel{})
 	if res.Error != nil {
 		return 0, fmt.Errorf("pruning reports: %w", res.Error)

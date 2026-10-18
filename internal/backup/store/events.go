@@ -71,7 +71,7 @@ type LoginEvent struct {
 
 // SaveLoginEvent appends ev to the login log. Called for every login
 // attempt a caller's handlers see, regardless of outcome.
-func (s *Store) SaveLoginEvent(ctx context.Context, ev LoginEvent) error {
+func (s *gormStore) SaveLoginEvent(ctx context.Context, ev LoginEvent) error {
 	m := loginEventModel{
 		At:         ev.At.UTC(),
 		Username:   ev.Username,
@@ -90,7 +90,7 @@ func (s *Store) SaveLoginEvent(ctx context.Context, ev LoginEvent) error {
 
 // ListLoginEvents returns up to limit of the most recently recorded login
 // events, newest first, for the dashboard's login log view.
-func (s *Store) ListLoginEvents(ctx context.Context, limit int) ([]LoginEvent, error) {
+func (s *gormStore) ListLoginEvents(ctx context.Context, limit int) ([]LoginEvent, error) {
 	var rows []loginEventModel
 
 	if err := s.read.WithContext(ctx).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
@@ -119,7 +119,7 @@ type DownloadEvent struct {
 
 // SaveDownloadEvent appends ev to the download log. Called for every
 // download attempt a caller's handlers see, regardless of outcome.
-func (s *Store) SaveDownloadEvent(ctx context.Context, ev DownloadEvent) error {
+func (s *gormStore) SaveDownloadEvent(ctx context.Context, ev DownloadEvent) error {
 	m := downloadEventModel{
 		At:         ev.At.UTC(),
 		Username:   ev.Username,
@@ -159,7 +159,7 @@ func listRecentEvents[M, E any](ctx context.Context, db *gorm.DB, limit int, con
 
 // ListDownloadEvents returns up to limit of the most recently recorded
 // download events, newest first, for the dashboard's download log view.
-func (s *Store) ListDownloadEvents(ctx context.Context, limit int) ([]DownloadEvent, error) {
+func (s *gormStore) ListDownloadEvents(ctx context.Context, limit int) ([]DownloadEvent, error) {
 	return listRecentEvents(ctx, s.read, limit, func(m downloadEventModel) DownloadEvent {
 		return DownloadEvent{At: m.At, Username: m.Username, ReceiverID: m.ReceiverID, Key: m.Key, Success: m.Success, RemoteAddr: m.RemoteAddr, Detail: m.Detail}
 	}, "reading download events")
@@ -188,7 +188,7 @@ type ReceiverEvent struct {
 
 // SaveReceiverEvent appends ev to the receiver event log. Called for every
 // receiver API request a caller's handlers serve, regardless of outcome.
-func (s *Store) SaveReceiverEvent(ctx context.Context, ev ReceiverEvent) error {
+func (s *gormStore) SaveReceiverEvent(ctx context.Context, ev ReceiverEvent) error {
 	m := receiverEventModel{
 		At:         ev.At.UTC(),
 		ReceiverID: ev.ReceiverID,
@@ -211,7 +211,7 @@ func (s *Store) SaveReceiverEvent(ctx context.Context, ev ReceiverEvent) error {
 // is recorded yet — used to seed a restarted process's in-memory receiver
 // status with what its last request actually did, mirroring GetLastRun's
 // reasoning for job status.
-func (s *Store) GetLastReceiverEvent(ctx context.Context, id string) (ReceiverEvent, bool, error) {
+func (s *gormStore) GetLastReceiverEvent(ctx context.Context, id string) (ReceiverEvent, bool, error) {
 	var m receiverEventModel
 
 	err := s.read.WithContext(ctx).Where("receiver_id = ?", id).Order("id DESC").Take(&m).Error
@@ -229,7 +229,7 @@ func (s *Store) GetLastReceiverEvent(ctx context.Context, id string) (ReceiverEv
 // ListReceiverEvents returns up to limit of the most recently recorded
 // receiver API requests (receive or delete, win or lose), newest first, for
 // the dashboard's receiver log view.
-func (s *Store) ListReceiverEvents(ctx context.Context, limit int) ([]ReceiverEvent, error) {
+func (s *gormStore) ListReceiverEvents(ctx context.Context, limit int) ([]ReceiverEvent, error) {
 	return listRecentEvents(ctx, s.read, limit, func(m receiverEventModel) ReceiverEvent {
 		return ReceiverEvent{At: m.At, ReceiverID: m.ReceiverID, Kind: m.Kind, Key: m.Key, Size: m.Size, Success: m.Success, Error: m.Error}
 	}, "reading receiver events")
@@ -250,11 +250,11 @@ type ReceiverDaySummary struct {
 // id's ReceiverDaySummary for the events recorded in [start, end). Stays
 // raw SQL: the conditional-aggregation columns (SUM(CASE WHEN ...)) have no
 // GORM chain equivalent.
-func (s *Store) SummarizeReceiverEvents(ctx context.Context, start, end time.Time) ([]ReceiverDaySummary, error) {
+func (s *gormStore) SummarizeReceiverEvents(ctx context.Context, start, end time.Time) ([]ReceiverDaySummary, error) {
 	const query = `SELECT receiver_id AS receiver_id,
-		SUM(CASE WHEN kind = ? AND success = 1 THEN 1 ELSE 0 END) AS files_received,
-		SUM(CASE WHEN kind = ? AND success = 1 THEN size ELSE 0 END) AS bytes_received,
-		SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS errors
+		SUM(CASE WHEN kind = ? AND success THEN 1 ELSE 0 END) AS files_received,
+		SUM(CASE WHEN kind = ? AND success THEN size ELSE 0 END) AS bytes_received,
+		SUM(CASE WHEN NOT success THEN 1 ELSE 0 END) AS errors
 		FROM receiver_events
 		WHERE at >= ? AND at < ?
 		GROUP BY receiver_id
@@ -282,11 +282,11 @@ type ReceiverErrorEvent struct {
 
 // ListReceiverErrorEvents returns every failed receiver API request
 // recorded in [start, end), oldest first.
-func (s *Store) ListReceiverErrorEvents(ctx context.Context, start, end time.Time) ([]ReceiverErrorEvent, error) {
+func (s *gormStore) ListReceiverErrorEvents(ctx context.Context, start, end time.Time) ([]ReceiverErrorEvent, error) {
 	var rows []receiverEventModel
 
 	err := s.read.WithContext(ctx).
-		Where("success = 0 AND at >= ? AND at < ?", start.UTC(), end.UTC()).
+		Where("NOT success AND at >= ? AND at < ?", start.UTC(), end.UTC()).
 		Order("at ASC").
 		Find(&rows).Error
 	if err != nil {
@@ -306,7 +306,7 @@ func (s *Store) ListReceiverErrorEvents(ctx context.Context, start, end time.Tim
 // are append-only otherwise, so without a periodic prune they'd grow for
 // the life of the install (receiver_events gains a row per receiver
 // request).
-func (s *Store) PruneEvents(ctx context.Context, cutoff time.Time) (int64, error) {
+func (s *gormStore) PruneEvents(ctx context.Context, cutoff time.Time) (int64, error) {
 	var total int64
 
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

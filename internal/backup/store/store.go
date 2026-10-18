@@ -1,10 +1,16 @@
 // Package store is go-backup-tool's only home for database access: every
-// query, statement, and schema definition against the shared
-// state/retention sqlite database lives here, behind a *Store whose
-// exported methods are Get*/List* lookups and Save*/Delete* writes (plus a
-// handful of clearly-named one-off operations — ExpiredObjectPaths — whose
-// behavior a plain Get/Save name would obscure).
-// Every other package reaches the database only through a *Store, never
+// query, statement, and schema definition against the shared state/retention
+// database lives here, behind the Store interface, whose methods are
+// Get*/List* lookups and Save*/Delete* writes (plus a handful of
+// clearly-named one-off operations — ExpiredObjectPaths — whose behavior a
+// plain Get/Save name would obscure).
+//
+// The database is either SQLite (OpenSQLite, the default: a file next to
+// the config file) or PostgreSQL (OpenPostgres), chosen by the config
+// file's database: section. Both share one gorm-based implementation; only
+// opening, connection pooling, and driver settings differ per backend.
+//
+// Every other package reaches the database only through a Store, never
 // through a *gorm.DB of its own.
 package store
 
@@ -12,90 +18,158 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
-
-	glebarezsqlite "github.com/glebarez/sqlite"
 )
 
-// Store wraps the shared state/retention sqlite database go-backup-tool
-// keeps alongside the config file: each start-time-anchored job's last
-// successful run (so a restart can tell a genuinely missed run apart from an
-// ordinary restart of a job that already ran on time), every file written to
-// a local target or receiver with retention: set (so a later sweep knows
-// what's eligible for automatic deletion), and the web UI's audit logs.
-// Nothing about web UI users is stored: every login is SSO and every
+// Store is the shared state/retention database go-backup-tool keeps: each
+// start-time-anchored job's last successful run (so a restart can tell a
+// genuinely missed run apart from an ordinary restart of a job that already
+// ran on time), every file written to a local target or receiver with
+// retention: set (so a later sweep knows what's eligible for automatic
+// deletion), the settings managed in the web UI, and the web UI's audit
+// logs. Nothing about web UI users is stored: every login is SSO and every
 // permission comes from the access token's groups (see
 // internal/backup/webui/auth.go). The only web UI credentials kept are the
 // read-only API tokens' metadata and signing key (see tokens.go), plus, for
 // a day after each OIDC back-channel logout, the subject and session it
 // ended (see sso_logouts.go).
 //
-// It holds two connection pools on the same file: db, a single connection
-// every write (and every read inside a write's transaction) goes through,
-// since sqlite allows one writer at a time anyway; and read, a few
-// query_only connections the pure Get*/List* lookups use, so under WAL the
-// dashboard's reads run alongside a job's writes instead of queuing behind
-// them for the one connection.
-type Store struct {
+// Open one with OpenSQLite or OpenPostgres; the caller must Close it. Each
+// method is documented on its implementation in this package's concern
+// files (jobs.go, events.go, ...).
+type Store interface {
+	// Job and target runs, and uploads awaiting a retry (jobs.go).
+	SaveJobRun(ctx context.Context, name, state string, success bool, startTime, endTime time.Time, bytesWritten int64, errText string) error
+	GetLastJobSuccess(ctx context.Context, name string) (time.Time, bool, error)
+	GetLastRun(ctx context.Context, name string) (LastRun, bool, error)
+	ListJobRunEvents(ctx context.Context, limit int) ([]JobRunEvent, error)
+	SummarizeJobRuns(ctx context.Context, start, end time.Time) ([]JobRunDaySummary, error)
+	ListJobRunErrorEvents(ctx context.Context, start, end time.Time) ([]JobRunErrorEvent, error)
+	SaveTargetRun(ctx context.Context, name string, success bool, target, state, errText string, at time.Time) error
+	ListTargetRuns(ctx context.Context, name string) ([]TargetRun, error)
+	ListTargetRunEvents(ctx context.Context, limit int) ([]TargetRunEvent, error)
+	AddOutstandingTargetUpload(ctx context.Context, u OutstandingTargetUpload) error
+	ListDueOutstandingTargetUploads(ctx context.Context, now time.Time) ([]OutstandingTargetUpload, error)
+	RescheduleOutstandingTargetUpload(ctx context.Context, id uint, retryAt time.Time) error
+	DeleteOutstandingTargetUpload(ctx context.Context, id uint) error
+	CountOutstandingTargetUploads(ctx context.Context, jobName, target string) (int64, error)
+	CountOutstandingTargetUploadsForFile(ctx context.Context, fileName string) (int64, error)
+
+	// Retention tracking of written objects (objects.go).
+	SaveObjectWrite(ctx context.Context, server, bucket, path string, writtenAt time.Time, retentionSeconds int64) error
+	DeleteObjectWrite(ctx context.Context, path string) error
+	ExpiredObjectPaths(ctx context.Context, server string, now time.Time, fallbackRetention time.Duration) ([]string, error)
+
+	// Login, download, and receiver event logs (events.go) and the audit
+	// log (audit.go).
+	SaveLoginEvent(ctx context.Context, ev LoginEvent) error
+	ListLoginEvents(ctx context.Context, limit int) ([]LoginEvent, error)
+	SaveDownloadEvent(ctx context.Context, ev DownloadEvent) error
+	ListDownloadEvents(ctx context.Context, limit int) ([]DownloadEvent, error)
+	SaveReceiverEvent(ctx context.Context, ev ReceiverEvent) error
+	GetLastReceiverEvent(ctx context.Context, id string) (ReceiverEvent, bool, error)
+	ListReceiverEvents(ctx context.Context, limit int) ([]ReceiverEvent, error)
+	SummarizeReceiverEvents(ctx context.Context, start, end time.Time) ([]ReceiverDaySummary, error)
+	ListReceiverErrorEvents(ctx context.Context, start, end time.Time) ([]ReceiverErrorEvent, error)
+	PruneEvents(ctx context.Context, cutoff time.Time) (int64, error)
+	SaveAuditEvent(ctx context.Context, ev AuditEvent) error
+	ListAuditEvents(ctx context.Context, limit int) ([]AuditEvent, error)
+
+	// Servers, commands, and jobs managed in the web UI (job_configs.go).
+	ListServerConfigs(ctx context.Context) ([]ServerConfig, error)
+	CreateServerConfig(ctx context.Context, c ServerConfig) error
+	UpdateServerConfig(ctx context.Context, c ServerConfig) error
+	DeleteServerConfig(ctx context.Context, name string) error
+	ListCommandConfigs(ctx context.Context) ([]CommandConfig, error)
+	CreateCommandConfig(ctx context.Context, c CommandConfig) error
+	UpdateCommandConfig(ctx context.Context, c CommandConfig) error
+	DeleteCommandConfig(ctx context.Context, id string) error
+	ListJobConfigs(ctx context.Context) ([]JobConfig, error)
+	GetJobConfig(ctx context.Context, name string) (JobConfig, bool, error)
+	CreateJobConfig(ctx context.Context, c JobConfig) error
+	UpdateJobConfig(ctx context.Context, c JobConfig) error
+	DeleteJobConfig(ctx context.Context, name string) error
+
+	// Notifications (notifications.go).
+	ListNotificationConfigs(ctx context.Context) ([]NotificationConfig, error)
+	GetNotificationConfig(ctx context.Context, id string) (NotificationConfig, bool, error)
+	CreateNotificationConfig(ctx context.Context, n NotificationConfig) error
+	UpdateNotificationConfig(ctx context.Context, n NotificationConfig) error
+	DeleteNotificationConfig(ctx context.Context, id string) error
+
+	// Receivers (receivers.go) and trusted servers (trusted_servers.go).
+	ListReceiverConfigs(ctx context.Context) ([]ReceiverConfig, error)
+	GetReceiverConfig(ctx context.Context, id string) (ReceiverConfig, bool, error)
+	CreateReceiverConfig(ctx context.Context, r ReceiverConfig) error
+	UpdateReceiverConfig(ctx context.Context, r ReceiverConfig) error
+	DeleteReceiverConfig(ctx context.Context, id string) error
+	ListReceiversRelyingOnPublicKey(ctx context.Context) ([]string, error)
+	ListTrustedServers(ctx context.Context) ([]TrustedServerConfig, error)
+	CreateTrustedServer(ctx context.Context, ts TrustedServerConfig) error
+	UpdateTrustedServer(ctx context.Context, ts TrustedServerConfig) error
+	DeleteTrustedServer(ctx context.Context, id string) error
+
+	// Periodic report settings (report_settings.go) and generated reports
+	// (reports.go).
+	GetReportSettings(ctx context.Context) (ReportSettings, bool, error)
+	SaveReportSettings(ctx context.Context, r ReportSettings) error
+	SaveReport(ctx context.Context, r Report) (Report, error)
+	ListReports(ctx context.Context, limit int) ([]ReportSummary, error)
+	GetReport(ctx context.Context, id uint) (Report, error)
+	DeleteReportsBefore(ctx context.Context, cutoff time.Time) (int64, error)
+
+	// API tokens and their signing key (tokens.go), and OIDC back-channel
+	// logouts (sso_logouts.go).
+	TokenSigningKey(ctx context.Context) ([]byte, error)
+	SaveAPIToken(ctx context.Context, t APIToken) error
+	GetAPIToken(ctx context.Context, id string) (APIToken, bool, error)
+	ListAPITokens(ctx context.Context) ([]APIToken, error)
+	RevokeAPIToken(ctx context.Context, id, by string, at time.Time) (bool, error)
+	SaveSSOLogout(ctx context.Context, l SSOLogout) error
+	ListSSOLogouts(ctx context.Context, issuer string, now time.Time) ([]SSOLogout, error)
+	DeleteExpiredSSOLogouts(ctx context.Context, now time.Time) error
+
+	// Close closes the underlying connection pools.
+	Close() error
+}
+
+var _ Store = (*gormStore)(nil)
+
+// gormStore is Store's one implementation, shared by every backend. Every
+// write (and every read inside a write's transaction) goes through db; the
+// pure Get*/List* lookups use read. With SQLite they're separate pools on
+// the same file (see openSQLite); with PostgreSQL, which handles concurrent
+// readers and writers itself, both are the same pool.
+type gormStore struct {
 	db   *gorm.DB
 	read *gorm.DB
 }
 
-// readConns is how many connections Store.read pools. The dashboard's
-// concurrent reads are few (a handful of open pages and API tokens), so a
-// small pool is plenty.
-const readConns = 4
-
-// stateDBName is the sqlite database file Open opens, a sibling of the
-// config file (see StateDBPath).
-const stateDBName = ".go-backup-tool-state.db"
-
-// StateDBPath returns the state db path for the config file at configPath: a
-// sibling file in the same directory.
-func StateDBPath(configPath string) string {
-	return filepath.Join(filepath.Dir(configPath), stateDBName)
-}
-
-// Open opens (creating if needed) the state-tracking sqlite database at
-// path, ensuring its schema exists. The caller must Close it.
+// newGormConfig returns the gorm settings every backend opens with.
 //
-// Writes go through a single connection (SetMaxOpenConns(1)): sqlite
-// handles one writer at a time regardless, and the returned *Store is
-// shared across every job's goroutine for the life of the run. Pure reads
-// use a separate pool of readConns query_only connections (see Store).
-func Open(ctx context.Context, path string) (*Store, error) {
-	// Every method in this package already wraps and returns query errors
-	// (including the entirely expected "not found" case every Get*
-	// lookup can hit) to its caller, so GORM's own query logging — which
-	// would otherwise print every one of those as a Warn/Error-level log
-	// line — is silenced rather than duplicating that with noise
-	// database/sql never produced.
-	//
-	// Every write here is a single statement or already runs in an explicit
-	// Transaction, so GORM's implicit per-write transaction is skipped.
-	gormConfig := &gorm.Config{
+// Every method in this package already wraps and returns query errors
+// (including the entirely expected "not found" case every Get* lookup can
+// hit) to its caller, so GORM's own query logging — which would otherwise
+// print every one of those as a Warn/Error-level log line — is silenced
+// rather than duplicating that with noise database/sql never produced.
+//
+// Every write here is a single statement or already runs in an explicit
+// Transaction, so GORM's implicit per-write transaction is skipped.
+func newGormConfig() *gorm.Config {
+	return &gorm.Config{
 		Logger:                 logger.Default.LogMode(logger.Silent),
 		SkipDefaultTransaction: true,
 		PrepareStmt:            true,
 	}
+}
 
-	gdb, err := gorm.Open(glebarezsqlite.Open(withPragmas(path, sqlitePragmas)), gormConfig)
-	if err != nil {
-		return nil, fmt.Errorf("opening job state db %q: %w", path, err)
-	}
-
-	sqlDB, err := gdb.DB()
-	if err != nil {
-		return nil, fmt.Errorf("opening job state db %q: %w", path, err)
-	}
-
-	sqlDB.SetMaxOpenConns(1)
-
+// migrate ensures gdb's schema exists and is current: it creates or extends
+// every table, then applies the one-off data migrations, each a no-op once
+// done (and on a fresh database).
+func migrate(ctx context.Context, gdb *gorm.DB) error {
 	if err := gdb.WithContext(ctx).AutoMigrate(
 		&jobRunModel{}, &targetRunModel{}, &outstandingTargetUploadModel{},
 		&objectModel{},
@@ -105,108 +179,33 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		&trustedServerModel{}, &ssoLogoutModel{},
 		&serverModel{}, &commandModel{}, &jobModel{},
 	); err != nil {
-		_ = sqlDB.Close()
-		return nil, fmt.Errorf("initializing job state db %q: %w", path, err)
+		return fmt.Errorf("creating schema: %w", err)
 	}
 
-	if err := removeObsoleteTables(ctx, gdb); err != nil {
-		_ = sqlDB.Close()
-		return nil, fmt.Errorf("migrating job state db %q: %w", path, err)
+	steps := []func(context.Context, *gorm.DB) error{
+		removeObsoleteTables, removeObsoleteIndexes,
+		migrateInlineJobCommands, migrateSingleJobCommands,
+	}
+	for _, step := range steps {
+		if err := step(ctx, gdb); err != nil {
+			return err
+		}
 	}
 
-	if err := removeObsoleteIndexes(ctx, gdb); err != nil {
-		_ = sqlDB.Close()
-		return nil, fmt.Errorf("migrating job state db %q: %w", path, err)
-	}
-
-	if err := migrateInlineJobCommands(ctx, gdb); err != nil {
-		_ = sqlDB.Close()
-		return nil, fmt.Errorf("migrating job state db %q: %w", path, err)
-	}
-
-	if err := migrateSingleJobCommands(ctx, gdb); err != nil {
-		_ = sqlDB.Close()
-		return nil, fmt.Errorf("migrating job state db %q: %w", path, err)
-	}
-
-	// Opened only once the schema exists: the read pool can't create it.
-	read, err := openReadPool(path, gormConfig)
-	if err != nil {
-		_ = sqlDB.Close()
-		return nil, fmt.Errorf("opening job state db %q for reading: %w", path, err)
-	}
-
-	return &Store{db: gdb, read: read}, nil
+	return nil
 }
 
-// openReadPool opens Store.read: readConns connections to path, each
-// query_only, so a write misrouted to it fails instead of bypassing the
-// single writer connection.
-func openReadPool(path string, gormConfig *gorm.Config) (*gorm.DB, error) {
-	read, err := gorm.Open(glebarezsqlite.Open(withPragmas(path, readPragmas)), gormConfig)
-	if err != nil {
-		return nil, err
+// Close closes both underlying connection pools, or the one pool when db
+// and read share it.
+func (s *gormStore) Close() error {
+	pools := []*gorm.DB{s.db}
+	if s.read != s.db {
+		pools = []*gorm.DB{s.read, s.db}
 	}
 
-	sqlDB, err := read.DB()
-	if err != nil {
-		return nil, err
-	}
-
-	sqlDB.SetMaxOpenConns(readConns)
-	sqlDB.SetMaxIdleConns(readConns)
-
-	return read, nil
-}
-
-// sqlitePragmas are applied to Store.db's connection: WAL so the
-// dashboard's reads don't block behind a job's writes (and vice versa),
-// a busy timeout instead of an immediate SQLITE_BUSY when another process
-// (e.g. a one-off CLI run) holds the lock, and synchronous=NORMAL, which is
-// durable under WAL short of an OS crash.
-var sqlitePragmas = []string{
-	"journal_mode(WAL)",
-	"busy_timeout(5000)",
-	"synchronous(NORMAL)",
-}
-
-// readPragmas are applied to every connection of Store.read: the same busy
-// timeout as sqlitePragmas, and query_only so it can never write. The
-// database is already in WAL mode by the time it's opened (journal_mode is
-// persistent), which is what lets these readers run alongside the writer.
-var readPragmas = []string{
-	"busy_timeout(5000)",
-	"query_only(1)",
-}
-
-// withPragmas appends pragmas to path as glebarez/sqlite _pragma query
-// parameters, preserving any query string path already carries.
-func withPragmas(path string, pragmas []string) string {
-	sep := "?"
-	if strings.Contains(path, "?") {
-		sep = "&"
-	}
-
-	var b strings.Builder
-
-	b.WriteString(path)
-
-	for _, p := range pragmas {
-		b.WriteString(sep)
-		b.WriteString("_pragma=")
-		b.WriteString(p)
-
-		sep = "&"
-	}
-
-	return b.String()
-}
-
-// Close closes both underlying connection pools.
-func (s *Store) Close() error {
 	var errs []error
 
-	for _, gdb := range []*gorm.DB{s.read, s.db} {
+	for _, gdb := range pools {
 		sqlDB, err := gdb.DB()
 		if err != nil {
 			errs = append(errs, err)
@@ -219,6 +218,15 @@ func (s *Store) Close() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// closeGormDB closes gdb's connection pool, for an Open* that fails after
+// opening it; the close error is dropped in favor of the error being
+// returned.
+func closeGormDB(gdb *gorm.DB) {
+	if sqlDB, err := gdb.DB(); err == nil {
+		_ = sqlDB.Close()
+	}
 }
 
 // isRecordNotFound reports whether err is GORM's "no row matched" sentinel,

@@ -51,7 +51,7 @@ func TestNotificationConfigCRUD(t *testing.T) {
 
 // checkDeleteNotificationConfig deletes stored notification id and checks
 // updating or deleting it afterwards reports it missing.
-func checkDeleteNotificationConfig(t *testing.T, db *Store, id string) {
+func checkDeleteNotificationConfig(t *testing.T, db *gormStore, id string) {
 	t.Helper()
 
 	ctx := t.Context()
@@ -138,7 +138,7 @@ var storedNotificationFixtures = []struct {
 
 // storedNotificationColumns reads id's raw webhook/email column values,
 // nil for NULL.
-func storedNotificationColumns(t *testing.T, db *Store, id string) (webhook, email *string) {
+func storedNotificationColumns(t *testing.T, db *gormStore, id string) (webhook, email *string) {
 	t.Helper()
 
 	var row struct{ Webhook, Email *string }
@@ -175,7 +175,7 @@ func TestNotificationConfigStoredFormat(t *testing.T) {
 	}
 }
 
-func assertStoredNotification(t *testing.T, db *Store, id string, expectedHook, expectedMail *string, when string) {
+func assertStoredNotification(t *testing.T, db *gormStore, id string, expectedHook, expectedMail *string, when string) {
 	t.Helper()
 
 	gotHook, gotMail := storedNotificationColumns(t, db, id)

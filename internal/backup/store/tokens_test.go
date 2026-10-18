@@ -33,7 +33,7 @@ func TestTokenSigningKeyIsStable(t *testing.T) {
 }
 
 // saveTestAPITokens stores tokens "a" then "b", an hour apart.
-func saveTestAPITokens(t *testing.T, db *Store, now time.Time) {
+func saveTestAPITokens(t *testing.T, db *gormStore, now time.Time) {
 	t.Helper()
 
 	for i, id := range []string{"a", "b"} {

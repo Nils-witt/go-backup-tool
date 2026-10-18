@@ -136,7 +136,7 @@ var (
 )
 
 // ListNotificationConfigs returns every stored notification, in id order.
-func (s *Store) ListNotificationConfigs(ctx context.Context) ([]NotificationConfig, error) {
+func (s *gormStore) ListNotificationConfigs(ctx context.Context) ([]NotificationConfig, error) {
 	var rows []notificationModel
 
 	if err := s.read.WithContext(ctx).Order("id").Find(&rows).Error; err != nil {
@@ -153,7 +153,7 @@ func (s *Store) ListNotificationConfigs(ctx context.Context) ([]NotificationConf
 
 // GetNotificationConfig looks up the stored notification with the given id,
 // reporting false if there is none.
-func (s *Store) GetNotificationConfig(ctx context.Context, id string) (NotificationConfig, bool, error) {
+func (s *gormStore) GetNotificationConfig(ctx context.Context, id string) (NotificationConfig, bool, error) {
 	var m notificationModel
 
 	if err := s.read.WithContext(ctx).Take(&m, "id = ?", id).Error; err != nil {
@@ -169,7 +169,7 @@ func (s *Store) GetNotificationConfig(ctx context.Context, id string) (Notificat
 
 // CreateNotificationConfig stores a new notification, returning
 // ErrNotificationExists if its id is already taken.
-func (s *Store) CreateNotificationConfig(ctx context.Context, n NotificationConfig) error {
+func (s *gormStore) CreateNotificationConfig(ctx context.Context, n NotificationConfig) error {
 	m := newNotificationModel(normalizeNotificationTimes(n))
 
 	res := s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&m)
@@ -187,7 +187,7 @@ func (s *Store) CreateNotificationConfig(ctx context.Context, n NotificationConf
 // UpdateNotificationConfig replaces the stored notification n.ID's channels,
 // keeping its CreatedAt/CreatedBy, and returns ErrNotificationNotFound if
 // there is none.
-func (s *Store) UpdateNotificationConfig(ctx context.Context, n NotificationConfig) error {
+func (s *gormStore) UpdateNotificationConfig(ctx context.Context, n NotificationConfig) error {
 	n = normalizeNotificationTimes(n)
 
 	res := s.db.WithContext(ctx).Model(&notificationModel{}).Where("id = ?", n.ID).
@@ -206,7 +206,7 @@ func (s *Store) UpdateNotificationConfig(ctx context.Context, n NotificationConf
 
 // DeleteNotificationConfig removes the stored notification with the given
 // id, returning ErrNotificationNotFound if there is none.
-func (s *Store) DeleteNotificationConfig(ctx context.Context, id string) error {
+func (s *gormStore) DeleteNotificationConfig(ctx context.Context, id string) error {
 	res := s.db.WithContext(ctx).Delete(&notificationModel{}, "id = ?", id)
 	if res.Error != nil {
 		return fmt.Errorf("deleting notification: %w", res.Error)

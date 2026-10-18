@@ -215,9 +215,13 @@ type RunConfig struct {
 	// that a job's or command's container: runs through. Empty falls back
 	// to DOCKER_HOST, then the default socket (see dockerexec.ResolveHost).
 	DockerSocket string
-	ConfigPath   string // where the config file was loaded from; state db lives alongside it
+	ConfigPath   string // where the config file was loaded from; a SQLite state db lives alongside it
 	LogLevel     slog.Level
 	LogFile      string // empty disables file logging; otherwise log output is also appended here
+
+	// Database is the config file's resolved database: entry: which
+	// backend holds the state db (see resolveDatabase).
+	Database DatabaseConfig
 
 	// ExportSettings and ImportSettings (-export-settings/-import-settings)
 	// name a settings file (see the settingsfile package) to write or apply

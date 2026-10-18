@@ -1,22 +1,10 @@
-# Local/production compose file for go-backup-tool. Copy config.example.yaml
-# to ./config.yaml first and fill in your jobs/servers (see that file for
-# every option) — this compose file just wires the container up around it.
-#
-# go-backup-tool writes its state/retention sqlite databases next to the
-# config file, so both the config and the data/ dir it lives in are mounted
-# from the host: bind-mount config.yaml itself (read-only, since only the
-# databases need to be written), and give it a real directory (not a named
-# volume) so those .db files are easy to inspect/back up from the host too.
 services:
   go-backup-tool:
     # build: .
-    image: ghcr.io/nils-witt/go-backup-tool:local # use instead of build: once published
+    image: ghcr.io/nils-witt/go-backup-tool:latest # use instead of build: once published
     restart: unless-stopped
-    # environment:
-    #   # Optional label shown on the dashboard's login page and app bar, to
-    #   # tell multiple instances apart. Only used when config.yaml doesn't
-    #   # set server-name:, which takes precedence.
-    #   INSTANCE_NAME: prod-nas
+    environment:
+      INSTANCE_NAME: change-me-01
     volumes:
       - ./config.yaml:/data/config.yaml:ro
       - ./data:/data
@@ -37,4 +25,23 @@ services:
     # Only needed if config.yaml sets listen: (enables the dashboard/receiver
     # API); leave commented out otherwise.
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
+    labels:
+      autoheal-app: true
+      com.centurylinklabs.watchtower.scope: ${COMPOSE_PROJECT_NAME}
+
+  autoheal:
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal-app
+    image: willfarrell/autoheal:latest
+    network_mode: none
+    restart: always
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  watchtower:
+    image: nickfedor/watchtower
+    volumes: [ "/var/run/docker.sock:/var/run/docker.sock" ]
+    command: --interval 30 --scope ${COMPOSE_PROJECT_NAME}
+    labels: [ "com.centurylinklabs.watchtower.scope=${COMPOSE_PROJECT_NAME}" ]

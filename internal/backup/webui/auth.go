@@ -85,12 +85,12 @@ type authenticator struct {
 	verifiers         *ssoVerifierCache
 	logouts           *ssoLogouts
 	tokens            *apiTokens
-	db                *store.Store
+	db                store.Store
 	log               *slog.Logger
 	trustProxyHeaders bool
 }
 
-func newAuthenticator(oidcSettings config.OIDCSettings, tokens *apiTokens, db *store.Store, log *slog.Logger, trustProxyHeaders bool) *authenticator {
+func newAuthenticator(oidcSettings config.OIDCSettings, tokens *apiTokens, db store.Store, log *slog.Logger, trustProxyHeaders bool) *authenticator {
 	return &authenticator{
 		oidc:              oidcSettings,
 		verifiers:         newSSOVerifierCache(),

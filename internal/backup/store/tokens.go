@@ -50,7 +50,7 @@ type APIToken struct {
 
 // TokenSigningKey returns the API token signing key, generating and storing
 // a random one on first call.
-func (s *Store) TokenSigningKey(ctx context.Context) ([]byte, error) {
+func (s *gormStore) TokenSigningKey(ctx context.Context) ([]byte, error) {
 	var m tokenSigningKeyModel
 
 	err := s.db.WithContext(ctx).Take(&m, 1).Error
@@ -76,7 +76,7 @@ func (s *Store) TokenSigningKey(ctx context.Context) ([]byte, error) {
 }
 
 // SaveAPIToken records a newly issued API token.
-func (s *Store) SaveAPIToken(ctx context.Context, t APIToken) error {
+func (s *gormStore) SaveAPIToken(ctx context.Context, t APIToken) error {
 	m := apiTokenModel{
 		ID: t.ID, Name: t.Name, CreatedBy: t.CreatedBy,
 		CreatedAt: t.CreatedAt.UTC(), ExpiresAt: t.ExpiresAt.UTC(),
@@ -91,7 +91,7 @@ func (s *Store) SaveAPIToken(ctx context.Context, t APIToken) error {
 
 // GetAPIToken looks up the API token with the given id, reporting false if
 // there is none.
-func (s *Store) GetAPIToken(ctx context.Context, id string) (APIToken, bool, error) {
+func (s *gormStore) GetAPIToken(ctx context.Context, id string) (APIToken, bool, error) {
 	var m apiTokenModel
 
 	if err := s.read.WithContext(ctx).Take(&m, "id = ?", id).Error; err != nil {
@@ -107,7 +107,7 @@ func (s *Store) GetAPIToken(ctx context.Context, id string) (APIToken, bool, err
 
 // ListAPITokens returns every issued API token, revoked and expired ones
 // included, newest first.
-func (s *Store) ListAPITokens(ctx context.Context) ([]APIToken, error) {
+func (s *gormStore) ListAPITokens(ctx context.Context) ([]APIToken, error) {
 	var rows []apiTokenModel
 
 	if err := s.read.WithContext(ctx).Order("created_at DESC").Find(&rows).Error; err != nil {
@@ -124,7 +124,7 @@ func (s *Store) ListAPITokens(ctx context.Context) ([]APIToken, error) {
 
 // RevokeAPIToken marks the API token with the given id revoked by `by` at
 // `at`, reporting false if no such token exists or it was already revoked.
-func (s *Store) RevokeAPIToken(ctx context.Context, id, by string, at time.Time) (bool, error) {
+func (s *gormStore) RevokeAPIToken(ctx context.Context, id, by string, at time.Time) (bool, error) {
 	at = at.UTC()
 
 	res := s.db.WithContext(ctx).Model(&apiTokenModel{}).

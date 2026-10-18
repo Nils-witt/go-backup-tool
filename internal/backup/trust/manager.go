@@ -49,7 +49,7 @@ type ManagedServer struct {
 // trusted_servers table and resolved into the live registry receivers
 // verify requests against. It's the only writer of both.
 type Manager struct {
-	db       *store.Store
+	db       store.Store
 	registry *Registry
 	log      *slog.Logger
 
@@ -62,7 +62,7 @@ type Manager struct {
 // NewManager builds a Manager over db (nil if the state db couldn't be
 // opened), resolving trusted servers into registry. Call Load before
 // anything resolves a receiver against registry.
-func NewManager(db *store.Store, registry *Registry, log *slog.Logger) *Manager {
+func NewManager(db store.Store, registry *Registry, log *slog.Logger) *Manager {
 	return &Manager{db: db, registry: registry, log: log, invalid: make(map[string]string)}
 }
 

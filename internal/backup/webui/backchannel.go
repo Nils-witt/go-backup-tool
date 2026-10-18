@@ -87,7 +87,7 @@ type subjectLogout struct {
 // concurrent use.
 type ssoLogouts struct {
 	issuer string
-	db     *store.Store
+	db     store.Store
 
 	mu       sync.RWMutex
 	sessions map[string]time.Time // sid -> when its logout stops applying
@@ -101,7 +101,7 @@ type ssoLogouts struct {
 // newSSOLogouts returns the logouts in effect for issuer, loaded from db.
 // A failure to load them is returned alongside a usable, empty set, so the
 // caller can decide whether to carry on without them.
-func newSSOLogouts(ctx context.Context, issuer string, db *store.Store) (*ssoLogouts, error) {
+func newSSOLogouts(ctx context.Context, issuer string, db store.Store) (*ssoLogouts, error) {
 	l := &ssoLogouts{
 		issuer:   issuer,
 		db:       db,
@@ -380,7 +380,7 @@ func writeLogoutError(w http.ResponseWriter) {
 
 // newAuthenticatorLogouts loads the back-channel logouts for s's issuer,
 // carrying on with an empty set if the state db can't provide them.
-func newAuthenticatorLogouts(ctx context.Context, s config.OIDCSettings, db *store.Store, log *slog.Logger) *ssoLogouts {
+func newAuthenticatorLogouts(ctx context.Context, s config.OIDCSettings, db store.Store, log *slog.Logger) *ssoLogouts {
 	var issuer string
 	if s.Enabled {
 		issuer = s.Issuer

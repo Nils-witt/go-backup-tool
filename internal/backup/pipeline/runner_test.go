@@ -57,9 +57,9 @@ func TestRunOnceRecordsLastRunToStateDB(t *testing.T) { //nolint:paralleltest //
 
 	job := plainTestJob(t, marker)
 
-	stateDB, err := store.Open(context.Background(), filepath.Join(dir, "state.db"))
+	stateDB, err := store.OpenSQLite(context.Background(), filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = stateDB.Close() })
@@ -211,9 +211,9 @@ func TestRunOnceReportsIncompleteWhenSomeTargetsFail(t *testing.T) {
 		},
 	}
 
-	stateDB, err := store.Open(context.Background(), filepath.Join(dir, "state.db"))
+	stateDB, err := store.OpenSQLite(context.Background(), filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = stateDB.Close() })
@@ -536,9 +536,9 @@ func TestRunOnceKeepsStagedFileForRetryWhenTargetFails(t *testing.T) {
 		},
 	}
 
-	stateDB, err := store.Open(context.Background(), filepath.Join(dir, "state.db"))
+	stateDB, err := store.OpenSQLite(context.Background(), filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = stateDB.Close() })
@@ -591,9 +591,9 @@ func TestRunOnceDeletesStagedFileOnSuccess(t *testing.T) {
 		},
 	}
 
-	stateDB, err := store.Open(context.Background(), filepath.Join(dir, "state.db"))
+	stateDB, err := store.OpenSQLite(context.Background(), filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = stateDB.Close() })
@@ -650,9 +650,9 @@ func TestRetryFailedTargetsRetriesOnlyNamedTargets(t *testing.T) {
 		},
 	}
 
-	stateDB, err := store.Open(context.Background(), filepath.Join(dir, "state.db"))
+	stateDB, err := store.OpenSQLite(context.Background(), filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = stateDB.Close() })
@@ -882,9 +882,9 @@ func TestSeedStatusFromStateAcrossRestart(t *testing.T) { //nolint:paralleltest 
 
 	job := plainTestJob(t, marker)
 
-	stateDB, err := store.Open(context.Background(), filepath.Join(dir, "state.db"))
+	stateDB, err := store.OpenSQLite(context.Background(), filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = stateDB.Close() })
@@ -1118,9 +1118,9 @@ func TestScheduleStartTimeSkipsCatchUpWhenAlreadyRecorded(t *testing.T) { //noli
 
 	job := startTimeTestJob(t, marker, startTime, interval)
 
-	stateDB, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	stateDB, err := store.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = stateDB.Close() })
@@ -1187,9 +1187,9 @@ func TestRetryOutstandingUploadSucceedsAfterTargetRecovers(t *testing.T) {
 		},
 	}
 
-	stateDB, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	stateDB, err := store.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = stateDB.Close() })
@@ -1227,7 +1227,7 @@ func TestRetryOutstandingUploadSucceedsAfterTargetRecovers(t *testing.T) {
 // verification, split out to keep that test's cyclomatic complexity down:
 // once a retry succeeds, the outstanding row and its staged file must both
 // be gone, and the target/job's live and persisted state must show success.
-func assertOutstandingUploadResolved(t *testing.T, stateDB *store.Store, statusStore *status.Store, jobName, stagedPath string) {
+func assertOutstandingUploadResolved(t *testing.T, stateDB store.Store, statusStore *status.Store, jobName, stagedPath string) {
 	t.Helper()
 
 	stillDue, err := stateDB.ListDueOutstandingTargetUploads(context.Background(), time.Now().Add(time.Hour))
@@ -1273,9 +1273,9 @@ func assertOutstandingUploadResolved(t *testing.T, stateDB *store.Store, statusS
 func TestRetryOutstandingUploadGivesUpWhenStagedFileIsGone(t *testing.T) {
 	t.Parallel()
 
-	stateDB, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	stateDB, err := store.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = stateDB.Close() })

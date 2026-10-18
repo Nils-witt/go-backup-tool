@@ -32,9 +32,9 @@ const senderID = "6f1c2a4e-8d3b-4c5a-9e7f-0a1b2c3d4e5f"
 func newManagers(t *testing.T, baseDir string) Managers {
 	t.Helper()
 
-	db, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"))
+	db, err := store.OpenSQLite(t.Context(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = db.Close() })

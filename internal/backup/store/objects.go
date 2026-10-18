@@ -36,7 +36,7 @@ func (objectModel) TableName() string { return "objects" }
 // at writtenAt, tracked for retentionSeconds — an upsert, so a later write
 // to the same path (e.g. a repeating job overwriting its own object)
 // refreshes both the write time and the retention window in effect for it.
-func (s *Store) SaveObjectWrite(ctx context.Context, server, bucket, path string, writtenAt time.Time, retentionSeconds int64) error {
+func (s *gormStore) SaveObjectWrite(ctx context.Context, server, bucket, path string, writtenAt time.Time, retentionSeconds int64) error {
 	m := objectModel{
 		Server:           server,
 		Bucket:           bucket,
@@ -59,7 +59,7 @@ func (s *Store) SaveObjectWrite(ctx context.Context, server, bucket, path string
 // DeleteObjectWrite removes any tracked record for path, used both when a
 // swept file is removed from disk and when a write is rolled back, so the
 // database doesn't go on tracking a file that no longer exists.
-func (s *Store) DeleteObjectWrite(ctx context.Context, path string) error {
+func (s *gormStore) DeleteObjectWrite(ctx context.Context, path string) error {
 	if err := s.db.WithContext(ctx).Where("path = ?", path).Delete(&objectModel{}).Error; err != nil {
 		return fmt.Errorf("removing retention record: %w", err)
 	}
@@ -76,7 +76,7 @@ func (s *Store) DeleteObjectWrite(ctx context.Context, path string) error {
 // The filter runs in sqlite rather than loading every row for server: one
 // indexed written_at range query per distinct retention_seconds value
 // (normally just one or two per server), each with its own cutoff.
-func (s *Store) ExpiredObjectPaths(ctx context.Context, server string, now time.Time, fallbackRetention time.Duration) ([]string, error) {
+func (s *gormStore) ExpiredObjectPaths(ctx context.Context, server string, now time.Time, fallbackRetention time.Duration) ([]string, error) {
 	db := s.read.WithContext(ctx)
 
 	var retentions []int64

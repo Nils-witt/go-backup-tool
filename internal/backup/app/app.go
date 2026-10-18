@@ -67,7 +67,7 @@ func withRunTimeout(ctx context.Context, timeout time.Duration, log *slog.Logger
 // authenticate senders only by a public key (removed in v8.0.0): they would
 // silently reject every upload. -export-settings/-import-settings run
 // before this check, so they can fix such receivers.
-func checkPublicKeyReceivers(ctx context.Context, db *store.Store) error {
+func checkPublicKeyReceivers(ctx context.Context, db store.Store) error {
 	if db == nil {
 		return nil
 	}
@@ -181,7 +181,7 @@ func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, deps webu
 // requests against, and their manager returned for the web UI.
 // notifications must already be loaded (see newSettings), since receivers
 // are checked against it.
-func newReceivers(ctx context.Context, rc *config.RunConfig, stateDB *store.Store, notifications *notify.Registry, log *slog.Logger) (*receiver.Registry, *status.ReceiverStore, *receiver.Manager, *trust.Manager) {
+func newReceivers(ctx context.Context, rc *config.RunConfig, stateDB store.Store, notifications *notify.Registry, log *slog.Logger) (*receiver.Registry, *status.ReceiverStore, *receiver.Manager, *trust.Manager) {
 	// Trusted servers load first: every receiver resolves its allowed
 	// servers against them.
 	trustManager := trust.NewManager(stateDB, trust.NewRegistry(nil), log)
@@ -200,7 +200,7 @@ func newReceivers(ctx context.Context, rc *config.RunConfig, stateDB *store.Stor
 // notifications:/report: into the state db) into a fresh live registry and
 // report holder — read by every job failure, receiver, and report trigger
 // at fire time, so a web UI edit applies without a restart.
-func newSettings(ctx context.Context, rc *config.RunConfig, stateDB *store.Store, log *slog.Logger) (*notify.Registry, *report.Live, *settings.Manager) {
+func newSettings(ctx context.Context, rc *config.RunConfig, stateDB store.Store, log *slog.Logger) (*notify.Registry, *report.Live, *settings.Manager) {
 	notifications := notify.NewRegistry(nil)
 	live := report.NewLive(report.Settings{})
 	manager := settings.NewManager(stateDB, notifications, live, rc.SMTP, rc.GPG, log)
@@ -215,7 +215,7 @@ func newSettings(ctx context.Context, rc *config.RunConfig, stateDB *store.Store
 // runner — not scheduled until its Start. notifications must already be
 // loaded (see newSettings), since job failure-notifications are checked
 // against it. The error is an unknown -job.
-func newJobs(ctx context.Context, rc *config.RunConfig, stateDB *store.Store, statusStore *status.Store, runner *pipeline.Runner, notifications *notify.Registry, log *slog.Logger) (*jobs.Manager, error) {
+func newJobs(ctx context.Context, rc *config.RunConfig, stateDB store.Store, statusStore *status.Store, runner *pipeline.Runner, notifications *notify.Registry, log *slog.Logger) (*jobs.Manager, error) {
 	manager := jobs.NewManager(stateDB, statusStore, runner, notifications, jobs.Settings{
 		GPG: rc.GPG, ServerName: rc.ServerName, Editing: rc.JobEditing, Filter: rc.JobFilter,
 	}, log)
@@ -227,11 +227,13 @@ func newJobs(ctx context.Context, rc *config.RunConfig, stateDB *store.Store, st
 	return manager, nil
 }
 
-func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
+// parseRunConfig parses args into a RunConfig. When that fails (or -help
+// was given), rc is nil and code is the exit code runWithContext returns.
+func parseRunConfig(args []string, stderr io.Writer) (rc *config.RunConfig, code int) {
 	rc, err := config.ParseFlags(args, stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return 0
+			return nil, 0
 		}
 
 		// The desired log level lives in rc, which parsing itself failed to
@@ -239,7 +241,16 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		// out.
 		newLogger(stderr, slog.LevelInfo).Error("parsing flags", "err", err)
 
-		return 2
+		return nil, 2
+	}
+
+	return rc, 0
+}
+
+func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
+	rc, code := parseRunConfig(args, stderr)
+	if rc == nil {
+		return code
 	}
 
 	logOut, closeLog, err := teeLogFile(stderr, rc.LogFile)
@@ -266,7 +277,12 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	ctx, cancelTimeout := withRunTimeout(ctx, rc.Timeout, log)
 	defer cancelTimeout()
 
-	stateDB, closeStateDB := openStateDB(ctx, rc, log)
+	stateDB, closeStateDB, err := openStateDB(ctx, rc, log)
+	if err != nil {
+		log.Error("opening state db", "err", err)
+		return 1
+	}
+
 	defer closeStateDB()
 
 	if rc.ExportSettings != "" || rc.ImportSettings != "" {
@@ -369,27 +385,45 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	return 0
 }
 
-// openStateDB opens the job state db next to the config file and starts
-// pruning its event logs (see pruneEventLogs). It is always opened: it backs
-// catch-up scheduling, the web UI, retention tracking, and the target-error
-// log, which every run needs regardless of those other features. A failure
-// is only logged: it returns a nil *store.Store, which those features treat
-// as unavailable, and a no-op close.
-func openStateDB(ctx context.Context, rc *config.RunConfig, log *slog.Logger) (db *store.Store, closeDB func()) {
-	path := store.StateDBPath(rc.ConfigPath)
+// openStateDB opens the state db the config file's database: entry
+// selects and starts pruning its event logs (see pruneEventLogs). It is
+// always opened: it backs catch-up scheduling, the web UI, retention
+// tracking, and the target-error log, which every run needs regardless of
+// those other features.
+//
+// A SQLite db that fails to open is only logged: openStateDB returns a nil
+// store.Store, which those features treat as unavailable, and a no-op
+// close. A PostgreSQL db is configured explicitly, so failing to reach it
+// is returned as an error instead, and the caller refuses to start.
+func openStateDB(ctx context.Context, rc *config.RunConfig, log *slog.Logger) (db store.Store, closeDB func(), err error) {
+	switch rc.Database.Type {
+	case config.DatabasePostgres:
+		// The DSN may carry a password, so it's never logged; the
+		// driver's own errors name only the host, user, and database.
+		db, err = store.OpenPostgres(ctx, rc.Database.PostgresDSN)
+		if err != nil {
+			return nil, nil, err
+		}
 
-	db, err := store.Open(ctx, path)
-	if err != nil {
-		log.Warn("opening job state db", "path", path, "err", err)
+		log.Debug("opened job state db", "type", rc.Database.Type)
+	case config.DatabaseSQLite, "": // "" is a RunConfig built without ParseFlags
+		path := store.StateDBPath(rc.ConfigPath)
 
-		return nil, func() {}
+		db, err = store.OpenSQLite(ctx, path)
+		if err != nil {
+			log.Warn("opening job state db", "path", path, "err", err)
+
+			return nil, func() {}, nil
+		}
+
+		log.Debug("opened job state db", "type", rc.Database.Type, "path", path)
+	default:
+		return nil, nil, fmt.Errorf("unknown database type %q", rc.Database.Type)
 	}
-
-	log.Debug("opened job state db", "path", path)
 
 	go pruneEventLogs(ctx, db, log)
 
-	return db, func() { _ = db.Close() }
+	return db, func() { _ = db.Close() }, nil
 }
 
 // eventLogRetention is how long the login, download, receiver, and audit
@@ -398,7 +432,7 @@ const eventLogRetention = 90 * 24 * time.Hour
 
 // pruneEventLogs deletes event log rows older than eventLogRetention once at
 // startup and then daily, until ctx is done.
-func pruneEventLogs(ctx context.Context, db *store.Store, log *slog.Logger) {
+func pruneEventLogs(ctx context.Context, db store.Store, log *slog.Logger) {
 	periodic.Run(ctx, 24*time.Hour, true, func() {
 		n, err := db.PruneEvents(ctx, time.Now().Add(-eventLogRetention))
 		if err != nil {

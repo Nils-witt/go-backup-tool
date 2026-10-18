@@ -48,7 +48,7 @@ var (
 )
 
 // ListTrustedServers returns every stored trusted server, in id order.
-func (s *Store) ListTrustedServers(ctx context.Context) ([]TrustedServerConfig, error) {
+func (s *gormStore) ListTrustedServers(ctx context.Context) ([]TrustedServerConfig, error) {
 	var rows []trustedServerModel
 
 	if err := s.read.WithContext(ctx).Order("id").Find(&rows).Error; err != nil {
@@ -65,7 +65,7 @@ func (s *Store) ListTrustedServers(ctx context.Context) ([]TrustedServerConfig, 
 
 // CreateTrustedServer stores a new trusted server, returning
 // ErrTrustedServerExists if its id is already taken.
-func (s *Store) CreateTrustedServer(ctx context.Context, ts TrustedServerConfig) error {
+func (s *gormStore) CreateTrustedServer(ctx context.Context, ts TrustedServerConfig) error {
 	m := trustedServerModel(normalizeTrustedServerTimes(ts))
 
 	res := s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&m)
@@ -83,7 +83,7 @@ func (s *Store) CreateTrustedServer(ctx context.Context, ts TrustedServerConfig)
 // UpdateTrustedServer replaces trusted server ts.ID's name and public key,
 // keeping its CreatedAt/CreatedBy, and returns ErrTrustedServerNotFound if
 // there is none.
-func (s *Store) UpdateTrustedServer(ctx context.Context, ts TrustedServerConfig) error {
+func (s *gormStore) UpdateTrustedServer(ctx context.Context, ts TrustedServerConfig) error {
 	ts = normalizeTrustedServerTimes(ts)
 
 	res := s.db.WithContext(ctx).Model(&trustedServerModel{}).Where("id = ?", ts.ID).Updates(map[string]any{
@@ -102,7 +102,7 @@ func (s *Store) UpdateTrustedServer(ctx context.Context, ts TrustedServerConfig)
 
 // DeleteTrustedServer removes the stored trusted server with the given id,
 // returning ErrTrustedServerNotFound if there is none.
-func (s *Store) DeleteTrustedServer(ctx context.Context, id string) error {
+func (s *gormStore) DeleteTrustedServer(ctx context.Context, id string) error {
 	res := s.db.WithContext(ctx).Delete(&trustedServerModel{}, "id = ?", id)
 	if res.Error != nil {
 		return fmt.Errorf("deleting trusted server: %w", res.Error)

@@ -165,7 +165,7 @@ func handleMintDownloadTicket(receivers *receiver.Registry, tickets *downloadTic
 // section (see handleDownloadEvents); a write failure there is only logged,
 // not surfaced to the browser, mirroring recordLogin's own tolerance for a
 // login log write failure.
-func handleDownloadFile(receivers *receiver.Registry, log *slog.Logger, db *store.Store, tickets *downloadTicketStore, trustProxyHeaders bool, queue *notify.Queue) http.HandlerFunc {
+func handleDownloadFile(receivers *receiver.Registry, log *slog.Logger, db store.Store, tickets *downloadTicketStore, trustProxyHeaders bool, queue *notify.Queue) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, ok := lookupReceiver(w, r, receivers)
 		if !ok {

@@ -63,7 +63,7 @@ type AuditChange struct {
 
 // SaveAuditEvent appends ev to the audit log. Called for every change
 // request a caller's handlers see, regardless of outcome.
-func (s *Store) SaveAuditEvent(ctx context.Context, ev AuditEvent) error {
+func (s *gormStore) SaveAuditEvent(ctx context.Context, ev AuditEvent) error {
 	var changes string
 
 	if len(ev.Changes) > 0 {
@@ -100,7 +100,7 @@ func (s *Store) SaveAuditEvent(ctx context.Context, ev AuditEvent) error {
 // ListAuditEvents returns up to limit of the most recently recorded audit
 // events, newest first, for the dashboard's audit log view. Changes is
 // never nil; a row whose changes don't decode lists none.
-func (s *Store) ListAuditEvents(ctx context.Context, limit int) ([]AuditEvent, error) {
+func (s *gormStore) ListAuditEvents(ctx context.Context, limit int) ([]AuditEvent, error) {
 	return listRecentEvents(ctx, s.read, limit, func(m auditEventModel) AuditEvent {
 		changes := []AuditChange{}
 		if m.Changes != "" {

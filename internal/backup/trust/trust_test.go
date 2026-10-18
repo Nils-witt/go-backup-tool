@@ -35,12 +35,12 @@ func testKeyPEM(t *testing.T) (string, *rsa.PublicKey) {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), &key.PublicKey
 }
 
-func openTestStateDB(t *testing.T) *store.Store {
+func openTestStateDB(t *testing.T) store.Store {
 	t.Helper()
 
-	db, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"))
+	db, err := store.OpenSQLite(t.Context(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = db.Close() })

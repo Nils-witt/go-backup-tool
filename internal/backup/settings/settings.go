@@ -39,7 +39,7 @@ var (
 // settings, so an edit in the web UI takes effect everywhere immediately.
 // It's the only writer of all of them.
 type Manager struct {
-	db            *store.Store
+	db            store.Store
 	notifications *notify.Registry
 	report        *report.Live
 	smtp          notify.SMTPSettings
@@ -63,7 +63,7 @@ type Manager struct {
 // opened), resolving notifications into notifications and the report into
 // live. smtp/gpg are what email notifications send and encrypt with (they
 // stay in the config file). Call Load before anything reads the registry.
-func NewManager(db *store.Store, notifications *notify.Registry, live *report.Live, smtp notify.SMTPSettings, gpg notify.GPGSettings, log *slog.Logger) *Manager {
+func NewManager(db store.Store, notifications *notify.Registry, live *report.Live, smtp notify.SMTPSettings, gpg notify.GPGSettings, log *slog.Logger) *Manager {
 	return &Manager{
 		db: db, notifications: notifications, report: live, smtp: smtp, gpg: gpg,
 		log: log, invalid: make(map[string]string),

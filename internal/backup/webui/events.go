@@ -17,7 +17,7 @@ import (
 // blocked by an audit-log hiccup. A nil db is a no-op, matching
 // StartWebUI's optional db. Used by auth.go for SSO logins (see
 // handleSSOLogin) and rejected bearer tokens (see rejectBearer).
-func recordLogin(ctx context.Context, db *store.Store, log *slog.Logger, r *http.Request, trustProxyHeaders bool, method, source, username, detail string, success bool) {
+func recordLogin(ctx context.Context, db store.Store, log *slog.Logger, r *http.Request, trustProxyHeaders bool, method, source, username, detail string, success bool) {
 	if db == nil {
 		return
 	}
@@ -45,9 +45,9 @@ type loginEventJSON struct {
 // db nil (state tracking unavailable) serves an empty list rather than
 // failing the request, matching handleReceiverStatus's own tolerance for a
 // missing dependency.
-func handleLoginEvents(db *store.Store, log *slog.Logger, limit int) http.HandlerFunc {
+func handleLoginEvents(db store.Store, log *slog.Logger, limit int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		serveEventLog(w, r, log, db, limit, db.ListLoginEvents,
+		serveEventLog(w, r, log, db, limit, store.Store.ListLoginEvents,
 			func(ev store.LoginEvent) loginEventJSON { return loginEventJSON(ev) },
 			"reading login events failed")
 	}
@@ -56,13 +56,14 @@ func handleLoginEvents(db *store.Store, log *slog.Logger, limit int) http.Handle
 // serveEventLog writes a JSON array of the most recently recorded audit-log
 // events (see store.Store.ListLoginEvents/ListDownloadEvents), newest first,
 // converting each raw event E to its wire shape J via toJSON. read is a
-// store method value (e.g. db.ListLoginEvents) so this doesn't need its own
-// *store.Store parameter to call it with. db nil (state tracking
+// store method expression (e.g. store.Store.ListLoginEvents), called with
+// db only once db is known to be non-nil: a method value (db.ListLoginEvents)
+// would panic on a nil db as soon as it's evaluated. db nil (state tracking
 // unavailable) serves an empty list rather than failing the request, since
 // the state db is optional (see StartWebUI). Shared by handleLoginEvents
 // and handleDownloadEvents, whose bodies would otherwise be identical but
 // for the event/read/limit types involved.
-func serveEventLog[E, J any](w http.ResponseWriter, r *http.Request, log *slog.Logger, db *store.Store, limit int, read func(context.Context, int) ([]E, error), toJSON func(E) J, errMsg string) {
+func serveEventLog[E, J any](w http.ResponseWriter, r *http.Request, log *slog.Logger, db store.Store, limit int, read func(store.Store, context.Context, int) ([]E, error), toJSON func(E) J, errMsg string) {
 	// A limit below 1 (a caller that didn't resolve webui.event-log-limit:,
 	// e.g. a test) falls back to the default rather than serving nothing.
 	if limit < 1 {
@@ -74,7 +75,7 @@ func serveEventLog[E, J any](w http.ResponseWriter, r *http.Request, log *slog.L
 	if db != nil {
 		var err error
 
-		events, err = read(r.Context(), limit)
+		events, err = read(db, r.Context(), limit)
 		if err != nil {
 			log.Warn("web UI: "+errMsg, "err", err)
 			http.Error(w, errMsg, http.StatusInternalServerError)
@@ -109,9 +110,9 @@ type downloadEventJSON struct {
 // as JSON. db nil (state tracking unavailable) serves an empty list rather
 // than failing the request, matching handleLoginEvents's own tolerance for
 // a missing dependency.
-func handleDownloadEvents(db *store.Store, log *slog.Logger, limit int) http.HandlerFunc {
+func handleDownloadEvents(db store.Store, log *slog.Logger, limit int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		serveEventLog(w, r, log, db, limit, db.ListDownloadEvents,
+		serveEventLog(w, r, log, db, limit, store.Store.ListDownloadEvents,
 			func(ev store.DownloadEvent) downloadEventJSON { return downloadEventJSON(ev) },
 			"reading download events failed")
 	}
@@ -134,9 +135,9 @@ type jobRunEventJSON struct {
 // JSON. db nil (state tracking unavailable) serves an empty list rather
 // than failing the request, matching handleLoginEvents's own tolerance for
 // a missing dependency.
-func handleJobRunEvents(db *store.Store, log *slog.Logger, limit int) http.HandlerFunc {
+func handleJobRunEvents(db store.Store, log *slog.Logger, limit int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		serveEventLog(w, r, log, db, limit, db.ListJobRunEvents,
+		serveEventLog(w, r, log, db, limit, store.Store.ListJobRunEvents,
 			func(ev store.JobRunEvent) jobRunEventJSON { return jobRunEventJSON(ev) },
 			"reading job run events failed")
 	}
@@ -159,9 +160,9 @@ type targetRunEventJSON struct {
 // across every job, as JSON. db nil (state tracking unavailable) serves an
 // empty list rather than failing the request, matching handleLoginEvents's
 // own tolerance for a missing dependency.
-func handleTargetRunEvents(db *store.Store, log *slog.Logger, limit int) http.HandlerFunc {
+func handleTargetRunEvents(db store.Store, log *slog.Logger, limit int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		serveEventLog(w, r, log, db, limit, db.ListTargetRunEvents,
+		serveEventLog(w, r, log, db, limit, store.Store.ListTargetRunEvents,
 			func(ev store.TargetRunEvent) targetRunEventJSON { return targetRunEventJSON(ev) },
 			"reading target run events failed")
 	}
@@ -186,9 +187,9 @@ type receiverEventJSON struct {
 // db nil (state tracking unavailable) serves an empty list rather than
 // failing the request, matching handleLoginEvents's own tolerance for a
 // missing dependency.
-func handleReceiverEvents(db *store.Store, log *slog.Logger, limit int) http.HandlerFunc {
+func handleReceiverEvents(db store.Store, log *slog.Logger, limit int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		serveEventLog(w, r, log, db, limit, db.ListReceiverEvents,
+		serveEventLog(w, r, log, db, limit, store.Store.ListReceiverEvents,
 			func(ev store.ReceiverEvent) receiverEventJSON { return receiverEventJSON(ev) },
 			"reading receiver events failed")
 	}

@@ -140,7 +140,7 @@ func serverTLSOf(sc ServerConfig) [3]any {
 }
 
 // onlyServerTLS returns the TLS settings stored for server name.
-func onlyServerTLS(t *testing.T, db *Store, name string) [3]any {
+func onlyServerTLS(t *testing.T, db *gormStore, name string) [3]any {
 	t.Helper()
 
 	servers, err := db.ListServerConfigs(t.Context())

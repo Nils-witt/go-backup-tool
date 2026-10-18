@@ -64,7 +64,7 @@ func reportToJSON(r store.Report) reportJSON {
 // registerReportRoutes mounts /api/reports on mux: listing and reading
 // kept reports wrapped in admin, generating one in change. Without a
 // Reporter only the reading routes exist.
-func registerReportRoutes(mux *http.ServeMux, db *store.Store, rep *reporter.Reporter, admin, change func(http.HandlerFunc) http.HandlerFunc, log *slog.Logger) {
+func registerReportRoutes(mux *http.ServeMux, db store.Store, rep *reporter.Reporter, admin, change func(http.HandlerFunc) http.HandlerFunc, log *slog.Logger) {
 	mux.HandleFunc("GET /api/reports", admin(handleListReports(db, log)))
 	mux.HandleFunc("GET /api/reports/{id}", admin(handleGetReport(db, log)))
 
@@ -75,7 +75,7 @@ func registerReportRoutes(mux *http.ServeMux, db *store.Store, rep *reporter.Rep
 
 // handleListReports serves GET /api/reports (admin only): every kept report,
 // newest first, without content.
-func handleListReports(db *store.Store, log *slog.Logger) http.HandlerFunc {
+func handleListReports(db store.Store, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if db == nil {
 			http.Error(w, reporter.ErrHistoryUnavailable.Error(), http.StatusServiceUnavailable)
@@ -100,7 +100,7 @@ func handleListReports(db *store.Store, log *slog.Logger) http.HandlerFunc {
 }
 
 // handleGetReport serves GET /api/reports/{id} (admin only).
-func handleGetReport(db *store.Store, log *slog.Logger) http.HandlerFunc {
+func handleGetReport(db store.Store, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if db == nil {
 			http.Error(w, reporter.ErrHistoryUnavailable.Error(), http.StatusServiceUnavailable)

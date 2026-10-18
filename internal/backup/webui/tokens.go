@@ -63,12 +63,12 @@ var (
 // bearer token as one, and the token endpoints report 503.
 type apiTokens struct {
 	key []byte
-	db  *store.Store
+	db  store.Store
 }
 
 // newAPITokens loads db's signing key, returning nil (tokens disabled) if
 // db is nil or the key can't be loaded.
-func newAPITokens(ctx context.Context, db *store.Store, log *slog.Logger) *apiTokens {
+func newAPITokens(ctx context.Context, db store.Store, log *slog.Logger) *apiTokens {
 	if db == nil {
 		return nil
 	}

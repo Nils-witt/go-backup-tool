@@ -59,8 +59,8 @@
 # "90m" for 90 minutes — "d" for days works alongside every unit Go's
 # time.ParseDuration already supports, including "m" for minutes) to
 # delete its own objects automatically once they're older than that.
-# go-backup-tool tracks what it wrote in the shared state sqlite database
-# kept alongside this config file (.go-backup-tool-state.db) so it only
+# go-backup-tool tracks what it wrote in its state database (see
+# database: below) so it only
 # ever deletes objects it wrote itself; retention is swept after every
 # write to that server, and once at startup. Omit retention (the default)
 # to keep objects forever.
@@ -151,6 +151,35 @@ servers:
 # keys-dir: data/keys # where this instance's persistent identity (RSA key
 # pair + UUID, generated on first run — see type: remote above) is stored.
 # Defaults to ./data/keys, next to this file.
+
+# database: chooses where the state database lives: the last run of each
+# job, retention tracking, the event and audit logs, and everything managed
+# in the web UI. Unset (or type: sqlite) keeps it in a SQLite file next to
+# this config file (.go-backup-tool-state.db); sqlite takes no other
+# settings. If that file can't be opened, go-backup-tool still runs, just
+# without those features.
+#
+# type: postgres keeps it in a PostgreSQL database instead, given either as
+# dsn: (a postgres:// URL or libpq key=value string, used as written) or as
+# the separate fields below, never both. With the fields, host, user, and
+# dbname are required; port defaults to 5432 and sslmode to require (one of
+# disable, allow, prefer, require, verify-ca, verify-full). go-backup-tool
+# creates its tables on startup, and refuses to start if the server can't
+# be reached within 30 seconds. A PostgreSQL database starts empty: nothing
+# is copied over from an existing SQLite file (move the web UI-managed
+# settings with -export-settings / -import-settings). Give every instance
+# its own database (or a search_path schema in dsn:): rows don't record
+# which instance wrote them, so instances sharing one would mix their state.
+# database:
+#   type: postgres
+#   dsn: postgres://backup:secret@db.example:5432/backup?sslmode=require
+#   # or, instead of dsn:
+#   host: db.example
+#   port: 5432
+#   user: backup
+#   password: secret
+#   dbname: backup
+#   sslmode: require
 
 # server-name identifies this instance in notifications — a
 # {server_name} placeholder, substituted the same way as a stale/download

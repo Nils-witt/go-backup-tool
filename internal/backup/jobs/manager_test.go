@@ -18,12 +18,12 @@ import (
 
 var discardLogger = slog.New(slog.DiscardHandler)
 
-func openTestStateDB(t *testing.T) *store.Store {
+func openTestStateDB(t *testing.T) store.Store {
 	t.Helper()
 
-	db, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"))
+	db, err := store.OpenSQLite(t.Context(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = db.Close() })
@@ -35,10 +35,10 @@ type testManager struct {
 	*Manager
 
 	status *status.Store
-	db     *store.Store
+	db     store.Store
 }
 
-func newTestManager(t *testing.T, db *store.Store, settings Settings) testManager {
+func newTestManager(t *testing.T, db store.Store, settings Settings) testManager {
 	t.Helper()
 
 	statusStore := status.NewStore(nil)

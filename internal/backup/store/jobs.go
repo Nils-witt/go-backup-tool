@@ -85,9 +85,9 @@ const maxJobRunsPerJob = 100
 // then prunes name's older runs beyond maxJobRunsPerJob, in the same
 // transaction. Insert and prune stay raw SQL — GORM has no "keep newest N per group, delete the rest"
 // chain equivalent for the prune half.
-func (s *Store) SaveJobRun(ctx context.Context, name, state string, success bool, startTime, endTime time.Time, bytesWritten int64, errText string) error {
+func (s *gormStore) SaveJobRun(ctx context.Context, name, state string, success bool, startTime, endTime time.Time, bytesWritten int64, errText string) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		const insert = `INSERT INTO job_runs (name, state, success, startTime, endTime, error, size) VALUES (?, ?, ?, ?, ?, ?, ?)`
+		const insert = `INSERT INTO job_runs (name, state, success, "startTime", "endTime", error, size) VALUES (?, ?, ?, ?, ?, ?, ?)`
 		if err := tx.Exec(insert, name, state, success, startTime.UTC(), endTime.UTC(), errText, bytesWritten).Error; err != nil {
 			return fmt.Errorf("recording job %q run: %w", name, err)
 		}
@@ -105,12 +105,12 @@ func (s *Store) SaveJobRun(ctx context.Context, name, state string, success bool
 
 // GetLastJobSuccess returns job name's last recorded successful run, and false
 // if none is recorded yet.
-func (s *Store) GetLastJobSuccess(ctx context.Context, name string) (time.Time, bool, error) {
+func (s *gormStore) GetLastJobSuccess(ctx context.Context, name string) (time.Time, bool, error) {
 	var m jobRunModel
 
 	err := s.read.WithContext(ctx).
-		Where("name = ? AND success = 1", name).
-		Order("endTime DESC").
+		Where("name = ? AND success", name).
+		Order(`"endTime" DESC`).
 		Take(&m).Error
 
 	if isRecordNotFound(err) {
@@ -142,12 +142,12 @@ type LastRun struct {
 
 // GetLastRun returns job name's most recently persisted run, and false if
 // none is recorded yet.
-func (s *Store) GetLastRun(ctx context.Context, name string) (LastRun, bool, error) {
+func (s *gormStore) GetLastRun(ctx context.Context, name string) (LastRun, bool, error) {
 	var m jobRunModel
 
 	err := s.read.WithContext(ctx).
 		Where("name = ?", name).
-		Order("endTime DESC").
+		Order(`"endTime" DESC`).
 		Take(&m).Error
 
 	if isRecordNotFound(err) {
@@ -187,7 +187,7 @@ type JobRunEvent struct {
 // ListJobRunEvents returns up to limit of the most recently recorded job
 // runs across every job, newest first, for the dashboard's job run log
 // view.
-func (s *Store) ListJobRunEvents(ctx context.Context, limit int) ([]JobRunEvent, error) {
+func (s *gormStore) ListJobRunEvents(ctx context.Context, limit int) ([]JobRunEvent, error) {
 	var rows []jobRunModel
 
 	if err := s.read.WithContext(ctx).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
@@ -223,13 +223,13 @@ type JobRunDaySummary struct {
 // JobRunDaySummary for the runs completed (endTime) in [start, end). Stays
 // raw SQL: the conditional-aggregation columns (SUM(CASE WHEN ...)) have no
 // GORM chain equivalent, mirroring SummarizeReceiverEvents.
-func (s *Store) SummarizeJobRuns(ctx context.Context, start, end time.Time) ([]JobRunDaySummary, error) {
+func (s *gormStore) SummarizeJobRuns(ctx context.Context, start, end time.Time) ([]JobRunDaySummary, error) {
 	const query = `SELECT name AS job_name,
-		SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS runs_completed,
-		SUM(CASE WHEN success = 1 THEN size ELSE 0 END) AS bytes_written,
-		SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS errors
+		SUM(CASE WHEN success THEN 1 ELSE 0 END) AS runs_completed,
+		SUM(CASE WHEN success THEN size ELSE 0 END) AS bytes_written,
+		SUM(CASE WHEN NOT success THEN 1 ELSE 0 END) AS errors
 		FROM job_runs
-		WHERE endTime >= ? AND endTime < ?
+		WHERE "endTime" >= ? AND "endTime" < ?
 		GROUP BY name
 		ORDER BY name`
 
@@ -252,12 +252,12 @@ type JobRunErrorEvent struct {
 
 // ListJobRunErrorEvents returns every failed job run completed (endTime) in
 // [start, end), oldest first, mirroring ListReceiverErrorEvents.
-func (s *Store) ListJobRunErrorEvents(ctx context.Context, start, end time.Time) ([]JobRunErrorEvent, error) {
+func (s *gormStore) ListJobRunErrorEvents(ctx context.Context, start, end time.Time) ([]JobRunErrorEvent, error) {
 	var rows []jobRunModel
 
 	err := s.read.WithContext(ctx).
-		Where("success = 0 AND endTime >= ? AND endTime < ?", start.UTC(), end.UTC()).
-		Order("endTime ASC").
+		Where(`NOT success AND "endTime" >= ? AND "endTime" < ?`, start.UTC(), end.UTC()).
+		Order(`"endTime" ASC`).
 		Find(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("reading job run error events: %w", err)
@@ -282,7 +282,7 @@ const maxTargetRunsPerTarget = 100
 // every run, mirroring SaveJobRun's per-job persistence one level down. It
 // then prunes that job/target pair's older runs beyond
 // maxTargetRunsPerTarget.
-func (s *Store) SaveTargetRun(ctx context.Context, name string, success bool, target, state, errText string, at time.Time) error {
+func (s *gormStore) SaveTargetRun(ctx context.Context, name string, success bool, target, state, errText string, at time.Time) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		const insert = `INSERT INTO target_runs (job_name, success, target, run_at, state, error) VALUES (?, ?, ?, ?, ?, ?)`
 		if err := tx.Exec(insert, name, success, target, at.UTC(), state, errText).Error; err != nil {
@@ -312,7 +312,7 @@ type TargetRun struct {
 // persisted run, one entry per target that has completed at least once.
 // Stays raw SQL: the correlated "latest row per target" subquery has no
 // GORM greatest-n-per-group builder equivalent.
-func (s *Store) ListTargetRuns(ctx context.Context, name string) ([]TargetRun, error) {
+func (s *gormStore) ListTargetRuns(ctx context.Context, name string) ([]TargetRun, error) {
 	query := `SELECT target AS target, state AS state, COALESCE(error, '') AS error FROM target_runs
 		WHERE job_name = ? AND id IN (
 			SELECT MAX(id) FROM target_runs WHERE job_name = ? GROUP BY target
@@ -344,7 +344,7 @@ type TargetRunEvent struct {
 // ListTargetRunEvents returns up to limit of the most recently recorded
 // target runs across every job, newest first, for the dashboard's target
 // run log view.
-func (s *Store) ListTargetRunEvents(ctx context.Context, limit int) ([]TargetRunEvent, error) {
+func (s *gormStore) ListTargetRunEvents(ctx context.Context, limit int) ([]TargetRunEvent, error) {
 	var rows []targetRunModel
 
 	if err := s.read.WithContext(ctx).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
@@ -364,7 +364,7 @@ func (s *Store) ListTargetRunEvents(ctx context.Context, limit int) ([]TargetRun
 // u.CreatedAt are the failed run's own resolved config.Config.Key/File/
 // CreatedAt (see outstandingTargetUploadModel's doc comment), not the job's
 // static config.
-func (s *Store) AddOutstandingTargetUpload(ctx context.Context, u OutstandingTargetUpload) error {
+func (s *gormStore) AddOutstandingTargetUpload(ctx context.Context, u OutstandingTargetUpload) error {
 	m := outstandingTargetUploadModel{
 		JobName: u.JobName, Target: u.Target, RunAt: u.RetryAt.UTC(), FileName: u.FileName,
 		Key: u.Key, BackupFile: u.BackupFile, CreatedAt: u.CreatedAt.UTC(),
@@ -397,7 +397,7 @@ type OutstandingTargetUpload struct {
 // ListDueOutstandingTargetUploads returns every outstanding target upload
 // whose retry time is at or before now, oldest first, for
 // pipeline.Runner.RunOutstandingUploadRetries's retry loop to attempt.
-func (s *Store) ListDueOutstandingTargetUploads(ctx context.Context, now time.Time) ([]OutstandingTargetUpload, error) {
+func (s *gormStore) ListDueOutstandingTargetUploads(ctx context.Context, now time.Time) ([]OutstandingTargetUpload, error) {
 	var rows []outstandingTargetUploadModel
 
 	if err := s.read.WithContext(ctx).Where("run_at <= ?", now.UTC()).Order("id").Find(&rows).Error; err != nil {
@@ -417,7 +417,7 @@ func (s *Store) ListDueOutstandingTargetUploads(ctx context.Context, now time.Ti
 
 // RescheduleOutstandingTargetUpload bumps id's retry time to retryAt, once
 // another retry attempt has failed.
-func (s *Store) RescheduleOutstandingTargetUpload(ctx context.Context, id uint, retryAt time.Time) error {
+func (s *gormStore) RescheduleOutstandingTargetUpload(ctx context.Context, id uint, retryAt time.Time) error {
 	err := s.db.WithContext(ctx).Model(&outstandingTargetUploadModel{}).Where("id = ?", id).
 		Update("run_at", retryAt.UTC()).Error
 	if err != nil {
@@ -430,7 +430,7 @@ func (s *Store) RescheduleOutstandingTargetUpload(ctx context.Context, id uint, 
 // DeleteOutstandingTargetUpload removes id, once its upload has finally
 // succeeded or it can no longer be retried (e.g. its staged file, job, or
 // target no longer exists).
-func (s *Store) DeleteOutstandingTargetUpload(ctx context.Context, id uint) error {
+func (s *gormStore) DeleteOutstandingTargetUpload(ctx context.Context, id uint) error {
 	if err := s.db.WithContext(ctx).Delete(&outstandingTargetUploadModel{}, id).Error; err != nil {
 		return fmt.Errorf("deleting outstanding target upload %d: %w", id, err)
 	}
@@ -442,7 +442,7 @@ func (s *Store) DeleteOutstandingTargetUpload(ctx context.Context, id uint) erro
 // jobName still has for target, e.g. other files of the same backup, so a
 // retry that succeeds for one of them only marks the target recovered once
 // none are left.
-func (s *Store) CountOutstandingTargetUploads(ctx context.Context, jobName, target string) (int64, error) {
+func (s *gormStore) CountOutstandingTargetUploads(ctx context.Context, jobName, target string) (int64, error) {
 	var n int64
 
 	err := s.read.WithContext(ctx).Model(&outstandingTargetUploadModel{}).
@@ -457,10 +457,10 @@ func (s *Store) CountOutstandingTargetUploads(ctx context.Context, jobName, targ
 // CountOutstandingTargetUploadsForFile reports how many outstanding target
 // uploads still reference fileName, so its staged file (see stageBackup) can
 // be safely removed once none do.
-func (s *Store) CountOutstandingTargetUploadsForFile(ctx context.Context, fileName string) (int64, error) {
+func (s *gormStore) CountOutstandingTargetUploadsForFile(ctx context.Context, fileName string) (int64, error) {
 	var n int64
 
-	err := s.read.WithContext(ctx).Model(&outstandingTargetUploadModel{}).Where("fileName = ?", fileName).Count(&n).Error
+	err := s.read.WithContext(ctx).Model(&outstandingTargetUploadModel{}).Where(`"fileName" = ?`, fileName).Count(&n).Error
 	if err != nil {
 		return 0, fmt.Errorf("counting outstanding target uploads for %q: %w", fileName, err)
 	}

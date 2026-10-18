@@ -29,7 +29,7 @@ import (
 // is the live receiver status store, shared with whatever also displays it
 // (e.g. the dashboard's /api/receivers), so a write here is reflected there
 // immediately.
-func RegisterRoutes(mux *http.ServeMux, receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db *store.Store) {
+func RegisterRoutes(mux *http.ServeMux, receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db store.Store) {
 	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(receivers, receiverStatus, log, db))
 	mux.HandleFunc("PUT /api/v1/backups/{id}/{key...}", HandleReceiveBackupFile(receivers, receiverStatus, log, db))
 }
@@ -44,7 +44,7 @@ func RegisterRoutes(mux *http.ServeMux, receivers *Registry, receiverStatus *sta
 // answers 404 instead of storing every file of a backup at the same key.
 // Only request-bound tokens (see remoteauth.Request) are accepted, since
 // every sender that knows this route also binds its tokens.
-func HandleReceiveBackupFile(receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
+func HandleReceiveBackupFile(receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db store.Store) http.HandlerFunc {
 	return receiveObject(receivers, receiverStatus, log, db, true)
 }
 
@@ -64,14 +64,14 @@ func HandleReceiveBackupFile(receivers *Registry, receiverStatus *status.Receive
 // (objectstore.SetObjectModTime) so the dashboard's file listing agrees with it.
 // Every attempt is recorded to status, win or lose, so /api/receivers
 // reflects it.
-func HandleReceiveObject(receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db *store.Store) http.HandlerFunc {
+func HandleReceiveObject(receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db store.Store) http.HandlerFunc {
 	return receiveObject(receivers, receiverStatus, log, db, false)
 }
 
 // receiveObject is HandleReceiveObject, or HandleReceiveBackupFile when
 // multiFile is set. key, as recorded in status and the receiver's event log,
 // is the object's path under the receiver: key/file for a backup's file.
-func receiveObject(receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db *store.Store, multiFile bool) http.HandlerFunc {
+func receiveObject(receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db store.Store, multiFile bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recv, cfg, t, bound, ok := resolveReceiverRequest(w, r, receivers, log, multiFile)
 		if !ok {

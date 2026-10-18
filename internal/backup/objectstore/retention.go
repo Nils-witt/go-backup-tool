@@ -22,7 +22,7 @@ import (
 // couldn't be opened at startup) also disables tracking rather than
 // erroring, since the backup write itself already succeeded and this is
 // auxiliary bookkeeping.
-func RecordLocalWrite(ctx context.Context, db *store.Store, cfg *config.Config, t *config.Target, log *slog.Logger) error {
+func RecordLocalWrite(ctx context.Context, db store.Store, cfg *config.Config, t *config.Target, log *slog.Logger) error {
 	if t.Retention <= 0 || db == nil {
 		return nil
 	}
@@ -47,7 +47,7 @@ func RecordLocalWrite(ctx context.Context, db *store.Store, cfg *config.Config, 
 // is cfg.CreatedAt when set (the receiver API's creationTime, or a run's job
 // start time — see remoteclient.Upload/receiver.parseCreationTime), or
 // upload time otherwise.
-func RecordObjectWrite(ctx context.Context, db *store.Store, cfg *config.Config, t *config.Target, log *slog.Logger) error {
+func RecordObjectWrite(ctx context.Context, db store.Store, cfg *config.Config, t *config.Target, log *slog.Logger) error {
 	if t.Retention <= 0 || db == nil {
 		return nil
 	}
@@ -73,7 +73,7 @@ func RecordObjectWrite(ctx context.Context, db *store.Store, cfg *config.Config,
 // sweepStartupRetention/sweepStartupReceiverRetention) that aren't already
 // in the middle of a write. A nil db (the state db couldn't be opened at
 // startup) is a no-op.
-func SweepRetentionForTarget(ctx context.Context, db *store.Store, t *config.Target, log *slog.Logger) error {
+func SweepRetentionForTarget(ctx context.Context, db store.Store, t *config.Target, log *slog.Logger) error {
 	if t.Retention <= 0 || db == nil {
 		return nil
 	}
@@ -91,7 +91,7 @@ func SweepRetentionForTarget(ctx context.Context, db *store.Store, t *config.Tar
 // from disk is not an error: its record is still removed. Errors are
 // collected per file and returned joined, so one bad entry doesn't stop the
 // rest of the sweep.
-func sweepRetention(ctx context.Context, db *store.Store, t *config.Target, log *slog.Logger) error {
+func sweepRetention(ctx context.Context, db store.Store, t *config.Target, log *slog.Logger) error {
 	if t.Retention <= 0 {
 		return nil
 	}

@@ -70,9 +70,9 @@ func TestBuildReportSummarizesReceiverEvents(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	db, err := store.Open(ctx, filepath.Join(dir, "state.db"))
+	db, err := store.OpenSQLite(ctx, filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = db.Close() })
@@ -137,9 +137,9 @@ func TestBuildReportSummarizesJobRuns(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	db, err := store.Open(ctx, filepath.Join(dir, "state.db"))
+	db, err := store.OpenSQLite(ctx, filepath.Join(dir, "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = db.Close() })
@@ -405,12 +405,12 @@ func TestRunPicksUpSettingsChanges(t *testing.T) {
 }
 
 // openTestStore opens a fresh state db, closed when t ends.
-func openTestStore(t *testing.T) *store.Store {
+func openTestStore(t *testing.T) store.Store {
 	t.Helper()
 
-	db, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"))
+	db, err := store.OpenSQLite(t.Context(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
-		t.Fatalf("store.Open() error: %v", err)
+		t.Fatalf("store.OpenSQLite() error: %v", err)
 	}
 
 	t.Cleanup(func() { _ = db.Close() })

@@ -42,7 +42,7 @@ type ManagedReceiver struct {
 // receiver created, edited, or deleted in the web UI takes effect
 // everywhere immediately, without a restart.
 type Manager struct {
-	db            *store.Store
+	db            store.Store
 	registry      *Registry
 	status        *status.ReceiverStore
 	notifications *notify.Registry
@@ -64,7 +64,7 @@ type Manager struct {
 // server registries and serverName (see config.ResolveReceiver) and
 // restricting web UI paths to baseDir (see config.ValidateReceiverPath).
 // Call Load before serving anything.
-func NewManager(db *store.Store, registry *Registry, receiverStatus *status.ReceiverStore, notifications *notify.Registry, trusted *trust.Registry, serverName, baseDir string, log *slog.Logger) *Manager {
+func NewManager(db store.Store, registry *Registry, receiverStatus *status.ReceiverStore, notifications *notify.Registry, trusted *trust.Registry, serverName, baseDir string, log *slog.Logger) *Manager {
 	return &Manager{
 		db: db, registry: registry, status: receiverStatus,
 		notifications: notifications, trusted: trusted, serverName: serverName, baseDir: baseDir,

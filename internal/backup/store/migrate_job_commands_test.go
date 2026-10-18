@@ -14,9 +14,9 @@ func TestOpenMigratesInlineJobCommands(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "state.db")
 
-	db, err := Open(ctx, path)
+	db, err := openSQLite(ctx, path)
 	if err != nil {
-		t.Fatalf("Open() error: %v", err)
+		t.Fatalf("openSQLite() error: %v", err)
 	}
 
 	now := time.Now().UTC().Truncate(time.Second)
@@ -39,9 +39,9 @@ func TestOpenMigratesInlineJobCommands(t *testing.T) {
 
 	// Opening twice must migrate once.
 	for range 2 {
-		db, err = Open(ctx, path)
+		db, err = openSQLite(ctx, path)
 		if err != nil {
-			t.Fatalf("Open() error: %v", err)
+			t.Fatalf("openSQLite() error: %v", err)
 		}
 
 		checkMigratedJobCommands(t, db)
@@ -53,7 +53,7 @@ func TestOpenMigratesInlineJobCommands(t *testing.T) {
 // checkMigratedJobCommands checks TestOpenMigratesInlineJobCommands' db
 // after Open: db's inline cmd moved into command job-db-2, and each job's
 // single command into its files.
-func checkMigratedJobCommands(t *testing.T, db *Store) {
+func checkMigratedJobCommands(t *testing.T, db *gormStore) {
 	t.Helper()
 
 	ctx := context.Background()

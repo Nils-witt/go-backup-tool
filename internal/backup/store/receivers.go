@@ -77,7 +77,7 @@ var (
 )
 
 // ListReceiverConfigs returns every stored receiver, in id order.
-func (s *Store) ListReceiverConfigs(ctx context.Context) ([]ReceiverConfig, error) {
+func (s *gormStore) ListReceiverConfigs(ctx context.Context) ([]ReceiverConfig, error) {
 	var rows []receiverModel
 
 	if err := s.read.WithContext(ctx).Order("id").Find(&rows).Error; err != nil {
@@ -94,7 +94,7 @@ func (s *Store) ListReceiverConfigs(ctx context.Context) ([]ReceiverConfig, erro
 
 // GetReceiverConfig looks up the stored receiver with the given id,
 // reporting false if there is none.
-func (s *Store) GetReceiverConfig(ctx context.Context, id string) (ReceiverConfig, bool, error) {
+func (s *gormStore) GetReceiverConfig(ctx context.Context, id string) (ReceiverConfig, bool, error) {
 	var m receiverModel
 
 	if err := s.read.WithContext(ctx).Take(&m, "id = ?", id).Error; err != nil {
@@ -110,7 +110,7 @@ func (s *Store) GetReceiverConfig(ctx context.Context, id string) (ReceiverConfi
 
 // CreateReceiverConfig stores a new receiver, returning ErrReceiverExists if
 // its id is already taken.
-func (s *Store) CreateReceiverConfig(ctx context.Context, r ReceiverConfig) error {
+func (s *gormStore) CreateReceiverConfig(ctx context.Context, r ReceiverConfig) error {
 	m := newReceiverModel(normalizeReceiverTimes(r))
 
 	res := s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&m)
@@ -128,7 +128,7 @@ func (s *Store) CreateReceiverConfig(ctx context.Context, r ReceiverConfig) erro
 // UpdateReceiverConfig replaces the stored receiver r.ID's definition,
 // keeping its CreatedAt/CreatedBy, and returns ErrReceiverNotFound if there
 // is none.
-func (s *Store) UpdateReceiverConfig(ctx context.Context, r ReceiverConfig) error {
+func (s *gormStore) UpdateReceiverConfig(ctx context.Context, r ReceiverConfig) error {
 	r = normalizeReceiverTimes(r)
 
 	res := s.db.WithContext(ctx).Model(&receiverModel{}).Where("id = ?", r.ID).
@@ -152,7 +152,7 @@ func (s *Store) UpdateReceiverConfig(ctx context.Context, r ReceiverConfig) erro
 // DeleteReceiverConfig removes the stored receiver with the given id,
 // returning ErrReceiverNotFound if there is none. Its receiver_events and
 // tracked objects are kept, as are its files on disk.
-func (s *Store) DeleteReceiverConfig(ctx context.Context, id string) error {
+func (s *gormStore) DeleteReceiverConfig(ctx context.Context, id string) error {
 	res := s.db.WithContext(ctx).Delete(&receiverModel{}, "id = ?", id)
 	if res.Error != nil {
 		return fmt.Errorf("deleting receiver: %w", res.Error)
@@ -176,7 +176,7 @@ func normalizeReceiverTimes(r ReceiverConfig) ReceiverConfig {
 // still authenticate senders only by a public key, which v8.0.0 removed: a
 // public key and no allowed servers. They can no longer accept uploads
 // until a sender is added as a trusted server and allowed on them.
-func (s *Store) ListReceiversRelyingOnPublicKey(ctx context.Context) ([]string, error) {
+func (s *gormStore) ListReceiversRelyingOnPublicKey(ctx context.Context) ([]string, error) {
 	var rows []receiverModel
 
 	if err := s.read.WithContext(ctx).Where("public_key <> ''").Order("id").Find(&rows).Error; err != nil {
