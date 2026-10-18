@@ -115,7 +115,7 @@ func (m *Manager) Load(ctx context.Context) {
 	if err != nil {
 		m.log.Error("reading report settings from the state db", "err", err)
 	} else if ok {
-		m.activateReportLocked(report.FileReport{Enabled: rs.Enabled, Schedule: rs.Schedule, Notifications: rs.Notifications})
+		m.activateReportLocked(report.FileReport{Enabled: rs.Enabled, Schedule: rs.Schedule, Notifications: rs.Notifications, HistoryDays: rs.HistoryDays})
 	}
 }
 
@@ -499,7 +499,8 @@ func (m *Manager) UpdateReport(ctx context.Context, user string, fr report.FileR
 	}
 
 	if err := m.db.SaveReportSettings(ctx, store.ReportSettings{
-		Enabled: fr.Enabled, Schedule: fr.Schedule, Notifications: fr.Notifications, UpdatedAt: time.Now(), UpdatedBy: user,
+		Enabled: fr.Enabled, Schedule: fr.Schedule, Notifications: fr.Notifications, HistoryDays: fr.HistoryDays,
+		UpdatedAt: time.Now(), UpdatedBy: user,
 	}); err != nil {
 		return err
 	}

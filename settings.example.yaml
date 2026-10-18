@@ -151,3 +151,7 @@
 #   # {job-errors} are counts of each section. A webhook: channel receives a
 #   # JSON summary of the same counts, or its own body: template.
 #   notifications: [ops-email]
+#   # history-days: how many days each generated report (scheduled, or
+#   # generated on demand on the dashboard's Report page) is kept for viewing
+#   # there. Default 30, at most 3650.
+#   history-days: 30

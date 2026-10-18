@@ -46,7 +46,19 @@ type FileReport struct {
 	// its own body: template rendered the same way). Required (non-empty)
 	// when Enabled.
 	Notifications []string `yaml:"notifications" json:"notifications"`
+
+	// HistoryDays is how many days a generated report (scheduled or made on
+	// demand in the web UI) is kept for viewing in the web UI before it's
+	// deleted. 0 (unset) means DefaultHistoryDays; at most MaxHistoryDays.
+	// Applies even while Enabled is false, to reports made on demand.
+	HistoryDays int `yaml:"history-days,omitempty" json:"history_days"`
 }
+
+// DefaultHistoryDays is FileReport.HistoryDays' default when left unset.
+const DefaultHistoryDays = 30
+
+// MaxHistoryDays bounds FileReport.HistoryDays (about ten years).
+const MaxHistoryDays = 3650
 
 // Settings is fileReport after validation, ready for
 // reporter.Run to act on. Its zero value (Enabled false) means the
@@ -62,6 +74,22 @@ type Settings struct {
 	// up in the live notify.Registry each time the report is sent (see
 	// notify.Registry.Resolve), so edits made in the web UI apply.
 	Notifications []string
+
+	// HistoryRetention is how long a generated report is kept (see
+	// FileReport.HistoryDays). Set even while the report is disabled; use
+	// Retention to read it, which also covers the zero value.
+	HistoryRetention time.Duration
+}
+
+// Retention returns s.HistoryRetention, or DefaultHistoryDays when it's
+// unset (as in the zero Settings of a report whose stored settings don't
+// resolve).
+func (s Settings) Retention() time.Duration {
+	if s.HistoryRetention <= 0 {
+		return DefaultHistoryDays * 24 * time.Hour
+	}
+
+	return s.HistoryRetention
 }
 
 // parseUTCSchedule parses schedule as a standard cron expression (or
@@ -96,8 +124,8 @@ const DefaultSchedule = "0 7 * * *"
 // it into a Settings, checking every notification id exists in
 // notifications — skipped when notifications is nil, as when parsing the
 // config file, before the live registry exists. An unset/false cfg.Enabled
-// returns the zero value, leaving the report disabled, though the schedule
-// is still checked so a bad one can't be saved for later.
+// returns a disabled Settings carrying only the history retention, though
+// the schedule is still checked so a bad one can't be saved for later.
 func ResolveSettings(cfg FileReport, notifications *notify.Registry) (Settings, error) {
 	schedule := strings.TrimSpace(cfg.Schedule)
 	if schedule == "" {
@@ -109,6 +137,17 @@ func ResolveSettings(cfg FileReport, notifications *notify.Registry) (Settings, 
 		return Settings{}, err
 	}
 
+	if cfg.HistoryDays < 0 || cfg.HistoryDays > MaxHistoryDays {
+		return Settings{}, fmt.Errorf("report.history-days must be between 0 and %d, got %d", MaxHistoryDays, cfg.HistoryDays)
+	}
+
+	history := cfg.HistoryDays
+	if history == 0 {
+		history = DefaultHistoryDays
+	}
+
+	retention := time.Duration(history) * 24 * time.Hour
+
 	if notifications != nil {
 		for i, id := range cfg.Notifications {
 			if _, ok := notifications.Get(id); !ok {
@@ -118,7 +157,7 @@ func ResolveSettings(cfg FileReport, notifications *notify.Registry) (Settings, 
 	}
 
 	if !cfg.Enabled {
-		return Settings{}, nil
+		return Settings{HistoryRetention: retention}, nil
 	}
 
 	if len(cfg.Notifications) == 0 {
@@ -126,9 +165,10 @@ func ResolveSettings(cfg FileReport, notifications *notify.Registry) (Settings, 
 	}
 
 	return Settings{
-		Enabled:       true,
-		Schedule:      sched,
-		Notifications: slices.Clone(cfg.Notifications),
+		Enabled:          true,
+		Schedule:         sched,
+		Notifications:    slices.Clone(cfg.Notifications),
+		HistoryRetention: retention,
 	}, nil
 }
 

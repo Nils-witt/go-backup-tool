@@ -15,6 +15,7 @@ type reportSettingsModel struct {
 	Enabled       bool      `gorm:"column:enabled;not null"`
 	Schedule      string    `gorm:"column:schedule;not null;default:''"`
 	Notifications []string  `gorm:"column:notifications;serializer:json"`
+	HistoryDays   int       `gorm:"column:history_days;not null;default:0"`
 	UpdatedAt     time.Time `gorm:"column:updated_at;not null"`
 	UpdatedBy     string    `gorm:"column:updated_by;not null"`
 }
@@ -29,6 +30,7 @@ type ReportSettings struct {
 	Enabled       bool
 	Schedule      string
 	Notifications []string
+	HistoryDays   int
 	UpdatedAt     time.Time
 	UpdatedBy     string
 }
@@ -46,7 +48,7 @@ func (s *Store) GetReportSettings(ctx context.Context) (ReportSettings, bool, er
 		return ReportSettings{}, false, fmt.Errorf("reading report settings: %w", err)
 	}
 
-	return ReportSettings{Enabled: m.Enabled, Schedule: m.Schedule, Notifications: m.Notifications, UpdatedAt: m.UpdatedAt, UpdatedBy: m.UpdatedBy}, true, nil
+	return ReportSettings{Enabled: m.Enabled, Schedule: m.Schedule, Notifications: m.Notifications, HistoryDays: m.HistoryDays, UpdatedAt: m.UpdatedAt, UpdatedBy: m.UpdatedBy}, true, nil
 }
 
 // SaveReportSettings stores r as the report settings, replacing any saved
@@ -63,7 +65,7 @@ func (s *Store) SaveReportSettings(ctx context.Context, r ReportSettings) error 
 
 func reportSettingsModelFrom(r ReportSettings) reportSettingsModel {
 	return reportSettingsModel{
-		ID: reportSettingsID, Enabled: r.Enabled, Schedule: r.Schedule, Notifications: r.Notifications,
+		ID: reportSettingsID, Enabled: r.Enabled, Schedule: r.Schedule, Notifications: r.Notifications, HistoryDays: r.HistoryDays,
 		UpdatedAt: r.UpdatedAt.UTC(), UpdatedBy: r.UpdatedBy,
 	}
 }

@@ -301,6 +301,43 @@ export interface ReportConfigJSON {
   default_schedule: string;
   next_run: string | null;
   notification_ids: string[];
+  history_days: number;
+  default_history_days: number;
+  max_history_days: number;
+}
+
+// ReportSummaryJSON mirrors reportSummaryJSON (GET /api/reports): one kept
+// report without its content.
+export interface ReportSummaryJSON {
+  id: number;
+  generated_at: string;
+  period_start: string;
+  period_end: string;
+  trigger: "scheduled" | "manual";
+  triggered_by: string;
+  notifications: string[];
+  receivers: number;
+  receiver_errors: number;
+  stale: number;
+  jobs: number;
+  job_errors: number;
+}
+
+// ReportJSON mirrors reportJSON (GET /api/reports/{id}, POST /api/reports).
+export interface ReportJSON extends ReportSummaryJSON {
+  content: {
+    receivers: { id: string; files_received: number; bytes_received: number; errors: number }[];
+    stale: { id: string; stale_after_seconds: number; last_seen: string | null }[];
+    receiver_errors: {
+      at: string;
+      receiver_id: string;
+      kind: string;
+      key: string;
+      error: string;
+    }[];
+    jobs: { id: string; runs_completed: number; bytes_written: number; errors: number }[];
+    job_errors: { at: string; job_name: string; error: string }[];
+  };
 }
 
 // JobTargetJSON mirrors config.FileJobTarget's JSON form: one of a job's

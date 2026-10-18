@@ -101,7 +101,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		&objectModel{},
 		&loginEventModel{}, &downloadEventModel{}, &receiverEventModel{}, &auditEventModel{},
 		&apiTokenModel{}, &tokenSigningKeyModel{},
-		&receiverModel{}, &notificationModel{}, &reportSettingsModel{},
+		&receiverModel{}, &notificationModel{}, &reportSettingsModel{}, &reportModel{},
 		&trustedServerModel{}, &ssoLogoutModel{},
 		&serverModel{}, &commandModel{}, &jobModel{},
 	); err != nil {

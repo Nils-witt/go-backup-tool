@@ -27,6 +27,8 @@ interface ReportForm {
   enabled: boolean;
   schedule: string;
   notifications: string[];
+  // historyDays is kept as typed; empty means the server's default.
+  historyDays: string;
 }
 
 function errorText(err: unknown): string {
@@ -45,7 +47,12 @@ export function ReportConfigSection() {
     apiFetchJSON<ReportConfigJSON>("/api/report-config")
       .then((d) => {
         setData(d);
-        setForm({ enabled: d.enabled, schedule: d.schedule, notifications: d.notifications });
+        setForm({
+          enabled: d.enabled,
+          schedule: d.schedule,
+          notifications: d.notifications,
+          historyDays: d.history_days ? String(d.history_days) : "",
+        });
         setLoadError(null);
       })
       .catch((err: unknown) => setLoadError(errorText(err)));
@@ -67,7 +74,12 @@ export function ReportConfigSection() {
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...form, schedule: form.schedule.trim() }),
+          body: JSON.stringify({
+            enabled: form.enabled,
+            schedule: form.schedule.trim(),
+            notifications: form.notifications,
+            history_days: Number(form.historyDays.trim() || 0),
+          }),
         },
         "saving report settings failed",
       );
@@ -88,6 +100,10 @@ export function ReportConfigSection() {
     setForm({ ...form, ...patch });
   };
   const options = data.notification_ids;
+  const historyDays = form.historyDays.trim();
+  const historyValid =
+    historyDays === "" ||
+    (/^\d+$/.test(historyDays) && Number(historyDays) <= data.max_history_days);
 
   return (
     <Card variant="outlined">
@@ -153,6 +169,21 @@ export function ReportConfigSection() {
             ))}
           </TextField>
 
+          <TextField
+            label="Keep reports for (days)"
+            value={form.historyDays}
+            onChange={(e) => set({ historyDays: e.target.value })}
+            placeholder={String(data.default_history_days)}
+            error={!historyValid}
+            helperText={
+              historyValid
+                ? `How long each report, scheduled or generated below, stays viewable. Empty means ${data.default_history_days}. Applies even while the report is off.`
+                : `Enter a whole number of days, up to ${data.max_history_days}.`
+            }
+            slotProps={{ htmlInput: { inputMode: "numeric" } }}
+            sx={{ maxWidth: 360 }}
+          />
+
           <Stack
             direction={{ xs: "column", sm: "row" }}
             spacing={1}
@@ -169,7 +200,7 @@ export function ReportConfigSection() {
             <Button
               variant="contained"
               onClick={() => void save()}
-              disabled={saving || (form.enabled && !form.notifications.length)}
+              disabled={saving || !historyValid || (form.enabled && !form.notifications.length)}
               sx={{ flexShrink: 0 }}
             >
               Save

@@ -164,6 +164,9 @@ type reportConfigJSON struct {
 	DefaultSchedule string     `json:"default_schedule"`
 	NextRun         *time.Time `json:"next_run"`
 	NotificationIDs []string   `json:"notification_ids"`
+
+	DefaultHistoryDays int `json:"default_history_days"`
+	MaxHistoryDays     int `json:"max_history_days"`
 }
 
 // handleGetReportConfig serves GET /api/report-config (admin only).
@@ -176,9 +179,10 @@ func handleGetReportConfig(m *settings.Manager, log *slog.Logger) http.HandlerFu
 		}
 
 		out := reportConfigJSON{
-			Enabled: mr.Enabled, Schedule: mr.Schedule, Notifications: nonNil(mr.Notifications),
+			Enabled: mr.Enabled, Schedule: mr.Schedule, Notifications: nonNil(mr.Notifications), HistoryDays: mr.HistoryDays,
 			UpdatedBy: mr.UpdatedBy, Error: mr.Error,
 			DefaultSchedule: report.DefaultSchedule, NotificationIDs: nonNil(m.NotificationIDs()),
+			DefaultHistoryDays: report.DefaultHistoryDays, MaxHistoryDays: report.MaxHistoryDays,
 		}
 
 		if !mr.UpdatedAt.IsZero() {

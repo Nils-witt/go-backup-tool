@@ -58,9 +58,10 @@ func TestResolveSettingsDefaults(t *testing.T) {
 	}
 
 	want := Settings{
-		Enabled:       true,
-		Schedule:      wantSchedule(t, DefaultSchedule),
-		Notifications: []string{"ops-email"},
+		Enabled:          true,
+		Schedule:         wantSchedule(t, DefaultSchedule),
+		Notifications:    []string{"ops-email"},
+		HistoryRetention: DefaultHistoryDays * 24 * time.Hour,
 	}
 
 	if !reflect.DeepEqual(got, want) {
@@ -191,6 +192,16 @@ func TestResolveSettingsErrors(t *testing.T) {
 			wantErrHas:    "report.schedule",
 		},
 		{
+			name:       "negative history days",
+			cfg:        FileReport{HistoryDays: -1},
+			wantErrHas: "report.history-days",
+		},
+		{
+			name:       "too many history days",
+			cfg:        FileReport{HistoryDays: MaxHistoryDays + 1},
+			wantErrHas: "report.history-days",
+		},
+		{
 			name:          "time zone prefix",
 			cfg:           FileReport{Enabled: true, Notifications: []string{"ops-email"}, Schedule: "CRON_TZ=Europe/Berlin 0 7 * * *"},
 			notifications: notifications,
@@ -207,5 +218,24 @@ func TestResolveSettingsErrors(t *testing.T) {
 				t.Fatalf("ResolveSettings() error = %v, want it to mention %q", err, tc.wantErrHas)
 			}
 		})
+	}
+}
+
+func TestResolveSettingsHistoryRetention(t *testing.T) {
+	t.Parallel()
+
+	// A disabled report still carries its history retention, for reports
+	// generated on demand.
+	got, err := ResolveSettings(FileReport{HistoryDays: 7}, nil)
+	if err != nil {
+		t.Fatalf("ResolveSettings() error: %v", err)
+	}
+
+	if want := 7 * 24 * time.Hour; got.Retention() != want {
+		t.Errorf("Retention() = %v, want %v", got.Retention(), want)
+	}
+
+	if want := DefaultHistoryDays * 24 * time.Hour; (Settings{}).Retention() != want {
+		t.Errorf("zero Settings Retention() = %v, want %v", (Settings{}).Retention(), want)
 	}
 }

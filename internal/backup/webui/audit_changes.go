@@ -78,7 +78,7 @@ func auditResources(db *store.Store, keyring *gpgkeys.Keyring) map[string]auditR
 		"report-config": {snapshot: getStored(func(ctx context.Context, _ string) (store.ReportSettings, bool, error) {
 			return db.GetReportSettings(ctx)
 		}, func(rs store.ReportSettings) report.FileReport {
-			return report.FileReport{Enabled: rs.Enabled, Schedule: rs.Schedule, Notifications: rs.Notifications}
+			return report.FileReport{Enabled: rs.Enabled, Schedule: rs.Schedule, Notifications: rs.Notifications, HistoryDays: rs.HistoryDays}
 		})},
 		// A token is revoked by id but created by name (its id is only
 		// generated then), so either finds it: the newest token by that

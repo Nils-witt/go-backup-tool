@@ -1123,6 +1123,115 @@ paths:
         "503":
           $ref: "#/components/responses/StateDBUnavailable"
 
+  /api/reports:
+    get:
+      tags: [admin]
+      summary: List kept reports
+      operationId: listReports
+      description: >
+        Every kept report (scheduled, or generated on demand), newest first,
+        without its content. Reports are kept for the report settings'
+        `history_days`. Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Kept reports
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ReportSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+    post:
+      tags: [admin]
+      summary: Generate a report now
+      operationId: generateReport
+      description: >
+        Builds a report covering the given number of hours up to now and
+        keeps it. It isn't sent to the report's notifications. Works whether
+        or not the scheduled report is enabled. Requires the `admin`
+        permission.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                hours:
+                  type: integer
+                  minimum: 0
+                  maximum: 2160
+                  description: How far back the report reaches; 0 or unset means 24.
+      responses:
+        "201":
+          description: The generated report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Report"
+        "400":
+          description: The period is out of range
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+
+  /api/reports/{id}:
+    get:
+      tags: [admin]
+      summary: Get a kept report
+      operationId: getReport
+      description: One kept report with its content. Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: The report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Report"
+        "400":
+          description: The id isn't a number
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No kept report has this id (it may have been pruned)
+          content:
+            text/plain:
+              schema:
+                type: string
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+
   /api/job-configs:
     get:
       tags: [admin]
@@ -2450,6 +2559,11 @@ components:
           items:
             type: string
           description: Notification ids; required when enabled.
+        history_days:
+          type: integer
+          minimum: 0
+          maximum: 3650
+          description: Days a generated report is kept for viewing; 0 means the default (30).
       required: [enabled]
 
     ReportConfig:
@@ -2476,7 +2590,104 @@ components:
               type: array
               items:
                 type: string
-          required: [schedule, notifications, updated_by, default_schedule, notification_ids]
+            default_history_days:
+              type: integer
+            max_history_days:
+              type: integer
+          required: [schedule, notifications, history_days, updated_by, default_schedule, notification_ids, default_history_days, max_history_days]
+
+    ReportSummary:
+      type: object
+      description: A kept report without its content.
+      properties:
+        id:
+          type: integer
+        generated_at:
+          type: string
+          format: date-time
+        period_start:
+          type: string
+          format: date-time
+        period_end:
+          type: string
+          format: date-time
+        trigger:
+          type: string
+          enum: [scheduled, manual]
+        triggered_by:
+          type: string
+          description: Who generated a manual report; empty for a scheduled one.
+        notifications:
+          type: array
+          items:
+            type: string
+          description: Notification ids a scheduled report was sent to.
+        receivers:
+          type: integer
+        receiver_errors:
+          type: integer
+        stale:
+          type: integer
+        jobs:
+          type: integer
+        job_errors:
+          type: integer
+      required: [id, generated_at, period_start, period_end, trigger, triggered_by, notifications, receivers, receiver_errors, stale, jobs, job_errors]
+
+    Report:
+      allOf:
+        - $ref: "#/components/schemas/ReportSummary"
+        - type: object
+          properties:
+            content:
+              type: object
+              properties:
+                receivers:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      files_received: { type: integer }
+                      bytes_received: { type: integer, format: int64 }
+                      errors: { type: integer }
+                stale:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      stale_after_seconds: { type: integer, format: int64 }
+                      last_seen: { type: string, format: date-time, nullable: true }
+                receiver_errors:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      at: { type: string, format: date-time }
+                      receiver_id: { type: string }
+                      kind: { type: string }
+                      key: { type: string }
+                      error: { type: string }
+                jobs:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      runs_completed: { type: integer }
+                      bytes_written: { type: integer, format: int64 }
+                      errors: { type: integer }
+                job_errors:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      at: { type: string, format: date-time }
+                      job_name: { type: string }
+                      error: { type: string }
+              required: [receivers, stale, receiver_errors, jobs, job_errors]
+          required: [content]
 
     JobTarget:
       type: object

@@ -23,6 +23,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
+	"nilswitt.dev/go-backup-tool/internal/backup/reporter"
 	"nilswitt.dev/go-backup-tool/internal/backup/settings"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
@@ -47,7 +48,8 @@ type Server struct {
 // other field may be nil where the handlers using it allow that, which is
 // how tests start a server with only what they exercise: a nil Runner
 // drops GET /api/docker-containers, a nil Jobs drops the job-config
-// routes, and a nil Logs gets a fresh LogRingBuffer.
+// routes, a nil Reporter drops POST /api/reports, and a nil Logs gets a
+// fresh LogRingBuffer.
 type Deps struct {
 	Log             *slog.Logger
 	DB              *store.Store
@@ -66,6 +68,9 @@ type Deps struct {
 	// NotifyQueue retries a download notification email that fails to
 	// send (see notify.Queue).
 	NotifyQueue *notify.Queue
+
+	// Reporter generates a report on demand; nil drops POST /api/reports.
+	Reporter *reporter.Reporter
 }
 
 // Options are the web UI's plain settings, taken from the config file and
@@ -234,6 +239,7 @@ func registerRoutes(liveCtx context.Context, mux *http.ServeMux, deps Deps, opts
 	mux.HandleFunc("DELETE /api/tokens/{id}", change(handleRevokeAPIToken(tokens, log)))
 	registerSettingsRoutes(mux, deps.ReceiverManager, deps.Trust, deps.Settings, admin, change, log)
 	registerJobConfigRoutes(mux, deps.Jobs, admin, change, log)
+	registerReportRoutes(mux, db, deps.Reporter, admin, change, log)
 
 	if deps.Runner != nil {
 		mux.HandleFunc("GET /api/docker-containers", admin(handleListDockerContainers(deps.Runner, log)))

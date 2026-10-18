@@ -172,9 +172,9 @@ func writeReceiverConfigError(w http.ResponseWriter, log *slog.Logger, action, i
 	}
 }
 
-func nonNil(s []string) []string {
+func nonNil[T any](s []T) []T {
 	if s == nil {
-		return []string{}
+		return []T{}
 	}
 
 	return s

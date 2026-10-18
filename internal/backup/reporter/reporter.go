@@ -8,6 +8,7 @@ package reporter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -19,23 +20,65 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/objectstore"
+	"nilswitt.dev/go-backup-tool/internal/backup/periodic"
 	reportpkg "nilswitt.dev/go-backup-tool/internal/backup/report"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
-// Run sends the receiver/job report on the schedule in live (see
-// reportpkg.Settings), evaluated in UTC (see reportpkg.ResolveSettings), until ctx
-// is done, idling while the report is disabled. A change to live (the
-// report edited in the web UI) reschedules immediately. db may be nil (the
-// state db couldn't be opened at startup); the report is still sent, just
-// without any receiver_events/job_runs history (see buildReport).
-// Receivers (from receivers, e.g. receiver.Registry.Snapshot), notifications
-// (from their live registry) and jobs (from jobNames) are read at each send,
-// so ones managed in the web UI are included.
-// serverName is this instance's {server_name} (see config.RunConfig.ServerName).
-func Run(ctx context.Context, serverName string, jobNames func() []string, live *reportpkg.Live, notifications *notify.Registry, receivers func() map[string]config.ResolvedReceiver, db *store.Store, queue *notify.Queue, log *slog.Logger) {
-	log = log.With("component", "report")
+// Deps are what a Reporter reads each time it builds a report. Receivers
+// (e.g. receiver.Registry.Snapshot), notifications (their live registry)
+// and jobs (JobNames) are read at each report, so ones managed in the web
+// UI are included. DB may be nil (the state db couldn't be opened at
+// startup): reports are then still sent, just without any
+// receiver_events/job_runs history (see buildReport), and none is kept.
+type Deps struct {
+	// ServerName is this instance's {server_name} (see
+	// config.RunConfig.ServerName).
+	ServerName    string
+	JobNames      func() []string
+	Settings      *reportpkg.Live
+	Notifications *notify.Registry
+	Receivers     func() map[string]config.ResolvedReceiver
+	DB            *store.Store
+	Queue         *notify.Queue
+	Log           *slog.Logger
+}
+
+// Reporter builds the receiver/job report: on the schedule in its
+// settings (see Run), or on demand (see Generate). Every report it builds
+// is kept in the state db for the settings' history retention (see
+// reportpkg.Settings.Retention), so the web UI can show past ones.
+type Reporter struct {
+	deps Deps
+	log  *slog.Logger
+}
+
+// New returns a Reporter reading deps. It does nothing until Run.
+func New(deps Deps) *Reporter {
+	return &Reporter{deps: deps, log: deps.Log.With("component", "report")}
+}
+
+// ErrHistoryUnavailable is returned by Generate when there's no state db
+// to keep the report in.
+var ErrHistoryUnavailable = errors.New("state db unavailable: reports can't be kept this run")
+
+// MaxGeneratePeriod bounds Generate's period: the receiver and job event
+// logs it summarizes are pruned after 90 days anyway.
+const MaxGeneratePeriod = 90 * 24 * time.Hour
+
+// Run sends the receiver/job report on the schedule in the settings (see
+// reportpkg.Settings), evaluated in UTC (see reportpkg.ResolveSettings),
+// until ctx is done, idling while the report is disabled. A change to the
+// settings (the report edited in the web UI) reschedules immediately.
+// Alongside it, reports older than the history retention are deleted once
+// at startup and then daily.
+func (r *Reporter) Run(ctx context.Context) {
+	if r.deps.DB != nil {
+		go periodic.Run(ctx, historyPruneInterval, true, func() { r.pruneHistory(ctx) })
+	}
+
+	live := r.deps.Settings
 
 	var prev time.Time // zero until the first report in this process has been sent
 
@@ -53,7 +96,7 @@ func Run(ctx context.Context, serverName string, jobNames func() []string, live 
 		}
 
 		next := settings.Schedule.Next(time.Now().UTC())
-		log.Debug("scheduled next report", "at", next)
+		r.log.Debug("scheduled next report", "at", next)
 
 		switch waitUntilOrChanged(ctx, next, changed) {
 		case waitDone:
@@ -68,8 +111,116 @@ func Run(ctx context.Context, serverName string, jobNames func() []string, live 
 			start = next.Add(-24 * time.Hour)
 		}
 
-		sendReport(ctx, serverName, jobNames(), notifications.Resolve(settings.Notifications, log), receivers(), db, start, next, queue, log)
+		report := r.build(ctx, start, next)
+		r.keep(ctx, report, store.ReportTriggerScheduled, "", settings.Notifications)
+		sendReport(ctx, report, r.deps.Notifications.Resolve(settings.Notifications, r.log), r.deps.Queue, r.log)
+
 		prev = next
+	}
+}
+
+// Generate builds a report covering the period up to now, without sending
+// it anywhere, keeps it in the state db as made by user, and returns it as
+// kept. period must be positive and at most MaxGeneratePeriod.
+func (r *Reporter) Generate(ctx context.Context, user string, period time.Duration) (store.Report, error) {
+	if r.deps.DB == nil {
+		return store.Report{}, ErrHistoryUnavailable
+	}
+
+	if period <= 0 || period > MaxGeneratePeriod {
+		return store.Report{}, fmt.Errorf("report period must be between 1h and %s, got %s", MaxGeneratePeriod, period)
+	}
+
+	end := time.Now().UTC()
+	report := r.build(ctx, end.Add(-period), end)
+
+	kept, err := r.deps.DB.SaveReport(ctx, storedReport(report, store.ReportTriggerManual, user, nil))
+	if err != nil {
+		return store.Report{}, err
+	}
+
+	r.log.Info("report generated on demand", "id", kept.ID, "period", period, "by", user)
+
+	return kept, nil
+}
+
+// build builds the report for the window from start to end.
+func (r *Reporter) build(ctx context.Context, start, end time.Time) reportContent {
+	return buildReport(ctx, r.deps.ServerName, r.deps.JobNames(), r.deps.Receivers(), r.deps.DB, start, end, r.log)
+}
+
+// keep stores a scheduled report in the history, logging (rather than
+// returning) a failure: the report is still sent.
+func (r *Reporter) keep(ctx context.Context, report reportContent, trigger, user string, notifications []string) {
+	if r.deps.DB == nil {
+		return
+	}
+
+	if _, err := r.deps.DB.SaveReport(ctx, storedReport(report, trigger, user, notifications)); err != nil {
+		r.log.Warn("keeping report in history failed", "err", err)
+	}
+}
+
+// historyPruneInterval is how often Run deletes reports past the history
+// retention.
+const historyPruneInterval = 24 * time.Hour
+
+// pruneHistory deletes every kept report older than the current history
+// retention.
+func (r *Reporter) pruneHistory(ctx context.Context) {
+	retention := r.deps.Settings.Get().Retention()
+
+	n, err := r.deps.DB.DeleteReportsBefore(ctx, time.Now().Add(-retention))
+	if err != nil {
+		r.log.Warn("pruning report history", "err", err)
+		return
+	}
+
+	if n > 0 {
+		r.log.Info("pruned old reports", "reports", n, "retention", retention)
+	}
+}
+
+// storedReport converts report into the store's shape.
+func storedReport(report reportContent, trigger, user string, notifications []string) store.Report {
+	c := store.ReportContent{
+		Receivers:      make([]store.ReportReceiverLine, len(report.receivers)),
+		Stale:          make([]store.ReportStaleReceiver, len(report.stale)),
+		ReceiverErrors: make([]store.ReportReceiverError, len(report.errors)),
+		Jobs:           make([]store.ReportJobLine, len(report.jobs)),
+		JobErrors:      make([]store.ReportJobError, len(report.jobErrors)),
+	}
+
+	for i, l := range report.receivers {
+		c.Receivers[i] = store.ReportReceiverLine{ID: l.id, FilesReceived: l.filesReceived, BytesReceived: l.bytesReceived, Errors: l.errors}
+	}
+
+	for i, s := range report.stale {
+		line := store.ReportStaleReceiver{ID: s.id, StaleAfterSeconds: int64(s.staleAfter / time.Second)}
+		if !s.lastSeen.IsZero() {
+			lastSeen := s.lastSeen.UTC()
+			line.LastSeen = &lastSeen
+		}
+
+		c.Stale[i] = line
+	}
+
+	for i, e := range report.errors {
+		c.ReceiverErrors[i] = store.ReportReceiverError{At: e.At.UTC(), ReceiverID: e.ReceiverID, Kind: e.Kind, Key: e.Key, Error: e.Error}
+	}
+
+	for i, l := range report.jobs {
+		c.Jobs[i] = store.ReportJobLine{ID: l.id, RunsCompleted: l.runsCompleted, BytesWritten: l.bytesWritten, Errors: l.errors}
+	}
+
+	for i, e := range report.jobErrors {
+		c.JobErrors[i] = store.ReportJobError{At: e.At.UTC(), JobName: e.JobName, Error: e.Error}
+	}
+
+	return store.Report{
+		GeneratedAt: time.Now().UTC(), PeriodStart: report.start, PeriodEnd: report.end,
+		Trigger: trigger, TriggeredBy: user, Notifications: notifications,
+		Content: c,
 	}
 }
 
@@ -424,14 +575,12 @@ func reportWebhookBody(wh notify.Webhook, report reportContent) ([]byte, error) 
 	return json.Marshal(payload)
 }
 
-// sendReport builds rc's receiver/job report for the window from start to
-// end and sends it to every one of notifications,
-// logging (rather than returning) any failure: like a receiver's stale/
-// download notifications, a delivery problem here shouldn't affect anything
-// else this process is doing, and there's no caller to report it to — the
-// next scheduled report gets another chance.
-func sendReport(ctx context.Context, serverName string, jobNames []string, notifications []notify.Notification, receivers map[string]config.ResolvedReceiver, db *store.Store, start, end time.Time, queue *notify.Queue, log *slog.Logger) {
-	report := buildReport(ctx, serverName, jobNames, receivers, db, start, end, log)
+// sendReport sends report to every one of notifications, logging (rather
+// than returning) any failure: like a receiver's stale/download
+// notifications, a delivery problem here shouldn't affect anything else this
+// process is doing, and there's no caller to report it to — the next
+// scheduled report gets another chance.
+func sendReport(ctx context.Context, report reportContent, notifications []notify.Notification, queue *notify.Queue, log *slog.Logger) {
 	body := renderReportBody(report)
 
 	for _, n := range notifications {

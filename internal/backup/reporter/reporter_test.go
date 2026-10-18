@@ -2,6 +2,7 @@ package reporter
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -364,7 +365,14 @@ func TestRunPicksUpSettingsChanges(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	go Run(ctx, "", func() []string { return nil }, live, notifications, func() map[string]config.ResolvedReceiver { return map[string]config.ResolvedReceiver{} }, nil, nil, discardLogger)
+	db := openTestStore(t)
+	r := New(Deps{
+		JobNames: func() []string { return nil }, Settings: live, Notifications: notifications,
+		Receivers: func() map[string]config.ResolvedReceiver { return map[string]config.ResolvedReceiver{} },
+		DB:        db, Log: discardLogger,
+	})
+
+	go r.Run(ctx)
 
 	select {
 	case <-sent:
@@ -383,6 +391,127 @@ func TestRunPicksUpSettingsChanges(t *testing.T) {
 	case <-sent:
 	case <-time.After(5 * time.Second):
 		t.Fatal("no report sent after enabling it")
+	}
+
+	// The scheduled report is kept in the history before it's sent.
+	kept, err := db.ListReports(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListReports() error: %v", err)
+	}
+
+	if len(kept) == 0 || kept[0].Trigger != store.ReportTriggerScheduled || !reflect.DeepEqual(kept[0].Notifications, []string{"hook"}) {
+		t.Errorf("ListReports() = %+v, want a scheduled report sent to hook", kept)
+	}
+}
+
+// openTestStore opens a fresh state db, closed when t ends.
+func openTestStore(t *testing.T) *store.Store {
+	t.Helper()
+
+	db, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("store.Open() error: %v", err)
+	}
+
+	t.Cleanup(func() { _ = db.Close() })
+
+	return db
+}
+
+func TestGenerateKeepsReport(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	db := openTestStore(t)
+
+	if err := db.SaveJobRun(ctx, "nightly", "done", false, time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour), 0, "boom"); err != nil {
+		t.Fatalf("SaveJobRun() error: %v", err)
+	}
+
+	r := New(Deps{
+		JobNames: func() []string { return []string{"nightly"} }, Settings: reportpkg.NewLive(reportpkg.Settings{}),
+		Receivers: func() map[string]config.ResolvedReceiver { return nil }, DB: db, Log: discardLogger,
+	})
+
+	got, err := r.Generate(ctx, "alice", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+
+	if got.ID == 0 || got.Trigger != store.ReportTriggerManual || got.TriggeredBy != "alice" {
+		t.Errorf("Generate() = %+v, want a manual report by alice", got.ReportSummary)
+	}
+
+	if got.Jobs != 1 || got.JobErrors != 1 || len(got.Content.JobErrors) != 1 || got.Content.JobErrors[0].Error != "boom" {
+		t.Errorf("Generate() content = %+v, want nightly's failed run", got.Content)
+	}
+
+	if d := got.PeriodEnd.Sub(got.PeriodStart); d != 24*time.Hour {
+		t.Errorf("Generate() period = %v, want 24h", d)
+	}
+
+	stored, err := db.GetReport(ctx, got.ID)
+	if err != nil {
+		t.Fatalf("GetReport() error: %v", err)
+	}
+
+	if !reflect.DeepEqual(stored.Content, got.Content) {
+		t.Errorf("GetReport() content = %+v, want %+v", stored.Content, got.Content)
+	}
+}
+
+func TestGenerateRejectsBadPeriod(t *testing.T) {
+	t.Parallel()
+
+	r := New(Deps{Settings: reportpkg.NewLive(reportpkg.Settings{}), DB: openTestStore(t), Log: discardLogger})
+
+	for _, period := range []time.Duration{0, -time.Hour, MaxGeneratePeriod + time.Hour} {
+		if _, err := r.Generate(t.Context(), "alice", period); err == nil {
+			t.Errorf("Generate(%v) succeeded, want an error", period)
+		}
+	}
+}
+
+func TestGenerateWithoutStore(t *testing.T) {
+	t.Parallel()
+
+	r := New(Deps{Settings: reportpkg.NewLive(reportpkg.Settings{}), Log: discardLogger})
+
+	if _, err := r.Generate(t.Context(), "alice", time.Hour); !errors.Is(err, ErrHistoryUnavailable) {
+		t.Errorf("Generate() error = %v, want ErrHistoryUnavailable", err)
+	}
+}
+
+func TestPruneHistory(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	db := openTestStore(t)
+
+	for _, age := range []time.Duration{time.Hour, 8 * 24 * time.Hour} {
+		_, err := db.SaveReport(ctx, store.Report{
+			GeneratedAt: time.Now().Add(-age), Trigger: store.ReportTriggerManual,
+		})
+		if err != nil {
+			t.Fatalf("SaveReport() error: %v", err)
+		}
+	}
+
+	settings, err := reportpkg.ResolveSettings(reportpkg.FileReport{HistoryDays: 7}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := New(Deps{Settings: reportpkg.NewLive(settings), DB: db, Log: discardLogger})
+	r.pruneHistory(ctx)
+
+	kept, err := db.ListReports(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListReports() error: %v", err)
+	}
+
+	if len(kept) != 1 || time.Since(kept[0].GeneratedAt) > 2*time.Hour {
+		t.Errorf("ListReports() after prune = %+v, want only the 1h old report", kept)
 	}
 }
 

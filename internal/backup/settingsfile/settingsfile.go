@@ -96,7 +96,7 @@ func Export(ctx context.Context, m Managers) (File, error) {
 	}
 
 	if !rs.UpdatedAt.IsZero() {
-		f.Report = &report.FileReport{Enabled: rs.Enabled, Schedule: rs.Schedule, Notifications: rs.Notifications}
+		f.Report = &report.FileReport{Enabled: rs.Enabled, Schedule: rs.Schedule, Notifications: rs.Notifications, HistoryDays: rs.HistoryDays}
 	}
 
 	return f, nil

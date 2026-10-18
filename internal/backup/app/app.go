@@ -318,7 +318,12 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	// Independent of the web UI: a daily report is useful for anyone
 	// monitoring receivers by inbox, not just those watching the dashboard.
 	// reporter.Run idles while the report is disabled.
-	go reporter.Run(ctx, rc.ServerName, jobsManager.Names, reportSettings, notifications, receivers.Snapshot, stateDB, mailQueue, log)
+	// Every report is also kept for the dashboard's report history.
+	reports := reporter.New(reporter.Deps{
+		ServerName: rc.ServerName, JobNames: jobsManager.Names, Settings: reportSettings, Notifications: notifications,
+		Receivers: receivers.Snapshot, DB: stateDB, Queue: mailQueue, Log: log,
+	})
+	go reports.Run(ctx)
 
 	srv := startWebUIIfConfigured(ctx, rc, webui.Deps{
 		Log:             log,
@@ -334,6 +339,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 		Identity:        serverIdentity,
 		Logs:            logs,
 		NotifyQueue:     mailQueue,
+		Reporter:        reports,
 	})
 
 	log.Info("starting jobs", "count", len(jobsManager.Names()))
