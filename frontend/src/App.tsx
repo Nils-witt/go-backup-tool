@@ -47,6 +47,11 @@ const NotificationSettingsPage = lazy(() =>
 const ReportSettingsPage = lazy(() =>
   import("./pages/ReportSettingsPage").then((m) => ({ default: m.ReportSettingsPage })),
 );
+const LogRetentionSettingsPage = lazy(() =>
+  import("./pages/LogRetentionSettingsPage").then((m) => ({
+    default: m.LogRetentionSettingsPage,
+  })),
+);
 const TrustedServersPage = lazy(() =>
   import("./pages/TrustedServersPage").then((m) => ({ default: m.TrustedServersPage })),
 );
@@ -111,6 +116,7 @@ function AuthGate() {
         <Route path="trusted-servers" element={<TrustedServersPage />} />
         <Route path="notification-settings" element={<NotificationSettingsPage />} />
         <Route path="report-settings" element={<ReportSettingsPage />} />
+        <Route path="log-retention-settings" element={<LogRetentionSettingsPage />} />
         <Route path="identity" element={<IdentityPage />} />
         <Route path="tokens" element={<TokensPage />} />
         <Route path="logs" element={<LiveLogsPage />} />

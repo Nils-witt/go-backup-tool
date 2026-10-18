@@ -306,6 +306,25 @@ export interface ReportConfigJSON {
   max_history_days: number;
 }
 
+// LogRetention mirrors settings.LogRetention: limits for the job run and
+// target run logs, 0 meaning no limit of that kind.
+export interface LogRetention {
+  job_run_days: number;
+  job_run_max_rows: number;
+  target_run_days: number;
+  target_run_max_rows: number;
+}
+
+// LogRetentionConfigJSON mirrors logRetentionConfigJSON (GET
+// /api/log-retention-config).
+export interface LogRetentionConfigJSON extends LogRetention {
+  updated_at: string | null;
+  updated_by: string;
+  defaults: LogRetention;
+  limit_days: number;
+  limit_rows: number;
+}
+
 // ReportSummaryJSON mirrors reportSummaryJSON (GET /api/reports): one kept
 // report without its content.
 export interface ReportSummaryJSON {

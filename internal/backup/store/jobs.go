@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
-
-	"gorm.io/gorm"
 )
 
 // jobRunModel is job_runs: an append-only history of every completed job
@@ -75,32 +73,17 @@ type outstandingTargetUploadModel struct {
 
 func (outstandingTargetUploadModel) TableName() string { return "outstanding_target_uploads" }
 
-// maxJobRunsPerJob caps how many job_runs rows SaveJobRun retains per job
-// name, so the table doesn't grow unbounded over a job's lifetime.
-const maxJobRunsPerJob = 100
-
 // SaveJobRun appends a job_runs row recording that job name's run starting
 // at startTime and ending at endTime just completed, succeeding or failing
-// with errText (empty on success) and having written bytesWritten bytes. It
-// then prunes name's older runs beyond maxJobRunsPerJob, in the same
-// transaction. Insert and prune stay raw SQL — GORM has no "keep newest N per group, delete the rest"
-// chain equivalent for the prune half.
+// with errText (empty on success) and having written bytesWritten bytes.
+// Old rows are removed separately, by DeleteOldJobRuns.
 func (s *gormStore) SaveJobRun(ctx context.Context, name, state string, success bool, startTime, endTime time.Time, bytesWritten int64, errText string) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		const insert = `INSERT INTO job_runs (name, state, success, "startTime", "endTime", error, size) VALUES (?, ?, ?, ?, ?, ?, ?)`
-		if err := tx.Exec(insert, name, state, success, startTime.UTC(), endTime.UTC(), errText, bytesWritten).Error; err != nil {
-			return fmt.Errorf("recording job %q run: %w", name, err)
-		}
+	const insert = `INSERT INTO job_runs (name, state, success, "startTime", "endTime", error, size) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	if err := s.db.WithContext(ctx).Exec(insert, name, state, success, startTime.UTC(), endTime.UTC(), errText, bytesWritten).Error; err != nil {
+		return fmt.Errorf("recording job %q run: %w", name, err)
+	}
 
-		const prune = `DELETE FROM job_runs WHERE name = ? AND id NOT IN (
-			SELECT id FROM job_runs WHERE name = ? ORDER BY id DESC LIMIT ?
-		)`
-		if err := tx.Exec(prune, name, name, maxJobRunsPerJob).Error; err != nil {
-			return fmt.Errorf("pruning job %q run history: %w", name, err)
-		}
-
-		return nil
-	})
+	return nil
 }
 
 // GetLastJobSuccess returns job name's last recorded successful run, and false
@@ -271,33 +254,18 @@ func (s *gormStore) ListJobRunErrorEvents(ctx context.Context, start, end time.T
 	return events, nil
 }
 
-// maxTargetRunsPerTarget caps how many target_runs rows SaveTargetRun
-// retains per job name/target pair, so the table doesn't grow unbounded
-// over a target's lifetime.
-const maxTargetRunsPerTarget = 100
-
 // SaveTargetRun appends a target_runs row recording job name's target
 // (target names the servers: entry it came from, see config.Target.
 // ServerName) just-finished success/failure. Called for every target of
-// every run, mirroring SaveJobRun's per-job persistence one level down. It
-// then prunes that job/target pair's older runs beyond
-// maxTargetRunsPerTarget.
+// every run, mirroring SaveJobRun's per-job persistence one level down. Old
+// rows are removed separately, by DeleteOldTargetRuns.
 func (s *gormStore) SaveTargetRun(ctx context.Context, name string, success bool, target, state, errText string, at time.Time) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		const insert = `INSERT INTO target_runs (job_name, success, target, run_at, state, error) VALUES (?, ?, ?, ?, ?, ?)`
-		if err := tx.Exec(insert, name, success, target, at.UTC(), state, errText).Error; err != nil {
-			return fmt.Errorf("recording job %q target %q run: %w", name, target, err)
-		}
+	const insert = `INSERT INTO target_runs (job_name, success, target, run_at, state, error) VALUES (?, ?, ?, ?, ?, ?)`
+	if err := s.db.WithContext(ctx).Exec(insert, name, success, target, at.UTC(), state, errText).Error; err != nil {
+		return fmt.Errorf("recording job %q target %q run: %w", name, target, err)
+	}
 
-		const prune = `DELETE FROM target_runs WHERE job_name = ? AND target = ? AND id NOT IN (
-			SELECT id FROM target_runs WHERE job_name = ? AND target = ? ORDER BY id DESC LIMIT ?
-		)`
-		if err := tx.Exec(prune, name, target, name, target, maxTargetRunsPerTarget).Error; err != nil {
-			return fmt.Errorf("pruning job %q target %q run history: %w", name, target, err)
-		}
-
-		return nil
-	})
+	return nil
 }
 
 // TargetRun is one job target's most recently persisted success/failure, as

@@ -1,7 +1,7 @@
 // Package settingsfile exports and imports the settings managed in the web
-// UI (trusted servers, notifications, receivers and the report) as one YAML
-// file, for keeping them in version control or copying them to another
-// instance. Its notifications:, receivers: and report: sections have the
+// UI (trusted servers, notifications, receivers, the report and log
+// retention) as one YAML file, for keeping them in version control or
+// copying them to another instance. Its notifications:, receivers: and report: sections have the
 // same shape as the config file's former sections of those names, so a
 // leftover section can be moved into a settings file as is.
 //
@@ -36,6 +36,7 @@ type File struct {
 	Notifications  []notify.FileNotification `yaml:"notifications,omitempty"`
 	Receivers      []config.FileReceiver     `yaml:"receivers,omitempty"`
 	Report         *report.FileReport        `yaml:"report,omitempty"`
+	LogRetention   *settings.LogRetention    `yaml:"log-retention,omitempty"`
 }
 
 // TrustedServer is a trusted-servers: entry: another instance, by its
@@ -58,8 +59,8 @@ type Result struct {
 	Created, Updated map[string]int
 }
 
-// Export reads every stored setting into a File. The report is omitted if
-// it was never saved.
+// Export reads every stored setting into a File. The report and log
+// retention are omitted if they were never saved.
 func Export(ctx context.Context, m Managers) (File, error) {
 	var f File
 
@@ -97,6 +98,15 @@ func Export(ctx context.Context, m Managers) (File, error) {
 
 	if !rs.UpdatedAt.IsZero() {
 		f.Report = &report.FileReport{Enabled: rs.Enabled, Schedule: rs.Schedule, Notifications: rs.Notifications, HistoryDays: rs.HistoryDays}
+	}
+
+	lr, err := m.Settings.GetLogRetention(ctx)
+	if err != nil {
+		return File{}, fmt.Errorf("reading log retention settings: %w", err)
+	}
+
+	if !lr.UpdatedAt.IsZero() {
+		f.LogRetention = &lr.LogRetention
 	}
 
 	return f, nil
@@ -183,6 +193,14 @@ func Import(ctx context.Context, m Managers, user string, f File) (Result, error
 		}
 
 		res.Updated["report"]++
+	}
+
+	if f.LogRetention != nil {
+		if err := m.Settings.UpdateLogRetention(ctx, user, *f.LogRetention); err != nil {
+			return res, fmt.Errorf("log retention: %w", err)
+		}
+
+		res.Updated["log-retention"]++
 	}
 
 	return res, nil

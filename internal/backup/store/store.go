@@ -51,6 +51,8 @@ type Store interface {
 	SaveTargetRun(ctx context.Context, name string, success bool, target, state, errText string, at time.Time) error
 	ListTargetRuns(ctx context.Context, name string) ([]TargetRun, error)
 	ListTargetRunEvents(ctx context.Context, limit int) ([]TargetRunEvent, error)
+	DeleteOldJobRuns(ctx context.Context, cutoff time.Time, maxPerJob int) (int64, error)
+	DeleteOldTargetRuns(ctx context.Context, cutoff time.Time, maxPerTarget int) (int64, error)
 	AddOutstandingTargetUpload(ctx context.Context, u OutstandingTargetUpload) error
 	ListDueOutstandingTargetUploads(ctx context.Context, now time.Time) ([]OutstandingTargetUpload, error)
 	RescheduleOutstandingTargetUpload(ctx context.Context, id uint, retryAt time.Time) error
@@ -121,6 +123,11 @@ type Store interface {
 	GetReport(ctx context.Context, id uint) (Report, error)
 	DeleteReportsBefore(ctx context.Context, cutoff time.Time) (int64, error)
 
+	// How long the job and target run logs keep their rows
+	// (log_retention.go).
+	GetLogRetentionSettings(ctx context.Context) (LogRetentionSettings, bool, error)
+	SaveLogRetentionSettings(ctx context.Context, r LogRetentionSettings) error
+
 	// API tokens and their signing key (tokens.go), and OIDC back-channel
 	// logouts (sso_logouts.go).
 	TokenSigningKey(ctx context.Context) ([]byte, error)
@@ -175,7 +182,7 @@ func migrate(ctx context.Context, gdb *gorm.DB) error {
 		&objectModel{},
 		&loginEventModel{}, &downloadEventModel{}, &receiverEventModel{}, &auditEventModel{},
 		&apiTokenModel{}, &tokenSigningKeyModel{},
-		&receiverModel{}, &notificationModel{}, &reportSettingsModel{}, &reportModel{},
+		&receiverModel{}, &notificationModel{}, &reportSettingsModel{}, &reportModel{}, &logRetentionSettingsModel{},
 		&trustedServerModel{}, &ssoLogoutModel{},
 		&serverModel{}, &commandModel{}, &jobModel{},
 	); err != nil {

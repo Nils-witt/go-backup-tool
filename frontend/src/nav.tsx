@@ -17,6 +17,7 @@ import DnsIcon from "@mui/icons-material/Dns";
 import CodeIcon from "@mui/icons-material/Code";
 import EnhancedEncryptionIcon from "@mui/icons-material/EnhancedEncryption";
 import ManageHistoryIcon from "@mui/icons-material/ManageHistory";
+import AutoDeleteIcon from "@mui/icons-material/AutoDelete";
 import type { AuthState } from "./auth/useAuth";
 
 export interface NavItem {
@@ -96,6 +97,12 @@ export const NAV_GROUPS: NavGroup[] = [
         to: "/report-settings",
         label: "Report",
         icon: <SummarizeIcon />,
+        visible: (s) => s.canManageSettings,
+      },
+      {
+        to: "/log-retention-settings",
+        label: "Log retention",
+        icon: <AutoDeleteIcon />,
         visible: (s) => s.canManageSettings,
       },
     ],

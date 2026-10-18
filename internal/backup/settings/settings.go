@@ -1,8 +1,7 @@
-// Package settings manages the notifications and report settings an admin
-// edits in the web UI: stored in the state db, resolved into the live
-// notify.Registry and report.Live every trigger reads at fire time, and
-// imported once from the config file's deprecated notifications:/report:
-// entries.
+// Package settings manages the notifications, report, and log retention
+// settings an admin edits in the web UI: stored in the state db and
+// resolved into the live notify.Registry, report.Live, and LogRetention
+// every trigger reads at fire time.
 package settings
 
 import (
@@ -15,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
@@ -34,10 +34,11 @@ var (
 	ErrNotificationInUse = errors.New("notification is still in use")
 )
 
-// Manager owns the notifications' and report settings' lifecycle: stored in
-// the state db, resolved into the live notification registry and report
-// settings, so an edit in the web UI takes effect everywhere immediately.
-// It's the only writer of all of them.
+// Manager owns the notifications', report settings', and log retention
+// settings' lifecycle: stored in the state db, resolved into the live
+// notification registry, report settings, and log retention, so an edit in
+// the web UI takes effect everywhere immediately. It's the only writer of
+// all of them.
 type Manager struct {
 	db            store.Store
 	notifications *notify.Registry
@@ -57,6 +58,11 @@ type Manager struct {
 	// "" if they didn't.
 	invalid   map[string]string
 	reportErr string
+
+	// logRetention is the log retention in effect, never nil;
+	// logRetentionChanged (capacity 1) signals an UpdateLogRetention.
+	logRetention        atomic.Pointer[LogRetention]
+	logRetentionChanged chan struct{}
 }
 
 // NewManager builds a Manager over db (nil if the state db couldn't be
@@ -64,10 +70,15 @@ type Manager struct {
 // live. smtp/gpg are what email notifications send and encrypt with (they
 // stay in the config file). Call Load before anything reads the registry.
 func NewManager(db store.Store, notifications *notify.Registry, live *report.Live, smtp notify.SMTPSettings, gpg notify.GPGSettings, log *slog.Logger) *Manager {
-	return &Manager{
+	m := &Manager{
 		db: db, notifications: notifications, report: live, smtp: smtp, gpg: gpg,
-		log: log, invalid: make(map[string]string),
+		log: log, invalid: make(map[string]string), logRetentionChanged: make(chan struct{}, 1),
 	}
+
+	defaults := DefaultLogRetention()
+	m.logRetention.Store(&defaults)
+
+	return m
 }
 
 // UseJobs makes DeleteNotification check jobs' failure-notifications via
@@ -88,8 +99,8 @@ func (m *Manager) SMTPConfigured() bool { return m.smtp.Host != "" }
 // NotificationIDs returns every active notification id, sorted.
 func (m *Manager) NotificationIDs() []string { return m.notifications.IDs() }
 
-// Load resolves every notification and the report settings stored in the
-// state db into the live registry and report settings. Something stored that
+// Load resolves every notification, the report settings, and the log
+// retention settings stored in the state db into their live holders. Something stored that
 // no longer resolves is logged and left inactive (see ListNotifications/
 // GetReport). With no state db there is nothing to load. Jobs'
 // failure-notifications ids are checked once jobs are loaded (see
@@ -117,6 +128,8 @@ func (m *Manager) Load(ctx context.Context) {
 	} else if ok {
 		m.activateReportLocked(report.FileReport{Enabled: rs.Enabled, Schedule: rs.Schedule, Notifications: rs.Notifications, HistoryDays: rs.HistoryDays})
 	}
+
+	m.loadLogRetentionLocked(ctx)
 }
 
 // activateNotificationLocked resolves fn into the registry, or records why

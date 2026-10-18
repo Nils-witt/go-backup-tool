@@ -38,14 +38,9 @@ type ReportSettings struct {
 // GetReportSettings returns the stored report settings, reporting false if
 // none have been saved yet (the report is then disabled).
 func (s *gormStore) GetReportSettings(ctx context.Context) (ReportSettings, bool, error) {
-	var m reportSettingsModel
-
-	if err := s.read.WithContext(ctx).Take(&m, reportSettingsID).Error; err != nil {
-		if isRecordNotFound(err) {
-			return ReportSettings{}, false, nil
-		}
-
-		return ReportSettings{}, false, fmt.Errorf("reading report settings: %w", err)
+	m, ok, err := takeSettingsRow[reportSettingsModel](ctx, s, reportSettingsID, "report settings")
+	if !ok || err != nil {
+		return ReportSettings{}, ok, err
 	}
 
 	return ReportSettings{Enabled: m.Enabled, Schedule: m.Schedule, Notifications: m.Notifications, HistoryDays: m.HistoryDays, UpdatedAt: m.UpdatedAt, UpdatedBy: m.UpdatedBy}, true, nil
@@ -68,4 +63,21 @@ func reportSettingsModelFrom(r ReportSettings) reportSettingsModel {
 		ID: reportSettingsID, Enabled: r.Enabled, Schedule: r.Schedule, Notifications: r.Notifications, HistoryDays: r.HistoryDays,
 		UpdatedAt: r.UpdatedAt.UTC(), UpdatedBy: r.UpdatedBy,
 	}
+}
+
+// takeSettingsRow reads row id of a single-row settings table (M is its
+// model), reporting false if it was never saved; what names the settings
+// in the error.
+func takeSettingsRow[M any](ctx context.Context, s *gormStore, id uint, what string) (M, bool, error) {
+	var m M
+
+	if err := s.read.WithContext(ctx).Take(&m, id).Error; err != nil {
+		if isRecordNotFound(err) {
+			return m, false, nil
+		}
+
+		return m, false, fmt.Errorf("reading %s: %w", what, err)
+	}
+
+	return m, true, nil
 }

@@ -82,7 +82,8 @@ func sampleFile(t *testing.T, baseDir string) File {
 			ID: "from-primary", AllowedServers: []string{senderID}, Path: filepath.Join(baseDir, "from-primary"), Retention: "30d",
 			StaleAfter: "26h", StaleNotifications: []string{"ops"},
 		}},
-		Report: &report.FileReport{Enabled: true, Schedule: "0 6 * * *", Notifications: []string{"ops"}},
+		Report:       &report.FileReport{Enabled: true, Schedule: "0 6 * * *", Notifications: []string{"ops"}},
+		LogRetention: &settings.LogRetention{JobRunDays: 30, JobRunMaxRows: 0, TargetRunDays: 14, TargetRunMaxRows: 200},
 	}
 }
 
@@ -99,8 +100,8 @@ func TestImportThenExportRoundTrips(t *testing.T) {
 	}
 
 	expected := map[string]int{"trusted-servers": 1, "notifications": 1, "receivers": 1}
-	if !reflect.DeepEqual(res.Created, expected) || !reflect.DeepEqual(res.Updated, map[string]int{"report": 1}) {
-		t.Errorf("Import() = %+v, want created %v and the report updated", res, expected)
+	if !reflect.DeepEqual(res.Created, expected) || !reflect.DeepEqual(res.Updated, map[string]int{"report": 1, "log-retention": 1}) {
+		t.Errorf("Import() = %+v, want created %v and the report and log retention updated", res, expected)
 	}
 
 	got, err := Export(t.Context(), m)
@@ -145,6 +146,10 @@ func assertExportedSample(t *testing.T, got, in File) {
 
 	if !reflect.DeepEqual(got.Report, in.Report) {
 		t.Errorf("exported report = %+v, want %+v", got.Report, in.Report)
+	}
+
+	if !reflect.DeepEqual(got.LogRetention, in.LogRetention) {
+		t.Errorf("exported log retention = %+v, want %+v", got.LogRetention, in.LogRetention)
 	}
 }
 

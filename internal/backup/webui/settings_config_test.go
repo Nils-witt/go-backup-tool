@@ -131,3 +131,44 @@ func TestReportConfigAPI(t *testing.T) {
 		t.Errorf("report config = %+v", got)
 	}
 }
+
+func TestLogRetentionConfigAPI(t *testing.T) {
+	t.Parallel()
+
+	idp := newTestIDP(t)
+	srv, _ := startSettingsWebUI(t, idp)
+
+	admin := idp.token(t, "erin", map[string]any{"preferred_username": "erin", "groups": []string{"admins"}})
+	viewer := idp.token(t, "viewer", nil)
+
+	var before logRetentionConfigJSON
+	if code := doJSON(t, srv, http.MethodGet, "/api/log-retention-config", admin, &before); code != http.StatusOK {
+		t.Fatalf("admin get before any save = %d", code)
+	}
+
+	if before.LogRetention != settings.DefaultLogRetention() || before.UpdatedAt != nil {
+		t.Errorf("log retention before any save = %+v, want the defaults, never updated", before)
+	}
+
+	want := settings.LogRetention{JobRunDays: 30, JobRunMaxRows: 0, TargetRunDays: 14, TargetRunMaxRows: 500}
+
+	for _, c := range []receiverConfigCall{
+		{"non-admin get", http.MethodGet, "/api/log-retention-config", viewer, nil, http.StatusForbidden},
+		{"negative days", http.MethodPut, "/api/log-retention-config", admin, settings.LogRetention{JobRunDays: -1}, http.StatusBadRequest},
+		{"too many rows", http.MethodPut, "/api/log-retention-config", admin, settings.LogRetention{TargetRunMaxRows: settings.MaxLogRetentionRows + 1}, http.StatusBadRequest},
+		{"non-admin update", http.MethodPut, "/api/log-retention-config", viewer, want, http.StatusForbidden},
+		{"admin update", http.MethodPut, "/api/log-retention-config", admin, want, http.StatusNoContent},
+	} {
+		c.run(t, srv)
+	}
+
+	var got logRetentionConfigJSON
+	if code := doJSON(t, srv, http.MethodGet, "/api/log-retention-config", admin, &got); code != http.StatusOK {
+		t.Fatalf("admin get = %d", code)
+	}
+
+	if got.LogRetention != want || got.UpdatedBy != "erin" || got.UpdatedAt == nil ||
+		got.Defaults != settings.DefaultLogRetention() || got.LimitDays != settings.MaxLogRetentionDays {
+		t.Errorf("log retention config = %+v", got)
+	}
+}

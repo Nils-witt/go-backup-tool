@@ -253,9 +253,9 @@ func registerRoutes(liveCtx context.Context, mux *http.ServeMux, deps Deps, opts
 }
 
 // registerSettingsRoutes mounts /api/receiver-configs,
-// /api/trusted-servers, /api/notification-configs, and /api/report-config
-// on mux: each listing wrapped in admin, each change in change (admin plus
-// the audit log).
+// /api/trusted-servers, /api/notification-configs, /api/report-config, and
+// /api/log-retention-config on mux: each listing wrapped in admin, each
+// change in change (admin plus the audit log).
 func registerSettingsRoutes(mux *http.ServeMux, receiverManager *receiver.Manager, trustManager *trust.Manager, settingsManager *settings.Manager, admin, change func(http.HandlerFunc) http.HandlerFunc, log *slog.Logger) {
 	mux.HandleFunc("GET /api/receiver-configs", admin(handleListReceiverConfigs(receiverManager, log)))
 	mux.HandleFunc("POST /api/receiver-configs", change(handleCreateReceiverConfig(receiverManager, log)))
@@ -271,6 +271,8 @@ func registerSettingsRoutes(mux *http.ServeMux, receiverManager *receiver.Manage
 	mux.HandleFunc("DELETE /api/notification-configs/{id}", change(handleDeleteNotificationConfig(settingsManager, log)))
 	mux.HandleFunc("GET /api/report-config", admin(handleGetReportConfig(settingsManager, log)))
 	mux.HandleFunc("PUT /api/report-config", change(handleUpdateReportConfig(settingsManager, log)))
+	mux.HandleFunc("GET /api/log-retention-config", admin(handleGetLogRetentionConfig(settingsManager, log)))
+	mux.HandleFunc("PUT /api/log-retention-config", change(handleUpdateLogRetentionConfig(settingsManager, log)))
 }
 
 // Shutdown gracefully stops the web UI server, waiting for it to finish.

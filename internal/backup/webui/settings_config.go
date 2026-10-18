@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -199,16 +200,66 @@ func handleGetReportConfig(m *settings.Manager, log *slog.Logger) http.HandlerFu
 
 // handleUpdateReportConfig serves PUT /api/report-config (admin only).
 func handleUpdateReportConfig(m *settings.Manager, log *slog.Logger) http.HandlerFunc {
+	return handleUpdateSettings("report settings", m.UpdateReport, log)
+}
+
+// logRetentionConfigJSON is GET /api/log-retention-config's response: the
+// log retention settings in effect, plus what the dashboard's form needs.
+type logRetentionConfigJSON struct {
+	settings.LogRetention
+
+	UpdatedAt *time.Time            `json:"updated_at"`
+	UpdatedBy string                `json:"updated_by"`
+	Defaults  settings.LogRetention `json:"defaults"`
+	LimitDays int                   `json:"limit_days"`
+	LimitRows int                   `json:"limit_rows"`
+}
+
+// handleGetLogRetentionConfig serves GET /api/log-retention-config (admin
+// only).
+func handleGetLogRetentionConfig(m *settings.Manager, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var in report.FileReport
+		mr, err := m.GetLogRetention(r.Context())
+		if err != nil {
+			writeSettingsError(w, log, "reading log retention settings", "", err)
+			return
+		}
+
+		out := logRetentionConfigJSON{
+			LogRetention: mr.LogRetention,
+			UpdatedBy:    mr.UpdatedBy,
+			Defaults:     settings.DefaultLogRetention(),
+			LimitDays:    settings.MaxLogRetentionDays,
+			LimitRows:    settings.MaxLogRetentionRows,
+		}
+
+		if !mr.UpdatedAt.IsZero() {
+			out.UpdatedAt = &mr.UpdatedAt
+		}
+
+		writeJSON(w, out)
+	}
+}
+
+// handleUpdateLogRetentionConfig serves PUT /api/log-retention-config
+// (admin only).
+func handleUpdateLogRetentionConfig(m *settings.Manager, log *slog.Logger) http.HandlerFunc {
+	return handleUpdateSettings("log retention settings", m.UpdateLogRetention, log)
+}
+
+// handleUpdateSettings serves a PUT that replaces one group of settings
+// (what names them in the log) with the request body, through update.
+func handleUpdateSettings[T any](what string, update func(ctx context.Context, user string, in T) error, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var in T
 		if !decodeSettingsBody(w, r, &in) {
 			return
 		}
 
 		user, _ := currentUser(r.Context())
 
-		if err := m.UpdateReport(r.Context(), user.Username, in); err != nil {
-			writeSettingsError(w, log, "updating report settings", "", err)
+		if err := update(r.Context(), user.Username, in); err != nil {
+			writeSettingsError(w, log, "updating "+what, "", err)
 			return
 		}
 

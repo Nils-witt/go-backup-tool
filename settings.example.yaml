@@ -155,3 +155,18 @@
 #   # generated on demand on the dashboard's Report page) is kept for viewing
 #   # there. Default 30, at most 3650.
 #   history-days: 30
+
+# log-retention: how long the job run and target run logs (the dashboard's
+# Job runs and Target runs pages) keep their rows. Anything older than the
+# *-days limit is deleted, and so is anything beyond the *-max-rows newest
+# rows per job (job runs) or per job and target (target runs). 0 means no
+# limit of that kind. Each job's newest run and newest successful run, and
+# each target's newest run, are always kept. Checked hourly and right after
+# a change. Without this section the defaults apply: no age limit, 100 rows.
+# Days go up to 3650, rows up to 100000.
+#
+# log-retention:
+#   job-run-days: 90
+#   job-run-max-rows: 0
+#   target-run-days: 30
+#   target-run-max-rows: 100

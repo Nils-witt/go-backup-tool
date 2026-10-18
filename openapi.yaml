@@ -1123,6 +1123,60 @@ paths:
         "503":
           $ref: "#/components/responses/StateDBUnavailable"
 
+  /api/log-retention-config:
+    get:
+      tags: [admin]
+      summary: Get the log retention settings
+      operationId: getLogRetentionConfig
+      description: >
+        How long the job run and target run logs keep their rows: the stored
+        settings, or the defaults while none were saved (`updated_at` is
+        then null), plus the defaults and the upper bounds. Requires the
+        `admin` permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Log retention settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogRetentionConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+    put:
+      tags: [admin]
+      summary: Update the log retention settings
+      operationId: updateLogRetentionConfig
+      description: >
+        Validates and stores the log retention settings. Rows past the new
+        limits are deleted right after, and then hourly. Each job's newest
+        run and newest successful run, and each job/target pair's newest
+        run, are always kept. Requires the `admin` permission.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LogRetention"
+      responses:
+        "204":
+          description: Log retention settings updated
+        "400":
+          $ref: "#/components/responses/InvalidSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+
   /api/reports:
     get:
       tags: [admin]
@@ -2595,6 +2649,50 @@ components:
             max_history_days:
               type: integer
           required: [schedule, notifications, history_days, updated_by, default_schedule, notification_ids, default_history_days, max_history_days]
+
+    LogRetention:
+      type: object
+      description: >
+        Limits for the job run and target run logs. 0 means no limit of
+        that kind. Row limits apply per job (job runs) and per job/target
+        pair (target runs).
+      properties:
+        job_run_days:
+          type: integer
+          minimum: 0
+          maximum: 3650
+        job_run_max_rows:
+          type: integer
+          minimum: 0
+          maximum: 100000
+        target_run_days:
+          type: integer
+          minimum: 0
+          maximum: 3650
+        target_run_max_rows:
+          type: integer
+          minimum: 0
+          maximum: 100000
+      required: [job_run_days, job_run_max_rows, target_run_days, target_run_max_rows]
+
+    LogRetentionConfig:
+      allOf:
+        - $ref: "#/components/schemas/LogRetention"
+        - type: object
+          properties:
+            updated_at:
+              type: string
+              format: date-time
+              nullable: true
+            updated_by:
+              type: string
+            defaults:
+              $ref: "#/components/schemas/LogRetention"
+            limit_days:
+              type: integer
+            limit_rows:
+              type: integer
+          required: [updated_by, defaults, limit_days, limit_rows]
 
     ReportSummary:
       type: object

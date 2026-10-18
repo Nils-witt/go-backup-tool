@@ -315,6 +315,8 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 
 	settingsManager.UseJobs(jobsManager.NotificationRefs)
 
+	go pruneRunLogs(ctx, stateDB, settingsManager, log)
+
 	// Without the web UI there's no way to add a job later, so nothing to
 	// stay running for.
 	if len(jobsManager.Names()) == 0 && rc.Listen == "" {
@@ -444,4 +446,52 @@ func pruneEventLogs(ctx context.Context, db store.Store, log *slog.Logger) {
 			log.Info("pruned old event log rows", "rows", n, "retention", eventLogRetention)
 		}
 	})
+}
+
+// runLogPruneInterval is how often pruneRunLogs applies the log retention
+// settings when they don't change.
+const runLogPruneInterval = time.Hour
+
+// pruneRunLogs deletes the job and target run log rows the log retention
+// settings no longer keep (see settings.LogRetention): once at startup,
+// then every runLogPruneInterval and right after each settings change,
+// until ctx is done. Without a state db (db nil) there is nothing to prune.
+func pruneRunLogs(ctx context.Context, db store.Store, m *settings.Manager, log *slog.Logger) {
+	if db == nil {
+		return
+	}
+
+	prune := func() {
+		r, now := m.LogRetention(), time.Now()
+
+		jobRuns, err := db.DeleteOldJobRuns(ctx, r.JobRunCutoff(now), r.JobRunMaxRows)
+		if err != nil {
+			log.Warn("pruning the job run log", "err", err)
+		}
+
+		targetRuns, err := db.DeleteOldTargetRuns(ctx, r.TargetRunCutoff(now), r.TargetRunMaxRows)
+		if err != nil {
+			log.Warn("pruning the target run log", "err", err)
+		}
+
+		if jobRuns > 0 || targetRuns > 0 {
+			log.Info("pruned old run log rows", "job_runs", jobRuns, "target_runs", targetRuns)
+		}
+	}
+
+	prune()
+
+	ticker := time.NewTicker(runLogPruneInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			prune()
+		case <-m.LogRetentionChanged():
+			prune()
+		}
+	}
 }

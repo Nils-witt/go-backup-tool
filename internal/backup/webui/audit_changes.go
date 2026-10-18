@@ -14,6 +14,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/jobs"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/report"
+	"nilswitt.dev/go-backup-tool/internal/backup/settings"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
@@ -79,6 +80,14 @@ func auditResources(db store.Store, keyring *gpgkeys.Keyring) map[string]auditRe
 			return db.GetReportSettings(ctx)
 		}, func(rs store.ReportSettings) report.FileReport {
 			return report.FileReport{Enabled: rs.Enabled, Schedule: rs.Schedule, Notifications: rs.Notifications, HistoryDays: rs.HistoryDays}
+		})},
+		"log-retention-config": {snapshot: getStored(db, func(db store.Store, ctx context.Context, _ string) (store.LogRetentionSettings, bool, error) {
+			return db.GetLogRetentionSettings(ctx)
+		}, func(s store.LogRetentionSettings) settings.LogRetention {
+			return settings.LogRetention{
+				JobRunDays: s.JobRunDays, JobRunMaxRows: s.JobRunMaxRows,
+				TargetRunDays: s.TargetRunDays, TargetRunMaxRows: s.TargetRunMaxRows,
+			}
 		})},
 		// A token is revoked by id but created by name (its id is only
 		// generated then), so either finds it: the newest token by that
