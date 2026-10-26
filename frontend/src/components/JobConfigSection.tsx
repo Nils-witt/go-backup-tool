@@ -8,18 +8,23 @@ import type {
   JobKind,
   JobSourceJSON,
   JobTargetJSON,
+  GPGKeyJSON,
+  GPGKeyListJSON,
   ServerOptionJSON,
 } from "../api/types";
 import { StatusChip } from "./StatusChip";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { EditingDisabledNotice } from "./EditingDisabledNotice";
 import { fmtTime } from "../lib/format";
+import { findKey, groupFingerprint, keyEmails, keyState } from "../lib/gpg";
 import Accordion from "@mui/material/Accordion";
 import AccordionDetails from "@mui/material/AccordionDetails";
 import AccordionSummary from "@mui/material/AccordionSummary";
 import Alert from "@mui/material/Alert";
+import Autocomplete from "@mui/material/Autocomplete";
 import Button from "@mui/material/Button";
 import Checkbox from "@mui/material/Checkbox";
+import Chip from "@mui/material/Chip";
 import Dialog from "@mui/material/Dialog";
 import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
@@ -47,10 +52,9 @@ import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import Box from "@mui/material/Box";
 
 // JobForm is the create/edit dialog's state: a job's definition, with its
-// lists as editable text (one entry per line).
-interface JobForm extends Omit<JobDefinitionJSON, "recipients" | "type" | "source"> {
+// source as edited.
+interface JobForm extends Omit<JobDefinitionJSON, "type" | "source"> {
   type: JobKind;
-  recipients: string;
   source: SourceForm;
 }
 
@@ -78,7 +82,7 @@ const EMPTY_FORM: JobForm = {
   files: [EMPTY_FILE],
   key: "",
   targets: [EMPTY_TARGET],
-  recipients: "",
+  recipients: [],
   armor: false,
   gpg_bin: "",
   gpg_homedir: "",
@@ -105,7 +109,7 @@ function formFrom(j: JobConfigJSON): JobForm {
       : [EMPTY_FILE],
     key: j.key,
     targets: j.targets.length ? j.targets : [EMPTY_TARGET],
-    recipients: j.recipients.join("\n"),
+    recipients: j.recipients,
     armor: j.armor,
     gpg_bin: j.gpg_bin,
     gpg_homedir: j.gpg_homedir,
@@ -124,7 +128,7 @@ function splitLines(text: string, separators = /\n/): string[] {
 }
 
 function definitionOf(form: JobForm): JobDefinitionJSON {
-  const recipients = splitLines(form.recipients, /[\n,]/);
+  const recipients = form.recipients.map((r) => r.trim()).filter(Boolean);
   if (form.type === "on-change") {
     // An on-change job uploads its source; files and key don't apply.
     return {
@@ -499,10 +503,127 @@ function TargetEditor({
   );
 }
 
+// shortFingerprint is the last 16 hex digits of fpr, its long key ID.
+function shortFingerprint(fpr: string): string {
+  return groupFingerprint(fpr.slice(-16));
+}
+
+// RecipientLabel shows a recipient as its key's email address and
+// fingerprint, or as typed when it matches no key in the keyring.
+function RecipientLabel({ keys, recipient }: { keys: GPGKeyJSON[] | null; recipient: string }) {
+  const k = keys ? findKey(keys, recipient) : undefined;
+  if (!k) return <>{recipient}</>;
+  return (
+    <>
+      {keyEmails(k).join(", ") || recipient}{" "}
+      <code style={{ fontSize: 12 }}>{shortFingerprint(k.fingerprint)}</code>
+    </>
+  );
+}
+
+// RecipientsSelect picks the GPG keys a job encrypts to from the keyring,
+// showing each key's email addresses. Free text is accepted too, for keys
+// this instance can't list (e.g. a job's own GPG home directory).
+function RecipientsSelect({
+  keys,
+  value,
+  onChange,
+}: {
+  keys: GPGKeyJSON[] | null;
+  value: string[];
+  onChange: (v: string[]) => void;
+}) {
+  const byFingerprint = new Map((keys ?? []).map((k) => [k.fingerprint, k]));
+  const help =
+    "GPG keys to encrypt to, preferably by fingerprint. Each must match exactly one usable key in the keyring, or the job fails.";
+
+  return (
+    <Autocomplete
+      multiple
+      freeSolo
+      options={[...byFingerprint.keys()]}
+      value={value}
+      onChange={(_, v) => onChange(v.map((r) => r.trim()).filter(Boolean))}
+      filterOptions={(options, { inputValue }) => {
+        const q = inputValue.trim().toLowerCase();
+        return options.filter((fpr) => {
+          const k = byFingerprint.get(fpr)!;
+          return (
+            !value.includes(fpr) &&
+            (!q ||
+              fpr.toLowerCase().includes(q.replace(/\s+/g, "")) ||
+              k.user_ids.some((u) => u.toLowerCase().includes(q)))
+          );
+        });
+      }}
+      renderOption={({ key, ...props }, fpr) => {
+        const k = byFingerprint.get(fpr)!;
+        const s = keyState(k);
+        return (
+          <li key={key} {...props}>
+            <span>
+              {keyEmails(k).join(", ") || "—"}
+              <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                <code>{groupFingerprint(fpr)}</code>{" "}
+                {s.state !== "ok" ? <StatusChip state={s.state} label={s.label} /> : null}
+              </Typography>
+            </span>
+          </li>
+        );
+      }}
+      renderValue={(selected, getItemProps) =>
+        selected.map((r, index) => {
+          const { key, ...itemProps } = getItemProps({ index });
+          const k = keys ? findKey(keys, r) : undefined;
+          const unusable = k && keyState(k).state !== "ok";
+          return (
+            <Tooltip
+              key={key}
+              title={
+                k
+                  ? `${groupFingerprint(k.fingerprint)}${unusable ? ` (${keyState(k).label})` : ""}`
+                  : keys
+                    ? "not in the keyring"
+                    : r
+              }
+            >
+              <Chip
+                {...itemProps}
+                size="small"
+                color={keys && (!k || unusable) ? "warning" : "default"}
+                label={
+                  k ? `${keyEmails(k).join(", ") || r} · ${shortFingerprint(k.fingerprint)}` : r
+                }
+              />
+            </Tooltip>
+          );
+        })
+      }
+      renderInput={(params) => (
+        <TextField
+          {...params}
+          label="Recipients"
+          required={!value.length}
+          helperText={
+            keys
+              ? `${help} Manage keys on the GPG keys page.`
+              : `${help} Type a fingerprint and press Enter.`
+          }
+          slotProps={{
+            ...params.slotProps,
+            htmlInput: { ...params.slotProps.htmlInput, spellCheck: false },
+          }}
+        />
+      )}
+    />
+  );
+}
+
 function JobDialog({
   editing,
   form,
   data,
+  keys,
   saving,
   error,
   onChange,
@@ -512,6 +633,7 @@ function JobDialog({
   editing: JobConfigJSON | null;
   form: JobForm;
   data: JobConfigListJSON;
+  keys: GPGKeyJSON[] | null;
   saving: boolean;
   error: string | null;
   onChange: (f: JobForm) => void;
@@ -533,7 +655,7 @@ function JobDialog({
   const canSave =
     !!form.name.trim() &&
     (isOnChange ? sourceOK : filesOK) &&
-    !!form.recipients.trim() &&
+    form.recipients.some((r) => r.trim()) &&
     form.targets.every((t) => t.server && t.bucket.trim());
 
   return (
@@ -643,15 +765,10 @@ function JobDialog({
             </Button>
           </Stack>
 
-          <TextField
-            label="Recipients"
+          <RecipientsSelect
+            keys={keys}
             value={form.recipients}
-            onChange={(e) => set({ recipients: e.target.value })}
-            helperText="GPG keys to encrypt to, one per line, preferably by fingerprint. Each must match exactly one usable key in the keyring, or the job fails."
-            required
-            multiline
-            minRows={2}
-            slotProps={{ htmlInput: { spellCheck: false } }}
+            onChange={(recipients) => set({ recipients })}
           />
           <FormControlLabel
             control={
@@ -724,6 +841,9 @@ function JobDialog({
 export function JobConfigSection() {
   const [data, setData] = useState<JobConfigListJSON | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // keys is null until loaded, or when the keyring can't be listed (the
+  // listing is admin only); recipients are then shown as typed.
+  const [keys, setKeys] = useState<GPGKeyJSON[] | null>(null);
 
   // dialog is null while closed; editing is the job being edited, or null
   // when creating a new one.
@@ -745,6 +865,12 @@ export function JobConfigSection() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    apiFetchJSON<GPGKeyListJSON>("/api/gpg-keys")
+      .then((d) => setKeys(d.keys))
+      .catch(() => setKeys(null));
+  }, []);
 
   function openDialog(editing: JobConfigJSON | null) {
     setForm(editing ? formFrom(editing) : EMPTY_FORM);
@@ -868,7 +994,13 @@ export function JobConfigSection() {
                       </Typography>
                     ))}
                   </TableCell>
-                  <TableCell sx={{ overflowWrap: "anywhere" }}>{j.recipients.join(", ")}</TableCell>
+                  <TableCell sx={{ overflowWrap: "anywhere" }}>
+                    {j.recipients.map((r, i) => (
+                      <Typography key={i} variant="caption" sx={{ display: "block" }}>
+                        <RecipientLabel keys={keys} recipient={r} />
+                      </Typography>
+                    ))}
+                  </TableCell>
                   {editing ? (
                     <TableCell>
                       {fmtTime(j.updated_at)}
@@ -907,6 +1039,7 @@ export function JobConfigSection() {
           editing={dialog.editing}
           form={form}
           data={data}
+          keys={keys}
           saving={saving}
           error={saveError}
           onChange={setForm}

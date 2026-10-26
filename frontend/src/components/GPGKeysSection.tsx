@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetchJSON } from "../api/client";
-import type { GPGKeyImportResultJSON, GPGKeyJSON, GPGKeyListJSON } from "../api/types";
+import type { GPGKeyImportResultJSON, GPGKeyListJSON } from "../api/types";
 import { StatusChip } from "./StatusChip";
 import { fmtTime } from "../lib/format";
+import { groupFingerprint, keyState } from "../lib/gpg";
 import Alert from "@mui/material/Alert";
 import Button from "@mui/material/Button";
 import Dialog from "@mui/material/Dialog";
@@ -24,20 +25,6 @@ import UploadFileIcon from "@mui/icons-material/UploadFile";
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-// keyState summarizes whether a job can encrypt to k.
-function keyState(k: GPGKeyJSON): { state: string; label: string } {
-  if (k.revoked) return { state: "failed", label: "revoked" };
-  if (k.expired) return { state: "failed", label: "expired" };
-  if (k.disabled) return { state: "failed", label: "disabled" };
-  if (!k.can_encrypt) return { state: "incomplete", label: "can't encrypt" };
-  return { state: "ok", label: "usable" };
-}
-
-// groupFingerprint spaces a fingerprint into groups of four for reading.
-function groupFingerprint(fpr: string): string {
-  return fpr.replace(/(.{4})(?=.)/g, "$1 ");
 }
 
 function AddKeyDialog({
