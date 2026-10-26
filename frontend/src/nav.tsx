@@ -19,6 +19,7 @@ import EnhancedEncryptionIcon from "@mui/icons-material/EnhancedEncryption";
 import ManageHistoryIcon from "@mui/icons-material/ManageHistory";
 import AutoDeleteIcon from "@mui/icons-material/AutoDelete";
 import HubIcon from "@mui/icons-material/Hub";
+import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import type { AuthState } from "./auth/useAuth";
 
 export interface NavItem {
@@ -40,6 +41,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     items: [
       { to: "/", label: "Dashboard", icon: <DashboardIcon /> },
+      { to: "/files", label: "File explorer", icon: <FolderOpenIcon /> },
       { to: "/identity", label: "Identity", icon: <VpnKeyIcon /> },
       {
         to: "/tokens",

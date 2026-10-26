@@ -32,6 +32,9 @@ const ReceiverLogPage = lazy(() =>
 const AuditLogPage = lazy(() =>
   import("./pages/AuditLogPage").then((m) => ({ default: m.AuditLogPage })),
 );
+const FileExplorerPage = lazy(() =>
+  import("./pages/FileExplorerPage").then((m) => ({ default: m.FileExplorerPage })),
+);
 const IdentityPage = lazy(() =>
   import("./pages/IdentityPage").then((m) => ({ default: m.IdentityPage })),
 );
@@ -121,6 +124,7 @@ function AuthGate() {
         <Route path="report-settings" element={<ReportSettingsPage />} />
         <Route path="log-retention-settings" element={<LogRetentionSettingsPage />} />
         <Route path="status-push-settings" element={<StatusPushSettingsPage />} />
+        <Route path="files" element={<FileExplorerPage />} />
         <Route path="identity" element={<IdentityPage />} />
         <Route path="tokens" element={<TokensPage />} />
         <Route path="logs" element={<LiveLogsPage />} />
