@@ -16,13 +16,29 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/dockerexec/dockerexectest"
 )
 
-// fakeGPG writes a stand-in gpg that ignores its arguments and copies stdin
-// to stdout, so a test can see exactly what the source command produced.
+// fakeGPGScript lists one usable key for unused@example.com when asked to
+// (see gpgkeys.Keyring.ResolveRecipients), and otherwise copies stdin to
+// stdout.
+const fakeGPGScript = `#!/bin/sh
+for a in "$@"; do
+	if [ "$a" = --list-keys ]; then
+		echo 'pub:u:255:22:AAAABBBBCCCCDDDD:1760000000:::u:::scESC::::::::0:'
+		echo 'fpr:::::::::0123456789ABCDEF0123456789ABCDEFAAAABBBB:'
+		echo 'uid:u::::1760000000::HASH::Test <unused@example.com>::::::::::0:'
+		exit 0
+	fi
+done
+exec cat
+`
+
+// fakeGPG writes a stand-in gpg that ignores its encryption arguments and
+// copies stdin to stdout, so a test can see exactly what the source command
+// produced. Its keyring holds one key, for unused@example.com.
 func fakeGPG(t *testing.T) string {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "gpg")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nexec cat\n"), 0o700); err != nil { //nolint:gosec // test script must be executable
+	if err := os.WriteFile(path, []byte(fakeGPGScript), 0o700); err != nil { //nolint:gosec // test script must be executable
 		t.Fatal(err)
 	}
 

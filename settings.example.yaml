@@ -59,8 +59,9 @@
 # receiver/download detail) aren't readable in transit or sitting in an
 # inbox provider — only the subject line stays in the clear, since SMTP/MIME
 # headers are never covered by this. encrypt.recipients names the GPG
-# identities (fingerprint or email address) to encrypt to; each must already
-# have its public key imported into the keyring the top-level
+# identities (fingerprint or email address) to encrypt to; each must match
+# exactly one usable key, like a job's recipients (see config.example.yaml),
+# and must already have its public key imported into the keyring the top-level
 # gpg-bin/gpg-homedir (in the config file) resolve to (`gpg --import their-key.asc`) —
 # encrypted emails use the same gpg binary and keyring as backups.
 # notifications:

@@ -21,6 +21,7 @@ import (
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/dockerexec"
+	"nilswitt.dev/go-backup-tool/internal/backup/gpgkeys"
 	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/objectstore"
 	"nilswitt.dev/go-backup-tool/internal/backup/remoteclient"
@@ -333,7 +334,11 @@ func startLocalPipeline(ctx, srcCtx context.Context, cfg *config.Config, src *co
 		return nil, nil, nil, fmt.Errorf("wiring command output: %w", err)
 	}
 
-	gpgCmd = buildGPGCommand(ctx, cfg)
+	gpgCmd, err = buildGPGCommand(ctx, cfg)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
 	gpgCmd.Stdin = sourceOut
 	gpgCmd.Stderr = &logWriter{log: log, msg: "gpg stderr"}
 
@@ -399,7 +404,12 @@ func startGPGOnPipe(ctx context.Context, cfg *config.Config, log *slog.Logger) (
 		return nil, nil, nil, fmt.Errorf("creating command output pipe: %w", err)
 	}
 
-	gpgCmd = buildGPGCommand(ctx, cfg)
+	gpgCmd, err = buildGPGCommand(ctx, cfg)
+	if err != nil {
+		_, _ = pr.Close(), pw.Close()
+		return nil, nil, nil, err
+	}
+
 	gpgCmd.Stdin = pr
 	gpgCmd.Stderr = &logWriter{log: log, msg: "gpg stderr"}
 
@@ -577,11 +587,26 @@ func firstPipelineError(source string, sourceErr, gpgErr, stageErr error) error 
 }
 
 // buildGPGCommand constructs the gpg invocation that encrypts a backup to
-// cfg.Recipients. --force-mdc makes gpg always add a modification detection
+// cfg.Recipients, each pinned to the fingerprint of the one usable key it
+// names in cfg's keyring (see gpgkeys.Keyring.ResolveRecipients): with
+// --trust-model always, gpg would otherwise take any key whose user ID
+// merely contains the recipient. It fails when a recipient names no key,
+// or more than one.
+func buildGPGCommand(ctx context.Context, cfg *config.Config) (*exec.Cmd, error) {
+	fingerprints, err := gpgkeys.New(cfg.GPGBin, cfg.GPGHomedir).ResolveRecipients(ctx, cfg.Recipients)
+	if err != nil {
+		return nil, err
+	}
+
+	return exec.CommandContext(ctx, cfg.GPGBin, gpgEncryptArgs(cfg, fingerprints)...), nil //nolint:gosec // cfg.GPGBin/args are operator-supplied CLI config, not untrusted input
+}
+
+// gpgEncryptArgs is buildGPGCommand's gpg arguments for encrypting to
+// fingerprints. --force-mdc makes gpg always add a modification detection
 // code, so a tampered ciphertext fails to decrypt instead of yielding
 // silently altered plaintext, even for recipient keys that don't advertise
 // MDC support.
-func buildGPGCommand(ctx context.Context, cfg *config.Config) *exec.Cmd {
+func gpgEncryptArgs(cfg *config.Config, fingerprints []string) []string {
 	args := []string{"--batch", "--yes"}
 
 	if cfg.GPGHomedir != "" {
@@ -593,11 +618,11 @@ func buildGPGCommand(ctx context.Context, cfg *config.Config) *exec.Cmd {
 	}
 
 	args = append(args, "--trust-model", "always", "--force-mdc", "--encrypt")
-	for _, r := range cfg.Recipients {
-		args = append(args, "--recipient", r)
+	for _, fpr := range fingerprints {
+		args = append(args, "--recipient", fpr)
 	}
 
-	return exec.CommandContext(ctx, cfg.GPGBin, args...) //nolint:gosec // cfg.GPGBin/args are operator-supplied CLI config, not untrusted input
+	return args
 }
 
 // uploadStagedToTargets uploads every already-staged file (see stageSource)

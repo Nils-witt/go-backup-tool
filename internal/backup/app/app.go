@@ -153,7 +153,7 @@ func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, deps webu
 
 	go receiver.MonitorReceiverRetention(ctx, deps.DB, deps.Receivers, deps.Log)
 
-	deps.GPGKeyring = gpgkeys.New(rc.GPG)
+	deps.GPGKeyring = gpgkeys.New(rc.GPG.Bin, rc.GPG.Homedir)
 	srv := webui.StartWebUI(deps, webui.Options{
 		Addr:              rc.Listen,
 		InstanceName:      rc.ServerName,

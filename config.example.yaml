@@ -291,7 +291,9 @@ servers:
 #   # if that's acceptable for everyone granted "admin".
 #   # It also lets admins add public keys to the GPG keyring (Settings >
 #   # GPG keys; listing them is always allowed): a key carrying a
-#   # recipient's email address could otherwise receive that job's backups.
+#   # recipient's email address makes that recipient ambiguous, which fails
+#   # the job (see recipients: below) — name recipients by fingerprint so a
+#   # new key can't stop backups either.
 #   job-editing: true
 #
 #   # oidc configures single sign-on via an OpenID Connect provider
@@ -364,8 +366,16 @@ jobs:
     targets:
       - server: nas
         bucket: my-backup-bucket
+    # recipients names the GPG public keys to encrypt to: preferably each
+    # key's full 40-digit fingerprint (`gpg --fingerprint`), or an email
+    # address, key ID, or part of a user ID. Before every run each one must
+    # match exactly one usable key in the keyring, and the backup is
+    # encrypted to that key's fingerprint: a recipient matching no key or
+    # several (e.g. a second key someone added carrying the same address)
+    # fails the job instead of encrypting to whichever key gpg picks. A
+    # recipient that isn't a fingerprint is logged as a warning on startup.
     recipients:
-      - me@example.com
+      - 0123456789ABCDEF0123456789ABCDEF01234567 # me@example.com
     # armor: false
     # gpg-bin: gpg
     # gpg-homedir: ""
