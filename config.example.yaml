@@ -202,6 +202,10 @@ servers:
 # until stopped (Ctrl-C/SIGTERM) or the config file's timeout elapses.
 # webui:
 #   enabled: true
+#   # listen is a plain-HTTP address (there's no built-in TLS): keep it on
+#   # loopback and put a TLS-terminating reverse proxy in front (see the
+#   # README's "Running behind a reverse proxy"). Listening beyond loopback
+#   # without trust-proxy-headers logs a warning on startup.
 #   listen: ":8080" # required when enabled: true
 #
 #   # The dashboard's only login method is SSO (see oidc below): every

@@ -51,6 +51,27 @@ docker compose up -d
 
 See [`compose.yaml`](compose.yaml). It mounts `config.yaml`, the `data/` directory, and a `keys/` directory with recipient public keys, which are imported on startup.
 
+### Running behind a reverse proxy
+
+The web UI and the receiver API share one plain-HTTP listener (`webui.listen`); the binary has no TLS of its own. Access tokens, download tickets, and receiver uploads all travel over that connection, so anything beyond loopback must go through a TLS-terminating reverse proxy:
+
+- Bind the listener to loopback (`listen: "127.0.0.1:8080"`), or, in a container, publish its port on loopback only, as `compose.yaml` does, so nothing reaches it except through the proxy.
+- Terminate TLS 1.2 or newer at the proxy and forward everything (`/`, `/api/...` including the `/api/live` WebSocket, and the receiver API) to the listener. Uploads can be large: raise the proxy's body size limit (e.g. nginx's `client_max_body_size`) to at least the receivers' `max-object-size`, and turn off request buffering for them.
+- Set `webui.trust-proxy-headers: true` so the logs record the real client address, rate limiting applies per client rather than to the proxy, and `Strict-Transport-Security` is sent. The proxy must set `Forwarded` or `X-Forwarded-For`/`-Proto`/`-Host` itself and drop any copies the client sent.
+- Point senders' `type: remote` servers at the `https://` endpoint. They require TLS 1.2 or newer and verify the certificate (`tls-ca` for a private CA).
+
+A minimal Caddy example (Caddy sets `X-Forwarded-*` itself but passes a client's `Forwarded` header through, which go-backup-tool would prefer, so it's dropped):
+
+```caddyfile
+backup.example.com {
+	reverse_proxy 127.0.0.1:8080 {
+		header_up -Forwarded
+	}
+}
+```
+
+On startup the process logs a warning when it listens beyond loopback without `trust-proxy-headers`, since that usually means plain HTTP is reachable from the network.
+
 ## Building
 
 The dashboard is embedded with `go:embed`, so build the frontend first:

@@ -135,6 +135,11 @@ func StartWebUI(deps Deps, opts Options) *Server {
 		log.Warn("web UI: webui.oidc is not enabled, so nobody can sign in to the dashboard (the receiver API is unaffected)")
 	}
 
+	if !opts.TrustProxyHeaders && !loopbackOnly(ln.Addr()) {
+		log.Warn("web UI: listening for plain HTTP beyond loopback without webui.trust-proxy-headers: access tokens, download tickets, and receiver uploads cross the network unencrypted unless a TLS-terminating reverse proxy sits in front (see README, \"Running behind a reverse proxy\")",
+			"addr", ln.Addr().String())
+	}
+
 	liveCtx, stopLive := context.WithCancel(context.Background())
 
 	mux := http.NewServeMux()
@@ -168,6 +173,14 @@ func StartWebUI(deps Deps, opts Options) *Server {
 	log.Info("web UI listening", "addr", srv.addr)
 
 	return srv
+}
+
+// loopbackOnly reports whether addr, a bound listener's address, only
+// accepts connections from this machine. A wildcard address (":8080",
+// "0.0.0.0", "::") accepts them from anywhere.
+func loopbackOnly(addr net.Addr) bool {
+	tcp, ok := addr.(*net.TCPAddr)
+	return ok && tcp.IP.IsLoopback()
 }
 
 // registerRoutes mounts every web UI route on mux: the single place to see

@@ -2,6 +2,7 @@ package webui
 
 import (
 	"crypto/tls"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -91,5 +92,24 @@ func TestSecurityHeaders(t *testing.T) {
 				t.Errorf("Strict-Transport-Security set = %v, want %v", got, tt.wantHSTS)
 			}
 		})
+	}
+}
+
+func TestLoopbackOnly(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		ip   string
+		want bool
+	}{
+		{"127.0.0.1", true},
+		{"::1", true},
+		{"0.0.0.0", false},
+		{"::", false},
+		{"192.0.2.10", false},
+	} {
+		if got := loopbackOnly(&net.TCPAddr{IP: net.ParseIP(tc.ip), Port: 8080}); got != tc.want {
+			t.Errorf("loopbackOnly(%s) = %v, want %v", tc.ip, got, tc.want)
+		}
 	}
 }
