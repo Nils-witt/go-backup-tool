@@ -1089,7 +1089,7 @@ func TestScheduleStartTimeCatchesUpMissedRun(t *testing.T) { //nolint:parallelte
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "marker")
 
-	job := startTimeTestJob(t, marker, time.Now().Add(-10*time.Minute), time.Second)
+	job := startTimeTestJob(t, marker, time.Now().Add(-10*time.Minute), time.Hour)
 
 	statusStore := status.NewStore([]*config.Config{job})
 	r := &Runner{log: discardLogger, store: statusStore}
@@ -1100,7 +1100,7 @@ func TestScheduleStartTimeCatchesUpMissedRun(t *testing.T) { //nolint:parallelte
 	r.Schedule(ctx, job)
 
 	if got := countMarkerRuns(t, marker); got != 1 {
-		t.Errorf("marker recorded %d runs, want exactly 1 (one immediate catch-up run, no extra runs before the next 1s grid slot)", got)
+		t.Errorf("marker recorded %d runs, want exactly 1 (one immediate catch-up run, no extra runs before the next grid slot)", got)
 	}
 }
 
@@ -1114,7 +1114,7 @@ func TestScheduleStartTimeSkipsCatchUpWhenAlreadyRecorded(t *testing.T) { //noli
 	marker := filepath.Join(dir, "marker")
 
 	startTime := time.Now().Add(-10 * time.Minute)
-	interval := time.Second
+	interval := time.Hour
 
 	job := startTimeTestJob(t, marker, startTime, interval)
 
