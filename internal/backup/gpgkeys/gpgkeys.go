@@ -31,9 +31,15 @@ type Key struct {
 	Created     time.Time  `json:"created"`
 	Expires     *time.Time `json:"expires,omitempty"`
 	UserIDs     []string   `json:"user_ids"`
-	Revoked     bool       `json:"revoked"`
-	Expired     bool       `json:"expired"`
-	Disabled    bool       `json:"disabled"`
+
+	// SubkeyIDs are the key IDs of the key's subkeys, revoked and expired
+	// ones included: a message names the subkey it's encrypted to (see
+	// pgprecipients.KeyIDs), which older files may still use.
+	SubkeyIDs []string `json:"subkey_ids"`
+
+	Revoked  bool `json:"revoked"`
+	Expired  bool `json:"expired"`
+	Disabled bool `json:"disabled"`
 
 	// CanEncrypt reports whether the key (or one of its subkeys) can
 	// currently encrypt — what a job's recipient needs.
@@ -248,6 +254,10 @@ func parseColons(out []byte) []Key {
 				cur.UserIDs = append(cur.UserIDs, unescapeColons(f[9]))
 			}
 		case "sub":
+			if cur != nil {
+				cur.SubkeyIDs = append(cur.SubkeyIDs, f[4])
+			}
+
 			fprForPub = false
 		}
 	}
@@ -257,7 +267,7 @@ func parseColons(out []byte) []Key {
 
 func keyFromPub(f []string) Key {
 	key := Key{
-		KeyID: f[4], Algorithm: algorithms[f[3]], UserIDs: []string{},
+		KeyID: f[4], Algorithm: algorithms[f[3]], UserIDs: []string{}, SubkeyIDs: []string{},
 		Revoked: f[1] == "r", Expired: f[1] == "e",
 	}
 

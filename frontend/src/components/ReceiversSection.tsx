@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { apiFetch, apiFetchJSON } from "../api/client";
-import type { ReceiverFile, ReceiverSnapshot } from "../api/types";
+import type { GPGKeyJSON, GPGKeyListJSON, ReceiverFile, ReceiverSnapshot } from "../api/types";
 import { StatusChip } from "./StatusChip";
-import { groupFingerprint } from "../lib/gpg";
+import { groupFingerprint, keyEmails, keyForKeyID } from "../lib/gpg";
 import { Fact } from "./Fact";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { encodePathKey, fmtRelative, fmtSize, fmtTime, hasTime } from "../lib/format";
@@ -113,8 +113,10 @@ function groupFiles(files: ReceiverFile[]): FileGroup[] {
 // --throw-keyids); see pgprecipients.HiddenKeyID.
 const HIDDEN_KEY_ID = "0000000000000000";
 
-// RecipientKeyIDs lists the key IDs a file is encrypted to, one per line.
-function RecipientKeyIDs({ ids }: { ids?: string[] }) {
+// RecipientKeyIDs lists the key IDs a file is encrypted to, one per line,
+// each with its key's email addresses when keys (the keyring, null when it
+// can't be listed) holds it.
+function RecipientKeyIDs({ ids, keys }: { ids?: string[]; keys: GPGKeyJSON[] | null }) {
   if (!ids?.length) {
     return (
       <Typography variant="caption" color="text.secondary">
@@ -123,24 +125,64 @@ function RecipientKeyIDs({ ids }: { ids?: string[] }) {
     );
   }
 
-  return ids.map((id, i) =>
-    id === HIDDEN_KEY_ID ? (
-      <Tooltip key={i} title="The sender hid this recipient's key ID (gpg --throw-keyids).">
-        <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-          hidden recipient
+  return ids.map((id, i) => {
+    if (id === HIDDEN_KEY_ID) {
+      return (
+        <Tooltip key={i} title="The sender hid this recipient's key ID (gpg --throw-keyids).">
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+            hidden recipient
+          </Typography>
+        </Tooltip>
+      );
+    }
+
+    const k = keys ? keyForKeyID(keys, id) : undefined;
+    const emails = k ? keyEmails(k).join(", ") : "";
+    const title = k
+      ? `Key ${groupFingerprint(k.fingerprint)}${k.key_id === id ? "" : ", subkey " + groupFingerprint(id)}`
+      : keys
+        ? "Not in this instance's keyring"
+        : "";
+
+    return (
+      <Tooltip key={i} title={title}>
+        <Typography variant="caption" sx={{ display: "block" }}>
+          {emails ? <>{emails} </> : null}
+          <Box
+            component="code"
+            sx={{ whiteSpace: "nowrap", color: emails ? "text.secondary" : undefined }}
+          >
+            {groupFingerprint(id)}
+          </Box>
         </Typography>
       </Tooltip>
-    ) : (
-      <Typography
-        key={i}
-        variant="caption"
-        component="code"
-        sx={{ display: "block", whiteSpace: "nowrap" }}
-      >
-        {groupFingerprint(id)}
-      </Typography>
-    ),
-  );
+    );
+  });
+}
+
+// useGPGKeys loads the keyring once enabled, to name recipients by email.
+// It stays null when the keyring can't be listed (the listing is admin
+// only); recipients then show as key IDs alone.
+function useGPGKeys(enabled: boolean): GPGKeyJSON[] | null {
+  const [keys, setKeys] = useState<GPGKeyJSON[] | null>(null);
+
+  useEffect(() => {
+    if (!enabled) return;
+
+    let cancelled = false;
+
+    apiFetchJSON<GPGKeyListJSON>("/api/gpg-keys")
+      .then((d) => {
+        if (!cancelled) setKeys(d.keys);
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled]);
+
+  return keys;
 }
 
 function FileListDialog({
@@ -159,6 +201,7 @@ function FileListDialog({
   // listing arrives, without resetting state inside the effect.
   const [loaded, setLoaded] = useState<{ id: string; files: ReceiverFile[] } | null>(null);
   const files = loaded && loaded.id === id ? loaded.files : null;
+  const keys = useGPGKeys(id !== null);
 
   useEffect(() => {
     if (!id) return;
@@ -251,7 +294,7 @@ function FileListDialog({
                     <TableCell>{fmtTime(f.mod_time)}</TableCell>
                     <TableCell>{fmtTime(f.expires_at)}</TableCell>
                     <TableCell>
-                      <RecipientKeyIDs ids={f.recipient_key_ids} />
+                      <RecipientKeyIDs ids={f.recipient_key_ids} keys={keys} />
                     </TableCell>
                     <TableCell>
                       {canDownload && id ? (

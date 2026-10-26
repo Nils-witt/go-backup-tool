@@ -604,6 +604,9 @@ export interface GPGKeyJSON {
   created: string;
   expires?: string;
   user_ids: string[];
+  // subkey_ids are the key IDs of its subkeys, revoked and expired ones
+  // included: what a receiver file's recipient_key_ids usually name.
+  subkey_ids: string[];
   revoked: boolean;
   expired: boolean;
   disabled: boolean;

@@ -3739,7 +3739,14 @@ components:
         can_encrypt:
           type: boolean
           description: Whether the key (or a subkey) can currently encrypt, as a job recipient needs.
-      required: [fingerprint, key_id, algorithm, length, created, user_ids, revoked, expired, disabled, can_encrypt]
+        subkey_ids:
+          type: array
+          items:
+            type: string
+          description: >
+            Key IDs of the key's subkeys, revoked and expired ones included.
+            A receiver file's `recipient_key_ids` usually name one of these.
+      required: [fingerprint, key_id, algorithm, length, created, user_ids, subkey_ids, revoked, expired, disabled, can_encrypt]
 
     GPGKeyList:
       type: object

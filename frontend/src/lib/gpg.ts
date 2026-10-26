@@ -37,3 +37,12 @@ export function findKey(keys: GPGKeyJSON[], recipient: string): GPGKeyJSON | und
       keyEmails(k).some((e) => e.toUpperCase() === r),
   );
 }
+
+// keyForKeyID is the key whose primary key or one of whose subkeys has
+// keyID, as a receiver file's recipient_key_ids name them.
+export function keyForKeyID(keys: GPGKeyJSON[], keyID: string): GPGKeyJSON | undefined {
+  const id = keyID.toUpperCase();
+  return keys.find(
+    (k) => k.key_id.toUpperCase() === id || k.subkey_ids.some((s) => s.toUpperCase() === id),
+  );
+}

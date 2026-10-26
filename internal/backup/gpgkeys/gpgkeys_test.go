@@ -34,11 +34,11 @@ func TestParseColons(t *testing.T) {
 		{
 			Fingerprint: "0123456789ABCDEF0123456789ABCDEFAAAABBBB", KeyID: "AAAABBBBCCCCDDDD", Algorithm: "EdDSA ed25519",
 			Length: 255, Created: time.Unix(1760000000, 0).UTC(), Expires: &expires,
-			UserIDs: []string{"Backup Ops <ops@example.com>"}, CanEncrypt: true,
+			UserIDs: []string{"Backup Ops <ops@example.com>"}, SubkeyIDs: []string{"EEEEFFFF00001111"}, CanEncrypt: true,
 		},
 		{
 			Fingerprint: "9999999999999999999999999999999911112222", KeyID: "1111222233334444", Algorithm: "RSA",
-			Length: 4096, Created: time.Unix(1500000000, 0).UTC(), UserIDs: []string{}, Revoked: true,
+			Length: 4096, Created: time.Unix(1500000000, 0).UTC(), UserIDs: []string{}, SubkeyIDs: []string{}, Revoked: true,
 		},
 	}
 
@@ -139,6 +139,22 @@ func TestImportAndList(t *testing.T) {
 	res, err = target.Import(ctx, other)
 	if err != nil || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "ops@example.com") {
 		t.Errorf("Import(same email) = %+v, %v; want an ambiguity warning", res, err)
+	}
+}
+
+func TestListSubkeyIDs(t *testing.T) {
+	t.Parallel()
+
+	k, _ := genKey(t, "Ops <ops@example.com>")
+
+	keys, err := k.List(t.Context())
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("List() = %+v, %v; want one key", keys, err)
+	}
+
+	// --quick-gen-key with the default usage adds one encryption subkey.
+	if ids := keys[0].SubkeyIDs; len(ids) != 1 || len(ids[0]) != 16 || ids[0] == keys[0].KeyID {
+		t.Errorf("List() subkey IDs = %v, want one 16-digit key ID other than the primary %s", ids, keys[0].KeyID)
 	}
 }
 
