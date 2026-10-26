@@ -234,6 +234,8 @@ export interface ReceiverConfigJSON {
   // means the 50GiB default and no quota.
   max_object_size: string;
   quota: string;
+  // immutable (backup receivers only) refuses overwriting a stored object.
+  immutable: boolean;
   created_at: string;
   created_by: string;
   updated_at: string;

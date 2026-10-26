@@ -1809,6 +1809,8 @@ paths:
             text/plain:
               schema:
                 type: string
+        "409":
+          $ref: "#/components/responses/ImmutableConflict"
         "413":
           $ref: "#/components/responses/UploadTooLarge"
         "507":
@@ -1879,6 +1881,8 @@ paths:
             text/plain:
               schema:
                 type: string
+        "409":
+          $ref: "#/components/responses/ImmutableConflict"
         "413":
           $ref: "#/components/responses/UploadTooLarge"
         "507":
@@ -2040,6 +2044,12 @@ components:
   responses:
     Unauthorized:
       description: Missing, invalid, or expired access token
+      content:
+        text/plain:
+          schema:
+            type: string
+    ImmutableConflict:
+      description: The receiver is immutable and this key already holds a different object
       content:
         text/plain:
           schema:
@@ -2591,6 +2601,14 @@ components:
             Optional size such as "1TB": the most the receiver's path may
             hold in total. An upload that would take it over gets 507.
             Empty sets no quota.
+        immutable:
+          type: boolean
+          description: >
+            Backup receivers only: stored objects are write-once. A PUT to a
+            key that already holds a different object gets 409; one whose
+            body is identical to the stored object (same SHA-256 as the
+            token's `sha256` claim) gets 200 without rewriting it. Retention
+            still deletes expired objects. Default false.
       required: [id, path]
       description: >
         A receiver's editable fields, with the same syntax as a settings

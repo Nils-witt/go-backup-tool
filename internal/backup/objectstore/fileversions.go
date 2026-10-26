@@ -137,7 +137,7 @@ func WriteFileVersion(root, rel, plainSHA256 string, r io.Reader) (version int, 
 		return 0, false, fmt.Errorf("creating directory %q: %w", dir, err)
 	}
 
-	if err := writeFileAtomically(dir, filepath.Join(dir, versionFileName(next, plainSHA256)), r); err != nil {
+	if err := writeFileAtomically(dir, filepath.Join(dir, versionFileName(next, plainSHA256)), r, true); err != nil {
 		return 0, false, err
 	}
 

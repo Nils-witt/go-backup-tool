@@ -16,10 +16,12 @@ import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
 import DialogTitle from "@mui/material/DialogTitle";
 import IconButton from "@mui/material/IconButton";
+import FormControlLabel from "@mui/material/FormControlLabel";
 import InputAdornment from "@mui/material/InputAdornment";
 import MenuItem from "@mui/material/MenuItem";
 import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
+import Switch from "@mui/material/Switch";
 import Table from "@mui/material/Table";
 import TableBody from "@mui/material/TableBody";
 import TableCell from "@mui/material/TableCell";
@@ -49,6 +51,7 @@ interface ReceiverForm {
   download_notifications: string[];
   max_object_size: string;
   quota: string;
+  immutable: boolean;
 }
 
 const EMPTY_FORM: ReceiverForm = {
@@ -63,6 +66,7 @@ const EMPTY_FORM: ReceiverForm = {
   download_notifications: [],
   max_object_size: "",
   quota: "",
+  immutable: false,
 };
 
 // basePrefix is baseDir with exactly one trailing slash.
@@ -96,6 +100,7 @@ function formFrom(r: ReceiverConfigJSON, baseDir: string): ReceiverForm {
     download_notifications: r.download_notifications,
     max_object_size: r.max_object_size ?? "",
     quota: r.quota ?? "",
+    immutable: !!r.immutable,
   };
 }
 
@@ -224,6 +229,7 @@ function ReceiverDialog({
               set({
                 type: e.target.value as ReceiverKind,
                 keep_versions: e.target.value === "directory" ? form.keep_versions : "",
+                immutable: e.target.value === "directory" ? false : form.immutable,
               })
             }
             helperText={
@@ -315,6 +321,17 @@ function ReceiverDialog({
               value={form.retention}
               onChange={(e) => set({ retention: e.target.value })}
               helperText='Delete objects older than this, e.g. "30d" or "12h". Empty keeps them forever.'
+            />
+          )}
+          {directory ? null : (
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={form.immutable}
+                  onChange={(e) => set({ immutable: e.target.checked })}
+                />
+              }
+              label="Immutable: senders can't overwrite stored objects (an identical re-upload still succeeds)"
             />
           )}
           <TextField
@@ -511,7 +528,13 @@ export function ReceiverConfigSection() {
                       </Tooltip>
                     ) : null}
                   </TableCell>
-                  <TableCell>{r.type === "directory" ? "directory" : "backup"}</TableCell>
+                  <TableCell>
+                    {r.type === "directory"
+                      ? "directory"
+                      : r.immutable
+                        ? "backup, immutable"
+                        : "backup"}
+                  </TableCell>
                   <TableCell sx={{ overflowWrap: "anywhere" }}>
                     {r.allowed_servers.map((id) => serverLabel(trustedServers, id)).join(", ")}
                     {!r.allowed_servers.length ? "—" : null}

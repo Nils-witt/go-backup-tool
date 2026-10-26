@@ -67,6 +67,14 @@ type FileReceiver struct {
 	// such as "1TB"; an upload that would take it over is rejected. Unset
 	// means no quota.
 	Quota string `yaml:"quota,omitempty" json:"quota"`
+
+	// Immutable (backup receivers only) makes stored objects write-once: a
+	// sender can't overwrite an object that already exists, so a
+	// compromised sender can't destroy the backups it sent earlier. An
+	// upload identical to the stored object succeeds without rewriting it,
+	// so a retry after a lost response isn't stuck. Retention still
+	// deletes expired objects.
+	Immutable bool `yaml:"immutable,omitempty" json:"immutable"`
 }
 
 // ResolvedReceiver is one fileReceiver after validation, ready to be used by
@@ -107,6 +115,9 @@ type ResolvedReceiver struct {
 	// caps the bytes stored under Path; 0 means no quota.
 	MaxObjectSize int64
 	Quota         int64
+
+	// Immutable is the receiver's immutable: setting (see FileReceiver).
+	Immutable bool
 
 	// Notifications is the live notification registry the ids above are
 	// resolved against when firing (see notify.Registry.Resolve), copied
@@ -198,6 +209,7 @@ func ResolveReceiver(fr FileReceiver, notifications *notify.Registry, trusted *t
 		DownloadNotifications: slices.Clone(fr.DownloadNotifications),
 		MaxObjectSize:         maxObjectSize,
 		Quota:                 quota,
+		Immutable:             fr.Immutable,
 		Notifications:         notifications,
 		ServerName:            serverName,
 	}, nil
@@ -231,8 +243,9 @@ func ParseReceiverKind(t string) (ReceiverKind, error) {
 	}
 }
 
-// resolveReceiverKind validates fr's type: and the keep-versions: that only
-// a directory receiver may set.
+// resolveReceiverKind validates fr's type:, the keep-versions: that only a
+// directory receiver may set, and the immutable: only a backup receiver
+// may set.
 func resolveReceiverKind(fr FileReceiver) (ReceiverKind, error) {
 	kind, err := ParseReceiverKind(fr.Type)
 	if err != nil {
@@ -244,6 +257,8 @@ func resolveReceiverKind(fr FileReceiver) (ReceiverKind, error) {
 		return "", fmt.Errorf("keep-versions must not be negative, got %d", fr.KeepVersions)
 	case fr.KeepVersions > 0 && kind != ReceiverKindDirectory:
 		return "", errors.New("keep-versions is only valid for a directory receiver (type: directory)")
+	case fr.Immutable && kind == ReceiverKindDirectory:
+		return "", errors.New("immutable is only valid for a backup receiver: a directory receiver never overwrites, it adds versions")
 	}
 
 	return kind, nil

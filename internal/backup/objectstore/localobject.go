@@ -40,6 +40,23 @@ func LocalObjectPath(cfg *config.Config, t *config.Target) string {
 // partially written object and a mid-stream failure leaves nothing at the
 // final path.
 func WriteLocalObject(cfg *config.Config, t *config.Target, r io.Reader) error {
+	return writeLocalObject(cfg, t, r, true)
+}
+
+// ErrObjectExists is returned by WriteNewLocalObject when an object already
+// exists at its path.
+var ErrObjectExists = errors.New("object already exists")
+
+// WriteNewLocalObject is WriteLocalObject for a write-once destination (an
+// immutable: receiver): it never replaces an existing object, returning
+// ErrObjectExists instead — even when another write lands at the same path
+// while r is still streaming, since the finished temp file is hard-linked
+// into place rather than renamed over it.
+func WriteNewLocalObject(cfg *config.Config, t *config.Target, r io.Reader) error {
+	return writeLocalObject(cfg, t, r, false)
+}
+
+func writeLocalObject(cfg *config.Config, t *config.Target, r io.Reader, replace bool) error {
 	dst := LocalObjectPath(cfg, t)
 	dir := filepath.Dir(dst)
 
@@ -53,21 +70,24 @@ func WriteLocalObject(cfg *config.Config, t *config.Target, r io.Reader) error {
 		}
 	}
 
-	return writeFileAtomically(dir, dst, r)
+	return writeFileAtomically(dir, dst, r, replace)
 }
 
 // writeFileAtomically streams r into a temp file in dir (which must exist),
 // syncs it, and renames it to dst, so a reader never observes a partially
-// written file and a failure leaves nothing at dst.
-func writeFileAtomically(dir, dst string, r io.Reader) error {
+// written file and a failure leaves nothing at dst. Without replace, the
+// temp file is hard-linked to dst instead, which fails with
+// ErrObjectExists if dst already exists.
+func writeFileAtomically(dir, dst string, r io.Reader, replace bool) error {
 	tmp, err := os.CreateTemp(dir, ".*.tmp")
 	if err != nil {
 		return fmt.Errorf("creating temp file in %q: %w", dir, err)
 	}
 
 	// A successful rename below moves tmp.Name() to dst, so this Remove
-	// then finds nothing and is a harmless no-op; on any earlier error path
-	// it cleans up the leftover temp file.
+	// then finds nothing and is a harmless no-op (after a link, it drops
+	// the temp name and leaves dst); on any earlier error path it cleans
+	// up the leftover temp file.
 	defer func() { _ = os.Remove(tmp.Name()) }()
 
 	if err := tmp.Chmod(0o600); err != nil {
@@ -90,6 +110,18 @@ func writeFileAtomically(dir, dst string, r io.Reader) error {
 
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("closing %q: %w", tmp.Name(), err)
+	}
+
+	if !replace {
+		if err := os.Link(tmp.Name(), dst); err != nil {
+			if errors.Is(err, fs.ErrExist) {
+				return fmt.Errorf("%w: %q", ErrObjectExists, dst)
+			}
+
+			return fmt.Errorf("linking %q to %q: %w", tmp.Name(), dst, err)
+		}
+
+		return nil
 	}
 
 	if err := os.Rename(tmp.Name(), dst); err != nil {

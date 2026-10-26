@@ -133,6 +133,13 @@
 # receiver's path may hold in total; an upload that would take it over is
 # rejected with 507. Unset sets no quota.
 #
+# immutable: true (backup receivers only) makes stored objects write-once:
+# an upload to a key that already holds a different object is rejected
+# with 409, so a compromised sender can't overwrite the backups it sent
+# earlier. Re-sending the identical object succeeds without rewriting it.
+# Retention still deletes expired objects. Leave it off for jobs whose key
+# has no {time}, which overwrite the same object on every run.
+#
 # download-notifications (optional, independent of stale-after/
 # stale-notifications) names notifications: entries to fire every time a
 # file is successfully downloaded from this receiver through the dashboard.
@@ -152,6 +159,7 @@
 #     download-notifications: [slack-downloads]
 #     max-object-size: 20GiB
 #     quota: 2TB
+#     immutable: true
 #   - id: documents
 #     type: directory
 #     allowed-servers: [6f1c2a4e-8d3b-4c5a-9e7f-0a1b2c3d4e5f]

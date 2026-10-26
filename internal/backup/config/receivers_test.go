@@ -438,3 +438,19 @@ func buildReceivers(fileReceivers []FileReceiver, notifications *notify.Registry
 
 	return receivers, nil
 }
+
+func TestResolveReceiverImmutable(t *testing.T) {
+	t.Parallel()
+
+	backup := FileReceiver{ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a", Immutable: true}
+	if got, err := ResolveReceiver(backup, nil, nil, ""); err != nil || !got.Immutable {
+		t.Errorf("immutable backup receiver = (Immutable %v, err %v), want (true, nil)", got.Immutable, err)
+	}
+
+	directory := backup
+	directory.Type = string(ReceiverKindDirectory)
+
+	if _, err := ResolveReceiver(directory, nil, nil, ""); err == nil {
+		t.Error("immutable directory receiver = nil error, want one")
+	}
+}

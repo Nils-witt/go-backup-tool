@@ -63,7 +63,9 @@ func HandleReceiveBackupFile(receivers *Registry, receiverStatus *status.Receive
 // upload time; when given, it's also stamped as the written file's mtime
 // (objectstore.SetObjectModTime) so the dashboard's file listing agrees with it.
 // Every attempt is recorded to status, win or lose, so /api/receivers
-// reflects it.
+// reflects it. On an immutable receiver, a key that already holds a
+// different object answers 409 and an identical re-upload 200 (see
+// storeObject).
 func HandleReceiveObject(receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db store.Store) http.HandlerFunc {
 	return receiveObject(receivers, receiverStatus, log, db, false)
 }
@@ -90,29 +92,7 @@ func receiveObject(receivers *Registry, receiverStatus *status.ReceiverStore, lo
 
 		cfg.CreatedAt = createdAt
 
-		limited, limit, ok := limitUploadBody(w, r, recv, objectstore.LocalObjectPath(cfg, t), log)
-		if !ok {
-			return
-		}
-
-		body := &digestReader{r: limited, h: sha256.New(), want: bound.BodySHA256}
-
-		if err := objectstore.WriteLocalObject(cfg, t, body); err != nil {
-			log.Warn("receiver: writing object failed", "id", recv.ID, "key", key, "err", err)
-			receiverStatus.Record(recv.ID, key, err)
-			recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, store.ReceiverEventReceive, key, 0, err)
-
-			if writeUploadLimitError(w, err, limit) {
-				return
-			}
-
-			if errors.Is(err, errBodyDigestMismatch) {
-				http.Error(w, errBodyDigestMismatch.Error(), http.StatusBadRequest)
-				return
-			}
-
-			http.Error(w, "writing object failed", http.StatusInternalServerError)
-
+		if !storeObject(w, r, recv, cfg, t, key, bound, receiverStatus, log, db) {
 			return
 		}
 
@@ -138,6 +118,55 @@ func receiveObject(receivers *Registry, receiverStatus *status.ReceiverStore, lo
 		log.Info("receiver: object written", "id", recv.ID, "key", key, "path", objectstore.LocalObjectPath(cfg, t))
 		w.WriteHeader(http.StatusCreated)
 	}
+}
+
+// storeObject stores r's body as the object cfg/t names (key, for status
+// and the event log), capped by the receiver's upload limits (see
+// limitUploadBody) and checked against the token's body digest. It reports
+// whether the object was written; otherwise it has already answered r. An
+// immutable receiver checks for an existing object before taking the body
+// (see answerExistingObject), and its write never replaces one either (see
+// objectstore.WriteNewLocalObject), in case another upload of the same key
+// lands meanwhile.
+func storeObject(w http.ResponseWriter, r *http.Request, recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, key string, bound remoteauth.Request, receiverStatus *status.ReceiverStore, log *slog.Logger, db store.Store) bool {
+	dst := objectstore.LocalObjectPath(cfg, t)
+	replacing, write := dst, objectstore.WriteLocalObject
+
+	if recv.Immutable {
+		if answerExistingObject(r.Context(), w, recv, dst, key, bound.BodySHA256, log, db) {
+			return false
+		}
+
+		replacing, write = "", objectstore.WriteNewLocalObject
+	}
+
+	limited, limit, ok := limitUploadBody(w, r, recv, replacing, log)
+	if !ok {
+		return false
+	}
+
+	err := write(cfg, t, &digestReader{r: limited, h: sha256.New(), want: bound.BodySHA256})
+	if err == nil {
+		return true
+	}
+
+	if errors.Is(err, objectstore.ErrObjectExists) && answerExistingObject(r.Context(), w, recv, dst, key, bound.BodySHA256, log, db) {
+		return false
+	}
+
+	log.Warn("receiver: writing object failed", "id", recv.ID, "key", key, "err", err)
+	receiverStatus.Record(recv.ID, key, err)
+	recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, store.ReceiverEventReceive, key, 0, err)
+
+	switch {
+	case writeUploadLimitError(w, err, limit):
+	case errors.Is(err, errBodyDigestMismatch):
+		http.Error(w, errBodyDigestMismatch.Error(), http.StatusBadRequest)
+	default:
+		http.Error(w, "writing object failed", http.StatusInternalServerError)
+	}
+
+	return false
 }
 
 // authorizeReceiver looks up the receiver named by the request's {id} path
