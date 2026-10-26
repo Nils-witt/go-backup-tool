@@ -490,7 +490,8 @@ paths:
         dashboard's own JavaScript calls this (bearer-authenticated) right
         before navigating the browser to the matching GET below, which — as
         a plain page navigation — can't carry an Authorization header.
-        Requires the `download` permission (which implies `view`).
+        Requires the `download` permission (which implies `view`). One
+        user can hold at most 100 unredeemed, unexpired tickets at a time.
       security:
         - webUIBearer: []
       parameters:
@@ -524,6 +525,18 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: Unknown receiver id
+          content:
+            text/plain:
+              schema:
+                type: string
+        "429":
+          description: >
+            The user already holds 100 unused download tickets; retry once
+            some have expired (see Retry-After).
+          headers:
+            Retry-After:
+              schema:
+                type: integer
           content:
             text/plain:
               schema:
