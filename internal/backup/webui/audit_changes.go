@@ -58,6 +58,7 @@ func auditResources(db store.Store, keyring *gpgkeys.Keyring) map[string]auditRe
 			return config.FileReceiver{
 				ID: rc.ID, AllowedServers: rc.AllowedServers, Path: rc.Path, Retention: rc.Retention,
 				StaleAfter: rc.StaleAfter, StaleNotifications: rc.StaleNotifications, DownloadNotifications: rc.DownloadNotifications,
+				MaxObjectSize: rc.MaxObjectSize, Quota: rc.Quota, Immutable: rc.Immutable,
 			}
 		})},
 		"trusted-servers": {snapshot: func(ctx context.Context, id string) (any, bool, error) {

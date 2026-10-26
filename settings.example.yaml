@@ -59,8 +59,9 @@
 # receiver/download detail) aren't readable in transit or sitting in an
 # inbox provider — only the subject line stays in the clear, since SMTP/MIME
 # headers are never covered by this. encrypt.recipients names the GPG
-# identities (fingerprint or email address) to encrypt to; each must already
-# have its public key imported into the keyring the top-level
+# identities (fingerprint or email address) to encrypt to; each must match
+# exactly one usable key, like a job's recipients (see config.example.yaml),
+# and must already have its public key imported into the keyring the top-level
 # gpg-bin/gpg-homedir (in the config file) resolve to (`gpg --import their-key.asc`) —
 # encrypted emails use the same gpg binary and keyring as backups.
 # notifications:
@@ -126,6 +127,20 @@
 # deleted, and with neither rule set nothing is. keep-versions is only valid
 # on a directory receiver.
 #
+# max-object-size (optional) is the largest single object (or, on a
+# directory receiver, file) a sender may upload, as a size such as 10GiB or
+# 500MB (decimal kB/MB/GB/TB or binary KiB/MiB/GiB/TiB); a larger upload is
+# rejected with 413. Unset means 50GiB. quota (optional) caps how much the
+# receiver's path may hold in total; an upload that would take it over is
+# rejected with 507. Unset sets no quota.
+#
+# immutable: true (backup receivers only) makes stored objects write-once:
+# an upload to a key that already holds a different object is rejected
+# with 409, so a compromised sender can't overwrite the backups it sent
+# earlier. Re-sending the identical object succeeds without rewriting it.
+# Retention still deletes expired objects. Leave it off for jobs whose key
+# has no {time}, which overwrite the same object on every run.
+#
 # download-notifications (optional, independent of stale-after/
 # stale-notifications) names notifications: entries to fire every time a
 # file is successfully downloaded from this receiver through the dashboard.
@@ -143,6 +158,9 @@
 #     stale-after: 26h # alert if sibling-instance's daily job hasn't shown up
 #     stale-notifications: [pagerduty]
 #     download-notifications: [slack-downloads]
+#     max-object-size: 20GiB
+#     quota: 2TB
+#     immutable: true
 #   - id: documents
 #     type: directory
 #     allowed-servers: [6f1c2a4e-8d3b-4c5a-9e7f-0a1b2c3d4e5f]

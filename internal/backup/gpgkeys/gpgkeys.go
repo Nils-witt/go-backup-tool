@@ -16,8 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 )
 
 // ErrInvalidKey wraps every reason Import refuses its input, so the web UI
@@ -49,9 +47,10 @@ type Keyring struct {
 	Homedir string
 }
 
-// New returns the keyring gpg resolves to.
-func New(gpg notify.GPGSettings) *Keyring {
-	return &Keyring{Bin: gpg.Bin, Homedir: gpg.Homedir}
+// New returns the keyring the gpg binary bin resolves homedir ("" for its
+// default) to.
+func New(bin, homedir string) *Keyring {
+	return &Keyring{Bin: bin, Homedir: homedir}
 }
 
 // List returns every public key in the keyring, in gpg's order.

@@ -92,6 +92,7 @@ export function ReceiverLogSection({ events }: { events: ReceiverEventJSON[] }) 
         >
           <MenuItem value="">All kinds</MenuItem>
           <MenuItem value="receive">Receive</MenuItem>
+          <MenuItem value="reject">Reject</MenuItem>
           <MenuItem value="delete">Delete</MenuItem>
         </Select>
         <Select

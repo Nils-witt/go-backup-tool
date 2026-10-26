@@ -18,6 +18,7 @@ import Button from "@mui/material/Button";
 import LinearProgress from "@mui/material/LinearProgress";
 import { useAuth } from "./auth/useAuth";
 import { Footer } from "./components/Footer";
+import { ReauthDialog } from "./components/ReauthDialog";
 import { useMeta } from "./hooks/useMeta";
 import { NAV_GROUPS } from "./nav";
 
@@ -134,6 +135,7 @@ export function Layout() {
         </Container>
         <Footer />
       </Box>
+      <ReauthDialog />
     </Box>
   );
 }

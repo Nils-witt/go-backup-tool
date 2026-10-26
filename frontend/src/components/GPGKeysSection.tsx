@@ -154,8 +154,8 @@ export function GPGKeysSection() {
         <Typography variant="body2" color="text.secondary">
           Public keys in the keyring jobs encrypt backups to (
           {data?.homedir ? <code>{data.homedir}</code> : "gpg's default keyring"}). A job&apos;s
-          recipients must each match one of them; jobs with their own GPG home directory use that
-          keyring instead.
+          recipients must each match exactly one of them, or the job fails; jobs with their own GPG
+          home directory use that keyring instead.
         </Typography>
         {editing ? (
           <Button

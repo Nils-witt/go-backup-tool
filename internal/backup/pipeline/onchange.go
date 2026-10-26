@@ -511,7 +511,11 @@ func encryptFile(ctx context.Context, cfg *config.Config, p string, log *slog.Lo
 
 	h := sha256.New()
 
-	gpgCmd := buildGPGCommand(ctx, cfg)
+	gpgCmd, err := buildGPGCommand(ctx, cfg)
+	if err != nil {
+		return "", 0, "", err
+	}
+
 	gpgCmd.Stdin = io.TeeReader(f, h)
 	gpgCmd.Stderr = &logWriter{log: log, msg: "gpg stderr"}
 

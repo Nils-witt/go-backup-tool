@@ -256,7 +256,7 @@ func TestReceiverCreatedAtRuntimeAcceptsUploads(t *testing.T) {
 	m.trusted.Put(trust.Server{ID: testSenderUUID, Name: "sender", PublicKey: &key.PublicKey})
 
 	mux := http.NewServeMux()
-	RegisterRoutes(mux, m.registry, m.status, discardLogger, m.db)
+	RegisterRoutes(mux, m.registry, m.status, discardLogger, m.db, nil)
 
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

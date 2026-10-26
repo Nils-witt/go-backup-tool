@@ -49,7 +49,7 @@ func newOnChangeFixture(t *testing.T) *onChangeFixture {
 	receivers := map[string]config.ResolvedReceiver{recv.ID: recv}
 
 	mux := http.NewServeMux()
-	receiver.RegisterRoutes(mux, receiver.NewRegistry(receivers), status.NewReceiverStore(receivers), discardLogger, nil)
+	receiver.RegisterRoutes(mux, receiver.NewRegistry(receivers), status.NewReceiverStore(receivers), discardLogger, nil, nil)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if f.failing.Load() {

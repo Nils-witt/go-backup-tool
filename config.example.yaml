@@ -202,6 +202,10 @@ servers:
 # until stopped (Ctrl-C/SIGTERM) or the config file's timeout elapses.
 # webui:
 #   enabled: true
+#   # listen is a plain-HTTP address (there's no built-in TLS): keep it on
+#   # loopback and put a TLS-terminating reverse proxy in front (see the
+#   # README's "Running behind a reverse proxy"). Listening beyond loopback
+#   # without trust-proxy-headers logs a warning on startup.
 #   listen: ":8080" # required when enabled: true
 #
 #   # The dashboard's only login method is SSO (see oidc below): every
@@ -220,9 +224,20 @@ servers:
 #
 #   # event-log-limit caps how many of the most recent entries each event
 #   # log (job runs, target runs, logins, downloads, receiver events) shows
-#   # in the dashboard. Every entry stays in the state database regardless.
-#   # Unset defaults to 200; must be between 1 and 10000.
+#   # in the dashboard; older entries stay in the state database until
+#   # event-log-retention removes them. Unset defaults to 200; must be
+#   # between 1 and 10000.
 #   event-log-limit: 1000
+#
+#   # event-log-retention is how long the login, download, receiver, and
+#   # audit logs keep an entry before it's deleted (checked daily), e.g.
+#   # "365d" or "720h". Unset defaults to 90d; "0" keeps entries forever.
+#   # It lives here rather than in the dashboard so an admin can't shorten
+#   # it to cover their tracks. To keep these events beyond this instance,
+#   # forward the process's log output (or log-file:) to syslog or a SIEM:
+#   # every login, change, download, and rejected receiver request is also
+#   # logged there.
+#   event-log-retention: 365d
 #
 #   # trust-proxy-headers makes the dashboard's login/download logs and
 #   # access log record the client address from the Forwarded/
@@ -233,7 +248,9 @@ servers:
 #   # logged address. Unset (the default) always uses the TCP connection's
 #   # own address. It also makes the live status WebSocket accept the
 #   # public host from Forwarded host=/X-Forwarded-Host as its origin, for a
-#   # proxy that rewrites Host (e.g. to 127.0.0.1:8086).
+#   # proxy that rewrites Host (e.g. to 127.0.0.1:8086), and sends
+#   # Strict-Transport-Security when Forwarded proto=/X-Forwarded-Proto
+#   # reports the client connected over HTTPS.
 #   trust-proxy-headers: true
 #
 #   # dev-mode adds permissive CORS response headers (Access-Control-Allow-
@@ -248,12 +265,28 @@ servers:
 #   # cors-get-origins enables CORS for the read-only GET /api/... endpoints
 #   # only, so another site's JavaScript (e.g. a status page) can read this
 #   # instance's API with its own bearer token (an API token from the
-#   # dashboard) — e.g. another instance's dashboard showing this one under
-#   # "Remote backends". List bare origins (scheme://host[:port]) or "*" for any
+#   # dashboard). List bare origins (scheme://host[:port]) or "*" for any
 #   # origin. POST/PUT/DELETE stay same-origin only. Unset (the default)
 #   # adds no CORS headers; dev-mode, if set, takes precedence.
 #   cors-get-origins:
 #     - "https://status.example.com"
+#
+#   # rate-limit limits each client's /api/... requests (the dashboard API
+#   # and the receiver API), keyed by its address (IPv6 by /64 network). A
+#   # client gets 429 Too Many Requests, with Retry-After, once it exceeds
+#   # requests-per-second (after an initial burst), or once it has had
+#   # auth-failure-burst requests rejected with 401 (a rejected SSO, API or
+#   # receiver token) until they refill at auth-failures-per-minute. Both
+#   # are on by default with the values below; set a field to change it, or
+#   # disabled: true when a reverse proxy or WAF already rate-limits. Behind
+#   # a reverse proxy, also set trust-proxy-headers, or every client shares
+#   # the proxy's limits.
+#   rate-limit:
+#     requests-per-second: 20
+#     burst: 100
+#     auth-failures-per-minute: 10
+#     auth-failure-burst: 20
+#     # disabled: true
 #
 #   # receivers-base-dir is the directory every receiver path set from the
 #   # web UI (Receiver settings) must lie inside, so a dashboard admin can't
@@ -273,7 +306,9 @@ servers:
 #   # if that's acceptable for everyone granted "admin".
 #   # It also lets admins add public keys to the GPG keyring (Settings >
 #   # GPG keys; listing them is always allowed): a key carrying a
-#   # recipient's email address could otherwise receive that job's backups.
+#   # recipient's email address makes that recipient ambiguous, which fails
+#   # the job (see recipients: below) — name recipients by fingerprint so a
+#   # new key can't stop backups either.
 #   job-editing: true
 #
 #   # oidc configures single sign-on via an OpenID Connect provider
@@ -324,6 +359,14 @@ servers:
 #     group-permissions:
 #       backup-admins: [admin]
 #       auditors: [login-log, download-log, audit-log]
+#     # reauth-max-age is how recently a user must have signed in at the
+#     # provider (their ID token's auth_time) to create, change, or delete
+#     # jobs, servers, and commands, or to add GPG keys — the changes that
+#     # can run code on this machine or redirect backups. An older sign-in
+#     # makes the dashboard ask them to sign in again (prompt=login), so
+#     # someone using an unattended, signed-in browser can't make them.
+#     # Unset defaults to 15m; "0" turns the check off.
+#     # reauth-max-age: 15m
 
 jobs:
   - name: database
@@ -346,8 +389,16 @@ jobs:
     targets:
       - server: nas
         bucket: my-backup-bucket
+    # recipients names the GPG public keys to encrypt to: preferably each
+    # key's full 40-digit fingerprint (`gpg --fingerprint`), or an email
+    # address, key ID, or part of a user ID. Before every run each one must
+    # match exactly one usable key in the keyring, and the backup is
+    # encrypted to that key's fingerprint: a recipient matching no key or
+    # several (e.g. a second key someone added carrying the same address)
+    # fails the job instead of encrypting to whichever key gpg picks. A
+    # recipient that isn't a fingerprint is logged as a warning on startup.
     recipients:
-      - me@example.com
+      - 0123456789ABCDEF0123456789ABCDEF01234567 # me@example.com
     # armor: false
     # gpg-bin: gpg
     # gpg-homedir: ""

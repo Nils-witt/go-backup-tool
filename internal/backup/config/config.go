@@ -273,6 +273,10 @@ type RunConfig struct {
 	// DefaultEventLogLimit.
 	EventLogLimit int
 
+	// EventLogRetention is how long the event logs keep an entry (see
+	// fileWebUI.EventLogRetention); 0 keeps them forever.
+	EventLogRetention time.Duration
+
 	// TrustProxyHeaders, when set, makes the web UI derive the client
 	// address it records (login/download logs, access log) from
 	// proxy-supplied headers rather than the raw TCP connection — see
@@ -289,6 +293,10 @@ type RunConfig struct {
 	// "*") allowed to read the web UI's GET /api/... endpoints cross-origin.
 	// Empty adds no such CORS headers.
 	CORSGetOrigins []string
+
+	// RateLimit is webui.rate-limit: resolved, with its defaults filled in
+	// (see fileWebUIRateLimit).
+	RateLimit RateLimitSettings
 
 	// OIDC is the web UI's only login method: the SPA runs the OpenID
 	// Connect login itself as a public client, and every /api/... request

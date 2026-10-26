@@ -1,4 +1,4 @@
-import { getAccessToken, renewAccessToken } from "../auth/oidc";
+import { getAccessToken, getIdToken, renewAccessToken } from "../auth/oidc";
 import type { MeJSON, MetaJSON, SSOStatusJSON } from "./types";
 
 /** Thrown on a non-2xx response; message is the server's own (plain-text) error body. */
@@ -11,9 +11,48 @@ export class ApiError extends Error {
   }
 }
 
-function send(url: string, opts: RequestInit, token: string | null): Promise<Response> {
+/**
+ * Thrown when a change needs a more recent sign-in (an RFC 9470
+ * insufficient_user_authentication challenge); maxAge is how recent, in
+ * seconds. ReauthDialog offers to sign in again.
+ */
+export class ReauthRequiredError extends ApiError {
+  maxAge: number;
+
+  constructor(message: string, maxAge: number) {
+    super(401, message);
+    this.maxAge = maxAge;
+  }
+}
+
+type ReauthListener = (err: ReauthRequiredError) => void;
+const reauthListeners = new Set<ReauthListener>();
+
+/** Registers cb to run whenever a change needs a more recent sign-in. Returns an unsubscribe function. */
+export function onReauthRequired(cb: ReauthListener): () => void {
+  reauthListeners.add(cb);
+  return () => reauthListeners.delete(cb);
+}
+
+/** The max_age of an insufficient_user_authentication challenge, or null for any other 401. */
+function reauthMaxAge(res: Response): number | null {
+  const challenge = res.headers.get("WWW-Authenticate") ?? "";
+  if (!challenge.includes('error="insufficient_user_authentication"')) return null;
+
+  const m = /max_age=(\d+)/.exec(challenge);
+  return m ? Number(m[1]) : 0;
+}
+
+async function send(url: string, opts: RequestInit, token: string | null): Promise<Response> {
   const headers = new Headers(opts.headers);
   if (token) headers.set("Authorization", "Bearer " + token);
+
+  // Changes carry the ID token too: some of them need a recent sign-in,
+  // which only its auth_time shows (see internal/backup/webui/reauth.go).
+  if (token && opts.method && opts.method !== "GET") {
+    const idToken = await getIdToken();
+    if (idToken) headers.set("X-ID-Token", idToken);
+  }
 
   return fetch(url, { ...opts, headers });
 }
@@ -23,10 +62,20 @@ function send(url: string, opts: RequestInit, token: string | null): Promise<Res
 // provider) gets one silent renewal attempt; a 401 that persists throws an
 // ApiError rather than navigating anywhere — when the session can't be
 // renewed, oidc.ts drops it and AuthContext/AuthGate send the browser to
-// /login. Any other status is returned for the caller to inspect.
+// /login. A change that needs a more recent sign-in throws a
+// ReauthRequiredError instead, without a renewal (which wouldn't help).
+// Any other status is returned for the caller to inspect.
 export async function apiFetch(url: string, opts: RequestInit = {}): Promise<Response> {
   let token = await getAccessToken();
   let res = await send(url, opts, token);
+
+  const maxAge = res.status === 401 ? reauthMaxAge(res) : null;
+  if (maxAge !== null) {
+    const msg = (await res.text().catch(() => "")).trim();
+    const err = new ReauthRequiredError(msg || "this change needs a more recent sign-in", maxAge);
+    reauthListeners.forEach((cb) => cb(err));
+    throw err;
+  }
 
   if (res.status === 401 && token) {
     token = await renewAccessToken(true);
@@ -73,39 +122,6 @@ async function publicJSON<T>(url: string): Promise<T> {
 
   return (await res.json()) as T;
 }
-
-// remoteFetchJSON GETs path from another instance (see lib/remoteBackends)
-// with that instance's API token — never this instance's SSO token. A
-// network failure, which is also how a browser reports a CORS refusal,
-// rejects with a TypeError rather than an ApiError.
-export async function remoteFetchJSON<T>(
-  backend: { url: string; token: string },
-  path: string,
-): Promise<T> {
-  const res = await fetch(backend.url + path, {
-    headers: { Authorization: "Bearer " + backend.token },
-  });
-  if (!res.ok) throw await errorFrom(res, `request failed: ${res.status}`);
-
-  return (await res.json()) as T;
-}
-
-// remoteErrorMessage turns a remoteFetchJSON failure into something an
-// operator can act on.
-export function remoteErrorMessage(err: unknown): string {
-  if (err instanceof ApiError) {
-    if (err.status === 401) return "API token rejected (invalid, revoked or expired)";
-    return `${err.status}: ${err.message}`;
-  }
-  if (err instanceof TypeError) {
-    return `unreachable, or this origin (${window.location.origin}) is not in the remote's webui.cors-get-origins`;
-  }
-
-  return String(err);
-}
-
-export const fetchRemoteMeta = (backend: { url: string }) =>
-  publicJSON<MetaJSON>(backend.url + "/api/meta");
 
 export const fetchMeta = () => publicJSON<MetaJSON>("/api/meta");
 export const fetchSSOStatus = () => publicJSON<SSOStatusJSON>("/api/sso/status");

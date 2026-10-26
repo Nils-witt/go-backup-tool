@@ -153,7 +153,7 @@ func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, deps webu
 
 	go receiver.MonitorReceiverRetention(ctx, deps.DB, deps.Receivers, deps.Log)
 
-	deps.GPGKeyring = gpgkeys.New(rc.GPG)
+	deps.GPGKeyring = gpgkeys.New(rc.GPG.Bin, rc.GPG.Homedir)
 	srv := webui.StartWebUI(deps, webui.Options{
 		Addr:              rc.Listen,
 		InstanceName:      rc.ServerName,
@@ -162,8 +162,11 @@ func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, deps webu
 		DevMode:           rc.DevMode,
 		EventLogLimit:     rc.EventLogLimit,
 		CORSGetOrigins:    rc.CORSGetOrigins,
+		RateLimit:         rc.RateLimit,
 		ExtraRoutes: func(mux *http.ServeMux) {
-			receiver.RegisterRoutes(mux, deps.Receivers, deps.ReceiverStatus, deps.Log, deps.DB)
+			receiver.RegisterRoutes(mux, deps.Receivers, deps.ReceiverStatus, deps.Log, deps.DB, func(r *http.Request) string {
+				return webui.ClientAddr(r, rc.TrustProxyHeaders)
+			})
 		},
 	})
 
@@ -423,27 +426,28 @@ func openStateDB(ctx context.Context, rc *config.RunConfig, log *slog.Logger) (d
 		return nil, nil, fmt.Errorf("unknown database type %q", rc.Database.Type)
 	}
 
-	go pruneEventLogs(ctx, db, log)
+	go pruneEventLogs(ctx, db, rc.EventLogRetention, log)
 
 	return db, func() { _ = db.Close() }, nil
 }
 
-// eventLogRetention is how long the login, download, receiver, and audit
-// event logs keep a row before pruneEventLogs deletes it.
-const eventLogRetention = 90 * 24 * time.Hour
+// pruneEventLogs deletes login, download, receiver, and audit event log
+// rows older than retention (webui.event-log-retention) once at startup and
+// then daily, until ctx is done. A zero retention keeps them forever.
+func pruneEventLogs(ctx context.Context, db store.Store, retention time.Duration, log *slog.Logger) {
+	if retention <= 0 {
+		return
+	}
 
-// pruneEventLogs deletes event log rows older than eventLogRetention once at
-// startup and then daily, until ctx is done.
-func pruneEventLogs(ctx context.Context, db store.Store, log *slog.Logger) {
 	periodic.Run(ctx, 24*time.Hour, true, func() {
-		n, err := db.PruneEvents(ctx, time.Now().Add(-eventLogRetention))
+		n, err := db.PruneEvents(ctx, time.Now().Add(-retention))
 		if err != nil {
 			log.Warn("pruning event logs", "err", err)
 			return
 		}
 
 		if n > 0 {
-			log.Info("pruned old event log rows", "rows", n, "retention", eventLogRetention)
+			log.Info("pruned old event log rows", "rows", n, "retention", retention)
 		}
 	})
 }

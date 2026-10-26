@@ -5,7 +5,7 @@
 // only its id (jti), issuer and expiry; every request still looks its id up
 // in the state db, so revoking one takes effect immediately. A token's
 // principal is only ever granted permission.PermissionView and the job run
-// log (so a remote dashboard can draw each job's run history) — never
+// log (so a script or status page can follow each job's run history) — never
 // download, admin, or any of the other audit logs.
 
 package webui
@@ -35,8 +35,8 @@ const (
 
 	// apiTokenPermissions is what every API token grants: read-only
 	// dashboard access, without file downloads. The job run log is
-	// included so a dashboard merging this instance in as a remote backend
-	// can draw its jobs' run history.
+	// included so a script or status page reading this instance can follow
+	// its jobs' run history.
 	apiTokenPermissions = permission.PermissionView | permission.PermissionViewJobRunLog
 
 	// apiTokenUsernamePrefix prefixes an API token's name to form its

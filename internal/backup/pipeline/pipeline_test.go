@@ -296,37 +296,38 @@ func TestUploadStagedToTargetsSingleAttemptOnFailure(t *testing.T) {
 	}
 }
 
-func TestBuildGPGCommand(t *testing.T) {
+func TestGPGEncryptArgs(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		cfg      *config.Config
-		wantArgs []string // exact args, in order
+		name         string
+		cfg          *config.Config
+		fingerprints []string
+		wantArgs     []string // exact args, in order
 	}{
 		{
 			name: "single recipient",
 			cfg: &config.Config{
-				GPGBin:     "gpg",
-				Recipients: []string{"me@example.com"},
+				GPGBin: "gpg",
 			},
+			fingerprints: []string{"AAAA"},
 			wantArgs: []string{
 				"--batch", "--yes", "--trust-model", "always", "--force-mdc", "--encrypt",
-				"--recipient", "me@example.com",
+				"--recipient", "AAAA",
 			},
 		},
 		{
 			name: "multiple recipients plus armor and homedir",
 			cfg: &config.Config{
 				GPGBin:     "gpg",
-				Recipients: []string{"a@example.com", "b@example.com"},
 				Armor:      true,
 				GPGHomedir: "/tmp/gnupg-test",
 			},
+			fingerprints: []string{"AAAA", "BBBB"},
 			wantArgs: []string{
 				"--batch", "--yes", "--homedir", "/tmp/gnupg-test", "--armor",
 				"--trust-model", "always", "--force-mdc", "--encrypt",
-				"--recipient", "a@example.com", "--recipient", "b@example.com",
+				"--recipient", "AAAA", "--recipient", "BBBB",
 			},
 		},
 	}
@@ -335,11 +336,8 @@ func TestBuildGPGCommand(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			cmd := buildGPGCommand(context.Background(), tt.cfg)
-
-			gotArgs := cmd.Args[1:] // cmd.Args[0] is the binary name
-			if !slices.Equal(gotArgs, tt.wantArgs) {
-				t.Errorf("buildGPGCommand() args = %v, want %v", gotArgs, tt.wantArgs)
+			if got := gpgEncryptArgs(tt.cfg, tt.fingerprints); !slices.Equal(got, tt.wantArgs) {
+				t.Errorf("gpgEncryptArgs() = %v, want %v", got, tt.wantArgs)
 			}
 		})
 	}

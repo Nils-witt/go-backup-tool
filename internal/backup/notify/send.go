@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"nilswitt.dev/go-backup-tool/internal/backup/gpgkeys"
 )
 
 // Timeout bounds a single notification delivery — one webhook POST or one
@@ -150,11 +152,17 @@ func buildMailMessage(ctx context.Context, sender string, recipients []string, s
 }
 
 // encryptGPGBody GPG-encrypts body (armored) to every one of enc.Recipients,
-// which must already have their public key in the keyring enc.GPGBin/
-// enc.GPGHomedir resolve to. Mirrors pipeline.buildGPGCommand's recipient
-// mode, but runs synchronously since an email body is small enough to hold
-// entirely in memory.
+// each of which must name exactly one usable public key in the keyring
+// enc.GPGBin/enc.GPGHomedir resolve to (see gpgkeys.ResolveRecipients); it
+// encrypts to those keys' fingerprints. Mirrors pipeline.buildGPGCommand's
+// recipient mode, but runs synchronously since an email body is small
+// enough to hold entirely in memory.
 func encryptGPGBody(ctx context.Context, enc EmailEncrypt, body string) (string, error) {
+	fingerprints, err := gpgkeys.New(enc.GPGBin, enc.GPGHomedir).ResolveRecipients(ctx, enc.Recipients)
+	if err != nil {
+		return "", err
+	}
+
 	args := []string{"--batch", "--yes"}
 
 	if enc.GPGHomedir != "" {
@@ -163,8 +171,8 @@ func encryptGPGBody(ctx context.Context, enc EmailEncrypt, body string) (string,
 
 	args = append(args, "--trust-model", "always", "--force-mdc", "--armor", "--encrypt")
 
-	for _, r := range enc.Recipients {
-		args = append(args, "--recipient", r)
+	for _, fpr := range fingerprints {
+		args = append(args, "--recipient", fpr)
 	}
 
 	cmd := exec.CommandContext(ctx, enc.GPGBin, args...) //nolint:gosec // enc.GPGBin/args are operator-supplied CLI config, not untrusted input

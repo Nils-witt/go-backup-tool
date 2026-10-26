@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -98,8 +99,14 @@ type Options struct {
 	EventLogLimit int
 
 	// CORSGetOrigins are the origins allowed to read GET endpoints from
-	// another dashboard (see getCORSMiddleware). Ignored in DevMode.
+	// another site, e.g. a status page (see getCORSMiddleware). Ignored in
+	// DevMode.
 	CORSGetOrigins []string
+
+	// RateLimit limits each client's /api/... requests and failed
+	// authentications (see rateLimit). The zero value is replaced by
+	// config's defaults; set Disabled to turn it off.
+	RateLimit config.RateLimitSettings
 
 	// ExtraRoutes, if set, mounts more routes on the same mux, which is
 	// how the receiver API shares the listen address without this package
@@ -129,6 +136,11 @@ func StartWebUI(deps Deps, opts Options) *Server {
 		log.Warn("web UI: webui.oidc is not enabled, so nobody can sign in to the dashboard (the receiver API is unaffected)")
 	}
 
+	if !opts.TrustProxyHeaders && !loopbackOnly(ln.Addr()) {
+		log.Warn("web UI: listening for plain HTTP beyond loopback without webui.trust-proxy-headers: access tokens, download tickets, and receiver uploads cross the network unencrypted unless a TLS-terminating reverse proxy sits in front (see README, \"Running behind a reverse proxy\")",
+			"addr", ln.Addr().String())
+	}
+
 	liveCtx, stopLive := context.WithCancel(context.Background())
 
 	mux := http.NewServeMux()
@@ -140,6 +152,9 @@ func StartWebUI(deps Deps, opts Options) *Server {
 	} else if len(opts.CORSGetOrigins) > 0 {
 		handler = getCORSMiddleware(opts.CORSGetOrigins, handler)
 	}
+
+	handler = rateLimit(opts.RateLimit, opts.TrustProxyHeaders, log, handler)
+	handler = securityHeaders(opts.OIDC.Issuer, opts.TrustProxyHeaders, handler)
 
 	srv := &Server{
 		http:     &http.Server{Handler: logRequests(log, handler, opts.TrustProxyHeaders), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10},
@@ -159,6 +174,14 @@ func StartWebUI(deps Deps, opts Options) *Server {
 	log.Info("web UI listening", "addr", srv.addr)
 
 	return srv
+}
+
+// loopbackOnly reports whether addr, a bound listener's address, only
+// accepts connections from this machine. A wildcard address (":8080",
+// "0.0.0.0", "::") accepts them from anywhere.
+func loopbackOnly(addr net.Addr) bool {
+	tcp, ok := addr.(*net.TCPAddr)
+	return ok && tcp.IP.IsLoopback()
 }
 
 // registerRoutes mounts every web UI route on mux: the single place to see
@@ -210,6 +233,13 @@ func registerRoutes(liveCtx context.Context, mux *http.ServeMux, deps Deps, opts
 		return admin(recordChange(db, auditRes, log, opts.TrustProxyHeaders, h))
 	}
 
+	// codeChange is change for a change that could run code on this host or
+	// redirect backups (jobs, servers, commands, GPG keys): it also needs a
+	// recent sign-in at the provider (see requireRecentLogin).
+	codeChange := func(h http.HandlerFunc) http.HandlerFunc {
+		return admin(requireRecentLogin(auth, recordChange(db, auditRes, log, opts.TrustProxyHeaders, h)))
+	}
+
 	mux.HandleFunc("GET /", handleDashboard(dashboardIndexHTML))
 	mux.Handle("GET /assets/", http.StripPrefix("/assets/", cacheForever(gzipStatic(dashboardAssetsFS, http.FileServerFS(dashboardAssetsFS)))))
 	mux.HandleFunc("GET /api/meta", handleMeta(opts.InstanceName))
@@ -238,14 +268,14 @@ func registerRoutes(liveCtx context.Context, mux *http.ServeMux, deps Deps, opts
 	mux.HandleFunc("POST /api/tokens", change(handleCreateAPIToken(tokens, log)))
 	mux.HandleFunc("DELETE /api/tokens/{id}", change(handleRevokeAPIToken(tokens, log)))
 	registerSettingsRoutes(mux, deps.ReceiverManager, deps.Trust, deps.Settings, admin, change, log)
-	registerJobConfigRoutes(mux, deps.Jobs, admin, change, log)
+	registerJobConfigRoutes(mux, deps.Jobs, admin, codeChange, log)
 	registerReportRoutes(mux, db, deps.Reporter, admin, change, log)
 
 	if deps.Runner != nil {
 		mux.HandleFunc("GET /api/docker-containers", admin(handleListDockerContainers(deps.Runner, log)))
 	}
 
-	registerGPGKeyRoutes(mux, deps.GPGKeyring, deps.Jobs != nil && deps.Jobs.Editing(), admin, change, log)
+	registerGPGKeyRoutes(mux, deps.GPGKeyring, deps.Jobs != nil && deps.Jobs.Editing(), admin, codeChange, log)
 
 	if opts.ExtraRoutes != nil {
 		opts.ExtraRoutes(mux)
@@ -291,11 +321,14 @@ func (s *Server) Shutdown() {
 // writing a 500 if encoding fails. Shared by every simple "serve the
 // current snapshot as JSON" handler in this file. v is marshaled before
 // anything is written, so a failure can still become a real 500 rather than
-// a 200 with a truncated body.
+// a 200 with a truncated body. The 500 carries a generic message; the
+// encoding error itself is only logged (see noteResponseError).
 func writeJSON(w http.ResponseWriter, v any) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		noteResponseError(w, fmt.Errorf("encoding JSON response: %w", err))
+		http.Error(w, "encoding the response failed", http.StatusInternalServerError)
+
 		return
 	}
 

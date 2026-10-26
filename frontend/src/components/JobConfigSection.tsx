@@ -647,7 +647,7 @@ function JobDialog({
             label="Recipients"
             value={form.recipients}
             onChange={(e) => set({ recipients: e.target.value })}
-            helperText="GPG identities (fingerprint or email) to encrypt to, one per line. Their keys must be in the keyring."
+            helperText="GPG keys to encrypt to, one per line, preferably by fingerprint. Each must match exactly one usable key in the keyring, or the job fails."
             required
             multiline
             minRows={2}

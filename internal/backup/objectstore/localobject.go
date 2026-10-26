@@ -40,40 +40,66 @@ func LocalObjectPath(cfg *config.Config, t *config.Target) string {
 // partially written object and a mid-stream failure leaves nothing at the
 // final path.
 func WriteLocalObject(cfg *config.Config, t *config.Target, r io.Reader) error {
-	dst := LocalObjectPath(cfg, t)
+	return writeLocalObject(cfg, t, r, true)
+}
+
+// ErrObjectExists is returned by WriteNewLocalObject when an object already
+// exists at its path.
+var ErrObjectExists = errors.New("object already exists")
+
+// WriteNewLocalObject is WriteLocalObject for a write-once destination (an
+// immutable: receiver): it never replaces an existing object, returning
+// ErrObjectExists instead — even when another write lands at the same path
+// while r is still streaming, since the finished temp file is hard-linked
+// into place rather than renamed over it.
+func WriteNewLocalObject(cfg *config.Config, t *config.Target, r io.Reader) error {
+	return writeLocalObject(cfg, t, r, false)
+}
+
+func writeLocalObject(cfg *config.Config, t *config.Target, r io.Reader, replace bool) error {
+	root, err := openRoot(targetBase(t), true)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+
+	dst := objectRel(cfg)
 	dir := filepath.Dir(dst)
 
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("creating directory %q: %w", dir, err)
+	if err := root.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating directory %q: %w", filepath.Join(root.Name(), dir), err)
 	}
 
 	if cfg.File != "" {
-		if err := writeMultiFileMarker(dir); err != nil {
+		if err := writeMultiFileMarker(root, dir); err != nil {
 			return err
 		}
 	}
 
-	return writeFileAtomically(dir, dst, r)
+	return writeFileAtomically(root, dir, dst, r, replace)
 }
 
-// writeFileAtomically streams r into a temp file in dir (which must exist),
-// syncs it, and renames it to dst, so a reader never observes a partially
-// written file and a failure leaves nothing at dst.
-func writeFileAtomically(dir, dst string, r io.Reader) error {
-	tmp, err := os.CreateTemp(dir, ".*.tmp")
+// writeFileAtomically streams r into a temp file in dir (which must exist)
+// under root, syncs it, and renames it to dst, so a reader never observes
+// a partially written file and a failure leaves nothing at dst. Without
+// replace, the temp file is hard-linked to dst instead, which fails with
+// ErrObjectExists if dst already exists. dir and dst are relative to root.
+func writeFileAtomically(root *os.Root, dir, dst string, r io.Reader, replace bool) error {
+	name, err := tempFileName(dir)
 	if err != nil {
-		return fmt.Errorf("creating temp file in %q: %w", dir, err)
+		return err
 	}
 
-	// A successful rename below moves tmp.Name() to dst, so this Remove
-	// then finds nothing and is a harmless no-op; on any earlier error path
-	// it cleans up the leftover temp file.
-	defer func() { _ = os.Remove(tmp.Name()) }()
-
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("setting permissions on %q: %w", tmp.Name(), err)
+	tmp, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("creating temp file in %q: %w", filepath.Join(root.Name(), dir), err)
 	}
+
+	// A successful rename below moves name to dst, so this Remove then
+	// finds nothing and is a harmless no-op (after a link, it drops the
+	// temp name and leaves dst); on any earlier error path it cleans up
+	// the leftover temp file.
+	defer func() { _ = root.Remove(name) }()
 
 	if _, err := io.Copy(tmp, r); err != nil {
 		_ = tmp.Close()
@@ -92,45 +118,61 @@ func writeFileAtomically(dir, dst string, r io.Reader) error {
 		return fmt.Errorf("closing %q: %w", tmp.Name(), err)
 	}
 
-	if err := os.Rename(tmp.Name(), dst); err != nil {
-		return fmt.Errorf("renaming %q to %q: %w", tmp.Name(), dst, err)
+	full := filepath.Join(root.Name(), dst)
+
+	if !replace {
+		if err := root.Link(name, dst); err != nil {
+			if errors.Is(err, fs.ErrExist) {
+				return fmt.Errorf("%w: %q", ErrObjectExists, full)
+			}
+
+			return fmt.Errorf("linking %q to %q: %w", tmp.Name(), full, err)
+		}
+
+		return nil
+	}
+
+	if err := root.Rename(name, dst); err != nil {
+		return fmt.Errorf("renaming %q to %q: %w", tmp.Name(), full, err)
 	}
 
 	return nil
 }
 
-// writeMultiFileMarker creates dir's MultiFileMarker unless it exists.
-func writeMultiFileMarker(dir string) error {
+// writeMultiFileMarker creates dir's MultiFileMarker under root unless it
+// exists.
+func writeMultiFileMarker(root *os.Root, dir string) error {
 	path := filepath.Join(dir, MultiFileMarker)
 
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // dir is a target's own key folder, not raw untrusted input
+	f, err := root.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if errors.Is(err, fs.ErrExist) {
 		return nil
 	}
 
 	if err != nil {
-		return fmt.Errorf("creating backup marker %q: %w", path, err)
+		return fmt.Errorf("creating backup marker %q: %w", filepath.Join(root.Name(), path), err)
 	}
 
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("closing backup marker %q: %w", path, err)
+		return fmt.Errorf("closing backup marker %q: %w", filepath.Join(root.Name(), path), err)
 	}
 
 	return nil
 }
 
-// removeEmptyMultiFileDir removes dir — a key folder that held one of a
-// multi-file backup's files, which was just deleted — once nothing but its
-// MultiFileMarker is left in it. A dir without the marker (a flat object's
-// own parent folder) is left alone, as is one that still holds any file.
-func removeEmptyMultiFileDir(dir string) error {
-	entries, err := os.ReadDir(dir)
+// removeEmptyMultiFileDir removes dir (relative to root) — a key folder
+// that held one of a multi-file backup's files, which was just deleted —
+// once nothing but its MultiFileMarker is left in it. A dir without the
+// marker (a flat object's own parent folder) is left alone, as is one that
+// still holds any file.
+func removeEmptyMultiFileDir(root *os.Root, dir string) error {
+	entries, err := fs.ReadDir(root.FS(), filepath.ToSlash(dir))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 
-		return fmt.Errorf("reading %q: %w", dir, err)
+		return fmt.Errorf("reading %q: %w", filepath.Join(root.Name(), dir), err)
 	}
 
 	hasMarker := false
@@ -143,16 +185,16 @@ func removeEmptyMultiFileDir(dir string) error {
 		hasMarker = true
 	}
 
-	if !hasMarker {
+	if !hasMarker || dir == "." {
 		return nil
 	}
 
-	if err := os.Remove(filepath.Join(dir, MultiFileMarker)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("removing backup marker in %q: %w", dir, err)
+	if err := root.Remove(filepath.Join(dir, MultiFileMarker)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("removing backup marker in %q: %w", filepath.Join(root.Name(), dir), err)
 	}
 
-	if err := os.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("removing empty backup folder %q: %w", dir, err)
+	if err := root.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("removing empty backup folder %q: %w", filepath.Join(root.Name(), dir), err)
 	}
 
 	return nil
@@ -164,5 +206,11 @@ func removeEmptyMultiFileDir(dir string) error {
 // (see ListReceiverFiles) stays consistent with the retention db record
 // RecordObjectWrite made for the same write.
 func SetObjectModTime(cfg *config.Config, t *config.Target, at time.Time) error {
-	return os.Chtimes(LocalObjectPath(cfg, t), at, at)
+	root, err := openRoot(targetBase(t), false)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+
+	return root.Chtimes(objectRel(cfg), at, at)
 }

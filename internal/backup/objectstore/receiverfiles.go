@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -99,32 +100,30 @@ func ListReceiverFiles(recv config.ResolvedReceiver) ([]ReceiverFile, error) {
 		return listDirectoryReceiverFiles(recv)
 	}
 
-	if _, err := os.Stat(recv.Path); err != nil {
-		if os.IsNotExist(err) {
-			return []ReceiverFile{}, nil
-		}
+	root, err := openRoot(recv.Path, false)
+	if isNotExist(err) {
+		return []ReceiverFile{}, nil
+	}
 
+	if err != nil {
 		return nil, err
 	}
 
-	files := []ReceiverFile{}
-	isMultiFile := multiFileDirCache(recv.Path)
+	defer func() { _ = root.Close() }()
 
-	err := filepath.WalkDir(recv.Path, func(path string, d fs.DirEntry, walkErr error) error {
+	files := []ReceiverFile{}
+	isMultiFile := multiFileDirCache(root)
+
+	err = fs.WalkDir(root.FS(), ".", func(rel string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 
-		if d.IsDir() || strings.HasPrefix(d.Name(), ".") {
+		if !d.Type().IsRegular() || strings.HasPrefix(d.Name(), ".") {
 			return nil
 		}
 
 		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-
-		rel, err := filepath.Rel(recv.Path, path)
 		if err != nil {
 			return err
 		}
@@ -134,9 +133,9 @@ func ListReceiverFiles(recv config.ResolvedReceiver) ([]ReceiverFile, error) {
 			expiresAt = info.ModTime().Add(recv.Retention)
 		}
 
-		f := ReceiverFile{Key: filepath.ToSlash(rel), Size: info.Size(), ModTime: info.ModTime(), ExpiresAt: expiresAt}
-		if isMultiFile(filepath.Dir(path)) {
-			f.Key, f.File = filepath.ToSlash(filepath.Dir(rel)), d.Name()
+		f := ReceiverFile{Key: rel, Size: info.Size(), ModTime: info.ModTime(), ExpiresAt: expiresAt}
+		if isMultiFile(path.Dir(rel)) {
+			f.Key, f.File = path.Dir(rel), d.Name()
 		}
 
 		files = append(files, f)
@@ -182,19 +181,19 @@ func listDirectoryReceiverFiles(recv config.ResolvedReceiver) ([]ReceiverFile, e
 }
 
 // multiFileDirCache returns a func reporting whether dir — a folder under
-// root, root itself excluded — holds a MultiFileMarker, checking each dir on
-// disk only once.
-func multiFileDirCache(root string) func(dir string) bool {
+// root (slash-separated, relative to it), root itself excluded — holds a
+// MultiFileMarker, checking each dir on disk only once.
+func multiFileDirCache(root *os.Root) func(dir string) bool {
 	seen := map[string]bool{}
 
 	return func(dir string) bool {
-		if dir == filepath.Clean(root) {
+		if dir == "." {
 			return false
 		}
 
 		is, ok := seen[dir]
 		if !ok {
-			_, err := os.Stat(filepath.Join(dir, MultiFileMarker))
+			_, err := root.Lstat(filepath.Join(filepath.FromSlash(dir), MultiFileMarker))
 			is = err == nil
 			seen[dir] = is
 		}
@@ -219,20 +218,23 @@ func ObjectPath(root, key, file string) string {
 // doesn't exist yet or holds no objects, meaning nothing has ever been
 // received.
 func LastReceivedAt(recv config.ResolvedReceiver) (t time.Time, ok bool, err error) {
-	if _, statErr := os.Stat(recv.Path); statErr != nil {
-		if os.IsNotExist(statErr) {
-			return time.Time{}, false, nil
-		}
-
-		return time.Time{}, false, statErr
+	root, openErr := openRoot(recv.Path, false)
+	if isNotExist(openErr) {
+		return time.Time{}, false, nil
 	}
 
-	walkErr := filepath.WalkDir(recv.Path, func(_ string, d fs.DirEntry, err error) error {
+	if openErr != nil {
+		return time.Time{}, false, openErr
+	}
+
+	defer func() { _ = root.Close() }()
+
+	walkErr := fs.WalkDir(root.FS(), ".", func(_ string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if d.IsDir() || strings.HasPrefix(d.Name(), ".") {
+		if !d.Type().IsRegular() || strings.HasPrefix(d.Name(), ".") {
 			return nil
 		}
 

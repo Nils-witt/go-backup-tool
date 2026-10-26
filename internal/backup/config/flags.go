@@ -135,9 +135,11 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		KeysDir:           keysDir,
 		LogViewer:         fileCfg.WebUI.LogViewer,
 		EventLogLimit:     webUI.eventLogLimit,
+		EventLogRetention: webUI.eventLogRetention,
 		TrustProxyHeaders: fileCfg.WebUI.TrustProxyHeaders,
 		DevMode:           fileCfg.WebUI.DevMode,
 		CORSGetOrigins:    webUI.corsGetOrigins,
+		RateLimit:         webUI.rateLimit,
 		OIDC:              webUI.oidc,
 		ServerName:        fileCfg.ServerName,
 	}, nil

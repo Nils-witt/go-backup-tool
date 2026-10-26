@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 )
@@ -37,7 +38,18 @@ type OIDCSettings struct {
 	// GroupsClaim claim) to the permissions its members get on top of
 	// DefaultPermissions.
 	GroupPermissions map[string]permission.Permission
+
+	// ReauthMaxAge is how recently a user must have signed in at the
+	// provider to change jobs, servers, commands, or GPG keys (see
+	// fileWebUIOIDC.ReauthMaxAge); 0 turns the check off.
+	ReauthMaxAge time.Duration
 }
+
+// DefaultOIDCReauthMaxAge is webui.oidc.reauth-max-age's default.
+const DefaultOIDCReauthMaxAge = 15 * time.Minute
+
+// DefaultEventLogRetention is webui.event-log-retention's default.
+const DefaultEventLogRetention = 90 * 24 * time.Hour
 
 const (
 	// defaultOIDCButtonLabel is used when webui.oidc.button-label is unset.
@@ -54,6 +66,9 @@ type webUISettings struct {
 	receiversBaseDir string
 	eventLogLimit    int
 	corsGetOrigins   []string
+	rateLimit        RateLimitSettings
+
+	eventLogRetention time.Duration
 }
 
 // resolveWebUISettings resolves cfg (the config file's webui: entry) into
@@ -91,7 +106,62 @@ func resolveWebUISettings(cfg fileWebUI) (webUISettings, error) {
 		return webUISettings{}, err
 	}
 
-	return webUISettings{listen: listen, oidc: oidc, receiversBaseDir: baseDir, eventLogLimit: limit, corsGetOrigins: corsGetOrigins}, nil
+	rateLimit, err := resolveRateLimit(cfg.RateLimit)
+	if err != nil {
+		return webUISettings{}, err
+	}
+
+	retention, err := resolveEventLogRetention(cfg.EventLogRetention)
+	if err != nil {
+		return webUISettings{}, err
+	}
+
+	return webUISettings{
+		listen: listen, oidc: oidc, receiversBaseDir: baseDir, eventLogLimit: limit, corsGetOrigins: corsGetOrigins, rateLimit: rateLimit,
+		eventLogRetention: retention,
+	}, nil
+}
+
+// resolveEventLogRetention validates webui.event-log-retention: (see
+// fileWebUI.EventLogRetention), returning DefaultEventLogRetention when
+// it's unset and 0 (keep forever) for "0".
+func resolveEventLogRetention(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return DefaultEventLogRetention, nil
+	}
+
+	d, err := parseDayDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("webui.event-log-retention: %w", err)
+	}
+
+	if d < 0 {
+		return 0, fmt.Errorf("webui.event-log-retention must not be negative, got %q", s)
+	}
+
+	return d, nil
+}
+
+// resolveReauthMaxAge validates webui.oidc.reauth-max-age: (see
+// fileWebUIOIDC.ReauthMaxAge), returning DefaultOIDCReauthMaxAge when it's
+// unset and 0 (no check) for "0".
+func resolveReauthMaxAge(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return DefaultOIDCReauthMaxAge, nil
+	}
+
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("webui.oidc.reauth-max-age: %w", err)
+	}
+
+	if d < 0 {
+		return 0, fmt.Errorf("webui.oidc.reauth-max-age must not be negative, got %q", s)
+	}
+
+	return d, nil
 }
 
 // resolveCORSGetOrigins validates webui.cors-get-origins: (see
@@ -201,18 +271,7 @@ func resolveOIDCSettings(cfg fileWebUIOIDC, listen string) (OIDCSettings, error)
 		scopes = []string{"openid", "profile", "email"}
 	}
 
-	defaultPerm := permission.PermissionView | permission.PermissionDownload
-
-	if len(cfg.DefaultPermissions) > 0 {
-		parsed, err := permission.ParsePermissions(cfg.DefaultPermissions)
-		if err != nil {
-			return OIDCSettings{}, fmt.Errorf("webui.oidc.default-permissions: %w", err)
-		}
-
-		defaultPerm = parsed
-	}
-
-	groupPerms, err := parseOIDCGroupPermissions(cfg.GroupPermissions)
+	defaultPerm, groupPerms, err := resolveOIDCPermissions(cfg)
 	if err != nil {
 		return OIDCSettings{}, err
 	}
@@ -227,6 +286,11 @@ func resolveOIDCSettings(cfg fileWebUIOIDC, listen string) (OIDCSettings, error)
 		groupsClaim = defaultOIDCGroupsClaim
 	}
 
+	reauthMaxAge, err := resolveReauthMaxAge(cfg.ReauthMaxAge)
+	if err != nil {
+		return OIDCSettings{}, err
+	}
+
 	return OIDCSettings{
 		Enabled:            true,
 		Issuer:             issuer,
@@ -236,7 +300,31 @@ func resolveOIDCSettings(cfg fileWebUIOIDC, listen string) (OIDCSettings, error)
 		GroupsClaim:        groupsClaim,
 		DefaultPermissions: defaultPerm,
 		GroupPermissions:   groupPerms,
+		ReauthMaxAge:       reauthMaxAge,
 	}, nil
+}
+
+// resolveOIDCPermissions parses webui.oidc.default-permissions: (defaulting
+// to view and download) and webui.oidc.group-permissions: (see
+// parseOIDCGroupPermissions).
+func resolveOIDCPermissions(cfg fileWebUIOIDC) (permission.Permission, map[string]permission.Permission, error) {
+	defaultPerm := permission.PermissionView | permission.PermissionDownload
+
+	if len(cfg.DefaultPermissions) > 0 {
+		parsed, err := permission.ParsePermissions(cfg.DefaultPermissions)
+		if err != nil {
+			return 0, nil, fmt.Errorf("webui.oidc.default-permissions: %w", err)
+		}
+
+		defaultPerm = parsed
+	}
+
+	groupPerms, err := parseOIDCGroupPermissions(cfg.GroupPermissions)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	return defaultPerm, groupPerms, nil
 }
 
 // parseOIDCGroupPermissions parses webui.oidc.group-permissions: (group

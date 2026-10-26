@@ -51,7 +51,7 @@ func TestVerifyReceiverTokenTrustedServers(t *testing.T) {
 	sign := func(key *rsa.PrivateKey, issuer, audience string) string {
 		t.Helper()
 
-		tok, err := remoteauth.SignRemoteAuthToken(key, issuer, audience, remoteauth.Request{})
+		tok, err := remoteauth.SignRemoteAuthToken(key, issuer, audience, remoteauth.Request{Method: http.MethodPut, Key: "k", BodySHA256: "abc"})
 		if err != nil {
 			t.Fatalf("SignRemoteAuthToken() error: %v", err)
 		}
@@ -59,7 +59,7 @@ func TestVerifyReceiverTokenTrustedServers(t *testing.T) {
 		return tok
 	}
 
-	if _, err := verifyReceiverToken(recv, sign(allowedKey, allowed.UUID(), "r")); err != nil {
+	if _, _, err := verifyReceiverToken(recv, sign(allowedKey, allowed.UUID(), "r")); err != nil {
 		t.Errorf("allowed server: verifyReceiverToken() error: %v", err)
 	}
 
@@ -72,7 +72,7 @@ func TestVerifyReceiverTokenTrustedServers(t *testing.T) {
 	}
 
 	for name, tok := range cases {
-		if _, err := verifyReceiverToken(recv, tok); err == nil {
+		if _, _, err := verifyReceiverToken(recv, tok); err == nil {
 			t.Errorf("%s: verifyReceiverToken() = nil error, want rejection", name)
 		}
 	}
@@ -80,7 +80,7 @@ func TestVerifyReceiverTokenTrustedServers(t *testing.T) {
 	// Rotating the allowed server's key in the registry applies immediately.
 	trusted.Put(trust.Server{ID: allowed.UUID(), Name: "allowed", PublicKey: &otherKey.PublicKey})
 
-	if _, err := verifyReceiverToken(recv, sign(allowedKey, allowed.UUID(), "r")); err == nil {
+	if _, _, err := verifyReceiverToken(recv, sign(allowedKey, allowed.UUID(), "r")); err == nil {
 		t.Error("after key rotation: old key still accepted")
 	}
 
@@ -88,7 +88,7 @@ func TestVerifyReceiverTokenTrustedServers(t *testing.T) {
 	// still lists it.
 	trusted.Delete(allowed.UUID())
 
-	if _, err := verifyReceiverToken(recv, sign(otherKey, allowed.UUID(), "r")); err == nil {
+	if _, _, err := verifyReceiverToken(recv, sign(otherKey, allowed.UUID(), "r")); err == nil {
 		t.Error("after removal from the registry: token still accepted")
 	}
 }
@@ -123,7 +123,10 @@ func TestRemoteTargetInteropWithTrustedServer(t *testing.T) {
 // TestReceiverTokenReplayRejected checks a token sender S sent instance A
 // for one PUT can't be replayed by A against another instance B whose
 // receiver has the same id and also allows S: not as a DELETE, not for
-// another key or creationTime, and not with a different body.
+// another key or creationTime, and not with a different body — nor sent to
+// A itself a second time. Once B has verified the token for one replay, it
+// remembers its jti, so later replays fail as replays (401) whatever they
+// change.
 func TestReceiverTokenReplayRejected(t *testing.T) {
 	t.Parallel()
 
@@ -168,6 +171,7 @@ func TestReceiverTokenReplayRejected(t *testing.T) {
 
 	tests := []struct {
 		name     string
+		target   string // srvB.URL when ""
 		method   string
 		path     string
 		body     string
@@ -176,11 +180,17 @@ func TestReceiverTokenReplayRejected(t *testing.T) {
 		{name: "delete", method: http.MethodDelete, path: "db.gpg", expected: http.StatusMethodNotAllowed},
 		{name: "other key", method: http.MethodPut, path: "other.gpg?" + creationTime, body: "genuine", expected: http.StatusUnauthorized},
 		{name: "backdated creation time", method: http.MethodPut, path: "db.gpg?" + backdated, body: "genuine", expected: http.StatusUnauthorized},
-		{name: "different body", method: http.MethodPut, path: "db.gpg?" + creationTime, body: "attacker", expected: http.StatusBadRequest},
+		{name: "different body", method: http.MethodPut, path: "db.gpg?" + creationTime, body: "attacker", expected: http.StatusUnauthorized},
+		{name: "same request to A", target: srvA.URL, method: http.MethodPut, path: "db.gpg?" + creationTime, body: "genuine", expected: http.StatusUnauthorized},
 	}
 
 	for _, tt := range tests {
-		req, err := http.NewRequestWithContext(t.Context(), tt.method, srvB.URL+"/api/v1/objects/from-primary/"+tt.path, strings.NewReader(tt.body))
+		base := srvB.URL
+		if tt.target != "" {
+			base = tt.target
+		}
+
+		req, err := http.NewRequestWithContext(t.Context(), tt.method, base+"/api/v1/objects/from-primary/"+tt.path, strings.NewReader(tt.body))
 		if err != nil {
 			t.Fatalf("%s: building request: %v", tt.name, err)
 		}

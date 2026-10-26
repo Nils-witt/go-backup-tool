@@ -7,6 +7,13 @@ info:
     the receiver API that another go-backup-tool instance's `type: remote`
     targets write objects to. Both are served from the same listen address
     (see `-listen` / `webui:` in the config file).
+
+
+    Every `/api/...` endpoint is rate-limited per client (see
+    `webui.rate-limit` in the config file): a client over its request limit,
+    or one that has had too many requests rejected with 401, gets the
+    `TooManyRequests` response (429, with `Retry-After`) until its limit
+    refills.
   version: "1.0"
 servers:
   - url: http://localhost:8080
@@ -483,7 +490,8 @@ paths:
         dashboard's own JavaScript calls this (bearer-authenticated) right
         before navigating the browser to the matching GET below, which — as
         a plain page navigation — can't carry an Authorization header.
-        Requires the `download` permission (which implies `view`).
+        Requires the `download` permission (which implies `view`). One
+        user can hold at most 100 unredeemed, unexpired tickets at a time.
       security:
         - webUIBearer: []
       parameters:
@@ -517,6 +525,18 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: Unknown receiver id
+          content:
+            text/plain:
+              schema:
+                type: string
+        "429":
+          description: >
+            The user already holds 100 unused download tickets; retry once
+            some have expired (see Retry-After).
+          headers:
+            Retry-After:
+              schema:
+                type: integer
           content:
             text/plain:
               schema:
@@ -1330,7 +1350,7 @@ paths:
         "400":
           $ref: "#/components/responses/InvalidSettings"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "409":
@@ -1367,7 +1387,7 @@ paths:
         "400":
           $ref: "#/components/responses/InvalidSettings"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "404":
@@ -1391,7 +1411,7 @@ paths:
         "204":
           description: Job deleted
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "404":
@@ -1447,7 +1467,7 @@ paths:
         "400":
           $ref: "#/components/responses/InvalidSettings"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "409":
@@ -1484,7 +1504,7 @@ paths:
         "400":
           $ref: "#/components/responses/InvalidSettings"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "404":
@@ -1508,7 +1528,7 @@ paths:
         "204":
           description: Server deleted
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "404":
@@ -1570,7 +1590,7 @@ paths:
         "400":
           $ref: "#/components/responses/InvalidSettings"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "409":
@@ -1607,7 +1627,7 @@ paths:
         "400":
           $ref: "#/components/responses/InvalidSettings"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "404":
@@ -1631,7 +1651,7 @@ paths:
         "204":
           description: Command deleted
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "404":
@@ -1744,7 +1764,7 @@ paths:
         "400":
           $ref: "#/components/responses/InvalidSettings"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
 
@@ -1802,6 +1822,12 @@ paths:
             text/plain:
               schema:
                 type: string
+        "409":
+          $ref: "#/components/responses/ImmutableConflict"
+        "413":
+          $ref: "#/components/responses/UploadTooLarge"
+        "507":
+          $ref: "#/components/responses/QuotaExceeded"
         "500":
           description: Writing the object failed
           content:
@@ -1857,7 +1883,7 @@ paths:
               schema:
                 type: string
         "401":
-          description: Missing, invalid, or unbound bearer token, or one bound to another request
+          description: Missing, invalid, unbound or already used bearer token, or one bound to another request
           content:
             text/plain:
               schema:
@@ -1868,6 +1894,12 @@ paths:
             text/plain:
               schema:
                 type: string
+        "409":
+          $ref: "#/components/responses/ImmutableConflict"
+        "413":
+          $ref: "#/components/responses/UploadTooLarge"
+        "507":
+          $ref: "#/components/responses/QuotaExceeded"
         "500":
           description: Writing the file failed
           content:
@@ -1935,7 +1967,7 @@ paths:
               schema:
                 type: string
         "401":
-          description: Missing, invalid, or unbound bearer token, or one bound to another request
+          description: Missing, invalid, unbound or already used bearer token, or one bound to another request
           content:
             text/plain:
               schema:
@@ -1946,6 +1978,10 @@ paths:
             text/plain:
               schema:
                 type: string
+        "413":
+          $ref: "#/components/responses/UploadTooLarge"
+        "507":
+          $ref: "#/components/responses/QuotaExceeded"
         "409":
           description: The receiver is a backup receiver, which doesn't accept files
           content:
@@ -1987,9 +2023,12 @@ components:
         (HTTP method), `key` (object key), `ctm` (the `creationTime` query
         value as sent, empty if none) and, for a PUT, `sha256` (hex SHA-256
         of the body); a request that doesn't match them is rejected (401, or
-        400 for a body digest mismatch). Tokens from older senders carry
-        none of these claims and are still accepted, with a warning logged
-        once per receiver. Independent of the dashboard's own SSO auth.
+        400 for a body digest mismatch). Every token must also carry a
+        unique `jti`: the receiver remembers each one it accepted until the
+        token expires and rejects it if it comes again (401), so a captured
+        token can't be replayed, not even for the same request. Tokens that
+        bind no request or have no `jti` (from senders older than 8.0.0) are
+        rejected with 401. Independent of the dashboard's own SSO auth.
 
   parameters:
     ReceiverId:
@@ -2018,6 +2057,59 @@ components:
   responses:
     Unauthorized:
       description: Missing, invalid, or expired access token
+      content:
+        text/plain:
+          schema:
+            type: string
+    UnauthorizedOrReauth:
+      description: >
+        Missing, invalid, or expired access token — or, since this change
+        could run code on the host or redirect backups, the user didn't sign
+        in at the provider within `webui.oidc.reauth-max-age` (15 minutes by
+        default). The request must carry the SPA's current OIDC ID token in
+        an `X-ID-Token` header: its `auth_time` must be that recent, and it
+        must belong to the access token's user and session. The second case
+        answers with an RFC 9470 challenge, on which the client signs in
+        again (`prompt=login`, `max_age`) and repeats the request.
+      headers:
+        WWW-Authenticate:
+          description: >
+            `Bearer error="insufficient_user_authentication", error_description="...", max_age=<seconds>`
+            when a more recent sign-in is required.
+          schema:
+            type: string
+      content:
+        text/plain:
+          schema:
+            type: string
+    ImmutableConflict:
+      description: The receiver is immutable and this key already holds a different object
+      content:
+        text/plain:
+          schema:
+            type: string
+    UploadTooLarge:
+      description: The upload is larger than the receiver's `max_object_size` (50GiB when unset)
+      content:
+        text/plain:
+          schema:
+            type: string
+    QuotaExceeded:
+      description: Storing the upload would take the receiver's path over its `quota`
+      content:
+        text/plain:
+          schema:
+            type: string
+    TooManyRequests:
+      description: >
+        The client exceeded its request rate limit, or had too many requests
+        rejected with 401 (see `webui.rate-limit`). Applies to every
+        `/api/...` endpoint.
+      headers:
+        Retry-After:
+          description: Seconds until the client may try again
+          schema:
+            type: integer
       content:
         text/plain:
           schema:
@@ -2183,8 +2275,14 @@ components:
           type: string
         kind:
           type: string
-          description: Which receiver API request this was. `delete` only appears on events recorded before the receiver API stopped accepting deletes.
-          enum: [receive, delete]
+          description: >
+            Which receiver API request this was. `reject` is a request turned
+            away with 401 (failed authentication or request binding, e.g. an
+            untrusted sender, a bad signature, or a replayed token); its
+            `error` says why and which client address it came from. `delete`
+            only appears on events recorded before the receiver API stopped
+            accepting deletes.
+          enum: [receive, reject, delete]
         key:
           type: string
         size:
@@ -2530,6 +2628,27 @@ components:
           items:
             type: string
           description: Notification ids fired on every dashboard download from this receiver.
+        max_object_size:
+          type: string
+          description: >
+            Optional size such as "10GiB" or "500MB" (decimal kB/MB/GB/TB or
+            binary KiB/MiB/GiB/TiB): the largest single object, or on a
+            directory receiver file, a sender may upload; larger uploads get
+            413. Empty means 50GiB.
+        quota:
+          type: string
+          description: >
+            Optional size such as "1TB": the most the receiver's path may
+            hold in total. An upload that would take it over gets 507.
+            Empty sets no quota.
+        immutable:
+          type: boolean
+          description: >
+            Backup receivers only: stored objects are write-once. A PUT to a
+            key that already holds a different object gets 409; one whose
+            body is identical to the stored object (same SHA-256 as the
+            token's `sha256` claim) gets 200 without rewriting it. Retention
+            still deletes expired objects. Default false.
       required: [id, path]
       description: >
         A receiver's editable fields, with the same syntax as a settings

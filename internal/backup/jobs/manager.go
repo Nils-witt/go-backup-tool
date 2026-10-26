@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/gpgkeys"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
@@ -421,7 +422,9 @@ func (m *Manager) activateJobLocked(ctx context.Context, name string, fresh bool
 		return
 	}
 
-	_, existed := m.jobs[name]
+	prev, existed := m.jobs[name]
+	m.warnLooseRecipients(prev, job)
+
 	m.jobs[name] = job
 	m.status.Upsert(job)
 
@@ -433,6 +436,26 @@ func (m *Manager) activateJobLocked(ctx context.Context, name string, fresh bool
 		// A moved source starts over with a full scan.
 		sourceMoved := m.schedules[name] != nil && m.schedules[name].source.Path != job.Source.Path
 		m.scheduleLocked(job, existed && !fresh && !sourceMoved)
+	}
+}
+
+// warnLooseRecipients logs a warning for every one of job's recipients that
+// isn't a full fingerprint, unless prev (the job as it was active before,
+// nil if it wasn't) had the same recipients. Such a recipient is resolved
+// against the keyring on every run (see gpgkeys.Keyring.ResolveRecipients),
+// so a key added later that carries the same address makes the job fail
+// rather than encrypt to it, but only a fingerprint pins the key the
+// backups are meant for.
+func (m *Manager) warnLooseRecipients(prev, job *config.Config) {
+	if prev != nil && slices.Equal(prev.Recipients, job.Recipients) {
+		return
+	}
+
+	for _, r := range job.Recipients {
+		if !gpgkeys.IsFingerprint(r) {
+			m.log.Warn("job names a gpg recipient by something other than its fingerprint; name it by its 40-digit fingerprint to pin the key",
+				"job", job.Name, "recipient", r)
+		}
 	}
 }
 

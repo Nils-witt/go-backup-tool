@@ -105,27 +105,66 @@ func sweepRetention(ctx context.Context, db store.Store, t *config.Target, log *
 
 	log.Debug("retention sweep", "server", t.ServerName, "now", now, "expired", len(expired))
 
+	// The recorded paths are absolute, under t.LocalPath: each is removed
+	// through a root opened there (see root.go), so a symlink can't lead
+	// the delete outside it.
+	root, err := openRoot(t.LocalPath, false)
+	if err != nil && !isNotExist(err) {
+		return err
+	}
+
+	if root != nil {
+		defer func() { _ = root.Close() }()
+	}
+
 	var errs []error
 
 	for _, p := range expired {
-		log.Debug("removing expired backup", "path", p, "server", t.ServerName, "retention", t.Retention)
-
-		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("removing expired backup %q: %w", p, err))
-			continue
-		}
-
-		if err := db.DeleteObjectWrite(ctx, p); err != nil {
-			errs = append(errs, fmt.Errorf("removing retention db record for %q: %w", p, err))
-			continue
-		}
-
-		if err := removeEmptyMultiFileDir(filepath.Dir(p)); err != nil {
+		if err := removeExpiredObject(ctx, db, root, t, p, log); err != nil {
 			errs = append(errs, err)
 		}
-
-		log.Info("removed expired backup", "path", p, "server", t.ServerName, "retention", t.Retention)
 	}
 
 	return errors.Join(errs...)
+}
+
+// removeExpiredObject deletes p, an expired object recorded for t's server,
+// through root (opened at t.LocalPath; nil when that doesn't exist, so
+// there's no file left to delete), then its db record and, once empty, its
+// multi-file backup folder.
+func removeExpiredObject(ctx context.Context, db store.Store, root *os.Root, t *config.Target, p string, log *slog.Logger) error {
+	log.Debug("removing expired backup", "path", p, "server", t.ServerName, "retention", t.Retention)
+
+	rel, err := filepath.Rel(t.LocalPath, p)
+	if err != nil || !filepath.IsLocal(rel) {
+		// Written before the server's path changed: no longer this
+		// server's to delete. Forget it rather than retrying forever.
+		log.Warn("expired backup is outside its server's path; leaving it in place", "path", p, "server", t.ServerName)
+
+		if err := db.DeleteObjectWrite(ctx, p); err != nil {
+			return fmt.Errorf("removing retention db record for %q: %w", p, err)
+		}
+
+		return nil
+	}
+
+	if root != nil {
+		if err := root.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("removing expired backup %q: %w", p, err)
+		}
+	}
+
+	if err := db.DeleteObjectWrite(ctx, p); err != nil {
+		return fmt.Errorf("removing retention db record for %q: %w", p, err)
+	}
+
+	if root != nil {
+		if err := removeEmptyMultiFileDir(root, filepath.Dir(rel)); err != nil {
+			return err
+		}
+	}
+
+	log.Info("removed expired backup", "path", p, "server", t.ServerName, "retention", t.Retention)
+
+	return nil
 }

@@ -51,8 +51,8 @@ func TestBuildReceivers(t *testing.T) {
 	}
 
 	want := map[string]ResolvedReceiver{
-		"a": {ID: "a", Kind: ReceiverKindBackup, AllowedServers: []string{testSenderID}, Path: "/mnt/a"},
-		"b": {ID: "b", Kind: ReceiverKindBackup, AllowedServers: []string{testSenderID}, Path: "/mnt/b", Retention: 7 * 24 * time.Hour},
+		"a": {ID: "a", Kind: ReceiverKindBackup, AllowedServers: []string{testSenderID}, Path: "/mnt/a", MaxObjectSize: DefaultReceiverMaxObjectSize},
+		"b": {ID: "b", Kind: ReceiverKindBackup, AllowedServers: []string{testSenderID}, Path: "/mnt/b", Retention: 7 * 24 * time.Hour, MaxObjectSize: DefaultReceiverMaxObjectSize},
 	}
 
 	if len(receivers) != len(want) {
@@ -151,6 +151,7 @@ func TestBuildReceiversStaleAfterAndNotifications(t *testing.T) {
 
 	want := ResolvedReceiver{
 		ID: "a", Kind: ReceiverKindBackup, AllowedServers: []string{testSenderID}, Path: "/mnt/a",
+		MaxObjectSize:      DefaultReceiverMaxObjectSize,
 		StaleAfter:         6 * time.Hour,
 		StaleNotifications: []string{"pagerduty"},
 		Notifications:      notifications,
@@ -210,6 +211,7 @@ func TestBuildReceiversDownloadNotificationsIndependentOfStaleAfter(t *testing.T
 
 	want := ResolvedReceiver{
 		ID: "a", Kind: ReceiverKindBackup, AllowedServers: []string{testSenderID}, Path: "/mnt/a",
+		MaxObjectSize:         DefaultReceiverMaxObjectSize,
 		DownloadNotifications: []string{"slack"},
 		Notifications:         notifications,
 	}
@@ -435,4 +437,20 @@ func buildReceivers(fileReceivers []FileReceiver, notifications *notify.Registry
 	}
 
 	return receivers, nil
+}
+
+func TestResolveReceiverImmutable(t *testing.T) {
+	t.Parallel()
+
+	backup := FileReceiver{ID: "a", AllowedServers: []string{testSenderID}, Path: "/mnt/a", Immutable: true}
+	if got, err := ResolveReceiver(backup, nil, nil, ""); err != nil || !got.Immutable {
+		t.Errorf("immutable backup receiver = (Immutable %v, err %v), want (true, nil)", got.Immutable, err)
+	}
+
+	directory := backup
+	directory.Type = string(ReceiverKindDirectory)
+
+	if _, err := ResolveReceiver(directory, nil, nil, ""); err == nil {
+		t.Error("immutable directory receiver = nil error, want one")
+	}
 }

@@ -4,11 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"mime"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -26,6 +27,16 @@ import (
 // a ticket leaking into a server log or browser history is useless almost
 // immediately.
 const downloadTicketTTL = 60 * time.Second
+
+// maxOpenDownloadTickets caps how many unredeemed, unexpired download
+// tickets one user may hold at a time: far more than a person clicking
+// through downloads within downloadTicketTTL needs, few enough that minting
+// in a loop can't grow the store without bound.
+const maxOpenDownloadTickets = 100
+
+// errTooManyDownloadTickets is returned by downloadTicketStore.create when
+// the user already holds maxOpenDownloadTickets tickets.
+var errTooManyDownloadTickets = errors.New("too many open download tickets")
 
 // downloadTicketEntry is one currently valid download ticket (see
 // downloadTicketStore): the receiver/key it authorizes one download of, the
@@ -60,7 +71,8 @@ func newDownloadTicketStore() *downloadTicketStore {
 
 // create mints a new ticket authorizing one download of receiverID/key,
 // attributed to username (best-effort, may be empty), valid for
-// downloadTicketTTL.
+// downloadTicketTTL. It fails with errTooManyDownloadTickets when username
+// already holds maxOpenDownloadTickets of them.
 func (s *downloadTicketStore) create(receiverID, key, username string) (string, error) {
 	id, err := randomTicketID()
 	if err != nil {
@@ -68,8 +80,27 @@ func (s *downloadTicketStore) create(receiverID, key, username string) (string, 
 	}
 
 	s.mu.Lock()
-	s.byID[id] = downloadTicketEntry{receiverID: receiverID, key: key, username: username, expires: time.Now().Add(downloadTicketTTL)}
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+
+	// Drop expired tickets that were minted but never redeemed (see
+	// liveTicketStore.create), counting the user's remaining ones.
+	now := time.Now()
+	open := 0
+
+	for k, e := range s.byID {
+		switch {
+		case now.After(e.expires):
+			delete(s.byID, k)
+		case e.username == username:
+			open++
+		}
+	}
+
+	if open >= maxOpenDownloadTickets {
+		return "", errTooManyDownloadTickets
+	}
+
+	s.byID[id] = downloadTicketEntry{receiverID: receiverID, key: key, username: username, expires: now.Add(downloadTicketTTL)}
 
 	return id, nil
 }
@@ -140,6 +171,13 @@ func handleMintDownloadTicket(receivers *receiver.Registry, tickets *downloadTic
 		}
 
 		ticket, err := tickets.create(recv.ID, key, username)
+		if errors.Is(err, errTooManyDownloadTickets) {
+			w.Header().Set("Retry-After", strconv.Itoa(int(downloadTicketTTL/time.Second)))
+			http.Error(w, "too many unused download tickets: wait a minute, then try again", http.StatusTooManyRequests)
+
+			return
+		}
+
 		if err != nil {
 			http.Error(w, "minting download ticket failed", http.StatusInternalServerError)
 			return
@@ -198,11 +236,9 @@ func handleDownloadFile(receivers *receiver.Registry, log *slog.Logger, db store
 			}
 		}
 
-		path := filepath.Join(recv.Path, filepath.FromSlash(key))
-
-		f, err := os.Open(path) //nolint:gosec // key is sanitized by SanitizeObjectKey and joined under recv.Path, not attacker-controlled beyond that
+		f, err := objectstore.OpenObject(recv.Path, key)
 		if err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, fs.ErrNotExist) {
 				http.Error(w, "not found", http.StatusNotFound)
 				record(false, "not found")
 			} else {
