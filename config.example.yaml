@@ -256,6 +256,23 @@ servers:
 #   cors-get-origins:
 #     - "https://status.example.com"
 #
+#   # rate-limit limits each client's /api/... requests (the dashboard API
+#   # and the receiver API), keyed by its address (IPv6 by /64 network). A
+#   # client gets 429 Too Many Requests, with Retry-After, once it exceeds
+#   # requests-per-second (after an initial burst), or once it has had
+#   # auth-failure-burst requests rejected with 401 (a rejected SSO, API or
+#   # receiver token) until they refill at auth-failures-per-minute. Both
+#   # are on by default with the values below; set a field to change it, or
+#   # disabled: true when a reverse proxy or WAF already rate-limits. Behind
+#   # a reverse proxy, also set trust-proxy-headers, or every client shares
+#   # the proxy's limits.
+#   rate-limit:
+#     requests-per-second: 20
+#     burst: 100
+#     auth-failures-per-minute: 10
+#     auth-failure-burst: 20
+#     # disabled: true
+#
 #   # receivers-base-dir is the directory every receiver path set from the
 #   # web UI (Receiver settings) must lie inside, so a dashboard admin can't
 #   # point a receiver at an arbitrary location on this machine; symlinks

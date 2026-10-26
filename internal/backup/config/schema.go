@@ -299,6 +299,11 @@ type fileWebUI struct {
 	// takes precedence with its permissive all-method CORS.
 	CORSGetOrigins []string `yaml:"cors-get-origins"`
 
+	// RateLimit limits how many /api/... requests, and how many failed
+	// authentications, each client may make (see fileWebUIRateLimit). On
+	// by default.
+	RateLimit fileWebUIRateLimit `yaml:"rate-limit"`
+
 	// ReceiversBaseDir is the directory every receiver path set from the
 	// web UI must lie inside (see ValidateReceiverPath), so an admin can't
 	// point a receiver at an arbitrary location on this machine. Must be

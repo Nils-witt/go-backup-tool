@@ -54,6 +54,7 @@ type webUISettings struct {
 	receiversBaseDir string
 	eventLogLimit    int
 	corsGetOrigins   []string
+	rateLimit        RateLimitSettings
 }
 
 // resolveWebUISettings resolves cfg (the config file's webui: entry) into
@@ -91,7 +92,12 @@ func resolveWebUISettings(cfg fileWebUI) (webUISettings, error) {
 		return webUISettings{}, err
 	}
 
-	return webUISettings{listen: listen, oidc: oidc, receiversBaseDir: baseDir, eventLogLimit: limit, corsGetOrigins: corsGetOrigins}, nil
+	rateLimit, err := resolveRateLimit(cfg.RateLimit)
+	if err != nil {
+		return webUISettings{}, err
+	}
+
+	return webUISettings{listen: listen, oidc: oidc, receiversBaseDir: baseDir, eventLogLimit: limit, corsGetOrigins: corsGetOrigins, rateLimit: rateLimit}, nil
 }
 
 // resolveCORSGetOrigins validates webui.cors-get-origins: (see

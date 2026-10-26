@@ -162,6 +162,7 @@ func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, deps webu
 		DevMode:           rc.DevMode,
 		EventLogLimit:     rc.EventLogLimit,
 		CORSGetOrigins:    rc.CORSGetOrigins,
+		RateLimit:         rc.RateLimit,
 		ExtraRoutes: func(mux *http.ServeMux) {
 			receiver.RegisterRoutes(mux, deps.Receivers, deps.ReceiverStatus, deps.Log, deps.DB)
 		},

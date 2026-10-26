@@ -102,6 +102,11 @@ type Options struct {
 	// DevMode.
 	CORSGetOrigins []string
 
+	// RateLimit limits each client's /api/... requests and failed
+	// authentications (see rateLimit). The zero value is replaced by
+	// config's defaults; set Disabled to turn it off.
+	RateLimit config.RateLimitSettings
+
 	// ExtraRoutes, if set, mounts more routes on the same mux, which is
 	// how the receiver API shares the listen address without this package
 	// importing receiver's HTTP handlers.
@@ -142,6 +147,7 @@ func StartWebUI(deps Deps, opts Options) *Server {
 		handler = getCORSMiddleware(opts.CORSGetOrigins, handler)
 	}
 
+	handler = rateLimit(opts.RateLimit, opts.TrustProxyHeaders, log, handler)
 	handler = securityHeaders(opts.OIDC.Issuer, opts.TrustProxyHeaders, handler)
 
 	srv := &Server{

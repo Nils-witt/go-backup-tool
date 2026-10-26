@@ -7,6 +7,13 @@ info:
     the receiver API that another go-backup-tool instance's `type: remote`
     targets write objects to. Both are served from the same listen address
     (see `-listen` / `webui:` in the config file).
+
+
+    Every `/api/...` endpoint is rate-limited per client (see
+    `webui.rate-limit` in the config file): a client over its request limit,
+    or one that has had too many requests rejected with 401, gets the
+    `TooManyRequests` response (429, with `Retry-After`) until its limit
+    refills.
   version: "1.0"
 servers:
   - url: http://localhost:8080
@@ -2018,6 +2025,20 @@ components:
   responses:
     Unauthorized:
       description: Missing, invalid, or expired access token
+      content:
+        text/plain:
+          schema:
+            type: string
+    TooManyRequests:
+      description: >
+        The client exceeded its request rate limit, or had too many requests
+        rejected with 401 (see `webui.rate-limit`). Applies to every
+        `/api/...` endpoint.
+      headers:
+        Retry-After:
+          description: Seconds until the client may try again
+          schema:
+            type: integer
       content:
         text/plain:
           schema:

@@ -290,6 +290,10 @@ type RunConfig struct {
 	// Empty adds no such CORS headers.
 	CORSGetOrigins []string
 
+	// RateLimit is webui.rate-limit: resolved, with its defaults filled in
+	// (see fileWebUIRateLimit).
+	RateLimit RateLimitSettings
+
 	// OIDC is the web UI's only login method: the SPA runs the OpenID
 	// Connect login itself as a public client, and every /api/... request
 	// carries the provider's access token — see auth.go in
