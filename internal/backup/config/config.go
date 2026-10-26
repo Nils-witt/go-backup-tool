@@ -231,6 +231,10 @@ type RunConfig struct {
 	// backend holds the state db (see resolveDatabase).
 	Database DatabaseConfig
 
+	// Sentry is the config file's resolved sentry: entry: where errors and
+	// panics are reported (see resolveSentry). The zero value disables it.
+	Sentry SentrySettings
+
 	// ExportSettings and ImportSettings (-export-settings/-import-settings)
 	// name a settings file (see the settingsfile package) to write or apply
 	// instead of running jobs; the process exits once that's done. At most

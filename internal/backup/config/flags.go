@@ -79,7 +79,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 
 	listen := webUI.listen
 
-	database, err := resolveDatabase(fileCfg.Database)
+	database, sentry, err := resolveExternalServices(fileCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -126,6 +126,7 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		Listen:            listen,
 		DockerSocket:      strings.TrimSpace(fileCfg.DockerSocket),
 		Database:          database,
+		Sentry:            sentry,
 		ConfigPath:        configPath,
 		LogLevel:          level,
 		LogFile:           strings.TrimSpace(fileCfg.LogFile),
@@ -143,6 +144,22 @@ func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 		OIDC:              webUI.oidc,
 		ServerName:        fileCfg.ServerName,
 	}, nil
+}
+
+// resolveExternalServices resolves the config file's database: and sentry:
+// entries: the services besides backup targets this instance connects to.
+func resolveExternalServices(fileCfg *fileConfig) (DatabaseConfig, SentrySettings, error) {
+	database, err := resolveDatabase(fileCfg.Database)
+	if err != nil {
+		return DatabaseConfig{}, SentrySettings{}, err
+	}
+
+	sentry, err := resolveSentry(fileCfg.Sentry)
+	if err != nil {
+		return DatabaseConfig{}, SentrySettings{}, err
+	}
+
+	return database, sentry, nil
 }
 
 // explicitFlags reports whether -config and -log-level were explicitly

@@ -181,6 +181,24 @@ servers:
 #   dbname: backup
 #   sslmode: require
 
+# sentry: reports errors to Sentry (https://sentry.io, or a self-hosted
+# instance). Unset (the default) disables it. With dsn: set, every error log
+# record becomes a Sentry event (grouped by its log message, with the info
+# and warning records before it as breadcrumbs), and panics are reported
+# before the process exits. Log messages and their attributes (job names,
+# paths, error text) are sent as written; reported HTTP requests keep only
+# their method and path.
+#
+# The web dashboard reports its own JavaScript errors too, to frontend-dsn:
+# (defaults to dsn:; usually a separate browser project). That DSN is served
+# to every visitor, signed in or not (DSNs are public by design), and the
+# dashboard's Content-Security-Policy then also allows connecting to its host.
+# environment: tags every event, e.g. production or staging.
+# sentry:
+#   dsn: https://<public-key>@o123456.ingest.sentry.io/1234567
+#   environment: production
+#   frontend-dsn: https://<public-key>@o123456.ingest.sentry.io/7654321
+
 # server-name identifies this instance in notifications — a
 # {server_name} placeholder, substituted the same way as a stale/download
 # notification's other placeholders or a report notification's, is

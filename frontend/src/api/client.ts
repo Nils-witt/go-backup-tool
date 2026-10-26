@@ -1,5 +1,5 @@
 import { getAccessToken, getIdToken, renewAccessToken } from "../auth/oidc";
-import type { MeJSON, MetaJSON, SSOStatusJSON } from "./types";
+import type { ClientConfigJSON, MeJSON, MetaJSON, SSOStatusJSON } from "./types";
 
 /** Thrown on a non-2xx response; message is the server's own (plain-text) error body. */
 export class ApiError extends Error {
@@ -125,6 +125,7 @@ async function publicJSON<T>(url: string): Promise<T> {
 
 export const fetchMeta = () => publicJSON<MetaJSON>("/api/meta");
 export const fetchSSOStatus = () => publicJSON<SSOStatusJSON>("/api/sso/status");
+export const fetchClientConfig = () => publicJSON<ClientConfigJSON>("/api/client-config");
 export const fetchMe = () => apiFetchJSON<MeJSON>("/api/me");
 /** Records the just-completed SSO login in the login log; returns the account like fetchMe(). */
 export const ssoLogin = () => apiFetchJSON<MeJSON>("/api/sso/login", { method: "POST" });

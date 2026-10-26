@@ -7,28 +7,43 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"nilswitt.dev/go-backup-tool/internal/backup/config"
 )
 
 func TestContentSecurityPolicyConnectSrc(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		issuer string
-		want   string
+		name string
+		opts Options
+		want string
 	}{
-		{name: "issuer origin", issuer: "https://sso.example/realms/backup", want: "connect-src 'self' https://sso.example;"},
-		{name: "issuer with port", issuer: "http://localhost:8081/application/o/gbt/", want: "connect-src 'self' http://localhost:8081;"},
-		{name: "no issuer", issuer: "", want: "connect-src 'self';"},
-		{name: "not a URL", issuer: "sso.example", want: "connect-src 'self';"},
+		{name: "issuer origin", opts: Options{OIDC: config.OIDCSettings{Issuer: "https://sso.example/realms/backup"}}, want: "connect-src 'self' https://sso.example;"},
+		{name: "issuer with port", opts: Options{OIDC: config.OIDCSettings{Issuer: "http://localhost:8081/application/o/gbt/"}}, want: "connect-src 'self' http://localhost:8081;"},
+		{name: "no issuer", want: "connect-src 'self';"},
+		{name: "not a URL", opts: Options{OIDC: config.OIDCSettings{Issuer: "sso.example"}}, want: "connect-src 'self';"},
+		{
+			name: "sentry dsn without its key",
+			opts: Options{
+				OIDC:   config.OIDCSettings{Issuer: "https://sso.example/realms/backup"},
+				Sentry: config.SentrySettings{DSN: "https://k@o1.ingest.sentry.io/1", FrontendDSN: "https://k@o1.ingest.sentry.io/2"},
+			},
+			want: "connect-src 'self' https://sso.example https://o1.ingest.sentry.io;",
+		},
+		{
+			name: "shared origin listed once",
+			opts: Options{OIDC: config.OIDCSettings{Issuer: "https://example.com/sso"}, Sentry: config.SentrySettings{FrontendDSN: "https://k@example.com/1"}},
+			want: "connect-src 'self' https://example.com;",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := contentSecurityPolicy(tt.issuer); !strings.Contains(got, tt.want) {
-				t.Errorf("contentSecurityPolicy(%q) = %q, want it to contain %q", tt.issuer, got, tt.want)
+			if got := contentSecurityPolicy(cspConnectOrigins(tt.opts)); !strings.Contains(got, tt.want) {
+				t.Errorf("contentSecurityPolicy() = %q, want it to contain %q", got, tt.want)
 			}
 		})
 	}
@@ -72,7 +87,7 @@ func TestSecurityHeaders(t *testing.T) {
 			}
 
 			rec := httptest.NewRecorder()
-			securityHeaders("https://sso.example", tt.trustProxy, next).ServeHTTP(rec, req)
+			securityHeaders([]string{"https://sso.example"}, tt.trustProxy, next).ServeHTTP(rec, req)
 
 			if rec.Code != http.StatusTeapot {
 				t.Errorf("status = %d, want the wrapped handler's %d", rec.Code, http.StatusTeapot)

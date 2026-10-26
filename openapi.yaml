@@ -47,6 +47,26 @@ paths:
               schema:
                 $ref: "#/components/schemas/Meta"
 
+  /api/client-config:
+    get:
+      tags: [dashboard]
+      summary: Public settings the dashboard needs before sign-in
+      operationId: getClientConfig
+      description: >
+        Always public/unauthenticated, since the dashboard reports errors on
+        the login page too. `sentry` is only present while the config file
+        sets `sentry.dsn`; its DSN (`sentry.frontend-dsn`, else `sentry.dsn`)
+        is public by design, as it only allows sending events to its
+        project.
+      security: []
+      responses:
+        "200":
+          description: Client settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClientConfig"
+
   /api/sso/status:
     get:
       tags: [auth]
@@ -2429,6 +2449,22 @@ components:
         commit:
           type: string
       required: [version, commit]
+
+    ClientConfig:
+      type: object
+      properties:
+        sentry:
+          type: object
+          description: Where the dashboard reports its own errors.
+          properties:
+            dsn:
+              type: string
+            environment:
+              type: string
+            release:
+              type: string
+              description: The build, as `go-backup-tool@<version>`, matching the backend's events.
+          required: [dsn, release]
 
     SSOStatus:
       type: object

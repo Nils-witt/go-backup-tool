@@ -209,6 +209,17 @@ export interface SSOStatusJSON {
   scopes?: string;
 }
 
+// ClientConfigJSON is the public GET /api/client-config response: settings
+// the SPA needs before anyone signs in. sentry is only present while the
+// backend's config.yaml sets sentry.dsn.
+export interface ClientConfigJSON {
+  sentry?: {
+    dsn: string;
+    environment?: string;
+    release: string;
+  };
+}
+
 export interface APITokenJSON {
   id: string;
   name: string;

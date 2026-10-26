@@ -39,7 +39,7 @@ func TestNewRunLoggerLogViewerGate(t *testing.T) {
 
 			rc := &config.RunConfig{Listen: tt.listen, LogViewer: tt.logViewer}
 
-			_, logs := newRunLogger(io.Discard, rc)
+			_, logs := newRunLogger(io.Discard, rc, nil)
 			if got := logs != nil; got != tt.wantLogs {
 				t.Errorf("newRunLogger() logs != nil = %v, want %v", got, tt.wantLogs)
 			}

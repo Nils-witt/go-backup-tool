@@ -33,6 +33,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/settings"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
+	"nilswitt.dev/go-backup-tool/internal/backup/telemetry"
 	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 	"nilswitt.dev/go-backup-tool/internal/backup/webui"
 	"nilswitt.dev/go-backup-tool/internal/version"
@@ -42,14 +43,44 @@ func newLogger(w io.Writer, level slog.Level) *slog.Logger {
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
 }
 
-func newRunLogger(stderr io.Writer, rc *config.RunConfig) (*slog.Logger, *webui.LogRingBuffer) {
-	if rc.Listen == "" || !rc.LogViewer {
-		return newLogger(stderr, rc.LogLevel), nil
+// newRunLogger builds the run's logger, writing to stderr and, with the web
+// UI's log viewer on, to the returned buffer too. A non-nil sentry handler
+// (see telemetry.Handler) also receives every record, independent of
+// rc.LogLevel.
+func newRunLogger(stderr io.Writer, rc *config.RunConfig, sentry slog.Handler) (*slog.Logger, *webui.LogRingBuffer) {
+	var logs *webui.LogRingBuffer
+
+	out := stderr
+
+	if rc.Listen != "" && rc.LogViewer {
+		logs = webui.NewLogRingBuffer(webui.LogBufferCapacity)
+		out = io.MultiWriter(stderr, logs)
 	}
 
-	logs := webui.NewLogRingBuffer(webui.LogBufferCapacity)
+	log := newLogger(out, rc.LogLevel)
+	if sentry != nil {
+		log = slog.New(slog.NewMultiHandler(log.Handler(), sentry))
+	}
 
-	return newLogger(io.MultiWriter(stderr, logs), rc.LogLevel), logs
+	return log, logs
+}
+
+// initSentry sets up error reporting to Sentry (see the telemetry package)
+// and returns the log handler that feeds it, or nil when rc doesn't enable
+// it. Failing to set it up is logged to stderr but doesn't stop the run:
+// backups matter more than their error reports.
+func initSentry(stderr io.Writer, rc *config.RunConfig) slog.Handler {
+	enabled, err := telemetry.Init(rc.Sentry, rc.ServerName)
+	if err != nil {
+		newLogger(stderr, rc.LogLevel).Error("sentry disabled", "err", err)
+		return nil
+	}
+
+	if !enabled {
+		return nil
+	}
+
+	return telemetry.Handler()
 }
 
 // withRunTimeout bounds ctx by the config file's timeout:, if set (> 0),
@@ -136,6 +167,11 @@ func Run(args []string, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Reports a panic of the run to Sentry, if runWithContext set it up
+	// (see initSentry); Recover runs before Flush, so its event is sent.
+	defer telemetry.Flush()
+	defer telemetry.Recover()
+
 	return runWithContext(ctx, args, stderr)
 }
 
@@ -170,6 +206,7 @@ func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, deps webu
 		EventLogLimit:     rc.EventLogLimit,
 		CORSGetOrigins:    rc.CORSGetOrigins,
 		RateLimit:         rc.RateLimit,
+		Sentry:            rc.Sentry,
 		ExtraRoutes: func(mux *http.ServeMux) {
 			clientAddr := func(r *http.Request) string { return webui.ClientAddr(r, rc.TrustProxyHeaders) }
 			receiver.RegisterRoutes(mux, deps.Receivers, deps.ReceiverStatus, deps.Log, deps.DB, clientAddr)
@@ -287,7 +324,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 
 	stderr = logOut
 
-	log, logs := newRunLogger(stderr, rc)
+	log, logs := newRunLogger(stderr, rc, initSentry(stderr, rc))
 
 	log.Info("go-backup-tool starting", "version", version.Version, "commit", version.Commit)
 

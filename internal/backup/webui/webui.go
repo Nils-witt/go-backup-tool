@@ -29,6 +29,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/settings"
 	"nilswitt.dev/go-backup-tool/internal/backup/status"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
+	"nilswitt.dev/go-backup-tool/internal/backup/telemetry"
 	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
 
@@ -113,6 +114,12 @@ type Options struct {
 	// config's defaults; set Disabled to turn it off.
 	RateLimit config.RateLimitSettings
 
+	// Sentry is the config file's sentry: entry: with it enabled, request
+	// panics are reported (see telemetry.HTTPMiddleware), the dashboard is
+	// told its DSN (GET /api/client-config), and the Content-Security-Policy
+	// lets it reach that DSN's host (see contentSecurityPolicy).
+	Sentry config.SentrySettings
+
 	// ExtraRoutes, if set, mounts more routes on the same mux, which is
 	// how the receiver API shares the listen address without this package
 	// importing receiver's HTTP handlers.
@@ -152,6 +159,10 @@ func StartWebUI(deps Deps, opts Options) *Server {
 	registerRoutes(liveCtx, mux, deps, opts)
 
 	var handler http.Handler = mux
+	if opts.Sentry.Enabled() {
+		handler = telemetry.HTTPMiddleware(handler)
+	}
+
 	if opts.DevMode {
 		handler = corsMiddleware(handler)
 	} else if len(opts.CORSGetOrigins) > 0 {
@@ -159,7 +170,7 @@ func StartWebUI(deps Deps, opts Options) *Server {
 	}
 
 	handler = rateLimit(opts.RateLimit, opts.TrustProxyHeaders, log, handler)
-	handler = securityHeaders(opts.OIDC.Issuer, opts.TrustProxyHeaders, handler)
+	handler = securityHeaders(cspConnectOrigins(opts), opts.TrustProxyHeaders, handler)
 
 	srv := &Server{
 		http:     &http.Server{Handler: logRequests(log, handler, opts.TrustProxyHeaders), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10},
@@ -248,6 +259,7 @@ func registerRoutes(liveCtx context.Context, mux *http.ServeMux, deps Deps, opts
 	mux.HandleFunc("GET /", handleDashboard(dashboardIndexHTML))
 	mux.Handle("GET /assets/", http.StripPrefix("/assets/", cacheForever(gzipStatic(dashboardAssetsFS, http.FileServerFS(dashboardAssetsFS)))))
 	mux.HandleFunc("GET /api/meta", handleMeta(opts.InstanceName))
+	mux.HandleFunc("GET /api/client-config", handleClientConfig(opts.Sentry))
 	mux.HandleFunc("GET /api/sso/status", handleSSOStatus(opts.OIDC))
 	mux.HandleFunc("GET /api/me", requireUser(auth, handleMe()))
 	mux.HandleFunc("POST /api/sso/login", requireUser(auth, handleSSOLogin(auth)))

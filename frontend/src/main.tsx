@@ -1,5 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { initSentry } from "./lib/sentry";
 import { Root } from "./Root";
 
 // The dashboard no longer fetches remote backends itself (its
@@ -12,6 +13,9 @@ try {
 } catch {
   // Storage unavailable: nothing was stored either.
 }
+
+// Doesn't hold up the first render: errors before Sentry loads go unreported.
+void initSentry();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

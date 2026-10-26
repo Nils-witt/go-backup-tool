@@ -3,6 +3,7 @@ package webui
 import (
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -16,14 +17,17 @@ const hstsValue = "max-age=31536000"
 // served from its own go:embed build, with no CDN. style-src also allows
 // 'unsafe-inline', because MUI (emotion) injects its styles as <style>
 // elements at runtime. connect-src allows this origin (the JSON API and the
-// /api/live WebSocket) plus the OIDC issuer's origin, which the SPA talks
-// to directly for discovery, token exchange and refresh (see
-// frontend/src/auth/oidc.ts); an empty or unparsable issuer adds nothing.
-// frame-ancestors 'none' replaces X-Frame-Options for clickjacking.
-func contentSecurityPolicy(issuer string) string {
-	connect := "'self'"
-	if origin, ok := urlOrigin(issuer); ok {
-		connect += " " + origin
+// /api/live WebSocket) plus the origin of each of connectURLs (see
+// cspConnectOrigins): services the SPA talks to directly. An empty or
+// unparsable URL adds nothing. frame-ancestors 'none' replaces
+// X-Frame-Options for clickjacking.
+func contentSecurityPolicy(connectURLs []string) string {
+	connect := []string{"'self'"}
+
+	for _, raw := range connectURLs {
+		if origin, ok := urlOrigin(raw); ok && !slices.Contains(connect, origin) {
+			connect = append(connect, origin)
+		}
 	}
 
 	return strings.Join([]string{
@@ -32,12 +36,21 @@ func contentSecurityPolicy(issuer string) string {
 		"style-src 'self' 'unsafe-inline'",
 		"img-src 'self' data:",
 		"font-src 'self' data:",
-		"connect-src " + connect,
+		"connect-src " + strings.Join(connect, " "),
 		"frame-ancestors 'none'",
 		"form-action 'self'",
 		"base-uri 'none'",
 		"object-src 'none'",
 	}, "; ")
+}
+
+// cspConnectOrigins lists the URLs whose origins the dashboard may connect
+// to besides its own (see contentSecurityPolicy): the OIDC issuer, for
+// discovery, token exchange and refresh (see frontend/src/auth/oidc.ts),
+// and the dashboard's Sentry DSN, for its error reports (see
+// frontend/src/lib/sentry.ts). Either is skipped when unset.
+func cspConnectOrigins(opts Options) []string {
+	return []string{opts.OIDC.Issuer, opts.Sentry.FrontendDSN}
 }
 
 // urlOrigin returns raw's scheme://host, reporting false unless raw is an
@@ -62,8 +75,8 @@ func urlOrigin(raw string) (string, bool) {
 // reached this instance over HTTPS: directly over TLS, or — with
 // trustProxyHeaders — as reported by the reverse proxy in front of it (see
 // requestIsHTTPS); a browser ignores it over plain HTTP anyway.
-func securityHeaders(issuer string, trustProxyHeaders bool, next http.Handler) http.Handler {
-	csp := contentSecurityPolicy(issuer)
+func securityHeaders(connectURLs []string, trustProxyHeaders bool, next http.Handler) http.Handler {
+	csp := contentSecurityPolicy(connectURLs)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()

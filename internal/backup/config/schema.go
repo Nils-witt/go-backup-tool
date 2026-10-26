@@ -222,6 +222,10 @@ type fileConfig struct {
 	// Database chooses where the state db lives: the default SQLite file
 	// next to this config file, or a PostgreSQL server (see fileDatabase).
 	Database fileDatabase `yaml:"database"`
+
+	// Sentry reports errors and panics to Sentry when its dsn: is set (see
+	// fileSentry).
+	Sentry fileSentry `yaml:"sentry"`
 }
 
 // fileWebUI is the top-level webui: entry, grouping every setting that

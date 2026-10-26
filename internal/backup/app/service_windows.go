@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/telemetry"
 )
 
 // serviceName is the Windows service go-backup-tool installs itself as and
@@ -335,6 +336,10 @@ func (h *serviceHandler) Execute(_ []string, r <-chan svc.ChangeRequest, changes
 	done := make(chan int, 1)
 
 	go func() {
+		// As in Run: report a panic of the run to Sentry, if enabled.
+		defer telemetry.Flush()
+		defer telemetry.Recover()
+
 		done <- runWithContext(ctx, h.args, h.stderr)
 	}()
 
