@@ -2,6 +2,8 @@ package receiver
 
 import (
 	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -282,14 +284,24 @@ func TestRemoteTargetInteropMalformedCreationTimeRejected(t *testing.T) {
 }
 
 // putWithRawQuery sends an authenticated (signed with id, matching the
-// receiver's configured public key) PUT to baseURL/api/v1/objects/recvID/key
-// with rawQuery attached as-is, for tests exercising HandleReceiveObject's
-// creationTime validation (which runs after authorization, so a valid
-// Authorization header is required to reach it).
+// receiver's configured public key, and bound to this very request) PUT to
+// baseURL/api/v1/objects/recvID/key with rawQuery attached as-is, for tests
+// exercising HandleReceiveObject's creationTime validation (which runs
+// after authorization, so a valid Authorization header is required to
+// reach it).
 func putWithRawQuery(t *testing.T, baseURL string, id *identity.ServerIdentity, recvID, key, rawQuery string) *http.Response {
 	t.Helper()
 
-	token, err := id.SignRequest(recvID, remoteauth.Request{})
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		t.Fatalf("parsing query %q: %v", rawQuery, err)
+	}
+
+	digest := sha256.Sum256([]byte("x"))
+
+	token, err := id.SignRequest(recvID, remoteauth.Request{
+		Method: http.MethodPut, Key: key, CreationTime: query.Get("creationTime"), BodySHA256: hex.EncodeToString(digest[:]),
+	})
 	if err != nil {
 		t.Fatalf("signing request: %v", err)
 	}

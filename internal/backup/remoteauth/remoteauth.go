@@ -4,11 +4,13 @@ package remoteauth
 
 import (
 	"crypto/rsa"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/google/uuid"
 )
 
 // remoteAuthTokenTTL bounds how long a signed remote-target request token
@@ -27,8 +29,8 @@ const remoteAuthTokenTTL = 5 * time.Minute
 // destination instance receives would authorize any method, key, or body
 // at any other instance whose receiver has the same id and allows the same
 // sender — letting a compromised destination delete or overwrite the
-// sender's copies elsewhere. A zero Request is what an older sender's
-// token, which carries none of these claims, decodes to.
+// sender's copies elsewhere. VerifyRemoteAuthToken rejects a token
+// binding none of these (see ErrUnboundToken).
 type Request struct {
 	Method       string `json:"htm,omitempty"`
 	Key          string `json:"key,omitempty"`
@@ -44,7 +46,7 @@ type Request struct {
 }
 
 // IsZero reports whether r binds nothing, i.e. came from a token minted by
-// an older sender that predates request binding.
+// a sender that predates request binding.
 func (r Request) IsZero() bool {
 	return r == Request{}
 }
@@ -59,7 +61,8 @@ func (r Request) IsZero() bool {
 // VerifyRemoteAuthToken against this instance's public key, configured as
 // a trusted server allowed on its matching receivers: entry (see
 // authorizeReceiver in receiver.go), and checks req against the request it
-// arrived with.
+// arrived with. Every token gets a fresh random jti, which the receiver
+// remembers until the token expires, so it can't be used twice.
 func SignRemoteAuthToken(privateKey *rsa.PrivateKey, issuer, audience string, req Request) (string, error) {
 	signer, err := jose.NewSigner(
 		jose.SigningKey{Algorithm: jose.RS256, Key: privateKey},
@@ -72,6 +75,7 @@ func SignRemoteAuthToken(privateKey *rsa.PrivateKey, issuer, audience string, re
 	now := time.Now()
 
 	claims := jwt.Claims{
+		ID:       uuid.NewString(),
 		Issuer:   issuer,
 		Audience: jwt.Audience{audience},
 		IssuedAt: jwt.NewNumericDate(now),
@@ -86,19 +90,44 @@ func SignRemoteAuthToken(privateKey *rsa.PrivateKey, issuer, audience string, re
 	return token, nil
 }
 
+var (
+	// ErrUnboundToken is returned by VerifyRemoteAuthToken for a token
+	// that binds no request (see Request): one from a sender that predates
+	// request binding, which would authorize any method, key and body.
+	ErrUnboundToken = errors.New("token is not bound to its request; upgrade the sending instance")
+
+	// ErrNoTokenID is returned by VerifyRemoteAuthToken for a token without
+	// a jti, which the receiver needs to reject a replayed token; senders
+	// that predate replay protection don't set one.
+	ErrNoTokenID = errors.New("token has no jti; upgrade the sending instance")
+)
+
+// Token is what VerifyRemoteAuthToken returns about a verified token.
+type Token struct {
+	// Request is the request the token is bound to, which the caller must
+	// check against the actual request. Never zero.
+	Request Request
+
+	// ID is the token's jti and Expiry its exp, for the caller to remember
+	// ID until Expiry (plus jwt.DefaultLeeway) and reject it if it comes
+	// back. ID is never "".
+	ID     string
+	Expiry time.Time
+}
+
 // VerifyRemoteAuthToken parses raw as a JWT, verifies its RS256 signature
 // against publicKey (the sender's public key, from its trusted server
 // entry), and checks it's currently valid
 // (exp/nbf/iat, with jwt.Claims.Validate's default one-minute clock-skew
 // leeway), scoped to audience (this receiver's own id), and — unless issuer
-// is "" — issued by issuer (the trusted server's id). It returns the
-// Request the token is bound to, which the caller must check against the
-// actual request (a zero Request for an older sender's unbound token). See
-// SignRemoteAuthToken for what a sender puts in the token.
-func VerifyRemoteAuthToken(raw string, publicKey *rsa.PublicKey, audience, issuer string) (Request, error) {
+// is "" — issued by issuer (the trusted server's id). The token must carry
+// a jti (ErrNoTokenID) and be bound to a request (ErrUnboundToken). See
+// SignRemoteAuthToken for what a sender puts in the token. Checking that
+// the jti hasn't been seen before is the caller's job.
+func VerifyRemoteAuthToken(raw string, publicKey *rsa.PublicKey, audience, issuer string) (Token, error) {
 	token, err := jwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.RS256})
 	if err != nil {
-		return Request{}, fmt.Errorf("parsing token: %w", err)
+		return Token{}, fmt.Errorf("parsing token: %w", err)
 	}
 
 	var (
@@ -107,14 +136,23 @@ func VerifyRemoteAuthToken(raw string, publicKey *rsa.PublicKey, audience, issue
 	)
 
 	if err := token.Claims(publicKey, &claims, &req); err != nil {
-		return Request{}, fmt.Errorf("verifying signature: %w", err)
+		return Token{}, fmt.Errorf("verifying signature: %w", err)
 	}
 
 	if err := claims.Validate(jwt.Expected{Issuer: issuer, AnyAudience: jwt.Audience{audience}, Time: time.Now()}); err != nil {
-		return Request{}, fmt.Errorf("validating claims: %w", err)
+		return Token{}, fmt.Errorf("validating claims: %w", err)
 	}
 
-	return req, nil
+	switch {
+	case claims.ID == "":
+		return Token{}, ErrNoTokenID
+	case req.IsZero():
+		return Token{}, ErrUnboundToken
+	case claims.Expiry == nil:
+		return Token{}, errors.New("token has no expiry")
+	}
+
+	return Token{Request: req, ID: claims.ID, Expiry: claims.Expiry.Time()}, nil
 }
 
 // UnverifiedIssuer returns raw's iss claim WITHOUT verifying its signature,

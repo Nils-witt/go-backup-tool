@@ -1864,7 +1864,7 @@ paths:
               schema:
                 type: string
         "401":
-          description: Missing, invalid, or unbound bearer token, or one bound to another request
+          description: Missing, invalid, unbound or already used bearer token, or one bound to another request
           content:
             text/plain:
               schema:
@@ -1942,7 +1942,7 @@ paths:
               schema:
                 type: string
         "401":
-          description: Missing, invalid, or unbound bearer token, or one bound to another request
+          description: Missing, invalid, unbound or already used bearer token, or one bound to another request
           content:
             text/plain:
               schema:
@@ -1994,9 +1994,12 @@ components:
         (HTTP method), `key` (object key), `ctm` (the `creationTime` query
         value as sent, empty if none) and, for a PUT, `sha256` (hex SHA-256
         of the body); a request that doesn't match them is rejected (401, or
-        400 for a body digest mismatch). Tokens from older senders carry
-        none of these claims and are still accepted, with a warning logged
-        once per receiver. Independent of the dashboard's own SSO auth.
+        400 for a body digest mismatch). Every token must also carry a
+        unique `jti`: the receiver remembers each one it accepted until the
+        token expires and rejects it if it comes again (401), so a captured
+        token can't be replayed, not even for the same request. Tokens that
+        bind no request or have no `jti` (from senders older than 8.0.0) are
+        rejected with 401. Independent of the dashboard's own SSO auth.
 
   parameters:
     ReceiverId:

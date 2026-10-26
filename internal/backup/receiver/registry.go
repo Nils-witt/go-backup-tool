@@ -16,6 +16,10 @@ import (
 type Registry struct {
 	mu   sync.RWMutex
 	byID map[string]config.ResolvedReceiver
+
+	// usedTokens are the request tokens the receiver API has accepted,
+	// shared across receivers (see replayCache).
+	usedTokens replayCache
 }
 
 // NewRegistry builds a registry holding receivers (copied).

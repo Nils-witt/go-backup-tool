@@ -13,7 +13,6 @@ import (
 	"path"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
@@ -138,9 +137,10 @@ func receiveObject(receivers *Registry, receiverStatus *status.ReceiverStore, lo
 // authorizeReceiver looks up the receiver named by the request's {id} path
 // value and verifies its Authorization: Bearer <token> header (see
 // verifyReceiverToken), writing an error response and returning ok=false if
-// either the id is unknown or the token doesn't verify. bound is the
-// request the token is bound to (see remoteauth.Request), for the caller
-// to check against r once it has sanitized the key.
+// the id is unknown, the token doesn't verify, or the token was already
+// used (see replayCache). bound is the request the token is bound to (see
+// remoteauth.Request), for the caller to check against r once it has
+// sanitized the key.
 func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *Registry, log *slog.Logger) (recv config.ResolvedReceiver, bound remoteauth.Request, ok bool) {
 	recv, exists := receivers.Get(r.PathValue("id"))
 	if !exists {
@@ -154,7 +154,11 @@ func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *Regist
 		return config.ResolvedReceiver{}, remoteauth.Request{}, false
 	}
 
-	bound, err := verifyReceiverToken(recv, token)
+	issuer, verified, err := verifyReceiverToken(recv, token)
+	if err == nil && !receivers.usedTokens.use(issuer, verified.ID, verified.Expiry, time.Now()) {
+		err = errTokenReplayed
+	}
+
 	if err != nil {
 		log.Debug("receiver: rejected request", "id", recv.ID, "err", err)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -162,33 +166,39 @@ func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *Regist
 		return config.ResolvedReceiver{}, remoteauth.Request{}, false
 	}
 
-	if bound.IsZero() {
-		warnUnboundTokenOnce(recv.ID, token, log)
-	}
-
-	return recv, bound, true
+	return recv, verified.Request, true
 }
+
+// errTokenReplayed reports a request token whose jti the receiver has
+// already accepted once (see replayCache).
+var errTokenReplayed = errors.New("token was already used")
 
 // verifyReceiverToken verifies token as a request token (see
 // remoteauth.SignRemoteAuthToken) for recv: its issuer must be one of recv's
 // allowed servers, and it must verify against that server's current key.
-// It returns the request the token is bound to (see remoteauth.Request).
-func verifyReceiverToken(recv config.ResolvedReceiver, token string) (remoteauth.Request, error) {
+// It returns the token's issuer and what VerifyRemoteAuthToken reports
+// about it.
+func verifyReceiverToken(recv config.ResolvedReceiver, token string) (string, remoteauth.Token, error) {
 	issuer, err := remoteauth.UnverifiedIssuer(token)
 	if err != nil {
-		return remoteauth.Request{}, err
+		return "", remoteauth.Token{}, err
 	}
 
 	if !slices.Contains(recv.AllowedServers, issuer) {
-		return remoteauth.Request{}, fmt.Errorf("issuer %q is not an allowed server", issuer)
+		return "", remoteauth.Token{}, fmt.Errorf("issuer %q is not an allowed server", issuer)
 	}
 
 	srv, ok := recv.TrustedServers.Get(issuer)
 	if !ok {
-		return remoteauth.Request{}, fmt.Errorf("allowed server %q is no longer trusted", issuer)
+		return "", remoteauth.Token{}, fmt.Errorf("allowed server %q is no longer trusted", issuer)
 	}
 
-	return remoteauth.VerifyRemoteAuthToken(token, srv.PublicKey, recv.ID, issuer)
+	verified, err := remoteauth.VerifyRemoteAuthToken(token, srv.PublicKey, recv.ID, issuer)
+	if err != nil {
+		return "", remoteauth.Token{}, err
+	}
+
+	return issuer, verified, nil
 }
 
 // errBodyDigestMismatch reports that a PUT's body isn't the one its request
@@ -198,13 +208,8 @@ var errBodyDigestMismatch = errors.New("body does not match the request token's 
 // checkRequestBinding reports whether r, whose sanitized key and file are
 // key and file, is the request bound names: same method, key, file and
 // creationTime, and — for a PUT — a body digest to verify while it streams
-// (see digestReader). A zero bound (an older sender's unbound token) is
-// accepted as before.
+// (see digestReader).
 func checkRequestBinding(r *http.Request, key, file string, bound remoteauth.Request) error {
-	if bound.IsZero() {
-		return nil
-	}
-
 	switch {
 	case bound.Method != r.Method:
 		return fmt.Errorf("token is for method %q, not %q", bound.Method, r.Method)
@@ -246,27 +251,6 @@ func (d *digestReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// legacyKeyWarned records the receiver ids warnLegacyKeyOnce has already
-// warned about this run.
-
-// unboundTokenWarned records the receiver ids warnUnboundTokenOnce has
-// already warned about this run.
-var unboundTokenWarned sync.Map
-
-// warnUnboundTokenOnce logs, once per receiver per run, that recv accepted
-// a token from a sender too old to bind its tokens to their request (see
-// remoteauth.Request), which leaves such tokens replayable for other
-// methods, keys and bodies until the sender is upgraded.
-func warnUnboundTokenOnce(receiverID, token string, log *slog.Logger) {
-	if _, loaded := unboundTokenWarned.LoadOrStore(receiverID, struct{}{}); loaded {
-		return
-	}
-
-	issuer, _ := remoteauth.UnverifiedIssuer(token)
-	log.Warn("receiver: accepted a request token not bound to its request; upgrade the sending instance",
-		"id", receiverID, "sender_server_id", issuer)
-}
-
 // resolveReceiverRequest authorizes r against receivers (see
 // authorizeReceiver) and sanitizes its {key} path value (see
 // objectstore.SanitizeObjectKey) and — when multiFile — its required file query
@@ -301,12 +285,7 @@ func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *R
 		}
 	}
 
-	bindErr := checkRequestBinding(r, key, file, bound)
-	if bindErr == nil && multiFile && bound.IsZero() {
-		bindErr = errors.New("token is not bound to its request")
-	}
-
-	if bindErr != nil {
+	if bindErr := checkRequestBinding(r, key, file, bound); bindErr != nil {
 		log.Debug("receiver: rejected request", "id", recv.ID, "key", key, "file", file, "err", bindErr)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 
