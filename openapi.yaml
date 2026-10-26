@@ -1337,7 +1337,7 @@ paths:
         "400":
           $ref: "#/components/responses/InvalidSettings"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "409":
@@ -1374,7 +1374,7 @@ paths:
         "400":
           $ref: "#/components/responses/InvalidSettings"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "404":
@@ -1398,7 +1398,7 @@ paths:
         "204":
           description: Job deleted
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "404":
@@ -1454,7 +1454,7 @@ paths:
         "400":
           $ref: "#/components/responses/InvalidSettings"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "409":
@@ -1491,7 +1491,7 @@ paths:
         "400":
           $ref: "#/components/responses/InvalidSettings"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "404":
@@ -1515,7 +1515,7 @@ paths:
         "204":
           description: Server deleted
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "404":
@@ -1577,7 +1577,7 @@ paths:
         "400":
           $ref: "#/components/responses/InvalidSettings"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "409":
@@ -1614,7 +1614,7 @@ paths:
         "400":
           $ref: "#/components/responses/InvalidSettings"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "404":
@@ -1638,7 +1638,7 @@ paths:
         "204":
           description: Command deleted
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
         "404":
@@ -1751,7 +1751,7 @@ paths:
         "400":
           $ref: "#/components/responses/InvalidSettings"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/UnauthorizedOrReauth"
         "403":
           $ref: "#/components/responses/ForbiddenOrEditingDisabled"
 
@@ -2044,6 +2044,27 @@ components:
   responses:
     Unauthorized:
       description: Missing, invalid, or expired access token
+      content:
+        text/plain:
+          schema:
+            type: string
+    UnauthorizedOrReauth:
+      description: >
+        Missing, invalid, or expired access token — or, since this change
+        could run code on the host or redirect backups, the user didn't sign
+        in at the provider within `webui.oidc.reauth-max-age` (15 minutes by
+        default). The request must carry the SPA's current OIDC ID token in
+        an `X-ID-Token` header: its `auth_time` must be that recent, and it
+        must belong to the access token's user and session. The second case
+        answers with an RFC 9470 challenge, on which the client signs in
+        again (`prompt=login`, `max_age`) and repeats the request.
+      headers:
+        WWW-Authenticate:
+          description: >
+            `Bearer error="insufficient_user_authentication", error_description="...", max_age=<seconds>`
+            when a more recent sign-in is required.
+          schema:
+            type: string
       content:
         text/plain:
           schema:

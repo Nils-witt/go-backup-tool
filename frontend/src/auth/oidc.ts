@@ -92,6 +92,18 @@ export async function getAccessToken(): Promise<string | null> {
   return user.access_token;
 }
 
+/**
+ * The current ID token, or null if not signed in via SSO. Sent with every
+ * change so the backend can check when the user last signed in (see
+ * internal/backup/webui/reauth.go).
+ */
+export async function getIdToken(): Promise<string | null> {
+  if (!manager) return null;
+
+  const user = await manager.getUser();
+  return user?.id_token ?? null;
+}
+
 let renewing: Promise<string | null> | null = null;
 
 const minRetryMs = 5_000;
@@ -172,6 +184,16 @@ export async function startLogin(next: string) {
   if (!manager) throw new Error("SSO is not enabled");
 
   await manager.signinRedirect({ state: { next } });
+}
+
+/**
+ * Sends the browser to the provider to sign in again (even with a session
+ * there), for a change that needs a sign-in within maxAge seconds.
+ */
+export async function startReauth(next: string, maxAge: number) {
+  if (!manager) throw new Error("SSO is not enabled");
+
+  await manager.signinRedirect({ state: { next }, prompt: "login", max_age: maxAge });
 }
 
 /**

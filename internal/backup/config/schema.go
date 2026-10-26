@@ -258,6 +258,14 @@ type fileWebUI struct {
 	// maxEventLogLimit when set.
 	EventLogLimit int `yaml:"event-log-limit"`
 
+	// EventLogRetention is how long the login, download, receiver, and
+	// audit event logs keep an entry, as a duration with an optional
+	// leading day component (e.g. "180d"). Unset defaults to
+	// DefaultEventLogRetention; "0" keeps entries forever. It's set here,
+	// not in the dashboard, so an admin can't shorten it to cover their
+	// tracks.
+	EventLogRetention string `yaml:"event-log-retention"`
+
 	// TrustProxyHeaders makes the web UI take the client address recorded
 	// in the login/download logs and access log (see clientAddr in
 	// webui/middleware.go) from the Forwarded/X-Forwarded-For/X-Real-Ip request
@@ -368,6 +376,12 @@ type fileWebUIOIDC struct {
 	// GroupPermissions maps a group name (as it appears in GroupsClaim) to
 	// the permission names its members get on top of DefaultPermissions.
 	GroupPermissions map[string][]string `yaml:"group-permissions"`
+
+	// ReauthMaxAge is how recently a user must have signed in at the
+	// provider (the ID token's auth_time) to change jobs, servers,
+	// commands, or GPG keys, as a Go duration. Unset defaults to
+	// DefaultOIDCReauthMaxAge; "0" turns the check off.
+	ReauthMaxAge string `yaml:"reauth-max-age"`
 }
 
 // loadFileConfig reads and parses the YAML config file at path, rejecting

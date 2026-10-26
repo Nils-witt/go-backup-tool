@@ -273,6 +273,10 @@ type RunConfig struct {
 	// DefaultEventLogLimit.
 	EventLogLimit int
 
+	// EventLogRetention is how long the event logs keep an entry (see
+	// fileWebUI.EventLogRetention); 0 keeps them forever.
+	EventLogRetention time.Duration
+
 	// TrustProxyHeaders, when set, makes the web UI derive the client
 	// address it records (login/download logs, access log) from
 	// proxy-supplied headers rather than the raw TCP connection — see

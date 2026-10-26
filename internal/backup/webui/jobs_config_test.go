@@ -25,6 +25,14 @@ func startJobsWebUI(t *testing.T, idp *testIDP, editing bool) (*Server, *jobs.Ma
 func startJobsWebUIWithKeyring(t *testing.T, idp *testIDP, editing bool, keyring *gpgkeys.Keyring) (*Server, *jobs.Manager) {
 	t.Helper()
 
+	return startJobsWebUIWithOIDC(t, idp.settings(), editing, keyring)
+}
+
+// startJobsWebUIWithOIDC is startJobsWebUIWithKeyring with its SSO
+// settings given as oidc.
+func startJobsWebUIWithOIDC(t *testing.T, oidc config.OIDCSettings, editing bool, keyring *gpgkeys.Keyring) (*Server, *jobs.Manager) {
+	t.Helper()
+
 	db := openTestStateDB(t)
 	statusStore := status.NewStore(nil)
 	notifications := notify.NewRegistry(nil)
@@ -44,7 +52,7 @@ func startJobsWebUIWithKeyring(t *testing.T, idp *testIDP, editing bool, keyring
 		GPGKeyring: keyring,
 	}, Options{
 		Addr: "127.0.0.1:0",
-		OIDC: idp.settings(),
+		OIDC: oidc,
 	})
 	if srv == nil {
 		t.Fatal("StartWebUI() = nil, want a running server")

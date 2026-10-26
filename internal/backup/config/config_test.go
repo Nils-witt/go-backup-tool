@@ -2334,6 +2334,7 @@ jobs:
 		GroupsClaim:        "groups",
 		DefaultPermissions: permission.PermissionView | permission.PermissionDownload,
 		GroupPermissions:   map[string]permission.Permission{},
+		ReauthMaxAge:       DefaultOIDCReauthMaxAge,
 	}
 
 	if !reflect.DeepEqual(rc.OIDC, want) {
@@ -3277,5 +3278,37 @@ func checkParseErrors(t *testing.T, tests []parseErrorCase) {
 				t.Fatalf("ParseFlags() error = %v, want it to contain %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestResolveReauthMaxAge(t *testing.T) {
+	t.Parallel()
+
+	for in, want := range map[string]time.Duration{"": DefaultOIDCReauthMaxAge, "0": 0, "5m": 5 * time.Minute} {
+		if got, err := resolveReauthMaxAge(in); err != nil || got != want {
+			t.Errorf("resolveReauthMaxAge(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+
+	for _, in := range []string{"-1m", "soon"} {
+		if _, err := resolveReauthMaxAge(in); err == nil {
+			t.Errorf("resolveReauthMaxAge(%q) error = nil, want an error", in)
+		}
+	}
+}
+
+func TestResolveEventLogRetention(t *testing.T) {
+	t.Parallel()
+
+	for in, want := range map[string]time.Duration{"": DefaultEventLogRetention, "0": 0, "365d": 365 * 24 * time.Hour} {
+		if got, err := resolveEventLogRetention(in); err != nil || got != want {
+			t.Errorf("resolveEventLogRetention(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+
+	for _, in := range []string{"-1d", "forever"} {
+		if _, err := resolveEventLogRetention(in); err == nil {
+			t.Errorf("resolveEventLogRetention(%q) error = nil, want an error", in)
+		}
 	}
 }

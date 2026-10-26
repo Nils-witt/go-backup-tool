@@ -219,6 +219,13 @@ func registerRoutes(liveCtx context.Context, mux *http.ServeMux, deps Deps, opts
 		return admin(recordChange(db, auditRes, log, opts.TrustProxyHeaders, h))
 	}
 
+	// codeChange is change for a change that could run code on this host or
+	// redirect backups (jobs, servers, commands, GPG keys): it also needs a
+	// recent sign-in at the provider (see requireRecentLogin).
+	codeChange := func(h http.HandlerFunc) http.HandlerFunc {
+		return admin(requireRecentLogin(auth, recordChange(db, auditRes, log, opts.TrustProxyHeaders, h)))
+	}
+
 	mux.HandleFunc("GET /", handleDashboard(dashboardIndexHTML))
 	mux.Handle("GET /assets/", http.StripPrefix("/assets/", cacheForever(gzipStatic(dashboardAssetsFS, http.FileServerFS(dashboardAssetsFS)))))
 	mux.HandleFunc("GET /api/meta", handleMeta(opts.InstanceName))
@@ -247,14 +254,14 @@ func registerRoutes(liveCtx context.Context, mux *http.ServeMux, deps Deps, opts
 	mux.HandleFunc("POST /api/tokens", change(handleCreateAPIToken(tokens, log)))
 	mux.HandleFunc("DELETE /api/tokens/{id}", change(handleRevokeAPIToken(tokens, log)))
 	registerSettingsRoutes(mux, deps.ReceiverManager, deps.Trust, deps.Settings, admin, change, log)
-	registerJobConfigRoutes(mux, deps.Jobs, admin, change, log)
+	registerJobConfigRoutes(mux, deps.Jobs, admin, codeChange, log)
 	registerReportRoutes(mux, db, deps.Reporter, admin, change, log)
 
 	if deps.Runner != nil {
 		mux.HandleFunc("GET /api/docker-containers", admin(handleListDockerContainers(deps.Runner, log)))
 	}
 
-	registerGPGKeyRoutes(mux, deps.GPGKeyring, deps.Jobs != nil && deps.Jobs.Editing(), admin, change, log)
+	registerGPGKeyRoutes(mux, deps.GPGKeyring, deps.Jobs != nil && deps.Jobs.Editing(), admin, codeChange, log)
 
 	if opts.ExtraRoutes != nil {
 		opts.ExtraRoutes(mux)

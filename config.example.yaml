@@ -220,9 +220,20 @@ servers:
 #
 #   # event-log-limit caps how many of the most recent entries each event
 #   # log (job runs, target runs, logins, downloads, receiver events) shows
-#   # in the dashboard. Every entry stays in the state database regardless.
-#   # Unset defaults to 200; must be between 1 and 10000.
+#   # in the dashboard; older entries stay in the state database until
+#   # event-log-retention removes them. Unset defaults to 200; must be
+#   # between 1 and 10000.
 #   event-log-limit: 1000
+#
+#   # event-log-retention is how long the login, download, receiver, and
+#   # audit logs keep an entry before it's deleted (checked daily), e.g.
+#   # "365d" or "720h". Unset defaults to 90d; "0" keeps entries forever.
+#   # It lives here rather than in the dashboard so an admin can't shorten
+#   # it to cover their tracks. To keep these events beyond this instance,
+#   # forward the process's log output (or log-file:) to syslog or a SIEM:
+#   # every login, change, download, and rejected receiver request is also
+#   # logged there.
+#   event-log-retention: 365d
 #
 #   # trust-proxy-headers makes the dashboard's login/download logs and
 #   # access log record the client address from the Forwarded/
@@ -344,6 +355,14 @@ servers:
 #     group-permissions:
 #       backup-admins: [admin]
 #       auditors: [login-log, download-log, audit-log]
+#     # reauth-max-age is how recently a user must have signed in at the
+#     # provider (their ID token's auth_time) to create, change, or delete
+#     # jobs, servers, and commands, or to add GPG keys — the changes that
+#     # can run code on this machine or redirect backups. An older sign-in
+#     # makes the dashboard ask them to sign in again (prompt=login), so
+#     # someone using an unattended, signed-in browser can't make them.
+#     # Unset defaults to 15m; "0" turns the check off.
+#     # reauth-max-age: 15m
 
 jobs:
   - name: database
