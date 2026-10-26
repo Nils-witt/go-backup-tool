@@ -98,7 +98,8 @@ type Options struct {
 	EventLogLimit int
 
 	// CORSGetOrigins are the origins allowed to read GET endpoints from
-	// another dashboard (see getCORSMiddleware). Ignored in DevMode.
+	// another site, e.g. a status page (see getCORSMiddleware). Ignored in
+	// DevMode.
 	CORSGetOrigins []string
 
 	// ExtraRoutes, if set, mounts more routes on the same mux, which is
@@ -140,6 +141,8 @@ func StartWebUI(deps Deps, opts Options) *Server {
 	} else if len(opts.CORSGetOrigins) > 0 {
 		handler = getCORSMiddleware(opts.CORSGetOrigins, handler)
 	}
+
+	handler = securityHeaders(opts.OIDC.Issuer, opts.TrustProxyHeaders, handler)
 
 	srv := &Server{
 		http:     &http.Server{Handler: logRequests(log, handler, opts.TrustProxyHeaders), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10},

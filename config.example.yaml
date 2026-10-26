@@ -233,7 +233,9 @@ servers:
 #   # logged address. Unset (the default) always uses the TCP connection's
 #   # own address. It also makes the live status WebSocket accept the
 #   # public host from Forwarded host=/X-Forwarded-Host as its origin, for a
-#   # proxy that rewrites Host (e.g. to 127.0.0.1:8086).
+#   # proxy that rewrites Host (e.g. to 127.0.0.1:8086), and sends
+#   # Strict-Transport-Security when Forwarded proto=/X-Forwarded-Proto
+#   # reports the client connected over HTTPS.
 #   trust-proxy-headers: true
 #
 #   # dev-mode adds permissive CORS response headers (Access-Control-Allow-
@@ -248,8 +250,7 @@ servers:
 #   # cors-get-origins enables CORS for the read-only GET /api/... endpoints
 #   # only, so another site's JavaScript (e.g. a status page) can read this
 #   # instance's API with its own bearer token (an API token from the
-#   # dashboard) — e.g. another instance's dashboard showing this one under
-#   # "Remote backends". List bare origins (scheme://host[:port]) or "*" for any
+#   # dashboard). List bare origins (scheme://host[:port]) or "*" for any
 #   # origin. POST/PUT/DELETE stay same-origin only. Unset (the default)
 #   # adds no CORS headers; dev-mode, if set, takes precedence.
 #   cors-get-origins:
