@@ -104,6 +104,9 @@ export interface ReceiverFile {
   path?: string;
   version?: number;
   sha256?: string;
+  // recipient_key_ids are the key IDs the file is encrypted to, read from
+  // its OpenPGP header ("0000000000000000" for a hidden recipient).
+  recipient_key_ids?: string[];
 }
 
 // JobKind mirrors config.JobKind: a job's type.

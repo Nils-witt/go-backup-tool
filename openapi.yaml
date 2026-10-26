@@ -2758,6 +2758,17 @@ components:
         sha256:
           type: string
           description: Directory receivers only — the hex SHA-256 of the version's plaintext.
+        recipient_key_ids:
+          type: array
+          items:
+            type: string
+            pattern: '^[0-9A-F]{16}$'
+          description: >
+            The key IDs the file is encrypted to, read from its OpenPGP
+            header; usually encryption subkeys rather than primary keys.
+            `0000000000000000` is a hidden recipient (gpg --throw-keyids).
+            Absent when the file isn't an OpenPGP message encrypted to a
+            public key.
       required: [key, size, mod_time]
 
     FileUploadResult:

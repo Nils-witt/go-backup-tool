@@ -1,9 +1,12 @@
 package objectstore
 
 import (
+	"encoding/hex"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -175,6 +178,70 @@ func TestListReceiverFilesExpiresAt(t *testing.T) {
 			t.Errorf("files[0].ExpiresAt = %v, want zero", files[0].ExpiresAt)
 		}
 	})
+}
+
+// encryptedTo is a minimal OpenPGP message encrypted to keyID (16 hex
+// digits): one version 3 PKESK packet, then a stand-in data packet.
+func encryptedTo(t *testing.T, keyID string) string {
+	t.Helper()
+
+	id, err := hex.DecodeString(keyID)
+	if err != nil || len(id) != 8 {
+		t.Fatalf("bad key ID %q", keyID)
+	}
+
+	pkesk := append([]byte{0x84, 10, 3}, id...)
+	pkesk = append(pkesk, 1)
+
+	return string(append(pkesk, 0xD2, 1, 1))
+}
+
+func TestListReceiverFilesRecipientKeyIDs(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, "flat.gpg"), encryptedTo(t, "0123456789ABCDEF"))
+	writeFile(t, filepath.Join(root, "backup-1", "db.gpg"), encryptedTo(t, "FEDCBA9876543210"))
+	writeFile(t, filepath.Join(root, "backup-1", MultiFileMarker), "")
+	writeFile(t, filepath.Join(root, "plain.txt"), "not encrypted")
+
+	files, err := ListReceiverFiles(config.ResolvedReceiver{ID: "a", Path: root})
+	if err != nil {
+		t.Fatalf("ListReceiverFiles() unexpected error: %v", err)
+	}
+
+	got := map[string][]string{}
+	for _, f := range files {
+		got[path.Join(f.Key, f.File)] = f.RecipientKeyIDs
+	}
+
+	expected := map[string][]string{
+		"flat.gpg":        {"0123456789ABCDEF"},
+		"backup-1/db.gpg": {"FEDCBA9876543210"},
+		"plain.txt":       nil,
+	}
+	if !maps.EqualFunc(got, expected, slices.Equal) {
+		t.Errorf("ListReceiverFiles() recipients = %v, want %v", got, expected)
+	}
+}
+
+func TestListReceiverFilesRecipientKeyIDsDirectoryReceiver(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	content := encryptedTo(t, "0123456789ABCDEF")
+
+	writeVersion(t, root, "docs/a.txt", content)
+
+	files, err := ListReceiverFiles(config.ResolvedReceiver{ID: "a", Path: root, Kind: config.ReceiverKindDirectory})
+	if err != nil {
+		t.Fatalf("ListReceiverFiles() unexpected error: %v", err)
+	}
+
+	if len(files) != 1 || !slices.Equal(files[0].RecipientKeyIDs, []string{"0123456789ABCDEF"}) {
+		t.Errorf("ListReceiverFiles() = %+v, want one version encrypted to 0123456789ABCDEF", files)
+	}
 }
 
 // writeFile creates path (and any missing parent directories) with contents.

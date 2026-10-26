@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/pgprecipients"
 )
 
 // SanitizeObjectKey validates key (the {key...} wildcard segment of a
@@ -69,12 +70,18 @@ func ReceiverTarget(recv config.ResolvedReceiver) *config.Target {
 // On a directory receiver every entry is one version of a file (see
 // FileVersion): Key is the version's own path below the receiver, Path the
 // file's, and Version and SHA256 identify the version.
+//
+// RecipientKeyIDs are the key IDs the file is encrypted to, read from its
+// OpenPGP header (see pgprecipients.KeyIDs); empty when it isn't an
+// encrypted OpenPGP message or couldn't be read.
 type ReceiverFile struct {
 	Key       string    `json:"key"`
 	File      string    `json:"file,omitempty"`
 	Size      int64     `json:"size"`
 	ModTime   time.Time `json:"mod_time"`
 	ExpiresAt time.Time `json:"expires_at"`
+
+	RecipientKeyIDs []string `json:"recipient_key_ids,omitempty"`
 
 	Path    string `json:"path,omitempty"`
 	Version int    `json:"version,omitempty"`
@@ -113,8 +120,9 @@ func ListReceiverFiles(recv config.ResolvedReceiver) ([]ReceiverFile, error) {
 
 	files := []ReceiverFile{}
 	isMultiFile := multiFileDirCache(root)
+	fsys := root.FS()
 
-	err = fs.WalkDir(root.FS(), ".", func(rel string, d fs.DirEntry, walkErr error) error {
+	err = fs.WalkDir(fsys, ".", func(rel string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -133,7 +141,13 @@ func ListReceiverFiles(recv config.ResolvedReceiver) ([]ReceiverFile, error) {
 			expiresAt = info.ModTime().Add(recv.Retention)
 		}
 
-		f := ReceiverFile{Key: rel, Size: info.Size(), ModTime: info.ModTime(), ExpiresAt: expiresAt}
+		f := ReceiverFile{
+			Key:             rel,
+			Size:            info.Size(),
+			ModTime:         info.ModTime(),
+			ExpiresAt:       expiresAt,
+			RecipientKeyIDs: recipientKeyIDs(fsys, rel),
+		}
 		if isMultiFile(path.Dir(rel)) {
 			f.Key, f.File = path.Dir(rel), d.Name()
 		}
@@ -163,9 +177,27 @@ func listDirectoryReceiverFiles(recv config.ResolvedReceiver) ([]ReceiverFile, e
 	}
 
 	files := make([]ReceiverFile, len(versions))
+	if len(versions) == 0 {
+		return files, nil
+	}
+
+	root, err := openRoot(recv.Path, false)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = root.Close() }()
 
 	for i, v := range versions {
-		f := ReceiverFile{Key: v.Key, Size: v.Size, ModTime: v.ReceivedAt, Path: v.Path, Version: v.Version, SHA256: v.SHA256}
+		f := ReceiverFile{
+			Key:             v.Key,
+			Size:            v.Size,
+			ModTime:         v.ReceivedAt,
+			Path:            v.Path,
+			Version:         v.Version,
+			SHA256:          v.SHA256,
+			RecipientKeyIDs: recipientKeyIDs(root.FS(), v.Key),
+		}
 
 		newest := i == len(versions)-1 || versions[i+1].Path != v.Path
 		if !newest && recv.Retention > 0 && recv.KeepVersions == 0 {
@@ -178,6 +210,26 @@ func listDirectoryReceiverFiles(recv config.ResolvedReceiver) ([]ReceiverFile, e
 	sort.SliceStable(files, func(i, j int) bool { return files[i].ModTime.Before(files[j].ModTime) })
 
 	return files, nil
+}
+
+// recipientKeyIDs returns the key IDs the object at name (slash-separated,
+// relative to fsys) is encrypted to, or nil when that can't be told. It's
+// best effort: an unreadable or unencrypted file is still listed, just
+// without recipients, so its error isn't reported.
+func recipientKeyIDs(fsys fs.FS, name string) []string {
+	f, err := fsys.Open(name)
+	if err != nil {
+		return nil
+	}
+
+	defer func() { _ = f.Close() }()
+
+	ids, err := pgprecipients.KeyIDs(f)
+	if err != nil {
+		return nil
+	}
+
+	return ids
 }
 
 // multiFileDirCache returns a func reporting whether dir — a folder under

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { apiFetch, apiFetchJSON } from "../api/client";
 import type { ReceiverFile, ReceiverSnapshot } from "../api/types";
 import { StatusChip } from "./StatusChip";
+import { groupFingerprint } from "../lib/gpg";
 import { Fact } from "./Fact";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { encodePathKey, fmtRelative, fmtSize, fmtTime, hasTime } from "../lib/format";
@@ -108,6 +109,40 @@ function groupFiles(files: ReceiverFile[]): FileGroup[] {
   return groups;
 }
 
+// HIDDEN_KEY_ID is the wildcard key ID of a recipient the sender hid (gpg
+// --throw-keyids); see pgprecipients.HiddenKeyID.
+const HIDDEN_KEY_ID = "0000000000000000";
+
+// RecipientKeyIDs lists the key IDs a file is encrypted to, one per line.
+function RecipientKeyIDs({ ids }: { ids?: string[] }) {
+  if (!ids?.length) {
+    return (
+      <Typography variant="caption" color="text.secondary">
+        —
+      </Typography>
+    );
+  }
+
+  return ids.map((id, i) =>
+    id === HIDDEN_KEY_ID ? (
+      <Tooltip key={i} title="The sender hid this recipient's key ID (gpg --throw-keyids).">
+        <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+          hidden recipient
+        </Typography>
+      </Tooltip>
+    ) : (
+      <Typography
+        key={i}
+        variant="caption"
+        component="code"
+        sx={{ display: "block", whiteSpace: "nowrap" }}
+      >
+        {groupFingerprint(id)}
+      </Typography>
+    ),
+  );
+}
+
 function FileListDialog({
   id,
   canDownload,
@@ -168,6 +203,11 @@ function FileListDialog({
                 <TableCell>Size</TableCell>
                 <TableCell>Modified</TableCell>
                 <TableCell>Expires</TableCell>
+                <TableCell>
+                  <Tooltip title="Key IDs the file is encrypted to, from its OpenPGP header. Usually an encryption subkey's ID, not the primary key's.">
+                    <span>Encrypted for</span>
+                  </Tooltip>
+                </TableCell>
                 <TableCell />
               </TableRow>
             </TableHead>
@@ -179,7 +219,7 @@ function FileListDialog({
                       {g.key}
                     </TableCell>
                     <TableCell>{fmtSize(g.files.reduce((n, f) => n + f.size, 0))}</TableCell>
-                    <TableCell colSpan={3}>
+                    <TableCell colSpan={4}>
                       <Typography variant="caption" color="text.secondary">
                         {g.files.length}{" "}
                         {g.isVersions
@@ -210,6 +250,9 @@ function FileListDialog({
                     <TableCell>{fmtSize(f.size)}</TableCell>
                     <TableCell>{fmtTime(f.mod_time)}</TableCell>
                     <TableCell>{fmtTime(f.expires_at)}</TableCell>
+                    <TableCell>
+                      <RecipientKeyIDs ids={f.recipient_key_ids} />
+                    </TableCell>
                     <TableCell>
                       {canDownload && id ? (
                         <Link
