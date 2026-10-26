@@ -12,13 +12,19 @@ import (
 // once it completes: method, path, remote address, response status, and
 // how long it took — the same per-request detail an operator would reach
 // for a proper HTTP access log, without pulling in a logging middleware
-// dependency for a handful of routes.
+// dependency for a handful of routes. A request whose handler noted an
+// internal error (see noteResponseError) is also logged at warn level with
+// that error, since the response itself only carries a generic message.
 func logRequests(log *slog.Logger, next http.Handler, trustProxyHeaders bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 
 		next.ServeHTTP(sw, req)
+
+		if sw.err != nil {
+			log.Warn("web UI: request failed", "method", req.Method, "path", req.URL.Path, "status", sw.status, "err", sw.err)
+		}
 
 		log.Debug("web UI request",
 			"method", req.Method,
@@ -207,6 +213,27 @@ func forwardedParam(header, key string) (string, bool) {
 type statusWriter struct {
 	http.ResponseWriter
 	status int
+
+	// err is the internal error noteResponseError recorded, if any.
+	err error
+}
+
+// noteResponseError records err, the internal cause of an error response
+// whose body doesn't name it, on every statusWriter wrapping w, for
+// logRequests to log.
+func noteResponseError(w http.ResponseWriter, err error) {
+	for w != nil {
+		if sw, ok := w.(*statusWriter); ok {
+			sw.err = err
+		}
+
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return
+		}
+
+		w = u.Unwrap()
+	}
 }
 
 func (w *statusWriter) WriteHeader(status int) {

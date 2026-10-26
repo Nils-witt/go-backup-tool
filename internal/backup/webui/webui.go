@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -320,11 +321,14 @@ func (s *Server) Shutdown() {
 // writing a 500 if encoding fails. Shared by every simple "serve the
 // current snapshot as JSON" handler in this file. v is marshaled before
 // anything is written, so a failure can still become a real 500 rather than
-// a 200 with a truncated body.
+// a 200 with a truncated body. The 500 carries a generic message; the
+// encoding error itself is only logged (see noteResponseError).
 func writeJSON(w http.ResponseWriter, v any) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		noteResponseError(w, fmt.Errorf("encoding JSON response: %w", err))
+		http.Error(w, "encoding the response failed", http.StatusInternalServerError)
+
 		return
 	}
 
