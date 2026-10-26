@@ -6,10 +6,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"mime"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -236,11 +236,9 @@ func handleDownloadFile(receivers *receiver.Registry, log *slog.Logger, db store
 			}
 		}
 
-		path := filepath.Join(recv.Path, filepath.FromSlash(key))
-
-		f, err := os.Open(path) //nolint:gosec // key is sanitized by SanitizeObjectKey and joined under recv.Path, not attacker-controlled beyond that
+		f, err := objectstore.OpenObject(recv.Path, key)
 		if err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, fs.ErrNotExist) {
 				http.Error(w, "not found", http.StatusNotFound)
 				record(false, "not found")
 			} else {

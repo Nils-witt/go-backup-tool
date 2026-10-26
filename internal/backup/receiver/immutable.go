@@ -10,9 +10,9 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"os"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/objectstore"
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
@@ -21,16 +21,16 @@ import (
 var errImmutableObjectExists = errors.New("an object with this key already exists on this immutable receiver")
 
 // answerExistingObject handles an upload to an immutable receiver (see
-// config.FileReceiver.Immutable) whose destination dst may already exist,
-// reporting whether it answered the request. A missing dst isn't answered:
-// the caller goes on to store the upload. An existing dst whose SHA-256 is
-// want — the digest the request token binds the body to — is the same
-// upload sent again (e.g. a retry after a lost response), answered 200
-// without reading or rewriting anything; any other existing dst is
-// answered 409 and recorded as a failed receive in the receiver's event
-// log.
-func answerExistingObject(ctx context.Context, w http.ResponseWriter, recv config.ResolvedReceiver, dst, key, want string, log *slog.Logger, db store.Store) bool {
-	got, err := fileSHA256(dst)
+// config.FileReceiver.Immutable) whose key may already hold an object,
+// reporting whether it answered the request. A missing object isn't
+// answered: the caller goes on to store the upload. An existing object
+// whose SHA-256 is want — the digest the request token binds the body to —
+// is the same upload sent again (e.g. a retry after a lost response),
+// answered 200 without reading or rewriting anything; any other existing
+// object is answered 409 and recorded as a failed receive in the
+// receiver's event log.
+func answerExistingObject(ctx context.Context, w http.ResponseWriter, recv config.ResolvedReceiver, key, want string, log *slog.Logger, db store.Store) bool {
+	got, err := objectSHA256(recv.Path, key)
 	if errors.Is(err, fs.ErrNotExist) {
 		return false
 	}
@@ -56,9 +56,10 @@ func answerExistingObject(ctx context.Context, w http.ResponseWriter, recv confi
 	return true
 }
 
-// fileSHA256 returns the hex SHA-256 of the file at path.
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path) //nolint:gosec // path is objectstore.LocalObjectPath of a key SanitizeObjectKey already validated, under the receiver's path
+// objectSHA256 returns the hex SHA-256 of the object stored as key under
+// base (see objectstore.OpenObject).
+func objectSHA256(base, key string) (string, error) {
+	f, err := objectstore.OpenObject(base, key)
 	if err != nil {
 		return "", err
 	}
@@ -66,7 +67,7 @@ func fileSHA256(path string) (string, error) {
 
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
-		return "", fmt.Errorf("hashing %q: %w", path, err)
+		return "", fmt.Errorf("hashing %q: %w", f.Name(), err)
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), nil

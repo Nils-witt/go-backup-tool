@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"path"
 	"slices"
 	"strings"
@@ -112,7 +111,7 @@ func receiveObject(receivers *Registry, receiverStatus *status.ReceiverStore, rj
 		receiverStatus.Record(recv.ID, key, nil)
 
 		var size int64
-		if info, statErr := os.Stat(objectstore.LocalObjectPath(cfg, t)); statErr == nil { //nolint:gosec // cfg.Key/cfg.File are resolveReceiverRequest's already-validated key and file, not raw untrusted input
+		if info, statErr := objectstore.StatObject(recv.Path, key); statErr == nil {
 			size = info.Size()
 		}
 
@@ -132,11 +131,10 @@ func receiveObject(receivers *Registry, receiverStatus *status.ReceiverStore, rj
 // objectstore.WriteNewLocalObject), in case another upload of the same key
 // lands meanwhile.
 func storeObject(w http.ResponseWriter, r *http.Request, recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, key string, bound remoteauth.Request, receiverStatus *status.ReceiverStore, log *slog.Logger, db store.Store) bool {
-	dst := objectstore.LocalObjectPath(cfg, t)
-	replacing, write := dst, objectstore.WriteLocalObject
+	replacing, write := key, objectstore.WriteLocalObject
 
 	if recv.Immutable {
-		if answerExistingObject(r.Context(), w, recv, dst, key, bound.BodySHA256, log, db) {
+		if answerExistingObject(r.Context(), w, recv, key, bound.BodySHA256, log, db) {
 			return false
 		}
 
@@ -153,7 +151,7 @@ func storeObject(w http.ResponseWriter, r *http.Request, recv config.ResolvedRec
 		return true
 	}
 
-	if errors.Is(err, objectstore.ErrObjectExists) && answerExistingObject(r.Context(), w, recv, dst, key, bound.BodySHA256, log, db) {
+	if errors.Is(err, objectstore.ErrObjectExists) && answerExistingObject(r.Context(), w, recv, key, bound.BodySHA256, log, db) {
 		return false
 	}
 

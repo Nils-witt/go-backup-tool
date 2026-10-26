@@ -101,7 +101,7 @@ func ValidateFilePath(rel string) error {
 // plainSHA256, r is read to its end (so a caller verifying its digest
 // still can) and discarded, and stored is false. version is rel's newest
 // version number either way.
-func WriteFileVersion(root, rel, plainSHA256 string, r io.Reader) (version int, stored bool, err error) {
+func WriteFileVersion(base, rel, plainSHA256 string, r io.Reader) (version int, stored bool, err error) {
 	if err := ValidateFilePath(rel); err != nil {
 		return 0, false, err
 	}
@@ -110,12 +110,19 @@ func WriteFileVersion(root, rel, plainSHA256 string, r io.Reader) (version int, 
 		return 0, false, fmt.Errorf("invalid content hash %q", plainSHA256)
 	}
 
-	dir := versionDir(root, rel)
+	root, err := openRoot(base, true)
+	if err != nil {
+		return 0, false, err
+	}
 
-	unlock := lockVersionDir(dir)
+	defer func() { _ = root.Close() }()
+
+	dir := versionDir(rel)
+
+	unlock := lockVersionDir(base, dir)
 	defer unlock()
 
-	versions, err := readVersionDir(dir)
+	versions, err := readVersionDir(root, dir)
 	if err != nil {
 		return 0, false, err
 	}
@@ -133,11 +140,11 @@ func WriteFileVersion(root, rel, plainSHA256 string, r io.Reader) (version int, 
 		next = versions[n-1].version + 1
 	}
 
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return 0, false, fmt.Errorf("creating directory %q: %w", dir, err)
+	if err := root.MkdirAll(dir, 0o700); err != nil {
+		return 0, false, fmt.Errorf("creating directory %q: %w", filepath.Join(base, dir), err)
 	}
 
-	if err := writeFileAtomically(dir, filepath.Join(dir, versionFileName(next, plainSHA256)), r, true); err != nil {
+	if err := writeFileAtomically(root, dir, filepath.Join(dir, versionFileName(next, plainSHA256)), r, true); err != nil {
 		return 0, false, err
 	}
 
@@ -147,10 +154,10 @@ func WriteFileVersion(root, rel, plainSHA256 string, r io.Reader) (version int, 
 // ListFileVersions returns every version stored under a directory
 // receiver's root, ordered by path, then version. A root that doesn't
 // exist yet holds no versions.
-func ListFileVersions(root string) ([]FileVersion, error) {
+func ListFileVersions(base string) ([]FileVersion, error) {
 	out := []FileVersion{}
 
-	err := walkVersionDirs(root, func(rel string, versions []versionEntry) error {
+	err := walkVersionDirs(base, func(_ *os.Root, rel string, versions []versionEntry) error {
 		for _, v := range versions {
 			out = append(out, FileVersion{
 				Path:       rel,
@@ -180,29 +187,28 @@ func ListFileVersions(root string) ([]FileVersion, error) {
 // VersionRetention), and returns how many it deleted. A path's newest
 // version is always kept: it's the file's current content. Failures to
 // delete one version are logged and skipped.
-func SweepFileVersions(root string, policy VersionRetention, now time.Time, log *slog.Logger) (int, error) {
+func SweepFileVersions(base string, policy VersionRetention, now time.Time, log *slog.Logger) (int, error) {
 	if policy.KeepVersions <= 0 && policy.MaxAge <= 0 {
 		return 0, nil
 	}
 
 	removed := 0
 
-	err := walkVersionDirs(root, func(rel string, _ []versionEntry) error {
-		dir := versionDir(root, rel)
+	err := walkVersionDirs(base, func(root *os.Root, rel string, _ []versionEntry) error {
+		dir := versionDir(rel)
 
-		unlock := lockVersionDir(dir)
+		unlock := lockVersionDir(base, dir)
 		defer unlock()
 
 		// Re-read under the lock: a write may have added a version since
 		// the walk listed this folder.
-		versions, err := readVersionDir(dir)
+		versions, err := readVersionDir(root, dir)
 		if err != nil {
 			return err
 		}
 
 		for _, v := range expiredVersions(versions, policy, now) {
-			p := filepath.Join(dir, v.name)
-			if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			if err := root.Remove(filepath.Join(dir, v.name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				log.Warn("deleting expired file version", "path", rel, "version", v.version, "error", err)
 				continue
 			}
@@ -246,9 +252,10 @@ type versionEntry struct {
 	modTime time.Time
 }
 
-// versionDir is the folder rel's versions are kept in under root.
-func versionDir(root, rel string) string {
-	return filepath.Join(root, filepath.FromSlash(rel)+config.VersionDirSuffix)
+// versionDir is the folder rel's versions are kept in, relative to a
+// directory receiver's base.
+func versionDir(rel string) string {
+	return filepath.FromSlash(rel) + config.VersionDirSuffix
 }
 
 // versionFileName names version of a file whose plaintext hashes to
@@ -257,9 +264,10 @@ func versionFileName(version int, plainSHA256 string) string {
 	return fmt.Sprintf("%0*d-%s.gpg", versionDigits, version, plainSHA256)
 }
 
-// lockVersionDir locks dir's entry in versionLocks, returning its unlock.
-func lockVersionDir(dir string) func() {
-	mu, _ := versionLocks.LoadOrStore(dir, &sync.Mutex{})
+// lockVersionDir locks the entry in versionLocks for dir under base,
+// returning its unlock.
+func lockVersionDir(base, dir string) func() {
+	mu, _ := versionLocks.LoadOrStore(filepath.Join(base, dir), &sync.Mutex{})
 
 	m, _ := mu.(*sync.Mutex)
 	m.Lock()
@@ -267,17 +275,17 @@ func lockVersionDir(dir string) func() {
 	return m.Unlock
 }
 
-// readVersionDir returns the versions in dir, oldest first, ignoring any
-// other file (such as an interrupted write's temp file). A dir that
-// doesn't exist holds none.
-func readVersionDir(dir string) ([]versionEntry, error) {
-	entries, err := os.ReadDir(dir)
+// readVersionDir returns the versions in dir (relative to root), oldest
+// first, ignoring any other file (such as an interrupted write's temp
+// file). A dir that doesn't exist holds none.
+func readVersionDir(root *os.Root, dir string) ([]versionEntry, error) {
+	entries, err := fs.ReadDir(root.FS(), filepath.ToSlash(dir))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("reading %q: %w", dir, err)
+		return nil, fmt.Errorf("reading %q: %w", filepath.Join(root.Name(), dir), err)
 	}
 
 	var out []versionEntry
@@ -306,37 +314,40 @@ func readVersionDir(dir string) ([]versionEntry, error) {
 	return out, nil
 }
 
-// walkVersionDirs calls fn with every version folder under root: the path
-// its versions are of (slash-separated, relative to root) and its versions,
-// oldest first. A root that doesn't exist yet holds none.
-func walkVersionDirs(root string, fn func(rel string, versions []versionEntry) error) error {
-	if _, err := os.Stat(root); errors.Is(err, fs.ErrNotExist) {
+// walkVersionDirs calls fn with every version folder under base: base's
+// root, the path its versions are of (slash-separated, relative to base),
+// and its versions, oldest first. Symlinks are never followed. A base that
+// doesn't exist yet holds none.
+func walkVersionDirs(base string, fn func(root *os.Root, rel string, versions []versionEntry) error) error {
+	root, err := openRoot(base, false)
+	if isNotExist(err) {
 		return nil
 	}
 
-	return filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
+	if err != nil {
+		return err
+	}
+
+	defer func() { _ = root.Close() }()
+
+	return fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 
-		if !d.IsDir() || !strings.HasSuffix(d.Name(), config.VersionDirSuffix) || p == root {
+		if !d.IsDir() || !strings.HasSuffix(d.Name(), config.VersionDirSuffix) || p == "." {
 			return nil
 		}
 
-		rel, err := filepath.Rel(root, strings.TrimSuffix(p, config.VersionDirSuffix))
+		versions, err := readVersionDir(root, filepath.FromSlash(p))
 		if err != nil {
 			return err
 		}
 
-		versions, err := readVersionDir(p)
-		if err != nil {
+		if err := fn(root, strings.TrimSuffix(p, config.VersionDirSuffix), versions); err != nil {
 			return err
 		}
 
-		if err := fn(filepath.ToSlash(rel), versions); err != nil {
-			return err
-		}
-
-		return filepath.SkipDir
+		return fs.SkipDir
 	})
 }

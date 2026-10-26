@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
 	"nilswitt.dev/go-backup-tool/internal/backup/objectstore"
@@ -23,8 +22,9 @@ type uploadLimit struct {
 
 // receiverUploadLimit works out the uploadLimit for one upload to recv:
 // its MaxObjectSize, lowered to what's left of its Quota, if any, when that
-// is less. replacing is the object the upload overwrites, if any, whose
-// current size counts as free since it's about to be replaced; "" for none.
+// is less. replacing is the key of the object the upload overwrites, if
+// any, whose current size counts as free since it's about to be replaced;
+// "" for none.
 func receiverUploadLimit(recv config.ResolvedReceiver, replacing string) (uploadLimit, error) {
 	maxSize := recv.MaxObjectSize
 	if maxSize <= 0 {
@@ -47,7 +47,7 @@ func receiverUploadLimit(recv config.ResolvedReceiver, replacing string) (upload
 	}
 
 	if replacing != "" {
-		if info, err := os.Stat(replacing); err == nil && info.Mode().IsRegular() { //nolint:gosec // replacing is objectstore.LocalObjectPath of a key SanitizeObjectKey already validated, under recv.Path
+		if info, err := objectstore.StatObject(recv.Path, replacing); err == nil && info.Mode().IsRegular() {
 			used -= info.Size()
 		}
 	}
