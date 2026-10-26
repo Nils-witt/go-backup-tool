@@ -103,6 +103,11 @@ func (p *pusher) run(ctx context.Context) {
 
 	var last time.Time
 
+	// The Changed channels are held across iterations and renewed only once
+	// they fire, so a change made during a push still wakes the loop.
+	jobsChanged := p.deps.Status.Changed()
+	receiversChanged := p.receiversChanged()
+
 	for {
 		sp := p.deps.Settings.StatusPush()
 
@@ -118,9 +123,11 @@ func (p *pusher) run(ctx context.Context) {
 			return
 		case <-p.deps.Settings.StatusPushChanged():
 			next = time.Now()
-		case <-p.deps.Status.Changed():
+		case <-jobsChanged:
+			jobsChanged = p.deps.Status.Changed()
 			next = p.soonest(next, last)
-		case <-p.receiversChanged():
+		case <-receiversChanged:
+			receiversChanged = p.receiversChanged()
 			next = p.soonest(next, last)
 		case <-due:
 			p.push(ctx, sp)

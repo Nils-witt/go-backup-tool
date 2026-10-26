@@ -54,6 +54,16 @@ type push struct {
 func startTestPusher(t *testing.T, src SettingsSource, jobs *status.Store, servers map[string]config.ResolvedServer) <-chan push {
 	t.Helper()
 
+	return startTestPusherHook(t, src, jobs, servers, nil)
+}
+
+// startTestPusherHook is startTestPusher, calling duringPost (when not nil)
+// inside every post, before the push reaches the returned channel.
+func startTestPusherHook(t *testing.T, src SettingsSource, jobs *status.Store, servers map[string]config.ResolvedServer,
+	duringPost func(),
+) <-chan push {
+	t.Helper()
+
 	pushes := make(chan push, 16)
 	p := &pusher{
 		deps: PusherDeps{
@@ -74,6 +84,10 @@ func startTestPusher(t *testing.T, src SettingsSource, jobs *status.Store, serve
 			var payload Payload
 			if err := json.Unmarshal(body, &payload); err != nil {
 				return err
+			}
+
+			if duringPost != nil {
+				duringPost()
 			}
 
 			pushes <- push{target: target, payload: payload}
@@ -169,6 +183,28 @@ func TestPusherPushesOnStartAndChange(t *testing.T) {
 	}
 
 	expectNoPush(t, pushes, 100*time.Millisecond)
+}
+
+func TestPusherSeesChangeDuringPush(t *testing.T) {
+	t.Parallel()
+
+	jobs := status.NewStore([]*config.Config{{Name: "db"}})
+	src := newFakeSettings(settings.StatusPush{Enabled: true, Server: "central", IntervalSeconds: 3600})
+
+	var once sync.Once
+
+	// The job starts while the first push is in flight, after its snapshot
+	// was taken; the pusher must still push again for it.
+	pushes := startTestPusherHook(t, src, jobs, map[string]config.ResolvedServer{"central": remoteServer(t, "central")},
+		func() { once.Do(func() { jobs.Starting("db") }) })
+
+	if got := waitPush(t, pushes).payload.Jobs[0].State; got == status.StateRunning {
+		t.Fatalf("first push already saw the job running")
+	}
+
+	if got := waitPush(t, pushes).payload.Jobs[0].State; got != status.StateRunning {
+		t.Errorf("job state after a change during a push = %q, want running", got)
+	}
 }
 
 func TestPusherIdlesWhileDisabled(t *testing.T) {
