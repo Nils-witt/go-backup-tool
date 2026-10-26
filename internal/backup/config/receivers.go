@@ -57,6 +57,16 @@ type FileReceiver struct {
 	// handleDownloadFile/receiver.NotifyDownload); independent of
 	// stale-after:/stale-notifications:. Optional.
 	DownloadNotifications []string `yaml:"download-notifications,omitempty" json:"download_notifications"`
+
+	// MaxObjectSize is the largest single object (or, on a directory
+	// receiver, file) a sender may upload, as a size such as "10GiB" (see
+	// ParseByteSize). Unset means DefaultReceiverMaxObjectSize.
+	MaxObjectSize string `yaml:"max-object-size,omitempty" json:"max_object_size"`
+
+	// Quota caps how much this receiver's path may hold in total, as a size
+	// such as "1TB"; an upload that would take it over is rejected. Unset
+	// means no quota.
+	Quota string `yaml:"quota,omitempty" json:"quota"`
 }
 
 // ResolvedReceiver is one fileReceiver after validation, ready to be used by
@@ -90,6 +100,13 @@ type ResolvedReceiver struct {
 	// the other fields.
 	StaleNotifications    []string
 	DownloadNotifications []string
+
+	// MaxObjectSize is the largest upload accepted, in bytes.
+	// ResolveReceiver always sets it (DefaultReceiverMaxObjectSize when
+	// max-object-size: is unset); 0 is treated as that default too. Quota
+	// caps the bytes stored under Path; 0 means no quota.
+	MaxObjectSize int64
+	Quota         int64
 
 	// Notifications is the live notification registry the ids above are
 	// resolved against when firing (see notify.Registry.Resolve), copied
@@ -158,6 +175,16 @@ func ResolveReceiver(fr FileReceiver, notifications *notify.Registry, trusted *t
 		return ResolvedReceiver{}, fmt.Errorf("download-notifications: %w", err)
 	}
 
+	maxObjectSize, err := parseOptionalByteSize("max-object-size", fr.MaxObjectSize, DefaultReceiverMaxObjectSize)
+	if err != nil {
+		return ResolvedReceiver{}, err
+	}
+
+	quota, err := parseOptionalByteSize("quota", fr.Quota, 0)
+	if err != nil {
+		return ResolvedReceiver{}, err
+	}
+
 	return ResolvedReceiver{
 		ID:                    id,
 		Kind:                  kind,
@@ -169,6 +196,8 @@ func ResolveReceiver(fr FileReceiver, notifications *notify.Registry, trusted *t
 		StaleAfter:            staleAfter,
 		StaleNotifications:    slices.Clone(fr.StaleNotifications),
 		DownloadNotifications: slices.Clone(fr.DownloadNotifications),
+		MaxObjectSize:         maxObjectSize,
+		Quota:                 quota,
 		Notifications:         notifications,
 		ServerName:            serverName,
 	}, nil

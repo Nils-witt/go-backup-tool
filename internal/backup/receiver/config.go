@@ -297,6 +297,8 @@ func normalizeFileReceiver(fr config.FileReceiver) config.FileReceiver {
 
 	fr.Retention = strings.TrimSpace(fr.Retention)
 	fr.StaleAfter = strings.TrimSpace(fr.StaleAfter)
+	fr.MaxObjectSize = strings.TrimSpace(fr.MaxObjectSize)
+	fr.Quota = strings.TrimSpace(fr.Quota)
 
 	return fr
 }
@@ -306,6 +308,7 @@ func toStoreConfig(fr config.FileReceiver) store.ReceiverConfig {
 		ID: strings.TrimSpace(fr.ID), Type: fr.Type, KeepVersions: fr.KeepVersions, AllowedServers: fr.AllowedServers, Path: fr.Path,
 		Retention: fr.Retention, StaleAfter: fr.StaleAfter,
 		StaleNotifications: fr.StaleNotifications, DownloadNotifications: fr.DownloadNotifications,
+		MaxObjectSize: fr.MaxObjectSize, Quota: fr.Quota,
 	}
 }
 
@@ -320,5 +323,6 @@ func toFileReceiver(rc store.ReceiverConfig) config.FileReceiver {
 		ID: rc.ID, Type: rc.Type, KeepVersions: rc.KeepVersions, AllowedServers: rc.AllowedServers, Path: rc.Path,
 		Retention: rc.Retention, StaleAfter: rc.StaleAfter,
 		StaleNotifications: rc.StaleNotifications, DownloadNotifications: rc.DownloadNotifications,
+		MaxObjectSize: rc.MaxObjectSize, Quota: rc.Quota,
 	}
 }

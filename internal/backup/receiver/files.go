@@ -40,13 +40,22 @@ func HandleReceiveFile(receivers *Registry, receiverStatus *status.ReceiverStore
 			return
 		}
 
-		body := &countingReader{r: &digestReader{r: r.Body, h: sha256.New(), want: bound.BodySHA256}}
+		limited, limit, ok := limitUploadBody(w, r, recv, "", log)
+		if !ok {
+			return
+		}
+
+		body := &countingReader{r: &digestReader{r: limited, h: sha256.New(), want: bound.BodySHA256}}
 
 		version, stored, err := objectstore.WriteFileVersion(recv.Path, rel, bound.PlainSHA256, body)
 		if err != nil {
 			log.Warn("receiver: writing file version failed", "id", recv.ID, "path", rel, "err", err)
 			receiverStatus.Record(recv.ID, rel, err)
 			recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, store.ReceiverEventReceive, rel, 0, err)
+
+			if writeUploadLimitError(w, err, limit) {
+				return
+			}
 
 			if errors.Is(err, errBodyDigestMismatch) {
 				http.Error(w, errBodyDigestMismatch.Error(), http.StatusBadRequest)

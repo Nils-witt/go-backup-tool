@@ -47,6 +47,8 @@ interface ReceiverForm {
   stale_after: string;
   stale_notifications: string[];
   download_notifications: string[];
+  max_object_size: string;
+  quota: string;
 }
 
 const EMPTY_FORM: ReceiverForm = {
@@ -59,6 +61,8 @@ const EMPTY_FORM: ReceiverForm = {
   stale_after: "",
   stale_notifications: [],
   download_notifications: [],
+  max_object_size: "",
+  quota: "",
 };
 
 // basePrefix is baseDir with exactly one trailing slash.
@@ -90,8 +94,14 @@ function formFrom(r: ReceiverConfigJSON, baseDir: string): ReceiverForm {
     stale_after: r.stale_after,
     stale_notifications: r.stale_notifications,
     download_notifications: r.download_notifications,
+    max_object_size: r.max_object_size ?? "",
+    quota: r.quota ?? "",
   };
 }
+
+// sizePattern matches what the server's ParseByteSize accepts: a number
+// with an optional B/kB/MB/GB/TB/KiB/MiB/GiB/TiB unit.
+const sizePattern = /^\d+(\.\d+)?\s*(([kmgt]i?)?b)?$/i;
 
 // retentionText summarizes r's retention rules for the table.
 function retentionText(r: ReceiverConfigJSON): string {
@@ -180,11 +190,16 @@ function ReceiverDialog({
   const directory = form.type === "directory";
   const keepVersions = form.keep_versions.trim();
   const keepVersionsOK = !keepVersions || /^\d+$/.test(keepVersions);
+  const sizeOK = (v: string) => !v.trim() || sizePattern.test(v.trim());
+  const maxObjectSizeOK = sizeOK(form.max_object_size);
+  const quotaOK = sizeOK(form.quota);
   const canSave =
     !!form.id.trim() &&
     form.allowed_servers.length > 0 &&
     (!!form.path.trim() || outsidePath !== null) &&
-    keepVersionsOK;
+    keepVersionsOK &&
+    maxObjectSizeOK &&
+    quotaOK;
 
   return (
     <Dialog open onClose={onCancel} fullWidth maxWidth="sm">
@@ -302,6 +317,22 @@ function ReceiverDialog({
               helperText='Delete objects older than this, e.g. "30d" or "12h". Empty keeps them forever.'
             />
           )}
+          <TextField
+            label="Max object size"
+            value={form.max_object_size}
+            onChange={(e) => set({ max_object_size: e.target.value })}
+            error={!maxObjectSizeOK}
+            helperText={`Reject any single ${directory ? "file" : "object"} larger than this, e.g. "10GiB" or "500MB". Empty means 50GiB.`}
+            slotProps={{ htmlInput: { spellCheck: false } }}
+          />
+          <TextField
+            label="Quota"
+            value={form.quota}
+            onChange={(e) => set({ quota: e.target.value })}
+            error={!quotaOK}
+            helperText={`Reject uploads that would take the receiver's directory over this total size, e.g. "1TB". Empty sets no quota.`}
+            slotProps={{ htmlInput: { spellCheck: false } }}
+          />
           <TextField
             label="Stale after"
             value={form.stale_after}

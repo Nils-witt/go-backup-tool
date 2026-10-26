@@ -1809,6 +1809,10 @@ paths:
             text/plain:
               schema:
                 type: string
+        "413":
+          $ref: "#/components/responses/UploadTooLarge"
+        "507":
+          $ref: "#/components/responses/QuotaExceeded"
         "500":
           description: Writing the object failed
           content:
@@ -1875,6 +1879,10 @@ paths:
             text/plain:
               schema:
                 type: string
+        "413":
+          $ref: "#/components/responses/UploadTooLarge"
+        "507":
+          $ref: "#/components/responses/QuotaExceeded"
         "500":
           description: Writing the file failed
           content:
@@ -1953,6 +1961,10 @@ paths:
             text/plain:
               schema:
                 type: string
+        "413":
+          $ref: "#/components/responses/UploadTooLarge"
+        "507":
+          $ref: "#/components/responses/QuotaExceeded"
         "409":
           description: The receiver is a backup receiver, which doesn't accept files
           content:
@@ -2028,6 +2040,18 @@ components:
   responses:
     Unauthorized:
       description: Missing, invalid, or expired access token
+      content:
+        text/plain:
+          schema:
+            type: string
+    UploadTooLarge:
+      description: The upload is larger than the receiver's `max_object_size` (50GiB when unset)
+      content:
+        text/plain:
+          schema:
+            type: string
+    QuotaExceeded:
+      description: Storing the upload would take the receiver's path over its `quota`
       content:
         text/plain:
           schema:
@@ -2554,6 +2578,19 @@ components:
           items:
             type: string
           description: Notification ids fired on every dashboard download from this receiver.
+        max_object_size:
+          type: string
+          description: >
+            Optional size such as "10GiB" or "500MB" (decimal kB/MB/GB/TB or
+            binary KiB/MiB/GiB/TiB): the largest single object, or on a
+            directory receiver file, a sender may upload; larger uploads get
+            413. Empty means 50GiB.
+        quota:
+          type: string
+          description: >
+            Optional size such as "1TB": the most the receiver's path may
+            hold in total. An upload that would take it over gets 507.
+            Empty sets no quota.
       required: [id, path]
       description: >
         A receiver's editable fields, with the same syntax as a settings

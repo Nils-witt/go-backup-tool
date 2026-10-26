@@ -30,6 +30,8 @@ type receiverModel struct {
 	StaleAfter            string    `gorm:"column:stale_after;not null;default:''"`
 	StaleNotifications    []string  `gorm:"column:stale_notifications;serializer:json"`
 	DownloadNotifications []string  `gorm:"column:download_notifications;serializer:json"`
+	MaxObjectSize         string    `gorm:"column:max_object_size;not null;default:''"`
+	Quota                 string    `gorm:"column:quota;not null;default:''"`
 	CreatedAt             time.Time `gorm:"column:created_at;not null"`
 	CreatedBy             string    `gorm:"column:created_by;not null"`
 	UpdatedAt             time.Time `gorm:"column:updated_at;not null"`
@@ -49,6 +51,8 @@ type ReceiverConfig struct {
 	StaleAfter            string
 	StaleNotifications    []string
 	DownloadNotifications []string
+	MaxObjectSize         string
+	Quota                 string
 	CreatedAt             time.Time
 	CreatedBy             string
 	UpdatedAt             time.Time
@@ -60,6 +64,7 @@ func newReceiverModel(r ReceiverConfig) receiverModel {
 	return receiverModel{
 		ID: r.ID, Type: r.Type, KeepVersions: r.KeepVersions, AllowedServers: r.AllowedServers, Path: r.Path, Retention: r.Retention, StaleAfter: r.StaleAfter,
 		StaleNotifications: r.StaleNotifications, DownloadNotifications: r.DownloadNotifications,
+		MaxObjectSize: r.MaxObjectSize, Quota: r.Quota,
 		CreatedAt: r.CreatedAt, CreatedBy: r.CreatedBy, UpdatedAt: r.UpdatedAt, UpdatedBy: r.UpdatedBy,
 	}
 }
@@ -69,6 +74,7 @@ func (m receiverModel) config() ReceiverConfig {
 	return ReceiverConfig{
 		ID: m.ID, Type: m.Type, KeepVersions: m.KeepVersions, AllowedServers: m.AllowedServers, Path: m.Path, Retention: m.Retention, StaleAfter: m.StaleAfter,
 		StaleNotifications: m.StaleNotifications, DownloadNotifications: m.DownloadNotifications,
+		MaxObjectSize: m.MaxObjectSize, Quota: m.Quota,
 		CreatedAt: m.CreatedAt, CreatedBy: m.CreatedBy, UpdatedAt: m.UpdatedAt, UpdatedBy: m.UpdatedBy,
 	}
 }
@@ -138,11 +144,12 @@ func (s *gormStore) UpdateReceiverConfig(ctx context.Context, r ReceiverConfig) 
 	r = normalizeReceiverTimes(r)
 
 	res := s.db.WithContext(ctx).Model(&receiverModel{}).Where("id = ?", r.ID).
-		Select("public_key", "type", "keep_versions", "allowed_servers", "path", "retention", "stale_after", "stale_notifications", "download_notifications", "updated_at", "updated_by").
+		Select("public_key", "type", "keep_versions", "allowed_servers", "path", "retention", "stale_after", "stale_notifications", "download_notifications", "max_object_size", "quota", "updated_at", "updated_by").
 		Updates(&receiverModel{
 			Type: r.Type, KeepVersions: r.KeepVersions,
 			AllowedServers: r.AllowedServers, Path: r.Path, Retention: r.Retention, StaleAfter: r.StaleAfter,
 			StaleNotifications: r.StaleNotifications, DownloadNotifications: r.DownloadNotifications,
+			MaxObjectSize: r.MaxObjectSize, Quota: r.Quota,
 			UpdatedAt: r.UpdatedAt, UpdatedBy: r.UpdatedBy,
 		})
 	if res.Error != nil {

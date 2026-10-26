@@ -90,15 +90,21 @@ func receiveObject(receivers *Registry, receiverStatus *status.ReceiverStore, lo
 
 		cfg.CreatedAt = createdAt
 
-		var body io.Reader = r.Body
-		if bound.BodySHA256 != "" {
-			body = &digestReader{r: r.Body, h: sha256.New(), want: bound.BodySHA256}
+		limited, limit, ok := limitUploadBody(w, r, recv, objectstore.LocalObjectPath(cfg, t), log)
+		if !ok {
+			return
 		}
+
+		body := &digestReader{r: limited, h: sha256.New(), want: bound.BodySHA256}
 
 		if err := objectstore.WriteLocalObject(cfg, t, body); err != nil {
 			log.Warn("receiver: writing object failed", "id", recv.ID, "key", key, "err", err)
 			receiverStatus.Record(recv.ID, key, err)
 			recordReceiverEventBestEffort(r.Context(), db, log, recv.ID, store.ReceiverEventReceive, key, 0, err)
+
+			if writeUploadLimitError(w, err, limit) {
+				return
+			}
 
 			if errors.Is(err, errBodyDigestMismatch) {
 				http.Error(w, errBodyDigestMismatch.Error(), http.StatusBadRequest)

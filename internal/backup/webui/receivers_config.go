@@ -72,6 +72,7 @@ func handleListReceiverConfigs(m *receiver.Manager, log *slog.Logger) http.Handl
 				ID: rc.ID, Type: string(cmp.Or(config.ReceiverKind(rc.Type), config.ReceiverKindBackup)), KeepVersions: rc.KeepVersions,
 				AllowedServers: nonNil(rc.AllowedServers), Path: rc.Path, Retention: rc.Retention, StaleAfter: rc.StaleAfter,
 				StaleNotifications: nonNil(rc.StaleNotifications), DownloadNotifications: nonNil(rc.DownloadNotifications),
+				MaxObjectSize: rc.MaxObjectSize, Quota: rc.Quota,
 				CreatedAt: rc.CreatedAt, CreatedBy: rc.CreatedBy, UpdatedAt: rc.UpdatedAt, UpdatedBy: rc.UpdatedBy,
 				Error: mr.Error,
 			}

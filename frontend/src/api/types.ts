@@ -230,6 +230,10 @@ export interface ReceiverConfigJSON {
   stale_after: string;
   stale_notifications: string[];
   download_notifications: string[];
+  // max_object_size and quota are sizes as entered (e.g. "10GiB"); ""
+  // means the 50GiB default and no quota.
+  max_object_size: string;
+  quota: string;
   created_at: string;
   created_by: string;
   updated_at: string;
