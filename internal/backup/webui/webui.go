@@ -21,6 +21,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/jobs"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/peerstatus"
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
@@ -65,6 +66,10 @@ type Deps struct {
 	Trust           *trust.Manager
 	Identity        *identity.ServerIdentity
 	Logs            *LogRingBuffer
+
+	// Peers holds the status other instances pushed to this one; nil
+	// serves none.
+	Peers *peerstatus.Hub
 
 	// NotifyQueue retries a download notification email that fails to
 	// send (see notify.Queue).
@@ -252,7 +257,11 @@ func registerRoutes(liveCtx context.Context, mux *http.ServeMux, deps Deps, opts
 	mux.HandleFunc("GET /api/identity", api(handleIdentity(deps.Identity)))
 	mux.HandleFunc("GET /api/receivers", api(handleReceiverStatus(deps.Receivers, deps.ReceiverStatus, log)))
 	mux.HandleFunc("POST /api/live/ticket", api(handleMintLiveTicket(liveTickets)))
-	mux.HandleFunc("GET /api/live", handleLive(liveCtx, deps.Status, deps.Receivers, deps.ReceiverStatus, liveTickets, auth.logouts, opts.DevMode, opts.TrustProxyHeaders, log))
+	mux.HandleFunc("GET /api/live", handleLive(liveCtx, &liveStatusCache{
+		statusStore: deps.Status, receivers: deps.Receivers, receiverStore: deps.ReceiverStatus, peers: deps.Peers, log: log,
+	}, liveTickets, auth.logouts, opts.DevMode, opts.TrustProxyHeaders, log))
+	mux.HandleFunc("GET /api/peers", api(handlePeers(deps.Peers)))
+	mux.HandleFunc("DELETE /api/peers/{id}", change(handleForgetPeer(deps.Peers, log)))
 	mux.HandleFunc("GET /api/job-runs", apiJobRunLog(handleJobRunEvents(db, log, opts.EventLogLimit)))
 	mux.HandleFunc("GET /api/target-runs", apiTargetRunLog(handleTargetRunEvents(db, log, opts.EventLogLimit)))
 	mux.HandleFunc("POST /api/jobs/{name}/retry", change(handleRetryFailedTargets(lookupJob, deps.Status, deps.Runner, log)))
@@ -283,8 +292,8 @@ func registerRoutes(liveCtx context.Context, mux *http.ServeMux, deps Deps, opts
 }
 
 // registerSettingsRoutes mounts /api/receiver-configs,
-// /api/trusted-servers, /api/notification-configs, /api/report-config, and
-// /api/log-retention-config on mux: each listing wrapped in admin, each
+// /api/trusted-servers, /api/notification-configs, /api/report-config,
+// /api/log-retention-config, and /api/status-push-config on mux: each listing wrapped in admin, each
 // change in change (admin plus the audit log).
 func registerSettingsRoutes(mux *http.ServeMux, receiverManager *receiver.Manager, trustManager *trust.Manager, settingsManager *settings.Manager, admin, change func(http.HandlerFunc) http.HandlerFunc, log *slog.Logger) {
 	mux.HandleFunc("GET /api/receiver-configs", admin(handleListReceiverConfigs(receiverManager, log)))
@@ -303,6 +312,8 @@ func registerSettingsRoutes(mux *http.ServeMux, receiverManager *receiver.Manage
 	mux.HandleFunc("PUT /api/report-config", change(handleUpdateReportConfig(settingsManager, log)))
 	mux.HandleFunc("GET /api/log-retention-config", admin(handleGetLogRetentionConfig(settingsManager, log)))
 	mux.HandleFunc("PUT /api/log-retention-config", change(handleUpdateLogRetentionConfig(settingsManager, log)))
+	mux.HandleFunc("GET /api/status-push-config", admin(handleGetStatusPushConfig(settingsManager, log)))
+	mux.HandleFunc("PUT /api/status-push-config", change(handleUpdateStatusPushConfig(settingsManager, log)))
 }
 
 // Shutdown gracefully stops the web UI server, waiting for it to finish.

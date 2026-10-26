@@ -172,3 +172,44 @@ func TestLogRetentionConfigAPI(t *testing.T) {
 		t.Errorf("log retention config = %+v", got)
 	}
 }
+
+func TestStatusPushConfigAPI(t *testing.T) {
+	t.Parallel()
+
+	idp := newTestIDP(t)
+	srv, _ := startSettingsWebUI(t, idp)
+
+	admin := idp.token(t, "erin", map[string]any{"preferred_username": "erin", "groups": []string{"admins"}})
+	viewer := idp.token(t, "viewer", nil)
+
+	var before statusPushConfigJSON
+	if code := doJSON(t, srv, http.MethodGet, "/api/status-push-config", admin, &before); code != http.StatusOK {
+		t.Fatalf("admin get before any save = %d", code)
+	}
+
+	if before.StatusPush != (settings.StatusPush{}) || before.UpdatedAt != nil || before.DefaultInterval != settings.DefaultStatusPushIntervalSeconds {
+		t.Errorf("status push before any save = %+v, want disabled, never updated, with the default interval", before)
+	}
+
+	want := settings.StatusPush{Enabled: true, Server: "central", IntervalSeconds: 60}
+
+	for _, c := range []receiverConfigCall{
+		{"non-admin get", http.MethodGet, "/api/status-push-config", viewer, nil, http.StatusForbidden},
+		{"enabled without a server", http.MethodPut, "/api/status-push-config", admin, settings.StatusPush{Enabled: true}, http.StatusBadRequest},
+		{"interval too short", http.MethodPut, "/api/status-push-config", admin, settings.StatusPush{IntervalSeconds: 1}, http.StatusBadRequest},
+		{"non-admin update", http.MethodPut, "/api/status-push-config", viewer, want, http.StatusForbidden},
+		{"admin update", http.MethodPut, "/api/status-push-config", admin, want, http.StatusNoContent},
+	} {
+		c.run(t, srv)
+	}
+
+	var got statusPushConfigJSON
+	if code := doJSON(t, srv, http.MethodGet, "/api/status-push-config", admin, &got); code != http.StatusOK {
+		t.Fatalf("admin get = %d", code)
+	}
+
+	if got.StatusPush != want || got.UpdatedBy != "erin" || got.UpdatedAt == nil ||
+		got.MinInterval != settings.MinStatusPushIntervalSeconds || got.MaxInterval != settings.MaxStatusPushIntervalSeconds {
+		t.Errorf("status push config = %+v", got)
+	}
+}

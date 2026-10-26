@@ -1,7 +1,7 @@
-// Package settings manages the notifications, report, and log retention
-// settings an admin edits in the web UI: stored in the state db and
-// resolved into the live notify.Registry, report.Live, and LogRetention
-// every trigger reads at fire time.
+// Package settings manages the notifications, report, log retention, and
+// status push settings an admin edits in the web UI: stored in the state db
+// and resolved into the live notify.Registry, report.Live, LogRetention, and
+// StatusPush every trigger reads at fire time.
 package settings
 
 import (
@@ -34,10 +34,11 @@ var (
 	ErrNotificationInUse = errors.New("notification is still in use")
 )
 
-// Manager owns the notifications', report settings', and log retention
-// settings' lifecycle: stored in the state db, resolved into the live
-// notification registry, report settings, and log retention, so an edit in
-// the web UI takes effect everywhere immediately. It's the only writer of
+// Manager owns the notifications', report settings', log retention
+// settings', and status push settings' lifecycle: stored in the state db,
+// resolved into the live notification registry, report settings, log
+// retention, and status push, so an edit in the web UI takes effect
+// everywhere immediately. It's the only writer of
 // all of them.
 type Manager struct {
 	db            store.Store
@@ -51,6 +52,10 @@ type Manager struct {
 	// failure-notifications ids; nil reads the jobs stored in the state db.
 	jobRefs func() map[string][]string
 
+	// checkServer, once set by UseServers, reports why a status push can't
+	// go to a server; nil skips that check.
+	checkServer func(name string) error
+
 	// mu serializes mutations, so the db and the live state never disagree.
 	mu sync.Mutex
 	// invalid maps each stored notification id that failed to resolve at
@@ -63,6 +68,11 @@ type Manager struct {
 	// logRetentionChanged (capacity 1) signals an UpdateLogRetention.
 	logRetention        atomic.Pointer[LogRetention]
 	logRetentionChanged chan struct{}
+
+	// statusPush is the status push in effect, never nil;
+	// statusPushChanged (capacity 1) signals an UpdateStatusPush.
+	statusPush        atomic.Pointer[StatusPush]
+	statusPushChanged chan struct{}
 }
 
 // NewManager builds a Manager over db (nil if the state db couldn't be
@@ -72,11 +82,13 @@ type Manager struct {
 func NewManager(db store.Store, notifications *notify.Registry, live *report.Live, smtp notify.SMTPSettings, gpg notify.GPGSettings, log *slog.Logger) *Manager {
 	m := &Manager{
 		db: db, notifications: notifications, report: live, smtp: smtp, gpg: gpg,
-		log: log, invalid: make(map[string]string), logRetentionChanged: make(chan struct{}, 1),
+		log: log, invalid: make(map[string]string),
+		logRetentionChanged: make(chan struct{}, 1), statusPushChanged: make(chan struct{}, 1),
 	}
 
 	defaults := DefaultLogRetention()
 	m.logRetention.Store(&defaults)
+	m.statusPush.Store(&StatusPush{})
 
 	return m
 }
@@ -99,8 +111,9 @@ func (m *Manager) SMTPConfigured() bool { return m.smtp.Host != "" }
 // NotificationIDs returns every active notification id, sorted.
 func (m *Manager) NotificationIDs() []string { return m.notifications.IDs() }
 
-// Load resolves every notification, the report settings, and the log
-// retention settings stored in the state db into their live holders. Something stored that
+// Load resolves every notification, the report settings, the log retention
+// settings, and the status push settings stored in the state db into their
+// live holders. Something stored that
 // no longer resolves is logged and left inactive (see ListNotifications/
 // GetReport). With no state db there is nothing to load. Jobs'
 // failure-notifications ids are checked once jobs are loaded (see
@@ -130,6 +143,7 @@ func (m *Manager) Load(ctx context.Context) {
 	}
 
 	m.loadLogRetentionLocked(ctx)
+	m.loadStatusPushLocked(ctx)
 }
 
 // activateNotificationLocked resolves fn into the registry, or records why

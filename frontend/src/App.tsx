@@ -52,6 +52,9 @@ const LogRetentionSettingsPage = lazy(() =>
     default: m.LogRetentionSettingsPage,
   })),
 );
+const StatusPushSettingsPage = lazy(() =>
+  import("./pages/StatusPushSettingsPage").then((m) => ({ default: m.StatusPushSettingsPage })),
+);
 const TrustedServersPage = lazy(() =>
   import("./pages/TrustedServersPage").then((m) => ({ default: m.TrustedServersPage })),
 );
@@ -117,6 +120,7 @@ function AuthGate() {
         <Route path="notification-settings" element={<NotificationSettingsPage />} />
         <Route path="report-settings" element={<ReportSettingsPage />} />
         <Route path="log-retention-settings" element={<LogRetentionSettingsPage />} />
+        <Route path="status-push-settings" element={<StatusPushSettingsPage />} />
         <Route path="identity" element={<IdentityPage />} />
         <Route path="tokens" element={<TokensPage />} />
         <Route path="logs" element={<LiveLogsPage />} />

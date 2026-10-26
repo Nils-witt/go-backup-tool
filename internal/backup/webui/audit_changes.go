@@ -90,6 +90,11 @@ func auditResources(db store.Store, keyring *gpgkeys.Keyring) map[string]auditRe
 				TargetRunDays: s.TargetRunDays, TargetRunMaxRows: s.TargetRunMaxRows,
 			}
 		})},
+		"status-push-config": {snapshot: getStored(db, func(db store.Store, ctx context.Context, _ string) (store.StatusPushSettings, bool, error) {
+			return db.GetStatusPushSettings(ctx)
+		}, func(s store.StatusPushSettings) settings.StatusPush {
+			return settings.StatusPush{Enabled: s.Enabled, Server: s.Server, IntervalSeconds: s.IntervalSeconds}
+		})},
 		// A token is revoked by id but created by name (its id is only
 		// generated then), so either finds it: the newest token by that
 		// name, for a create.

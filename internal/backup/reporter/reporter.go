@@ -259,7 +259,7 @@ type receiverReportLine struct {
 }
 
 // staleReceiverLine is one receiver found currently stale (see
-// annotateReceiverStaleness's identical condition) when a reportContent was
+// receiver.Snapshots' identical condition) when a reportContent was
 // built.
 type staleReceiverLine struct {
 	id         string
@@ -297,7 +297,7 @@ type reportContent struct {
 // the window from start to end: files received/runs completed and errors
 // from receiver_events/job_runs (db, skipped if nil), and current receiver
 // staleness read live from disk (see objectstore.LastReceivedAt), mirroring the
-// dashboard's own annotateReceiverStaleness so the two never disagree. A
+// dashboard's own receiver.Snapshots so the two never disagree. A
 // query failure is logged and leaves that section empty rather than failing
 // the whole report — a partial report is better than none, matching this
 // codebase's usual failure handling.
@@ -314,7 +314,7 @@ func buildReport(ctx context.Context, serverName string, jobNames []string, rece
 // window from start to end: files received and errors from receiver_events
 // (db, skipped if nil), and current staleness read live from disk (see
 // objectstore.LastReceivedAt), mirroring the dashboard's own
-// annotateReceiverStaleness so the two never disagree. A query failure is
+// receiver.Snapshots so the two never disagree. A query failure is
 // logged and leaves that section empty rather than failing the whole
 // report — a partial report is better than none, matching this codebase's
 // usual failure handling.

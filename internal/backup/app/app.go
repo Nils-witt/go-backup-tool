@@ -24,6 +24,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/identity"
 	"nilswitt.dev/go-backup-tool/internal/backup/jobs"
 	"nilswitt.dev/go-backup-tool/internal/backup/notify"
+	"nilswitt.dev/go-backup-tool/internal/backup/peerstatus"
 	"nilswitt.dev/go-backup-tool/internal/backup/periodic"
 	"nilswitt.dev/go-backup-tool/internal/backup/pipeline"
 	"nilswitt.dev/go-backup-tool/internal/backup/receiver"
@@ -138,13 +139,14 @@ func Run(args []string, stderr io.Writer) int {
 	return runWithContext(ctx, args, stderr)
 }
 
-// startWebUIIfConfigured starts the web UI dashboard and receiver API (see
-// webui.StartWebUI, receiver.RegisterRoutes) when rc.Listen is set, along
+// startWebUIIfConfigured starts the web UI dashboard, receiver API, and
+// status push endpoint (see webui.StartWebUI, receiver.RegisterRoutes,
+// peerstatus.Hub.RegisterRoutes) when rc.Listen is set, along
 // with the stale-receiver webhook monitor (see
 // receiver.MonitorStaleReceivers) and the per-receiver retention sweep (see
 // receiver.MonitorReceiverRetention). It returns nil, doing nothing else,
-// when rc.Listen is unset. deps.GPGKeyring is set here from rc.GPG, so
-// callers leave it nil. The monitors and the receiver API share deps'
+// when rc.Listen is unset. deps.GPGKeyring is set here from rc.GPG, and
+// deps.Peers from deps.Trust, so callers leave them nil. The monitors and the receiver API share deps'
 // live receiver set (see newReceivers) and notification queue.
 func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, deps webui.Deps) *webui.Server {
 	if rc.Listen == "" {
@@ -154,6 +156,11 @@ func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, deps webu
 	go receiver.MonitorReceiverRetention(ctx, deps.DB, deps.Receivers, deps.Log)
 
 	deps.GPGKeyring = gpgkeys.New(rc.GPG.Bin, rc.GPG.Homedir)
+
+	// Other instances push their status to this one through the web UI's
+	// listener, so it's only accepted (and shown) while that runs.
+	deps.Peers = peerstatus.NewHub(deps.DB, deps.Trust.Registry(), deps.Log)
+	deps.Peers.Load(ctx)
 	srv := webui.StartWebUI(deps, webui.Options{
 		Addr:              rc.Listen,
 		InstanceName:      rc.ServerName,
@@ -164,15 +171,28 @@ func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, deps webu
 		CORSGetOrigins:    rc.CORSGetOrigins,
 		RateLimit:         rc.RateLimit,
 		ExtraRoutes: func(mux *http.ServeMux) {
-			receiver.RegisterRoutes(mux, deps.Receivers, deps.ReceiverStatus, deps.Log, deps.DB, func(r *http.Request) string {
-				return webui.ClientAddr(r, rc.TrustProxyHeaders)
-			})
+			clientAddr := func(r *http.Request) string { return webui.ClientAddr(r, rc.TrustProxyHeaders) }
+			receiver.RegisterRoutes(mux, deps.Receivers, deps.ReceiverStatus, deps.Log, deps.DB, clientAddr)
+			deps.Peers.RegisterRoutes(mux, clientAddr)
 		},
 	})
 
 	go receiver.MonitorStaleReceivers(ctx, deps.Receivers, deps.NotifyQueue, deps.Log)
 
 	return srv
+}
+
+// startStatusPush pushes this instance's status to the central instance
+// settingsManager's status push settings name (see peerstatus.RunPusher),
+// until ctx is done; it idles while that's disabled. The server they name
+// is one of jobsManager's, checked when the settings are saved and again at
+// every push. deps' Settings, Server, and InstanceName (rc.ServerName) are
+// filled in here.
+func startStatusPush(ctx context.Context, rc *config.RunConfig, settingsManager *settings.Manager, jobsManager *jobs.Manager, deps peerstatus.PusherDeps) {
+	settingsManager.UseServers(func(name string) error { return peerstatus.CheckServer(jobsManager.Server, name) })
+
+	deps.Settings, deps.Server, deps.InstanceName = settingsManager, jobsManager.Server, rc.ServerName
+	go peerstatus.RunPusher(ctx, deps)
 }
 
 // newReceivers loads every receiver (see receiver.Manager.Load, which also
@@ -335,6 +355,7 @@ func runWithContext(ctx context.Context, args []string, stderr io.Writer) int {
 	go r.RunOutstandingUploadRetries(ctx, jobsManager.Get)
 
 	receivers, receiverStore, receiverManager, trustManager := newReceivers(ctx, rc, stateDB, notifications, log)
+	startStatusPush(ctx, rc, settingsManager, jobsManager, peerstatus.PusherDeps{Identity: serverIdentity, Status: statusStore, Receivers: receivers, ReceiverStatus: receiverStore, Log: log})
 
 	// Independent of the web UI: a daily report is useful for anyone
 	// monitoring receivers by inbox, not just those watching the dashboard.

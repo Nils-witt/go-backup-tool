@@ -249,15 +249,15 @@ func TestLiveStatusOriginBehindProxy(t *testing.T) {
 }
 
 // getLivePayload calls cache.get, failing the test on error.
-func getLivePayload(t *testing.T, cache *liveStatusCache) (payload []byte, jobsChanged, receiversChanged <-chan struct{}) {
+func getLivePayload(t *testing.T, cache *liveStatusCache) ([]byte, liveChanges) {
 	t.Helper()
 
-	payload, jobsChanged, receiversChanged, err := cache.get()
+	payload, changes, err := cache.get()
 	if err != nil {
 		t.Fatalf("liveStatusCache.get() error: %v", err)
 	}
 
-	return payload, jobsChanged, receiversChanged
+	return payload, changes
 }
 
 // requireClosed fails the test unless ch is closed, i.e. its store has
@@ -286,16 +286,16 @@ func TestLiveStatusCacheSharesPayloadUntilChange(t *testing.T) {
 	receiverStore := status.NewReceiverStore(receivers)
 	cache := &liveStatusCache{statusStore: statusStore, receivers: receiver.NewRegistry(receivers), receiverStore: receiverStore, log: discardLogger}
 
-	first, jobsChanged, receiversChanged := getLivePayload(t, cache)
+	first, changes := getLivePayload(t, cache)
 
-	if second, _, _ := getLivePayload(t, cache); !samePayload(first, second) {
+	if second, _ := getLivePayload(t, cache); !samePayload(first, second) {
 		t.Error("get() re-encoded with nothing changed, want the cached payload")
 	}
 
 	statusStore.Starting("test")
-	requireClosed(t, jobsChanged, "job")
+	requireClosed(t, changes.jobs, "job")
 
-	afterJob, _, _ := getLivePayload(t, cache)
+	afterJob, _ := getLivePayload(t, cache)
 	if samePayload(first, afterJob) {
 		t.Fatal("get() after a job change returned the stale payload")
 	}
@@ -310,9 +310,9 @@ func TestLiveStatusCacheSharesPayloadUntilChange(t *testing.T) {
 	}
 
 	receiverStore.Record("a", "key", nil)
-	requireClosed(t, receiversChanged, "receiver")
+	requireClosed(t, changes.receivers, "receiver")
 
-	afterReceiver, _, _ := getLivePayload(t, cache)
+	afterReceiver, _ := getLivePayload(t, cache)
 	if samePayload(afterJob, afterReceiver) {
 		t.Fatal("get() after a receiver change returned the stale payload")
 	}
@@ -323,7 +323,7 @@ func TestLiveStatusCacheSharesPayloadUntilChange(t *testing.T) {
 	cache.builtAt = cache.builtAt.Add(-2 * livePayloadMaxAge)
 	cache.mu.Unlock()
 
-	if aged, _, _ := getLivePayload(t, cache); samePayload(afterReceiver, aged) {
+	if aged, _ := getLivePayload(t, cache); samePayload(afterReceiver, aged) {
 		t.Error("get() past livePayloadMaxAge returned the old payload, want a rebuild")
 	}
 }

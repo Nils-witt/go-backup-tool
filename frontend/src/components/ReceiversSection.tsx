@@ -29,7 +29,7 @@ import { useTheme } from "@mui/material/styles";
 
 interface ReceiversSectionProps {
   // receivers may come from several instances (see Sourced); remote ones
-  // offer no file listing, since their downloads can't work cross-origin.
+  // offer no file listing: their files are on the other instance.
   receivers: Sourced<ReceiverSnapshot>[];
   canDownload: boolean;
 }
@@ -264,9 +264,9 @@ export function ReceiversCard({
               <Typography sx={{ fontWeight: 600, overflowWrap: "anywhere" }}>
                 {receiver.id}
               </Typography>
-              {receiver.source ? (
+              {receiver.instance ? (
                 <Typography variant="caption" color="text.secondary">
-                  {receiver.source}
+                  {receiver.instance}
                 </Typography>
               ) : null}
             </Box>
@@ -365,7 +365,7 @@ export function ReceiversSection({ receivers, canDownload }: ReceiversSectionPro
       <Grid container spacing={2}>
         {receivers.map((rcv) => {
           return (
-            <Grid key={sourcedKey(rcv.source, rcv.id)} size={{ xs: 12, sm: 6, md: 4 }}>
+            <Grid key={sourcedKey(rcv.instance, rcv.id)} size={{ xs: 12, sm: 6, md: 4 }}>
               <ReceiversCard receiver={rcv} canDownload={canDownload} />
             </Grid>
           );

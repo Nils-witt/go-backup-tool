@@ -18,6 +18,7 @@ import CodeIcon from "@mui/icons-material/Code";
 import EnhancedEncryptionIcon from "@mui/icons-material/EnhancedEncryption";
 import ManageHistoryIcon from "@mui/icons-material/ManageHistory";
 import AutoDeleteIcon from "@mui/icons-material/AutoDelete";
+import HubIcon from "@mui/icons-material/Hub";
 import type { AuthState } from "./auth/useAuth";
 
 export interface NavItem {
@@ -103,6 +104,12 @@ export const NAV_GROUPS: NavGroup[] = [
         to: "/log-retention-settings",
         label: "Log retention",
         icon: <AutoDeleteIcon />,
+        visible: (s) => s.canManageSettings,
+      },
+      {
+        to: "/status-push-settings",
+        label: "Status push",
+        icon: <HubIcon />,
         visible: (s) => s.canManageSettings,
       },
     ],

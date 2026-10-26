@@ -2,10 +2,12 @@
 // an object to another instance's receiver over HTTP(S), signing each
 // request with this instance's identity (see the remoteauth package) and
 // honoring the target's TLS settings. The server half is the receiver
-// package.
+// package. PostStatus is the client half of the status push, whose server
+// half is the peerstatus package.
 package remoteclient
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -118,16 +120,16 @@ func remoteObjectURL(t *config.Target, key, file string, query url.Values) strin
 }
 
 // remoteAuthHeader signs a fresh JWT with id (this instance's own RSA key
-// and UUID — see identity.LoadServerIdentityAtStartup) scoped to t.Bucket
-// (the destination instance's receiver id) and bound to req (see
-// remoteauth.Request), and formats it as an Authorization: Bearer header
-// value, for Upload. Errors if id is nil.
-func remoteAuthHeader(id *identity.ServerIdentity, t *config.Target, req remoteauth.Request) (string, error) {
+// and UUID — see identity.LoadServerIdentityAtStartup) scoped to audience
+// (the destination instance's receiver id, or StatusAudience) and bound to
+// req (see remoteauth.Request), and formats it as an Authorization: Bearer
+// header value, for sendSignedRequest. Errors if id is nil.
+func remoteAuthHeader(id *identity.ServerIdentity, audience string, req remoteauth.Request) (string, error) {
 	if id == nil {
 		return "", errors.New("no server identity available (see startup log for why loadServerIdentity failed)")
 	}
 
-	token, err := id.SignRequest(t.Bucket, req)
+	token, err := id.SignRequest(audience, req)
 	if err != nil {
 		return "", fmt.Errorf("signing request: %w", err)
 	}
@@ -194,7 +196,7 @@ func UploadFile(ctx context.Context, id *identity.ServerIdentity, t *config.Targ
 	bound := remoteauth.Request{Method: http.MethodPut, Key: relPath, PlainSHA256: plainSHA256}
 	u := FileURL(t, relPath) + "?" + url.Values{"sha256": {plainSHA256}}.Encode()
 
-	resp, err := sendSignedRequest(ctx, id, t, bound, u, r, "application/octet-stream")
+	resp, err := sendSignedRequest(ctx, id, t, t.Bucket, bound, u, r, "application/octet-stream")
 	if err != nil {
 		return FileUploadResult{}, err
 	}
@@ -208,6 +210,35 @@ func UploadFile(ctx context.Context, id *identity.ServerIdentity, t *config.Targ
 	return res, nil
 }
 
+// StatusAudience is the audience a status push's token is scoped to (see
+// PostStatus), distinct from every receiver id so a token minted for one
+// can't be used for the other.
+const StatusAudience = "status"
+
+// StatusPath is the route a status push is sent to, relative to the
+// central instance's endpoint.
+const StatusPath = "/api/v1/status"
+
+// StatusKey is the object key a status push's token is bound to (see
+// remoteauth.Request.Key), so the request binding is never empty.
+const StatusKey = "status"
+
+// PostStatus sends body, a JSON-encoded status snapshot (see the peerstatus
+// package), to t's instance at StatusPath, authenticated with a token
+// signed by id, scoped to StatusAudience and bound to the body's SHA-256.
+// t must be a type: remote server.
+func PostStatus(ctx context.Context, id *identity.ServerIdentity, t *config.Target, body []byte) error {
+	bound := remoteauth.Request{Method: http.MethodPost, Key: StatusKey}
+	u := strings.TrimSuffix(t.Endpoint, "/") + StatusPath
+
+	resp, err := sendSignedRequest(ctx, id, t, StatusAudience, bound, u, bytes.NewReader(body), "application/json")
+	if err != nil {
+		return err
+	}
+
+	return resp.Body.Close()
+}
+
 // doAuthenticatedRemoteRequest signs, sends, and status-checks a method
 // request (with body, whose Content-Type is set only when contentType is
 // non-empty, and an optional query string) to target t's receiver API, for
@@ -215,7 +246,7 @@ func UploadFile(ctx context.Context, id *identity.ServerIdentity, t *config.Targ
 func doAuthenticatedRemoteRequest(ctx context.Context, id *identity.ServerIdentity, cfg *config.Config, t *config.Target, method string, body io.Reader, contentType string, query url.Values) error {
 	bound := remoteauth.Request{Method: method, Key: cfg.Key, File: cfg.File, CreationTime: query.Get("creationTime")}
 
-	resp, err := sendSignedRequest(ctx, id, t, bound, remoteObjectURL(t, cfg.Key, cfg.File, query), body, contentType)
+	resp, err := sendSignedRequest(ctx, id, t, t.Bucket, bound, remoteObjectURL(t, cfg.Key, cfg.File, query), body, contentType)
 	if err != nil {
 		return err
 	}
@@ -224,10 +255,10 @@ func doAuthenticatedRemoteRequest(ctx context.Context, id *identity.ServerIdenti
 }
 
 // sendSignedRequest sends a bound.Method request with body to u on target
-// t's receiver API, authenticated with a token bound to bound plus body's
-// SHA-256, and returns the response when its status is 2xx; the caller
-// closes its body. Any other status is an error.
-func sendSignedRequest(ctx context.Context, id *identity.ServerIdentity, t *config.Target, bound remoteauth.Request, u string, body io.Reader, contentType string) (*http.Response, error) {
+// t's instance, authenticated with a token for audience bound to bound plus
+// body's SHA-256, and returns the response when its status is 2xx; the
+// caller closes its body. Any other status is an error.
+func sendSignedRequest(ctx context.Context, id *identity.ServerIdentity, t *config.Target, audience string, bound remoteauth.Request, u string, body io.Reader, contentType string) (*http.Response, error) {
 	if body != nil {
 		digest, err := bodySHA256(body)
 		if err != nil {
@@ -237,7 +268,7 @@ func sendSignedRequest(ctx context.Context, id *identity.ServerIdentity, t *conf
 		bound.BodySHA256 = digest
 	}
 
-	auth, err := remoteAuthHeader(id, t, bound)
+	auth, err := remoteAuthHeader(id, audience, bound)
 	if err != nil {
 		return nil, err
 	}

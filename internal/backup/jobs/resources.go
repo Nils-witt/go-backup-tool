@@ -50,6 +50,17 @@ func (m *Manager) Servers() []ServerOption {
 	return out
 }
 
+// Server returns active server name, reporting false if no server of that
+// name is active (undefined, or stored but invalid).
+func (m *Manager) Server(name string) (config.ResolvedServer, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	s, ok := m.servers[name]
+
+	return s, ok
+}
+
 // CreateServer validates and stores a new server and activates it.
 // Validation failures wrap ErrInvalid; a taken name returns
 // store.ErrServerExists.

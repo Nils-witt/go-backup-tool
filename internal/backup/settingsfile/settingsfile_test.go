@@ -84,6 +84,7 @@ func sampleFile(t *testing.T, baseDir string) File {
 		}},
 		Report:       &report.FileReport{Enabled: true, Schedule: "0 6 * * *", Notifications: []string{"ops"}},
 		LogRetention: &settings.LogRetention{JobRunDays: 30, JobRunMaxRows: 0, TargetRunDays: 14, TargetRunMaxRows: 200},
+		StatusPush:   &settings.StatusPush{Enabled: true, Server: "central", IntervalSeconds: 60},
 	}
 }
 
@@ -100,8 +101,8 @@ func TestImportThenExportRoundTrips(t *testing.T) {
 	}
 
 	expected := map[string]int{"trusted-servers": 1, "notifications": 1, "receivers": 1}
-	if !reflect.DeepEqual(res.Created, expected) || !reflect.DeepEqual(res.Updated, map[string]int{"report": 1, "log-retention": 1}) {
-		t.Errorf("Import() = %+v, want created %v and the report and log retention updated", res, expected)
+	if !reflect.DeepEqual(res.Created, expected) || !reflect.DeepEqual(res.Updated, map[string]int{"report": 1, "log-retention": 1, "status-push": 1}) {
+		t.Errorf("Import() = %+v, want created %v and the report, log retention, and status push updated", res, expected)
 	}
 
 	got, err := Export(t.Context(), m)
@@ -150,6 +151,10 @@ func assertExportedSample(t *testing.T, got, in File) {
 
 	if !reflect.DeepEqual(got.LogRetention, in.LogRetention) {
 		t.Errorf("exported log retention = %+v, want %+v", got.LogRetention, in.LogRetention)
+	}
+
+	if !reflect.DeepEqual(got.StatusPush, in.StatusPush) {
+		t.Errorf("exported status push = %+v, want %+v", got.StatusPush, in.StatusPush)
 	}
 }
 

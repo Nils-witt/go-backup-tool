@@ -78,7 +78,7 @@ function receiversFor(
 
   if (candidates.length > 1) {
     const named = candidates.filter(
-      (r) => r.source && r.source.toLowerCase() === t.server.toLowerCase(),
+      (r) => r.instance && r.instance.toLowerCase() === t.server.toLowerCase(),
     );
     if (named.length) return named;
   }
@@ -133,14 +133,14 @@ export function buildTopology(
   // nothing in view sends to follow at the end of their instance's group.
   const receiverNodes = new Map<string, TopologyNode>();
   const addReceiver = (r: Sourced<ReceiverSnapshot>): string => {
-    const key = nodeKey("receiver", r.source, r.id);
+    const key = nodeKey("receiver", r.instance, r.id);
     if (!receiverNodes.has(key)) {
       receiverNodes.set(key, {
         key,
         column: "receiver",
         label: r.id,
         detail: r.path,
-        source: r.source,
+        source: r.instance,
         state: r.stale ? "incomplete" : r.state,
         stale: r.stale,
         error: r.error,
@@ -150,13 +150,13 @@ export function buildTopology(
   };
 
   for (const j of jobs) {
-    const jobKey = nodeKey("job", j.source, j.name);
+    const jobKey = nodeKey("job", j.instance, j.name);
     nodes.set(jobKey, {
       key: jobKey,
       column: "job",
       label: j.name,
       detail: j.interval ? "every " + j.interval : undefined,
-      source: j.source,
+      source: j.instance,
       state: j.state,
       error: j.error,
     });
@@ -174,7 +174,7 @@ export function buildTopology(
       }
 
       // Servers are per instance: two instances may each name one "nas".
-      const serverKey = nodeKey("server", j.source, t.server);
+      const serverKey = nodeKey("server", j.instance, t.server);
       const server = nodes.get(serverKey);
       if (server) server.state = worstState(server.state, t.state);
       else
@@ -183,7 +183,7 @@ export function buildTopology(
           column: "server",
           label: t.server,
           detail: t.kind,
-          source: j.source,
+          source: j.instance,
           state: t.state,
         });
       const upload = [jobKey, addEdge(jobKey, serverKey, t.state, t.bucket), serverKey];

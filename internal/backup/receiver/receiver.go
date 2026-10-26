@@ -174,7 +174,7 @@ func storeObject(w http.ResponseWriter, r *http.Request, recv config.ResolvedRec
 // value and verifies its Authorization: Bearer <token> header (see
 // verifyReceiverToken), writing an error response and returning ok=false if
 // the id is unknown, the token doesn't verify, or the token was already
-// used (see replayCache). bound is the request the token is bound to (see
+// used (see remoteauth.ReplayCache). bound is the request the token is bound to (see
 // remoteauth.Request), for the caller to check against r once it has
 // sanitized the key.
 func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *Registry, rj rejecter) (recv config.ResolvedReceiver, bound remoteauth.Request, ok bool) {
@@ -191,7 +191,7 @@ func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *Regist
 	}
 
 	issuer, verified, err := verifyReceiverToken(recv, token)
-	if err == nil && !receivers.usedTokens.use(issuer, verified.ID, verified.Expiry, time.Now()) {
+	if err == nil && !receivers.usedTokens.Use(issuer, verified.ID, verified.Expiry, time.Now()) {
 		err = errTokenReplayed
 	}
 
@@ -205,7 +205,7 @@ func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *Regist
 
 var (
 	// errTokenReplayed reports a request token whose jti the receiver has
-	// already accepted once (see replayCache).
+	// already accepted once (see remoteauth.ReplayCache).
 	errTokenReplayed = errors.New("token was already used")
 
 	// errNoBearerToken reports a request without an Authorization: Bearer

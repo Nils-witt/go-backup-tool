@@ -47,13 +47,13 @@ function shownFiles(j: JobSnapshot) {
 }
 
 interface JobsGridProps {
-  // jobs may come from several instances (see Sourced); remote ones never
-  // offer a run or retry, which their API token can't reach.
+  // jobs may come from several instances (see Sourced); remote ones,
+  // pushed by another instance, never offer a run or retry.
   jobs: Sourced<JobSnapshot>[];
   canRetry: boolean;
   refreshNow: () => void;
   // runsByJob holds each job's recent runs, newest first, keyed by
-  // sourcedKey(source, name); a job without an entry shows no run history
+  // sourcedKey(instance, name); a job without an entry shows no run history
   // (its instance's job run log isn't readable).
   runsByJob: Map<string, JobRunEventJSON[]>;
 }
@@ -83,10 +83,10 @@ export function JobsGrid({ jobs, canRetry, refreshNow, runsByJob }: JobsGridProp
           const targets = j.targets || [];
           const hasFailedTarget = targets.some((t) => t.state === "failed");
           const accent = theme.palette.status[j.state] ?? theme.palette.status.idle;
-          const runs = runsByJob.get(sourcedKey(j.source, j.name));
+          const runs = runsByJob.get(sourcedKey(j.instance, j.name));
 
           return (
-            <Grid key={sourcedKey(j.source, j.name)} size={{ xs: 12, sm: 6, md: 4 }}>
+            <Grid key={sourcedKey(j.instance, j.name)} size={{ xs: 12, sm: 6, md: 4 }}>
               <Card
                 variant="outlined"
                 sx={{
@@ -119,9 +119,9 @@ export function JobsGrid({ jobs, canRetry, refreshNow, runsByJob }: JobsGridProp
                       <Typography sx={{ fontWeight: 600, overflowWrap: "anywhere" }}>
                         {j.name}
                       </Typography>
-                      {j.source ? (
+                      {j.instance ? (
                         <Typography variant="caption" color="text.secondary">
-                          {j.source}
+                          {j.instance}
                         </Typography>
                       ) : null}
                     </Box>

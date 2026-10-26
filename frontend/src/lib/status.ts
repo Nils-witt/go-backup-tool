@@ -10,15 +10,15 @@ export function countStates(states: RunState[]): StateCounts {
   return counts;
 }
 
-// Sourced tags a job or receiver snapshot with the instance it came from.
-// The dashboard only shows this instance, so source is always unset today;
-// remote marks one read with a view-only API token, so actions that need
-// more (retry, file listing, downloads) are hidden for it. instanceUuid is
-// that instance's server UUID, when known, which a remote target's
-// server_uuid names.
-export type Sourced<T> = T & { source?: string; remote?: boolean; instanceUuid?: string };
+// Sourced tags a job or receiver snapshot with the instance it came from:
+// instance is its name, unset while the dashboard shows only this one.
+// remote marks one another instance pushed to this one (see /api/peers), so
+// actions only its own dashboard can take (run, retry, file listing,
+// downloads) are hidden for it. instanceUuid is that instance's server
+// UUID, when known, which a remote target's server_uuid names.
+export type Sourced<T> = T & { instance?: string; remote?: boolean; instanceUuid?: string };
 
 // sourcedKey is a React key unique across instances.
-export function sourcedKey(source: string | undefined, id: string): string {
-  return (source ?? "") + "\u0000" + id;
+export function sourcedKey(instance: string | undefined, id: string): string {
+  return (instance ?? "") + "\u0000" + id;
 }

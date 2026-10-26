@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { apiFetchJSON } from "../api/client";
-import type { JobSnapshot, LiveStatusMessage, ReceiverSnapshot } from "../api/types";
+import type { JobSnapshot, LiveStatusMessage, PeerSnapshot, ReceiverSnapshot } from "../api/types";
 
 export interface LiveStatusState {
   jobs: JobSnapshot[];
   receivers: ReceiverSnapshot[];
+  // peers are the other instances that push their status to this one.
+  peers: PeerSnapshot[];
   // live is true while the socket is open and has delivered at least one
   // message; pages fall back to polling (see usePoll's enabled) otherwise.
   live: boolean;
@@ -20,7 +22,12 @@ const maxBackoffMs = 30000;
 // dropped connection is retried with exponential backoff, minting a fresh
 // ticket every time.
 export function useLiveStatus(): LiveStatusState {
-  const [state, setState] = useState<LiveStatusState>({ jobs: [], receivers: [], live: false });
+  const [state, setState] = useState<LiveStatusState>({
+    jobs: [],
+    receivers: [],
+    peers: [],
+    live: false,
+  });
 
   useEffect(() => {
     let stopped = false;
@@ -63,7 +70,12 @@ export function useLiveStatus(): LiveStatusState {
         if (msg.type !== "status") return;
         backoff = minBackoffMs;
         lastData = ev.data;
-        setState({ jobs: msg.jobs || [], receivers: msg.receivers || [], live: true });
+        setState({
+          jobs: msg.jobs || [],
+          receivers: msg.receivers || [],
+          peers: msg.peers || [],
+          live: true,
+        });
       };
       ws.onclose = () => {
         if (socket === ws) socket = null;

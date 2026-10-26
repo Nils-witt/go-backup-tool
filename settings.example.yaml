@@ -1,8 +1,8 @@
 # go-backup-tool settings file
 #
 # A settings file holds the settings that are managed in the web UI and
-# stored in the state db: trusted servers, notifications, receivers and the
-# report. Use it to keep them in version control or to copy them to another
+# stored in the state db: trusted servers, notifications, receivers, the
+# report, log retention and the status push. Use it to keep them in version control or to copy them to another
 # instance:
 #
 #   go-backup-tool -config config.yaml -export-settings settings.yaml
@@ -211,3 +211,21 @@
 #   job-run-max-rows: 0
 #   target-run-days: 30
 #   target-run-max-rows: 100
+
+# status-push: shows this instance's jobs and receivers on a central
+# instance's dashboard, read-only, next to that instance's own. server names
+# a type: remote server pointing at the central instance; its endpoint and
+# TLS settings are used. The central instance must list this one under its
+# trusted-servers: (no receiver has to allow it). Changes are pushed within
+# seconds; interval-seconds is the heartbeat, after three missed ones (at
+# least two minutes) the central dashboard shows this instance offline. 0
+# means 30; otherwise 10 to 3600. The central instance never connects back,
+# so this one can sit behind NAT or a firewall. Without this section the
+# status isn't pushed. Whether server names a usable remote server is
+# checked when this instance starts (and when the setting is saved in the
+# web UI), not on import, since the servers aren't loaded then.
+#
+# status-push:
+#   enabled: true
+#   server: central-instance
+#   interval-seconds: 30

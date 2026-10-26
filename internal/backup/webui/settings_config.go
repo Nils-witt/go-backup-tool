@@ -247,6 +247,50 @@ func handleUpdateLogRetentionConfig(m *settings.Manager, log *slog.Logger) http.
 	return handleUpdateSettings("log retention settings", m.UpdateLogRetention, log)
 }
 
+// statusPushConfigJSON is GET /api/status-push-config's response: the
+// stored status push settings, plus what the dashboard's form needs.
+type statusPushConfigJSON struct {
+	settings.StatusPush
+
+	UpdatedAt       *time.Time `json:"updated_at"`
+	UpdatedBy       string     `json:"updated_by"`
+	DefaultInterval int        `json:"default_interval_seconds"`
+	MinInterval     int        `json:"min_interval_seconds"`
+	MaxInterval     int        `json:"max_interval_seconds"`
+}
+
+// handleGetStatusPushConfig serves GET /api/status-push-config (admin
+// only).
+func handleGetStatusPushConfig(m *settings.Manager, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		mp, err := m.GetStatusPush(r.Context())
+		if err != nil {
+			writeSettingsError(w, log, "reading status push settings", "", err)
+			return
+		}
+
+		out := statusPushConfigJSON{
+			StatusPush:      mp.StatusPush,
+			UpdatedBy:       mp.UpdatedBy,
+			DefaultInterval: settings.DefaultStatusPushIntervalSeconds,
+			MinInterval:     settings.MinStatusPushIntervalSeconds,
+			MaxInterval:     settings.MaxStatusPushIntervalSeconds,
+		}
+
+		if !mp.UpdatedAt.IsZero() {
+			out.UpdatedAt = &mp.UpdatedAt
+		}
+
+		writeJSON(w, out)
+	}
+}
+
+// handleUpdateStatusPushConfig serves PUT /api/status-push-config (admin
+// only).
+func handleUpdateStatusPushConfig(m *settings.Manager, log *slog.Logger) http.HandlerFunc {
+	return handleUpdateSettings("status push settings", m.UpdateStatusPush, log)
+}
+
 // handleUpdateSettings serves a PUT that replaces one group of settings
 // (what names them in the log) with the request body, through update.
 func handleUpdateSettings[T any](what string, update func(ctx context.Context, user string, in T) error, log *slog.Logger) http.HandlerFunc {

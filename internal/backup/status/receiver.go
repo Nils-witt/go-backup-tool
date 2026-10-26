@@ -12,10 +12,10 @@ import (
 
 // ReceiverSnapshot is one configured receiver's current status, as reported
 // over /api/receivers, for display in the web UI dashboard (see webui.go).
-// StaleAfter and Stale are filled in by handleReceiverStatus (see
-// annotateReceiverStaleness), not NewReceiverStore/record below, since
-// they reflect what's actually on disk (like LastReceivedAt) rather than
-// live state this process tracks as requests come in.
+// StaleAfter and Stale are filled in by receiver.Snapshots, not
+// NewReceiverStore/record below, since they reflect what's actually on disk
+// (like LastReceivedAt) rather than live state this process tracks as
+// requests come in.
 type ReceiverSnapshot struct {
 	ID           string    `json:"id"`
 	Kind         string    `json:"kind"` // the receiver's type: "backup" or "directory"

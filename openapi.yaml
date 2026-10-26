@@ -27,7 +27,7 @@ tags:
   - name: admin
     description: Actions requiring the `admin` permission
   - name: receiver-api
-    description: "Object ingestion API for `type: remote` targets, authenticated per-receiver via a signed JWT bearer token"
+    description: "Instance-to-instance API: object ingestion for `type: remote` targets, and status pushes, authenticated via a signed JWT bearer token"
 
 paths:
   /api/meta:
@@ -252,6 +252,68 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /api/peers:
+    get:
+      tags: [dashboard]
+      summary: Status pushed by other instances
+      operationId: getPeers
+      description: >
+        The status every trusted server last pushed to this instance (see
+        `POST /api/v1/status`), sorted by trusted server name. An instance
+        that stopped pushing for three of its push intervals (at least two
+        minutes) is `offline`, its jobs and receivers then being the last
+        it pushed. An instance whose trusted server was deleted is left
+        out. The dashboard follows `/api/live` instead and only polls this
+        as a fallback. Requires the `view` permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Pushed instance statuses
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PeerSnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/peers/{id}:
+    delete:
+      tags: [admin]
+      summary: Forget a pushed instance status
+      operationId: forgetPeer
+      description: >
+        Drops the instance's last pushed status from the dashboard and the
+        state db, e.g. for a decommissioned instance. An instance that's
+        still trusted shows up again with its next push. Requires the
+        `admin` permission.
+      security:
+        - webUIBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The pushing instance's server UUID.
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Instance forgotten
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No status from that instance
+          content:
+            text/plain:
+              schema:
+                type: string
 
   /api/live/ticket:
     post:
@@ -1197,6 +1259,60 @@ paths:
         "503":
           $ref: "#/components/responses/StateDBUnavailable"
 
+  /api/status-push-config:
+    get:
+      tags: [admin]
+      summary: Get the status push settings
+      operationId: getStatusPushConfig
+      description: >
+        Where this instance pushes its status to: the stored settings, or
+        the disabled defaults while none were saved (`updated_at` is then
+        null), plus the interval's default and bounds. Requires the `admin`
+        permission.
+      security:
+        - webUIBearer: []
+      responses:
+        "200":
+          description: Status push settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusPushConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+    put:
+      tags: [admin]
+      summary: Update the status push settings
+      operationId: updateStatusPushConfig
+      description: >
+        Validates and stores the status push settings; the next push goes
+        out right away. An enabled push needs `server`, naming an active
+        `type: remote` server (the central instance). Requires the `admin`
+        permission.
+      security:
+        - webUIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StatusPush"
+      responses:
+        "204":
+          description: Status push settings updated
+        "400":
+          $ref: "#/components/responses/InvalidSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StateDBUnavailable"
+
   /api/reports:
     get:
       tags: [admin]
@@ -1995,6 +2111,51 @@ paths:
               schema:
                 type: string
 
+  /api/v1/status:
+    post:
+      tags: [receiver-api]
+      summary: Push this instance's status to a central instance
+      operationId: pushStatus
+      description: >
+        Called by another go-backup-tool instance with its status push
+        enabled: its current job and receiver status, shown read-only on
+        this instance's dashboard (see `/api/peers`). Accepted from any
+        trusted server; no receiver needs to allow it. Each push replaces
+        the sender's previous one, and is kept in the state db across
+        restarts.
+      security:
+        - statusPushBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StatusPushPayload"
+      responses:
+        "204":
+          description: Status recorded
+        "400":
+          description: Unreadable body, or an unsupported payload version
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          description: >
+            Missing or invalid bearer token, a sender that isn't a trusted
+            server, a replayed token, or a body that doesn't match the
+            token's `sha256` claim
+          content:
+            text/plain:
+              schema:
+                type: string
+        "413":
+          description: Body larger than 4 MiB
+          content:
+            text/plain:
+              schema:
+                type: string
+
 components:
   securitySchemes:
     webUIBearer:
@@ -2029,6 +2190,17 @@ components:
         token can't be replayed, not even for the same request. Tokens that
         bind no request or have no `jti` (from senders older than 8.0.0) are
         rejected with 401. Independent of the dashboard's own SSO auth.
+    statusPushBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        A `receiverBearer`-style token (signed by the sending instance's
+        private key, with a unique `jti`) scoped to the audience `status`
+        instead of a receiver id, and bound to `htm` `POST`, `key` `status`,
+        and `sha256` (hex SHA-256 of the body). Accepted when the issuer is
+        any trusted server and the signature verifies against its public
+        key.
 
   parameters:
     ReceiverId:
@@ -2167,7 +2339,69 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ReceiverSnapshot"
-      required: [type, jobs, receivers]
+        peers:
+          type: array
+          description: What `/api/peers` serves.
+          items:
+            $ref: "#/components/schemas/PeerSnapshot"
+      required: [type, jobs, receivers, peers]
+    PeerSnapshot:
+      type: object
+      description: The status another instance last pushed to this one.
+      properties:
+        id:
+          type: string
+          description: The pushing instance's server UUID.
+        name:
+          type: string
+          description: Its trusted server's name on this instance.
+        instance_name:
+          type: string
+          description: Its own `server-name:`; omitted when unset.
+        last_seen:
+          type: string
+          format: date-time
+        interval:
+          type: string
+          description: How often it pushes at the latest, e.g. `30s`.
+        offline:
+          type: boolean
+          description: >
+            Set once no push arrived for three intervals (at least two
+            minutes); omitted while it's online.
+        jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/JobSnapshot"
+        receivers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReceiverSnapshot"
+      required: [id, name, last_seen, interval, jobs, receivers]
+    StatusPushPayload:
+      type: object
+      description: One status push (see `POST /api/v1/status`).
+      properties:
+        version:
+          type: integer
+          enum: [1]
+        instance_name:
+          type: string
+        interval_seconds:
+          type: integer
+          description: How often the sender pushes at the latest; capped at a day.
+        sent_at:
+          type: string
+          format: date-time
+        jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/JobSnapshot"
+        receivers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReceiverSnapshot"
+      required: [version, interval_seconds, sent_at, jobs, receivers]
     Permission:
       type: string
       description: >
@@ -2954,6 +3188,43 @@ components:
             limit_rows:
               type: integer
           required: [updated_by, defaults, limit_days, limit_rows]
+
+    StatusPush:
+      type: object
+      description: >
+        Where this instance pushes its status to. `server` names a `type:
+        remote` server (the central instance), whose endpoint and TLS
+        settings the push uses; it's required when `enabled`. Changes are
+        pushed within seconds; `interval_seconds` is the heartbeat (0 means
+        30).
+      properties:
+        enabled:
+          type: boolean
+        server:
+          type: string
+        interval_seconds:
+          type: integer
+          description: 0, or between 10 and 3600.
+      required: [enabled, server, interval_seconds]
+
+    StatusPushConfig:
+      allOf:
+        - $ref: "#/components/schemas/StatusPush"
+        - type: object
+          properties:
+            updated_at:
+              type: string
+              format: date-time
+              nullable: true
+            updated_by:
+              type: string
+            default_interval_seconds:
+              type: integer
+            min_interval_seconds:
+              type: integer
+            max_interval_seconds:
+              type: integer
+          required: [updated_by, default_interval_seconds, min_interval_seconds, max_interval_seconds]
 
     ReportSummary:
       type: object

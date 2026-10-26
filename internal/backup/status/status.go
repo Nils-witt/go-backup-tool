@@ -2,8 +2,10 @@
 // in-memory stores that the pipeline and the receiver API update as runs and
 // uploads happen, and that the dashboard reads (GET /api/status,
 // /api/receivers) and watches through each store's Changed channel (the
-// /api/live WebSocket). Nothing here is persisted; past runs are seeded back
-// in from the state db at startup (see Store.SeedLastRun).
+// /api/live WebSocket). PeerStore holds the status other instances push to
+// this one (see the peerstatus package). Nothing here is persisted; past
+// runs are seeded back in from the state db at startup (see
+// Store.SeedLastRun).
 package status
 
 import (

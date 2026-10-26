@@ -205,16 +205,8 @@ func resolveJobTargets(cfg *Config, servers map[string]ResolvedServer, commands 
 			retention = ref.retention
 		}
 
-		cfg.Targets[i] = Target{
-			ServerName: server.name,
-			Kind:       server.kind,
-			Bucket:     ref.bucket,
-			Endpoint:   server.endpoint,
-			ServerUUID: server.serverUUID,
-			TLS:        server.tls,
-			LocalPath:  server.path,
-			Retention:  retention,
-		}
+		cfg.Targets[i] = server.Target(ref.bucket)
+		cfg.Targets[i].Retention = retention
 
 		if ref.onErrorCommandID != "" {
 			command, err := hookCommand(commands, ref.onErrorCommandID)

@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/remoteauth"
 )
 
 // Registry holds every receiver this instance currently accepts
@@ -18,8 +19,8 @@ type Registry struct {
 	byID map[string]config.ResolvedReceiver
 
 	// usedTokens are the request tokens the receiver API has accepted,
-	// shared across receivers (see replayCache).
-	usedTokens replayCache
+	// shared across receivers (see remoteauth.ReplayCache).
+	usedTokens remoteauth.ReplayCache
 }
 
 // NewRegistry builds a registry holding receivers (copied).

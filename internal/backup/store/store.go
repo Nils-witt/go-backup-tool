@@ -134,6 +134,14 @@ type Store interface {
 	GetLogRetentionSettings(ctx context.Context) (LogRetentionSettings, bool, error)
 	SaveLogRetentionSettings(ctx context.Context, r LogRetentionSettings) error
 
+	// Where this instance pushes its status (status_push_settings.go), and
+	// the status other instances pushed to it (peer_statuses.go).
+	GetStatusPushSettings(ctx context.Context) (StatusPushSettings, bool, error)
+	SaveStatusPushSettings(ctx context.Context, p StatusPushSettings) error
+	ListPeerStatuses(ctx context.Context) ([]PeerStatus, error)
+	SavePeerStatus(ctx context.Context, p PeerStatus) error
+	DeletePeerStatus(ctx context.Context, serverID string) error
+
 	// API tokens and their signing key (tokens.go), and OIDC back-channel
 	// logouts (sso_logouts.go).
 	TokenSigningKey(ctx context.Context) ([]byte, error)
@@ -190,6 +198,7 @@ func migrate(ctx context.Context, gdb *gorm.DB) error {
 		&apiTokenModel{}, &tokenSigningKeyModel{},
 		&receiverModel{}, &notificationModel{}, &reportSettingsModel{}, &reportModel{}, &logRetentionSettingsModel{},
 		&trustedServerModel{}, &ssoLogoutModel{},
+		&statusPushSettingsModel{}, &peerStatusModel{},
 		&serverModel{}, &commandModel{}, &jobModel{},
 	); err != nil {
 		return fmt.Errorf("creating schema: %w", err)

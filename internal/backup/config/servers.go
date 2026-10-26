@@ -151,3 +151,20 @@ type ResolvedServer struct {
 
 // Kind is s's type:.
 func (s ResolvedServer) Kind() ServerKind { return s.kind }
+
+// Target returns s as a target writing into bucket, with s's own
+// retention. Used for requests to a server that aren't a job's upload
+// (e.g. a status push, see remoteclient.PostStatus); a job's targets go
+// through resolveJobTargets, which also applies its per-target settings.
+func (s ResolvedServer) Target(bucket string) Target {
+	return Target{
+		ServerName: s.name,
+		Kind:       s.kind,
+		Bucket:     bucket,
+		Endpoint:   s.endpoint,
+		ServerUUID: s.serverUUID,
+		TLS:        s.tls,
+		LocalPath:  s.path,
+		Retention:  s.retention,
+	}
+}

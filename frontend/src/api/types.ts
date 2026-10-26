@@ -64,12 +64,29 @@ export interface ReceiverSnapshot {
   stale?: boolean;
 }
 
+// PeerSnapshot mirrors status.PeerSnapshot (GET /api/peers): the status
+// another instance last pushed to this one. name is its trusted server's
+// name here; offline is set once it stopped pushing, jobs and receivers
+// then being the last it pushed.
+export interface PeerSnapshot {
+  id: string;
+  name: string;
+  instance_name?: string;
+  last_seen: string;
+  interval: string;
+  offline?: boolean;
+  jobs: JobSnapshot[];
+  receivers: ReceiverSnapshot[];
+}
+
 // One message on the /api/live WebSocket (liveStatusJSON in
-// internal/backup/webui/live.go): the full current job and receiver state.
+// internal/backup/webui/live.go): the full current job, receiver, and
+// pushed instance state. peers is absent from older instances.
 export interface LiveStatusMessage {
   type: "status";
   jobs: JobSnapshot[];
   receivers: ReceiverSnapshot[];
+  peers?: PeerSnapshot[];
 }
 
 // ReceiverFile mirrors backup.ReceiverFile. file is set for one file of a
@@ -354,6 +371,25 @@ export interface LogRetentionConfigJSON extends LogRetention {
   defaults: LogRetention;
   limit_days: number;
   limit_rows: number;
+}
+
+// StatusPush mirrors settings.StatusPush: whether this instance pushes its
+// status to the central instance server (a remote server) names, at the
+// latest every interval_seconds (0 meaning the default).
+export interface StatusPush {
+  enabled: boolean;
+  server: string;
+  interval_seconds: number;
+}
+
+// StatusPushConfigJSON mirrors statusPushConfigJSON (GET
+// /api/status-push-config).
+export interface StatusPushConfigJSON extends StatusPush {
+  updated_at: string | null;
+  updated_by: string;
+  default_interval_seconds: number;
+  min_interval_seconds: number;
+  max_interval_seconds: number;
 }
 
 // ReportSummaryJSON mirrors reportSummaryJSON (GET /api/reports): one kept

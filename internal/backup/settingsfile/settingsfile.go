@@ -37,6 +37,7 @@ type File struct {
 	Receivers      []config.FileReceiver     `yaml:"receivers,omitempty"`
 	Report         *report.FileReport        `yaml:"report,omitempty"`
 	LogRetention   *settings.LogRetention    `yaml:"log-retention,omitempty"`
+	StatusPush     *settings.StatusPush      `yaml:"status-push,omitempty"`
 }
 
 // TrustedServer is a trusted-servers: entry: another instance, by its
@@ -59,8 +60,8 @@ type Result struct {
 	Created, Updated map[string]int
 }
 
-// Export reads every stored setting into a File. The report and log
-// retention are omitted if they were never saved.
+// Export reads every stored setting into a File. The report, log
+// retention, and status push are omitted if they were never saved.
 func Export(ctx context.Context, m Managers) (File, error) {
 	var f File
 
@@ -107,6 +108,15 @@ func Export(ctx context.Context, m Managers) (File, error) {
 
 	if !lr.UpdatedAt.IsZero() {
 		f.LogRetention = &lr.LogRetention
+	}
+
+	sp, err := m.Settings.GetStatusPush(ctx)
+	if err != nil {
+		return File{}, fmt.Errorf("reading status push settings: %w", err)
+	}
+
+	if !sp.UpdatedAt.IsZero() {
+		f.StatusPush = &sp.StatusPush
 	}
 
 	return f, nil
@@ -201,6 +211,14 @@ func Import(ctx context.Context, m Managers, user string, f File) (Result, error
 		}
 
 		res.Updated["log-retention"]++
+	}
+
+	if f.StatusPush != nil {
+		if err := m.Settings.UpdateStatusPush(ctx, user, *f.StatusPush); err != nil {
+			return res, fmt.Errorf("status push: %w", err)
+		}
+
+		res.Updated["status-push"]++
 	}
 
 	return res, nil
