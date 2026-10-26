@@ -165,11 +165,15 @@ func (s *gormStore) ListDownloadEvents(ctx context.Context, limit int) ([]Downlo
 	}, "reading download events")
 }
 
-// ReceiverEventReceive and ReceiverEventDelete are the kind values
-// SaveReceiverEvent records. The receiver API no longer accepts deletes, so
-// ReceiverEventDelete only appears on events recorded before that.
+// ReceiverEventReceive, ReceiverEventReject and ReceiverEventDelete are the
+// kind values SaveReceiverEvent records. A reject is a request turned away
+// with 401 (failed authentication or request binding), always unsuccessful;
+// its Error says why and where it came from. The receiver API no longer
+// accepts deletes, so ReceiverEventDelete only appears on events recorded
+// before that.
 const (
 	ReceiverEventReceive = "receive"
+	ReceiverEventReject  = "reject"
 	ReceiverEventDelete  = "delete"
 )
 
@@ -179,7 +183,7 @@ const (
 type ReceiverEvent struct {
 	At         time.Time
 	ReceiverID string
-	Kind       string // ReceiverEventReceive or ReceiverEventDelete
+	Kind       string // ReceiverEventReceive, ReceiverEventReject or ReceiverEventDelete
 	Key        string
 	Size       int64 // bytes written; 0 for a delete or a failed receive
 	Success    bool

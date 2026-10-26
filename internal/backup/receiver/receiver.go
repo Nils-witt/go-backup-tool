@@ -27,11 +27,12 @@ import (
 // UI dashboard serves from (see webui.Options.ExtraRoutes). receiverStatus
 // is the live receiver status store, shared with whatever also displays it
 // (e.g. the dashboard's /api/receivers), so a write here is reflected there
-// immediately.
-func RegisterRoutes(mux *http.ServeMux, receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db store.Store) {
-	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(receivers, receiverStatus, log, db))
-	mux.HandleFunc("PUT /api/v1/backups/{id}/{key...}", HandleReceiveBackupFile(receivers, receiverStatus, log, db))
-	mux.HandleFunc("PUT /api/v1/files/{id}/{path...}", HandleReceiveFile(receivers, receiverStatus, log, db))
+// immediately. clientAddr is what rejected requests are logged and
+// recorded as coming from (see ClientAddrFunc).
+func RegisterRoutes(mux *http.ServeMux, receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db store.Store, clientAddr ClientAddrFunc) {
+	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(receivers, receiverStatus, log, db, clientAddr))
+	mux.HandleFunc("PUT /api/v1/backups/{id}/{key...}", HandleReceiveBackupFile(receivers, receiverStatus, log, db, clientAddr))
+	mux.HandleFunc("PUT /api/v1/files/{id}/{path...}", HandleReceiveFile(receivers, receiverStatus, log, db, clientAddr))
 }
 
 // HandleReceiveBackupFile serves PUT /api/v1/backups/{id}/{key...}?file=: one
@@ -44,8 +45,8 @@ func RegisterRoutes(mux *http.ServeMux, receivers *Registry, receiverStatus *sta
 // answers 404 instead of storing every file of a backup at the same key.
 // Only request-bound tokens (see remoteauth.Request) are accepted, since
 // every sender that knows this route also binds its tokens.
-func HandleReceiveBackupFile(receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db store.Store) http.HandlerFunc {
-	return receiveObject(receivers, receiverStatus, log, db, true)
+func HandleReceiveBackupFile(receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db store.Store, clientAddr ClientAddrFunc) http.HandlerFunc {
+	return receiveObject(receivers, receiverStatus, rejecter{log: log, db: db, clientAddr: clientAddr}, true)
 }
 
 // HandleReceiveObject serves PUT /api/v1/objects/{id}/{key...}: after
@@ -66,16 +67,18 @@ func HandleReceiveBackupFile(receivers *Registry, receiverStatus *status.Receive
 // reflects it. On an immutable receiver, a key that already holds a
 // different object answers 409 and an identical re-upload 200 (see
 // storeObject).
-func HandleReceiveObject(receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db store.Store) http.HandlerFunc {
-	return receiveObject(receivers, receiverStatus, log, db, false)
+func HandleReceiveObject(receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db store.Store, clientAddr ClientAddrFunc) http.HandlerFunc {
+	return receiveObject(receivers, receiverStatus, rejecter{log: log, db: db, clientAddr: clientAddr}, false)
 }
 
 // receiveObject is HandleReceiveObject, or HandleReceiveBackupFile when
 // multiFile is set. key, as recorded in status and the receiver's event log,
 // is the object's path under the receiver: key/file for a backup's file.
-func receiveObject(receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db store.Store, multiFile bool) http.HandlerFunc {
+func receiveObject(receivers *Registry, receiverStatus *status.ReceiverStore, rj rejecter, multiFile bool) http.HandlerFunc {
+	log, db := rj.log, rj.db
+
 	return func(w http.ResponseWriter, r *http.Request) {
-		recv, cfg, t, bound, ok := resolveReceiverRequest(w, r, receivers, log, multiFile)
+		recv, cfg, t, bound, ok := resolveReceiverRequest(w, r, receivers, rj, multiFile)
 		if !ok {
 			return
 		}
@@ -176,7 +179,7 @@ func storeObject(w http.ResponseWriter, r *http.Request, recv config.ResolvedRec
 // used (see replayCache). bound is the request the token is bound to (see
 // remoteauth.Request), for the caller to check against r once it has
 // sanitized the key.
-func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *Registry, log *slog.Logger) (recv config.ResolvedReceiver, bound remoteauth.Request, ok bool) {
+func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *Registry, rj rejecter) (recv config.ResolvedReceiver, bound remoteauth.Request, ok bool) {
 	recv, exists := receivers.Get(r.PathValue("id"))
 	if !exists {
 		http.Error(w, "unknown receiver id", http.StatusNotFound)
@@ -185,7 +188,7 @@ func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *Regist
 
 	token, hasToken := bearerToken(r)
 	if !hasToken {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		rj.reject(w, r, recv.ID, "", errNoBearerToken)
 		return config.ResolvedReceiver{}, remoteauth.Request{}, false
 	}
 
@@ -195,18 +198,22 @@ func authorizeReceiver(w http.ResponseWriter, r *http.Request, receivers *Regist
 	}
 
 	if err != nil {
-		log.Debug("receiver: rejected request", "id", recv.ID, "err", err)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-
+		rj.reject(w, r, recv.ID, "", err)
 		return config.ResolvedReceiver{}, remoteauth.Request{}, false
 	}
 
 	return recv, verified.Request, true
 }
 
-// errTokenReplayed reports a request token whose jti the receiver has
-// already accepted once (see replayCache).
-var errTokenReplayed = errors.New("token was already used")
+var (
+	// errTokenReplayed reports a request token whose jti the receiver has
+	// already accepted once (see replayCache).
+	errTokenReplayed = errors.New("token was already used")
+
+	// errNoBearerToken reports a request without an Authorization: Bearer
+	// header.
+	errNoBearerToken = errors.New("no bearer token")
+)
 
 // verifyReceiverToken verifies token as a request token (see
 // remoteauth.SignRemoteAuthToken) for recv: its issuer must be one of recv's
@@ -293,8 +300,8 @@ func (d *digestReader) Read(p []byte) (int, error) {
 // reporting ok as false if any step fails. On success it also builds the
 // cfg/t pair receiveObject needs to reuse WriteLocalObject as a type: local
 // target would (see objectstore.ReceiverTarget).
-func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *Registry, log *slog.Logger, multiFile bool) (recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, bound remoteauth.Request, ok bool) {
-	recv, bound, ok = authorizeReceiver(w, r, receivers, log)
+func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *Registry, rj rejecter, multiFile bool) (recv config.ResolvedReceiver, cfg *config.Config, t *config.Target, bound remoteauth.Request, ok bool) {
+	recv, bound, ok = authorizeReceiver(w, r, receivers, rj)
 	if !ok {
 		return config.ResolvedReceiver{}, nil, nil, remoteauth.Request{}, false
 	}
@@ -321,9 +328,7 @@ func resolveReceiverRequest(w http.ResponseWriter, r *http.Request, receivers *R
 	}
 
 	if bindErr := checkRequestBinding(r, key, file, bound); bindErr != nil {
-		log.Debug("receiver: rejected request", "id", recv.ID, "key", key, "file", file, "err", bindErr)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-
+		rj.reject(w, r, recv.ID, path.Join(key, file), bindErr)
 		return config.ResolvedReceiver{}, nil, nil, remoteauth.Request{}, false
 	}
 

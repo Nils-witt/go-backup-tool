@@ -164,7 +164,9 @@ func startWebUIIfConfigured(ctx context.Context, rc *config.RunConfig, deps webu
 		CORSGetOrigins:    rc.CORSGetOrigins,
 		RateLimit:         rc.RateLimit,
 		ExtraRoutes: func(mux *http.ServeMux) {
-			receiver.RegisterRoutes(mux, deps.Receivers, deps.ReceiverStatus, deps.Log, deps.DB)
+			receiver.RegisterRoutes(mux, deps.Receivers, deps.ReceiverStatus, deps.Log, deps.DB, func(r *http.Request) string {
+				return webui.ClientAddr(r, rc.TrustProxyHeaders)
+			})
 		},
 	})
 

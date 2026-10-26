@@ -33,9 +33,11 @@ type fileUploadResponse struct {
 // is checked against its token's digest. Only tokens bound to this very
 // request — method, path, and both digests — are accepted. A backup
 // receiver answers 409.
-func HandleReceiveFile(receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db store.Store) http.HandlerFunc {
+func HandleReceiveFile(receivers *Registry, receiverStatus *status.ReceiverStore, log *slog.Logger, db store.Store, clientAddr ClientAddrFunc) http.HandlerFunc {
+	rj := rejecter{log: log, db: db, clientAddr: clientAddr}
+
 	return func(w http.ResponseWriter, r *http.Request) {
-		recv, rel, bound, ok := resolveFileRequest(w, r, receivers, log)
+		recv, rel, bound, ok := resolveFileRequest(w, r, receivers, rj)
 		if !ok {
 			return
 		}
@@ -93,8 +95,8 @@ func HandleReceiveFile(receivers *Registry, receiverStatus *status.ReceiverStore
 // to a directory receiver and validates its path (see
 // objectstore.ValidateFilePath), writing an error response and reporting
 // ok as false if any step fails.
-func resolveFileRequest(w http.ResponseWriter, r *http.Request, receivers *Registry, log *slog.Logger) (recv config.ResolvedReceiver, rel string, bound remoteauth.Request, ok bool) {
-	recv, bound, ok = authorizeReceiver(w, r, receivers, log)
+func resolveFileRequest(w http.ResponseWriter, r *http.Request, receivers *Registry, rj rejecter) (recv config.ResolvedReceiver, rel string, bound remoteauth.Request, ok bool) {
+	recv, bound, ok = authorizeReceiver(w, r, receivers, rj)
 	if !ok {
 		return config.ResolvedReceiver{}, "", remoteauth.Request{}, false
 	}
@@ -111,9 +113,7 @@ func resolveFileRequest(w http.ResponseWriter, r *http.Request, receivers *Regis
 	}
 
 	if err := checkFileBinding(r, rel, bound); err != nil {
-		log.Debug("receiver: rejected request", "id", recv.ID, "path", rel, "err", err)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-
+		rj.reject(w, r, recv.ID, rel, err)
 		return config.ResolvedReceiver{}, "", remoteauth.Request{}, false
 	}
 

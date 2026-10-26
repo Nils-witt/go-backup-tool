@@ -2241,8 +2241,14 @@ components:
           type: string
         kind:
           type: string
-          description: Which receiver API request this was. `delete` only appears on events recorded before the receiver API stopped accepting deletes.
-          enum: [receive, delete]
+          description: >
+            Which receiver API request this was. `reject` is a request turned
+            away with 401 (failed authentication or request binding, e.g. an
+            untrusted sender, a bad signature, or a replayed token); its
+            `error` says why and which client address it came from. `delete`
+            only appears on events recorded before the receiver API stopped
+            accepting deletes.
+          enum: [receive, reject, delete]
         key:
           type: string
         size:

@@ -108,6 +108,13 @@ func getCORSMiddleware(allowed []string, next http.Handler) http.Handler {
 	})
 }
 
+// ClientAddr is clientAddr for other packages sharing the web UI's HTTP
+// server, e.g. the receiver API logging a rejected request, so
+// webui.trust-proxy-headers applies to them the same way.
+func ClientAddr(req *http.Request, trustProxyHeaders bool) string {
+	return clientAddr(req, trustProxyHeaders)
+}
+
 // clientAddr returns the address to record as a request's origin: req's raw
 // TCP peer (req.RemoteAddr) normally, or — when trustProxyHeaders is set,
 // because this instance sits behind a reverse proxy — the original client's

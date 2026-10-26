@@ -31,7 +31,7 @@ func newReceiverMux(receivers map[string]config.ResolvedReceiver) *http.ServeMux
 	receiverStatus := status.NewReceiverStore(receivers)
 
 	mux := http.NewServeMux()
-	RegisterRoutes(mux, NewRegistry(receivers), receiverStatus, discardLogger, nil)
+	RegisterRoutes(mux, NewRegistry(receivers), receiverStatus, discardLogger, nil, nil)
 
 	return mux
 }
@@ -403,7 +403,7 @@ func newReceiverMuxWithDB(receivers map[string]config.ResolvedReceiver, db store
 	receiverStatus := status.NewReceiverStore(receivers)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(NewRegistry(receivers), receiverStatus, discardLogger, db))
+	mux.HandleFunc("PUT /api/v1/objects/{id}/{key...}", HandleReceiveObject(NewRegistry(receivers), receiverStatus, discardLogger, db, nil))
 
 	return mux
 }
