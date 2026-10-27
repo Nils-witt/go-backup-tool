@@ -74,7 +74,7 @@ jobs:
           restore-keys: gosec-gomod-
 
       - name: Run gosec
-        uses: securego/gosec@v2.29.0
+        uses: securego/gosec@v2.30.0
         env:
           GOMODCACHE: /github/workspace/.gomodcache
         with:
