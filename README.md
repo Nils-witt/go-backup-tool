@@ -43,6 +43,18 @@ go-backup-tool -config config.yaml -job database  # run a single job
 
 Flags: `-config`, `-job`, `-log-level` (`debug|info|warn|error`), `-export-settings`, `-import-settings`.
 
+### Querying a running instance
+
+With the web UI enabled, the same binary can query a running instance instead of running one:
+
+```sh
+go-backup-tool health                         # exit 0 if up and its state db is reachable, else 1
+GO_BACKUP_TOOL_TOKEN=... go-backup-tool status        # jobs, targets and receivers as tables
+GO_BACKUP_TOOL_TOKEN=... go-backup-tool status -json  # the same as JSON
+```
+
+The instance is found by `-url` (e.g. `http://backup.lan:8080`), else `GO_BACKUP_TOOL_URL`, else `webui.listen` from `-config` (default `config.yaml`, reached via `localhost`). `health` calls the public `GET /api/health`; `status` needs an API token from the dashboard (Settings › API tokens), passed as `GO_BACKUP_TOOL_TOKEN` (or `-token`, which other users can see in the process list). `status` exits 3 when a job, target or receiver has failed or gone stale, so it doubles as a monitoring check. In Docker, with the web UI enabled, `HEALTHCHECK CMD ["go-backup-tool", "health"]` works from the image's `/data` working directory.
+
 Upgrading to v8 from an older release: see [`CHANGELOG.md`](CHANGELOG.md) for the config sections v8.0.0 removed and how to carry them over.
 
 ### Docker

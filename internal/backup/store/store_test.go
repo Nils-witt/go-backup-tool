@@ -122,3 +122,24 @@ func createLegacyCommandsDB(t *testing.T, path string) {
 		}
 	}
 }
+
+func TestPing(t *testing.T) {
+	t.Parallel()
+
+	db, err := openSQLite(t.Context(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("openSQLite() error: %v", err)
+	}
+
+	if err := db.Ping(t.Context()); err != nil {
+		t.Errorf("Ping() on an open store error: %v", err)
+	}
+
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	if err := db.Ping(t.Context()); err == nil {
+		t.Error("Ping() on a closed store = nil, want an error")
+	}
+}

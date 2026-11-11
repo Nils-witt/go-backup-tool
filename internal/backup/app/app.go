@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
+	"nilswitt.dev/go-backup-tool/internal/backup/ctl"
 	"nilswitt.dev/go-backup-tool/internal/backup/dockerexec"
 	"nilswitt.dev/go-backup-tool/internal/backup/gpgkeys"
 	"nilswitt.dev/go-backup-tool/internal/backup/identity"
@@ -163,9 +164,16 @@ func openLogFile(path string) (*os.File, error) {
 // starts the stale-receiver webhook monitor (see
 // receiver.MonitorStaleReceivers) for any receivers: entry with
 // stale-after: set.
+//
+// When args starts with a client subcommand ("health", "status"), Run
+// instead queries an already running instance and exits (see ctl.Run).
 func Run(args []string, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if len(args) > 0 && ctl.IsCommand(args[0]) {
+		return ctl.Run(ctx, args[0], args[1:], os.Stdout, stderr)
+	}
 
 	// Reports a panic of the run to Sentry, if runWithContext set it up
 	// (see initSentry); Recover runs before Flush, so its event is sent.

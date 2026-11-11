@@ -1,11 +1,17 @@
 package webui
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/identity"
+	"nilswitt.dev/go-backup-tool/internal/backup/store"
 	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 	"nilswitt.dev/go-backup-tool/internal/version"
 )
@@ -82,4 +88,59 @@ func handleMeta(instanceName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, meta)
 	}
+}
+
+// healthPingTimeout bounds handleHealth's state db ping, so a hung database
+// fails the health check instead of hanging it.
+const healthPingTimeout = 2 * time.Second
+
+// Values of healthJSON's Status and Database fields.
+const (
+	healthOK          = "ok"
+	healthDegraded    = "degraded"
+	healthUnavailable = "unavailable"
+)
+
+// errStateDBUnavailable is pingStateDB's error when the state db never
+// opened.
+var errStateDBUnavailable = errors.New("state db is not open")
+
+// healthJSON is GET /api/health's response body.
+type healthJSON struct {
+	Status   string `json:"status"`
+	Version  string `json:"version"`
+	Database string `json:"database"`
+}
+
+// handleHealth serves GET /api/health: public/unauthenticated, for the
+// health subcommand (see the ctl package), container health checks, and
+// load balancers. It answers 200 when the state db answers a ping and 503
+// when it doesn't (or db is nil, i.e. the state db never opened). The ping
+// error is logged, not returned: it can name the database host.
+func handleHealth(db store.Store, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := pingStateDB(r.Context(), db); err != nil {
+			log.Warn("health check: state db unavailable", "err", err)
+
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(healthJSON{Status: healthDegraded, Version: version.Version, Database: healthUnavailable})
+
+			return
+		}
+
+		writeJSON(w, healthJSON{Status: healthOK, Version: version.Version, Database: healthOK})
+	}
+}
+
+// pingStateDB pings db within healthPingTimeout; a nil db is an error.
+func pingStateDB(ctx context.Context, db store.Store) error {
+	if db == nil {
+		return errStateDBUnavailable
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, healthPingTimeout)
+	defer cancel()
+
+	return db.Ping(ctx)
 }

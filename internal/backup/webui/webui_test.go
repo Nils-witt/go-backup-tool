@@ -396,8 +396,10 @@ func TestStartWebUIWithoutOIDCIsLocked(t *testing.T) {
 	for path, want := range map[string]int{
 		"/api/meta":       http.StatusOK,
 		"/api/sso/status": http.StatusOK,
-		"/api/status":     http.StatusUnauthorized,
-		"/api/me":         http.StatusUnauthorized,
+		// Public, but without a state db the instance isn't healthy.
+		"/api/health": http.StatusServiceUnavailable,
+		"/api/status": http.StatusUnauthorized,
+		"/api/me":     http.StatusUnauthorized,
 	} {
 		if got := webUIGetStatus(t, client, srv, "", path); got != want {
 			t.Errorf("GET %s status = %d, want %d", path, got, want)

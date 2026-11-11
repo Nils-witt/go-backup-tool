@@ -37,6 +37,7 @@ func (s *stringSlice) Set(v string) error {
 func ParseFlags(args []string, out io.Writer) (*RunConfig, error) {
 	fs := flag.NewFlagSet("go-backup-tool", flag.ContinueOnError)
 	fs.SetOutput(out)
+	fs.Usage = func() { printUsage(fs) }
 
 	var (
 		configPath     string
@@ -160,6 +161,21 @@ func resolveExternalServices(fileCfg *fileConfig) (DatabaseConfig, SentrySetting
 	}
 
 	return database, sentry, nil
+}
+
+// printUsage is ParseFlags's -help output: the flags for running an
+// instance, plus the client subcommands app.Run hands to the ctl package
+// (named here, since config can't import ctl).
+func printUsage(fs *flag.FlagSet) {
+	out := fs.Output()
+
+	_, _ = fmt.Fprintln(out, "Usage:")
+	_, _ = fmt.Fprintln(out, "  go-backup-tool [flags]           run the configured jobs (and web UI)")
+	_, _ = fmt.Fprintln(out, "  go-backup-tool health [flags]    check that a running instance is healthy")
+	_, _ = fmt.Fprintln(out, "  go-backup-tool status [flags]    show a running instance's jobs and receivers")
+	_, _ = fmt.Fprintln(out, "\nRun a subcommand with -help for its flags. Flags:")
+
+	fs.PrintDefaults()
 }
 
 // explicitFlags reports whether -config and -log-level were explicitly

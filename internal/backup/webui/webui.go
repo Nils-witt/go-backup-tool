@@ -259,6 +259,7 @@ func registerRoutes(liveCtx context.Context, mux *http.ServeMux, deps Deps, opts
 	mux.HandleFunc("GET /", handleDashboard(dashboardIndexHTML))
 	mux.Handle("GET /assets/", http.StripPrefix("/assets/", cacheForever(gzipStatic(dashboardAssetsFS, http.FileServerFS(dashboardAssetsFS)))))
 	mux.HandleFunc("GET /api/meta", handleMeta(opts.InstanceName))
+	mux.HandleFunc("GET /api/health", handleHealth(db, log))
 	mux.HandleFunc("GET /api/client-config", handleClientConfig(opts.Sentry))
 	mux.HandleFunc("GET /api/sso/status", handleSSOStatus(opts.OIDC))
 	mux.HandleFunc("GET /api/me", requireUser(auth, handleMe()))

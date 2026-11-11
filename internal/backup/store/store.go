@@ -153,6 +153,9 @@ type Store interface {
 	ListSSOLogouts(ctx context.Context, issuer string, now time.Time) ([]SSOLogout, error)
 	DeleteExpiredSSOLogouts(ctx context.Context, now time.Time) error
 
+	// Ping checks that the database is reachable (store.go).
+	Ping(ctx context.Context) error
+
 	// Close closes the underlying connection pools.
 	Close() error
 }
@@ -212,6 +215,22 @@ func migrate(ctx context.Context, gdb *gorm.DB) error {
 		if err := step(ctx, gdb); err != nil {
 			return err
 		}
+	}
+
+	return nil
+}
+
+// Ping checks that the write pool can reach the database, for the web UI's
+// health check. It uses db rather than read since a database that can't be
+// written to can't record backups either.
+func (s *gormStore) Ping(ctx context.Context) error {
+	sqlDB, err := s.db.DB()
+	if err != nil {
+		return fmt.Errorf("getting connection pool: %w", err)
+	}
+
+	if err := sqlDB.PingContext(ctx); err != nil {
+		return fmt.Errorf("pinging database: %w", err)
 	}
 
 	return nil

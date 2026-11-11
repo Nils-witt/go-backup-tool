@@ -366,3 +366,18 @@ func resolveWebUIListen(cfg fileWebUI) (string, error) {
 
 	return listen, nil
 }
+
+// WebUIListen returns the web UI listen address set by the config file at
+// path (see resolveWebUIListen), or "" when the web UI is disabled or, with
+// explicit false, when there's no file at path. Unlike ParseFlags it
+// validates nothing else, so the client subcommands (see the ctl package)
+// can find a running instance from its config file even where its jobs
+// wouldn't validate (e.g. on another host's copy of it).
+func WebUIListen(path string, explicit bool) (string, error) {
+	cfg, err := loadFileConfig(path, explicit)
+	if err != nil || cfg == nil {
+		return "", err
+	}
+
+	return resolveWebUIListen(cfg.WebUI)
+}

@@ -47,6 +47,31 @@ paths:
               schema:
                 $ref: "#/components/schemas/Meta"
 
+  /api/health:
+    get:
+      tags: [dashboard]
+      summary: Health check
+      operationId: getHealth
+      description: >
+        Public/unauthenticated, for `go-backup-tool health`, container
+        health checks and load balancers. Answers 200 when the state
+        database responds to a ping (within 2 seconds), 503 otherwise. The
+        database error itself is only logged.
+      security: []
+      responses:
+        "200":
+          description: The instance and its state database are up
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          description: The state database is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
   /api/client-config:
     get:
       tags: [dashboard]
@@ -2449,6 +2474,20 @@ components:
         commit:
           type: string
       required: [version, commit]
+
+    Health:
+      type: object
+      description: The instance's health (always public).
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        version:
+          type: string
+        database:
+          type: string
+          enum: [ok, unavailable]
+      required: [status, version, database]
 
     ClientConfig:
       type: object
