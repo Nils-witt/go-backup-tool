@@ -13,7 +13,7 @@ export function useMeta(): MetaJSON | null {
   const [meta, setMeta] = useState<MetaJSON | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
 
     if (!metaPromise) {
       metaPromise = fetchMeta();
@@ -24,13 +24,11 @@ export function useMeta(): MetaJSON | null {
 
     metaPromise
       .then((data) => {
-        if (!cancelled) setMeta(data);
+        if (!controller.signal.aborted) setMeta(data);
       })
       .catch(() => {});
 
-    return () => {
-      cancelled = true;
-    };
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {

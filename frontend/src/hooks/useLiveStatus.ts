@@ -30,20 +30,30 @@ export function useLiveStatus(): LiveStatusState {
   });
 
   useEffect(() => {
-    let stopped = false;
-    let socket: WebSocket | null = null;
-    let retryTimer: ReturnType<typeof setTimeout> | undefined;
-    let backoff = minBackoffMs;
-    // The last message's raw text: the server re-sends the full status on
-    // every ping, and an identical one shouldn't re-render the dashboard.
-    let lastData: string | null = null;
+    // Mutable connection state lives in one object: closures mutate its
+    // fields instead of reassigning locals (oxlint's react/immutability).
+    const conn: {
+      stopped: boolean;
+      socket: WebSocket | null;
+      retryTimer: ReturnType<typeof setTimeout> | undefined;
+      backoff: number;
+      // The last message's raw text: the server re-sends the full status on
+      // every ping, and an identical one shouldn't re-render the dashboard.
+      lastData: string | null;
+    } = {
+      stopped: false,
+      socket: null,
+      retryTimer: undefined,
+      backoff: minBackoffMs,
+      lastData: null,
+    };
 
     const scheduleReconnect = () => {
-      if (stopped) return;
-      lastData = null;
+      if (conn.stopped) return;
+      conn.lastData = null;
       setState((s) => (s.live ? { ...s, live: false } : s));
-      retryTimer = setTimeout(connect, backoff);
-      backoff = Math.min(backoff * 2, maxBackoffMs);
+      conn.retryTimer = setTimeout(connect, conn.backoff);
+      conn.backoff = Math.min(conn.backoff * 2, maxBackoffMs);
     };
 
     async function connect() {
@@ -56,20 +66,20 @@ export function useLiveStatus(): LiveStatusState {
         scheduleReconnect();
         return;
       }
-      if (stopped) return;
+      if (conn.stopped) return;
 
       const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
       const ws = new WebSocket(
         `${proto}//${window.location.host}/api/live?ticket=${encodeURIComponent(ticket)}`,
       );
-      socket = ws;
+      conn.socket = ws;
 
       ws.onmessage = (ev: MessageEvent<string>) => {
-        if (ev.data === lastData) return;
+        if (ev.data === conn.lastData) return;
         const msg = JSON.parse(ev.data) as LiveStatusMessage;
         if (msg.type !== "status") return;
-        backoff = minBackoffMs;
-        lastData = ev.data;
+        conn.backoff = minBackoffMs;
+        conn.lastData = ev.data;
         setState({
           jobs: msg.jobs || [],
           receivers: msg.receivers || [],
@@ -78,7 +88,7 @@ export function useLiveStatus(): LiveStatusState {
         });
       };
       ws.onclose = () => {
-        if (socket === ws) socket = null;
+        if (conn.socket === ws) conn.socket = null;
         scheduleReconnect();
       };
     }
@@ -86,9 +96,9 @@ export function useLiveStatus(): LiveStatusState {
     void connect();
 
     return () => {
-      stopped = true;
-      clearTimeout(retryTimer);
-      socket?.close();
+      conn.stopped = true;
+      clearTimeout(conn.retryTimer);
+      conn.socket?.close();
     };
   }, []);
 

@@ -24,8 +24,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    let unsubscribe = () => {};
+    // Mutable effect state lives in one object: closures mutate its fields
+    // instead of reassigning locals (oxlint's react/immutability).
+    const effect = { cancelled: false, unsubscribe: () => {} };
 
     void (async () => {
       // SSO settings first: a token stored by an earlier page load must be
@@ -33,11 +34,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const status = await fetchSSOStatus();
         await initOidc(status);
-        if (cancelled) return;
+        if (effect.cancelled) return;
         if (status.enabled) setSsoLabel(status.buttonLabel || "Sign in with SSO");
         // An SSO session that can't be renewed any more counts as logged
         // out: AuthGate then sends the user to /login?next=<current page>.
-        unsubscribe = onSsoSessionEnded(() => setMe(null));
+        effect.unsubscribe = onSsoSessionEnded(() => setMe(null));
       } catch {
         /* SSO status unavailable: the login page says so. */
       }
@@ -47,12 +48,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch {
         /* backend unreachable: treated as signed out. */
       }
-      if (!cancelled) setReady(true);
+      if (!effect.cancelled) setReady(true);
     })();
 
     return () => {
-      cancelled = true;
-      unsubscribe();
+      effect.cancelled = true;
+      effect.unsubscribe();
     };
   }, [refreshMe]);
 
