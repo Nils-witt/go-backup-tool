@@ -94,7 +94,7 @@ func TestRunOnceRecordsLastRunToStateDB(t *testing.T) { //nolint:paralleltest //
 // /api/status can show one target as done while another is still running,
 // rather than every target flipping from running to its final state
 // together only once the whole job completes. See runPipeline's
-// onTargetDone and runOnce's wiring of it to store.TargetDone.
+// onTargetDone and runOnce's wiring of it to status.Store.TargetDone.
 func TestRunOnceRefreshesEachTargetIndependently(t *testing.T) {
 	homedir := testGPGKeyring(t)
 
@@ -567,9 +567,8 @@ func TestRunOnceKeepsStagedFileForRetryWhenTargetFails(t *testing.T) {
 	}
 }
 
-// TestRunOnceDeletesStagedFileOnSuccess is the success-path counterpart to
-// TestRunOnceDeletesStagedFileEvenWhenTargetFails: the staged file is
-// removed once every target has succeeded.
+// TestRunOnceDeletesStagedFileOnSuccess verifies the staged file is removed
+// once every target has succeeded.
 func TestRunOnceDeletesStagedFileOnSuccess(t *testing.T) {
 	homedir := testGPGKeyring(t)
 

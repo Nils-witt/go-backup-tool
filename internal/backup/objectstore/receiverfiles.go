@@ -64,7 +64,7 @@ func ReceiverTarget(recv config.ResolvedReceiver) *config.Target {
 // dashboard (see webui.go). File is set for one file of a multi-file backup
 // (see MultiFileMarker): Key is then the backup's key and File the file's
 // name under it; a flat object has only Key. ExpiresAt is the zero
-// time.Time (see hasTime in the frontend's format.ts) when the receiver has
+// time.Time (see hasTime in frontend/src/lib/format.ts) when the receiver has
 // no retention: configured, since there's then nothing to expire.
 //
 // On a directory receiver every entry is one version of a file (see
@@ -252,13 +252,6 @@ func multiFileDirCache(root *os.Root) func(dir string) bool {
 
 		return is
 	}
-}
-
-// ObjectPath joins key, and file when non-empty, under root: where a
-// receiver stores (and the dashboard reads) one object. Both must already be
-// validated (see SanitizeObjectKey and config.ValidateFileName).
-func ObjectPath(root, key, file string) string {
-	return filepath.Join(root, filepath.FromSlash(key), file)
 }
 
 // LastReceivedAt returns the most recent modification time among every

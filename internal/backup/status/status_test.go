@@ -58,7 +58,7 @@ func TestOverallState(t *testing.T) {
 		{"single ok", []RunState{StateOK}, StateOK},
 		{"single failed", []RunState{StateFailed}, StateFailed},
 		// A target still running counts the same as failed here: only a
-		// state of stateOK counts as succeeded, so overallState never
+		// state of StateOK counts as succeeded, so overallState never
 		// reports ok or incomplete for a job that isn't actually done yet.
 		{"one running, one ok", []RunState{StateRunning, StateOK}, StateIncomplete},
 	}
@@ -419,7 +419,7 @@ func TestStatusStoreRetryStartingUnknownJobIsNoOp(t *testing.T) {
 }
 
 // TestStatusStoreFailedTargets verifies FailedTargets returns exactly the
-// server names of targets currently in stateFailed, in target order.
+// server names of targets currently in StateFailed, in target order.
 func TestStatusStoreFailedTargets(t *testing.T) {
 	t.Parallel()
 

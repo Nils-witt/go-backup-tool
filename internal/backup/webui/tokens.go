@@ -30,7 +30,7 @@ import (
 
 const (
 	// apiTokenIssuer is the iss claim of every API token this instance
-	// signs, and what apiTokenUser requires.
+	// signs, and what apiTokens.user requires.
 	apiTokenIssuer = "go-backup-tool"
 
 	// apiTokenPermissions is what every API token grants: read-only

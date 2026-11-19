@@ -53,9 +53,9 @@ func (r Request) IsZero() bool {
 
 // SignRemoteAuthToken builds a short-lived RS256-signed JSON Web Token,
 // signed with privateKey (this instance's own RSA key — see
-// loadServerIdentity), identifying this instance as issuer (its persistent
-// UUID — see ensureServerUUID), scoped to audience (the destination
-// receiver's id — a serverKindRemote target's bucket) and bound to req (see
+// identity.LoadServerIdentityAtStartup), identifying this instance as issuer (its persistent
+// UUID — see identity.ServerIdentity.UUID), scoped to audience (the destination
+// receiver's id — a config.ServerKindRemote target's bucket) and bound to req (see
 // Request). remoteclient.Upload sends the result as its
 // Authorization: Bearer header; the receiving instance verifies it with
 // VerifyRemoteAuthToken against this instance's public key, configured as

@@ -20,7 +20,8 @@ func handleReceiverStatus(receivers *receiver.Registry, store *status.ReceiverSt
 }
 
 // handleReceiverFiles serves GET /api/receivers/{id}/files: the objects
-// currently stored under receiver {id}'s path (see listReceiverFiles), for
+// currently stored under receiver {id}'s path (see
+// objectstore.ListReceiverFiles), for
 // the web UI dashboard's per-receiver file listing. Unlike the receiver API
 // (receiver.HandleReceiveObject), this is dashboard-only and isn't
 // JWT-authenticated, matching /api/receivers.

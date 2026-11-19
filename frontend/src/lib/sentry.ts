@@ -36,7 +36,7 @@ export async function initSentry() {
  * Drops a URL's query string and fragment: they may carry download and live
  * tickets or an OIDC callback's code and state.
  */
-export function stripQuery(url: string): string {
+function stripQuery(url: string): string {
   return url.replace(/[?#].*$/, "");
 }
 

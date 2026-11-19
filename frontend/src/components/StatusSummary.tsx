@@ -15,7 +15,7 @@ const ORDER: RunState[] = ["failed", "incomplete", "running", "ok", "idle"];
 
 // StatusBar is a single stacked bar of counts per state, with a 2px gap
 // between segments so adjacent states stay distinguishable.
-export function StatusBar({
+function StatusBar({
   counts,
   labels,
 }: {

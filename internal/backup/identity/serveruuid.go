@@ -10,10 +10,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// serverUUIDFile is the name ensureServerUUID stores this instance's
-// persistent identity under, inside config.DefaultKeysDir (the same directory
-// ensureServerKeyPair uses for the RSA key pair).
-
 // ensureServerUUID returns dir/server.uuid's contents, generating and
 // persisting a fresh random UUID there first if the file doesn't exist yet.
 // Once written, that value is read back as-is on every later call and never

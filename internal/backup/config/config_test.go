@@ -2583,7 +2583,7 @@ jobs:
 // TestParseFlagsServerName exercises the top-level server-name: option:
 // it lands on RunConfig.ServerName and is copied onto every receiver (see
 // ResolvedReceiver.ServerName), ready for renderStaleWebhookPayload/
-// renderDownloadWebhookPayload/pipeline.renderReportSubject to substitute
+// renderDownloadWebhookPayload/reporter's renderReportSubject to substitute
 // into a notification's {server_name} placeholder.
 func TestParseFlagsServerName(t *testing.T) {
 	t.Parallel()

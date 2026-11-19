@@ -44,8 +44,7 @@ var dashboardDistFS embed.FS
 var dashboardAssetsFS = mustSubFS(dashboardDistFS, "dist/assets")
 
 // dashboardIndexHTML is the SPA shell's HTML, read once at package init
-// (mirroring the pre-SPA dashboardHTML var's own "build it once, not per
-// request" shape) rather than on every GET /.
+// rather than on every GET /.
 var dashboardIndexHTML = mustReadFS(dashboardDistFS, "dist/index.html")
 
 // mustSubFS/mustReadFS panic on error rather than returning one: both only

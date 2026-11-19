@@ -20,7 +20,7 @@ import (
 
 // RunState is the lifecycle state of a job or target as shown in the web UI
 // (see webui.go). A target's own state is always one of idle/running/ok/
-// failed — stateIncomplete only ever applies at the job level, summarizing
+// failed — StateIncomplete only ever applies at the job level, summarizing
 // a run where its targets disagreed (see overallState).
 type RunState string
 
@@ -365,13 +365,13 @@ func (s *Store) SetNextRun(name string, next time.Time) {
 
 // Finished records job name's overall outcome and duration once its run
 // completes, deriving the overall state from each target's own already-
-// recorded outcome (see targetDone) rather than solely from err != nil: a
+// recorded outcome (see TargetDone) rather than solely from err != nil: a
 // job whose targets succeeded and failed in a mix is reported as
 // incomplete, not failed — the backup did land somewhere. Likewise, a run
 // that produced only some of its files is incomplete, and one that
 // produced none is failed (see jobState). It returns the state it recorded
 // (or "" if name is unknown), so a caller that persists its own summary of
-// the run (see runner.recordLastRun) can stay consistent with the live
+// the run (see pipeline's Runner.recordJobRun) can stay consistent with the live
 // store without re-deriving it.
 //
 // size is the encrypted files' total byte count; it's recorded whenever at
@@ -438,7 +438,7 @@ func jobState(j *JobSnapshot) RunState {
 }
 
 // overallState summarizes targets (a job's current per-target states) into
-// one job-level runState: ok if every target succeeded, failed if none did,
+// one job-level RunState: ok if every target succeeded, failed if none did,
 // incomplete if some but not all did.
 func overallState(targets []TargetSnapshot) RunState {
 	succeeded := 0
@@ -509,10 +509,10 @@ func (s *Store) SeedLastRun(name string, start, end time.Time, state RunState, e
 
 // SeedTargetRun initializes job name's target whose server matches target
 // from a previously persisted result (see store.ListTargetRuns), mirroring
-// seedLastRun's reasoning one level down: a restart's web UI can still show
+// SeedLastRun's reasoning one level down: a restart's web UI can still show
 // each target's last outcome instead of every target reverting to "idle"
 // until it next runs. Called once at startup, before any job's own goroutine
-// can call starting/targetDone, so it never races an actual run.
+// can call Starting/TargetDone, so it never races an actual run.
 func (s *Store) SeedTargetRun(name, target string, state RunState, errText string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

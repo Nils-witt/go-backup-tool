@@ -43,7 +43,7 @@ export interface Topology {
 // worst of their states.
 const SEVERITY: RunState[] = ["failed", "incomplete", "running", "ok", "idle"];
 
-export function worstState(a: RunState, b: RunState): RunState {
+function worstState(a: RunState, b: RunState): RunState {
   return SEVERITY.indexOf(a) <= SEVERITY.indexOf(b) ? a : b;
 }
 

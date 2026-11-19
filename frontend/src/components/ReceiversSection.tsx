@@ -54,7 +54,7 @@ function FileListDialog({
   );
 }
 
-export function ReceiversCard({
+function ReceiversCard({
   receiver,
   canDownload,
 }: {

@@ -122,8 +122,8 @@ type jobTargetRef struct {
 // Target is one upload destination for a job, fully resolved from a
 // jobTargetRef against its named server. A job uploads the same encrypted
 // object to every one of its targets. Its kind determines which of the
-// fields below apply: local uses only bucket (as a subdirectory of
-// localPath) and localPath itself; remote uses bucket (as the id sent to
+// fields below apply: local uses only Bucket (as a subdirectory of
+// LocalPath) and LocalPath itself; remote uses bucket (as the id sent to
 // the destination instance) and endpoint. A remote Target authenticates
 // with this instance's identity (see remoteclient.Upload), not a field on
 // Target itself.
@@ -144,17 +144,17 @@ type Target struct {
 	TLS TargetTLS
 
 	// LocalPath is the local server's root directory (only set when
-	// kind == serverKindLocal). The object is written to
+	// Kind == ServerKindLocal). The object is written to
 	// LocalPath/bucket/key.
 	LocalPath string
 
 	// Retention is how long a local target's written objects are kept
 	// before they're deleted automatically (only set when
-	// kind == serverKindLocal). Zero means no automatic expiry. Normally
+	// Kind == ServerKindLocal). Zero means no automatic expiry. Normally
 	// the server's Retention:, but a job's targets: entry may override it
 	// for that job's own writes (see resolveJobTargets); either way, this
-	// resolved value is what RecordLocalWrite stamps on each write. See
-	// Retention.go.
+	// resolved value is what objectstore.RecordLocalWrite stamps on each
+	// write.
 	Retention time.Duration
 
 	// OnErrorCommand, if non-nil, is fired (see pipeline.runTargetCommand)

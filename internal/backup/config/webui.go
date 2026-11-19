@@ -11,7 +11,7 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/permission"
 )
 
-// OIDCSettings is runConfig's resolved form of the config file's
+// OIDCSettings is RunConfig's resolved form of the config file's
 // webui.oidc: entry (see fileWebUIOIDC). The web UI's SPA logs in as the
 // public client ClientID (authorization code + PKCE, no client secret), and
 // the backend verifies every request's access token against Issuer (see
@@ -74,7 +74,7 @@ type webUISettings struct {
 // resolveWebUISettings resolves cfg (the config file's webui: entry) into
 // its listen address (see resolveWebUIListen), its SSO settings (see
 // resolveOIDCSettings), and its receivers base dir (see
-// resolveReceiversBaseDir) — the pieces of runConfig ParseFlags derives
+// resolveReceiversBaseDir) — the pieces of RunConfig ParseFlags derives
 // from webui: that need validation beyond a plain field copy.
 func resolveWebUISettings(cfg fileWebUI) (webUISettings, error) {
 	listen, err := resolveWebUIListen(cfg)
@@ -233,7 +233,7 @@ func resolveReceiversBaseDir(dir string) (string, error) {
 
 // resolveOIDCSettings validates cfg (the config file's webui.oidc: entry)
 // against listen (the web UI's resolved listen address, empty if the web UI
-// itself is disabled — see resolveWebUIListen) and returns runConfig's
+// itself is disabled — see resolveWebUIListen) and returns RunConfig's
 // resolved OIDCSettings. An unset/false cfg.Enabled returns the zero value:
 // since SSO is the web UI's only login method, that leaves the dashboard
 // locked (nobody can sign in) while the receiver API, served by the same

@@ -138,7 +138,7 @@ func buildRemoteServer(name string, fs *FileServer) (ResolvedServer, error) {
 }
 
 // ResolvedServer is one servers: entry, ready to be combined with a job's
-// targetRef bucket into a target.
+// jobTargetRef bucket into a Target.
 type ResolvedServer struct {
 	name       string
 	kind       ServerKind

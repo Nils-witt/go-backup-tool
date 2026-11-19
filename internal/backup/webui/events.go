@@ -28,7 +28,7 @@ func recordLogin(ctx context.Context, db store.Store, log *slog.Logger, r *http.
 	}
 }
 
-// loginEventJSON is loginEvent's wire shape for handleLoginEvents, matching
+// loginEventJSON is store.LoginEvent's wire shape for handleLoginEvents, matching
 // the dashboard's own field naming (snake_case, as every other /api/...
 // endpoint here uses).
 type loginEventJSON struct {
@@ -92,7 +92,7 @@ func serveEventLog[E, J any](w http.ResponseWriter, r *http.Request, log *slog.L
 	writeJSON(w, out)
 }
 
-// downloadEventJSON is downloadEvent's wire shape for handleDownloadEvents,
+// downloadEventJSON is store.DownloadEvent's wire shape for handleDownloadEvents,
 // matching the dashboard's own field naming (snake_case, as every other
 // /api/... endpoint here uses).
 type downloadEventJSON struct {

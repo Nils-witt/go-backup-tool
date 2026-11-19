@@ -233,6 +233,6 @@ export async function logoutOidc(): Promise<boolean> {
 }
 
 /** A same-site relative path, or '/'. "//host" is protocol-relative, so it would leave the site. */
-export function safeNext(next: string): string {
+function safeNext(next: string): string {
   return next.startsWith("/") && !next.startsWith("//") ? next : "/";
 }

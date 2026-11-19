@@ -17,7 +17,7 @@ func (s *stringSlice) Set(v string) error {
 	return nil
 }
 
-// ParseFlags parses args (typically os.Args[1:]) into a runConfig, writing
+// ParseFlags parses args (typically os.Args[1:]) into a RunConfig, writing
 // usage output to out on error or -h/-help. It takes an explicit argument
 // list and a fresh FlagSet (rather than the package-level flag.CommandLine)
 // so it can be called repeatedly and in isolation from tests.

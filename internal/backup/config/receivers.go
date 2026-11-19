@@ -13,12 +13,13 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/trust"
 )
 
-// FileReceiver is one top-level receivers: entry, defining a path this
+// FileReceiver is one receiver as entered in the web UI or a settings file
+// (-import-settings) and stored in the state DB, defining a path this
 // instance accepts incoming objects into over its receiver API (see
-// receiver.HandleReceiveObject), for pairing with
-// another go-backup-tool instance's type: remote target. Only reachable
-// when listen: is set, since the receiver API is served by the same HTTP
-// server as the web UI dashboard.
+// receiver.HandleReceiveObject), for pairing with another go-backup-tool
+// instance's type: remote target. Only reachable when the web UI listens,
+// since the receiver API is served by the same HTTP server as the web UI
+// dashboard.
 type FileReceiver struct {
 	ID string `yaml:"id" json:"id"`
 
@@ -77,7 +78,7 @@ type FileReceiver struct {
 	Immutable bool `yaml:"immutable,omitempty" json:"immutable"`
 }
 
-// ResolvedReceiver is one fileReceiver after validation, ready to be used by
+// ResolvedReceiver is one FileReceiver after validation, ready to be used by
 // the receiver API's handlers.
 type ResolvedReceiver struct {
 	ID string

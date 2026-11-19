@@ -242,10 +242,6 @@ export interface MetaJSON {
   instanceName?: string;
 }
 
-export interface DownloadTicketJSON {
-  ticket: string;
-}
-
 // ReceiverConfigJSON mirrors receiverConfigJSON in
 // internal/backup/webui/receivers_config.go: one stored receiver as entered,
 // plus error when it no longer resolves and so isn't currently active.

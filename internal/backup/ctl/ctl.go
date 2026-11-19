@@ -15,7 +15,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"slices"
 	"time"
 
 	"nilswitt.dev/go-backup-tool/internal/backup/config"
@@ -60,18 +59,6 @@ var commands = map[string]command{
 func IsCommand(name string) bool {
 	_, ok := commands[name]
 	return ok
-}
-
-// CommandNames returns every subcommand name, sorted, for usage text.
-func CommandNames() []string {
-	names := make([]string, 0, len(commands))
-	for name := range commands {
-		names = append(names, name)
-	}
-
-	slices.Sort(names)
-
-	return names
 }
 
 // options are a subcommand's parsed flags.

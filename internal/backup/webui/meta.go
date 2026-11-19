@@ -26,12 +26,11 @@ type identityJSON struct {
 }
 
 // handleIdentity serves GET /api/identity: this instance's persistent UUID
-// and PEM-encoded public key (see serverIdentity), for the dashboard's
-// "Server identity" section — an operator reads them off there to fill in a
-// receiving instance's matching receiver (its sender public key, in Receiver settings)
-// rather than digging through this instance's keys-dir: on disk. identity
-// nil (loadServerIdentityAtStartup failed at startup, or the receiver API
-// isn't used by any type: remote target) serves a zero-value identityJSON,
+// and PEM-encoded public key (see identity.ServerIdentity), for the
+// dashboard's "Server identity" section — an operator reads them off there to
+// add this instance as a trusted server on a receiving instance, rather than
+// digging through this instance's keys-dir: on disk. A nil identity serves a
+// zero-value identityJSON,
 // which the dashboard's JS treats as "no identity to show".
 func handleIdentity(identity *identity.ServerIdentity) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
@@ -49,9 +48,8 @@ func handleIdentity(identity *identity.ServerIdentity) http.HandlerFunc {
 }
 
 // metaJSON is this instance's build metadata, as served by GET /api/meta,
-// for the dashboard's footer — the SPA's index.html is a static build artifact with no server-side
-// templating, so this replaces what dashboardHTML's now-removed
-// {{VERSION}}/{{COMMIT}} placeholder substitutions did.
+// for the dashboard's footer (the SPA's index.html is a static build
+// artifact with no server-side templating).
 type metaJSON struct {
 	Version      string `json:"version"`
 	Commit       string `json:"commit"`

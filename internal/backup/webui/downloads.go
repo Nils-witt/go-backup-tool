@@ -190,7 +190,7 @@ func handleMintDownloadTicket(receivers *receiver.Registry, tickets *downloadTic
 // handleDownloadFile serves GET /api/receivers/{id}/download/{key...}: the
 // actual content of one object currently stored under receiver {id}'s path,
 // for a person to save from the dashboard's file listing (see
-// listReceiverFiles/handleReceiverFiles for the metadata-only listing this
+// handleReceiverFiles for the metadata-only listing this
 // complements). Unlike the receiver API's own per-receiver JWT auth (see
 // authorizeReceiver), and unlike every other dashboard endpoint (see
 // requireUser), this is authorized by a one-time download ticket

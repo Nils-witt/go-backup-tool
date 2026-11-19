@@ -30,7 +30,7 @@ func Snapshots(receivers *Registry, store *status.ReceiverStore, log *slog.Logge
 // otherwise. Stale mirrors staleReceiverMonitor.check's own condition — at
 // least one file received, and the most recent one older than
 // recv.StaleAfter — so the dashboard never disagrees with what actually
-// fires the webhook. A lastReceivedAt failure is logged and leaves Stale
+// fires the webhook. An objectstore.LastReceivedAt failure is logged and leaves Stale
 // false rather than failing the whole /api/receivers response over one
 // receiver's directory listing.
 func annotateReceiverStaleness(snap *status.ReceiverSnapshot, recv config.ResolvedReceiver, log *slog.Logger) {

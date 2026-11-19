@@ -43,8 +43,8 @@ func LoadServerIdentityAtStartup(log *slog.Logger, dir string) (*ServerIdentity,
 
 // loadServerIdentity ensures dir holds a server key pair and UUID
 // (generating them on first use — see ensureServerKeyPair/
-// ensureServerUUID), then loads them into a serverIdentity. See
-// loadServerIdentityAtStartup, which runWithContext (app.go) calls once at
+// ensureServerUUID), then loads them into a ServerIdentity. See
+// LoadServerIdentityAtStartup, which runWithContext (app.go) calls once at
 // startup.
 func loadServerIdentity(dir string, log *slog.Logger) (*ServerIdentity, error) {
 	if err := ensureServerKeyPair(dir, log); err != nil {
@@ -71,7 +71,7 @@ func loadServerIdentity(dir string, log *slog.Logger) (*ServerIdentity, error) {
 
 // NewTestServerIdentity builds a ServerIdentity directly from uuid and
 // privateKey, for tests in other packages that need one without touching
-// disk (see LoadServerIdentity for the real, on-disk-backed constructor).
+// disk (see LoadServerIdentityAtStartup for the real, on-disk-backed constructor).
 func NewTestServerIdentity(uuid string, privateKey *rsa.PrivateKey) *ServerIdentity {
 	return &ServerIdentity{uuid: uuid, privateKey: privateKey}
 }
@@ -88,11 +88,9 @@ func (si *ServerIdentity) PublicKeyPEM() string {
 	return si.publicKeyPEM
 }
 
-// PrivateKey returns this instance's RSA private key, for signing other
-// RS256 JWTs that piggyback on this same persistent key pair rather than
-// minting their own — e.g. the web UI dashboard's session tokens (see
-// newSessionStore in webui.go), instead of SignRequest's own
-// audience-scoped remote-target tokens.
+// PrivateKey returns this instance's RSA private key, e.g. for the web UI's
+// identity endpoint to derive the public key's fingerprint (see
+// handleIdentity).
 func (si *ServerIdentity) PrivateKey() *rsa.PrivateKey {
 	return si.privateKey
 }

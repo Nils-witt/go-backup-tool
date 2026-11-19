@@ -66,7 +66,7 @@ func NewReceiverStore(receivers map[string]config.ResolvedReceiver) *ReceiverSto
 
 // Record updates receiver id's status after it just handled a request for
 // key: err nil marks it ok, non-nil marks it failed with err's message,
-// mirroring statusStore.targetDone's success/failure recording for job
+// mirroring Store.TargetDone's success/failure recording for job
 // targets.
 func (s *ReceiverStore) Record(id, key string, err error) {
 	s.mu.Lock()
@@ -86,7 +86,7 @@ func (s *ReceiverStore) Record(id, key string, err error) {
 
 // SeedLastEvent initializes receiver id's snapshot from its most recently
 // persisted receiver_events row (see the store package's
-// GetLastReceiverEvent), mirroring statusStore.seedLastRun's reasoning for
+// GetLastReceiverEvent), mirroring Store.SeedLastRun's reasoning for
 // job status: a restart's web UI can still show a receiver's last activity
 // instead of it reverting to idle until it next serves a request. Called
 // once at startup, before the receiver API can serve any request, so it

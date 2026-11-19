@@ -180,7 +180,7 @@ func (m *Manager) activateReportLocked(fr report.FileReport) {
 
 // ManagedNotification is one stored notification as the web UI lists it:
 // its definition as entered, Error when it no longer resolves (and so is
-// inactive), and UsedBy, what references it (see usersOf).
+// inactive), and UsedBy, what references it (see usersByNotification).
 type ManagedNotification struct {
 	store.NotificationConfig
 

@@ -191,7 +191,7 @@ type fileConfig struct {
 	// placeholder, substituted the same way as a stale/download
 	// notification's other placeholders (see renderStaleWebhookPayload/
 	// renderDownloadWebhookPayload) or a report notification's (see
-	// pipeline.renderReportSubject), is available in every notification
+	// reporter's renderReportSubject), is available in every notification
 	// webhook.body/email.subject/email.body — handy for telling which
 	// go-backup-tool instance a notification came from when several share
 	// the same webhook/inbox. Unset (the default) substitutes as "". Also

@@ -451,8 +451,8 @@ func TestSweepAllReceiversRemovesExpiredObjects(t *testing.T) {
 
 	// sweepAllReceivers is the single sweep pass MonitorReceiverRetention
 	// runs both immediately and on every subsequent tick (see
-	// RunPeriodically); testing it directly, with a live context, exercises
-	// that pass without also having to drive RunPeriodically's own timing
+	// periodic.Run); testing it directly, with a live context, exercises
+	// that pass without also having to drive periodic.Run's own timing
 	// loop in a background goroutine.
 	sweepAllReceivers(context.Background(), db, receivers, discardLogger)
 
@@ -495,7 +495,7 @@ func TestMonitorReceiverRetentionNilDBIsNoop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	// Must return promptly rather than blocking on RunPeriodically's loop:
+	// Must return promptly rather than blocking on periodic.Run's loop:
 	// a nil db means retention tracking is unavailable this run.
 	MonitorReceiverRetention(ctx, nil, NewRegistry(receivers), discardLogger)
 }
@@ -514,7 +514,7 @@ func TestMonitorReceiverRetentionNoRetentionConfiguredIsNoop(t *testing.T) {
 	MonitorReceiverRetention(ctx, db, NewRegistry(receivers), discardLogger)
 }
 
-func TestSeedReceiverStatusFromState(t *testing.T) {
+func TestSeedReceiverStatus(t *testing.T) {
 	t.Parallel()
 
 	db := openTestStateDB(t)
@@ -531,7 +531,9 @@ func TestSeedReceiverStatusFromState(t *testing.T) {
 	}
 	statusStore := status.NewReceiverStore(receivers)
 
-	SeedReceiverStatusFromState(ctx, db, receivers, statusStore, discardLogger)
+	for id := range receivers {
+		seedReceiverStatus(ctx, db, id, statusStore, discardLogger)
+	}
 
 	snap := statusStore.Snapshot()
 

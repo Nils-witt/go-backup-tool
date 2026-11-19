@@ -18,9 +18,8 @@ import (
 )
 
 // testReceiverPublicKeyPEM generates a fresh (test-speed) RSA key pair and
-// returns its public key both PEM-encoded (as a receivers: entry's
-// public-key: value) and parsed (to build the resolvedReceiver a test
-// expects buildReceivers to produce).
+// returns its public key both PEM-encoded and parsed (e.g. for a
+// trust.Server a receiver's allowed-servers: can name).
 func testReceiverPublicKeyPEM(t *testing.T) (string, *rsa.PublicKey) {
 	t.Helper()
 

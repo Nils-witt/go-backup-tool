@@ -89,7 +89,7 @@ func TestNotifyDownloadWebhookNoopWhenUnconfigured(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	recv := config.ResolvedReceiver{ID: "a", Path: "/mnt/a"} // no DownloadWebhook configured
+	recv := config.ResolvedReceiver{ID: "a", Path: "/mnt/a"} // no DownloadNotifications configured
 
 	NotifyDownload(recv, DownloadWebhookEvent{Username: "alice", Key: "k", At: time.Now()}, nil, discardLogger)
 
@@ -219,7 +219,7 @@ func TestNotifyDownloadWebhookNonSuccessStatusIsLoggedNotReturned(t *testing.T) 
 
 	recv := config.ResolvedReceiver{ID: "a", Path: "/mnt/a", DownloadNotifications: []string{"test"}, Notifications: testWebhookRegistry(notify.Webhook{URL: srv.URL, Method: http.MethodPost})}
 
-	// NotifyDownloadWebhook returns nothing to assert on failure; this just
+	// NotifyDownload returns nothing to assert on failure; this just
 	// exercises the non-2xx path without panicking.
 	NotifyDownload(recv, DownloadWebhookEvent{Username: "alice", Key: "k", At: time.Now()}, nil, discardLogger)
 }

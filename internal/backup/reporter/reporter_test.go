@@ -320,13 +320,11 @@ func TestRenderReportSubject(t *testing.T) {
 func TestRenderReportSubjectDefaultTemplate(t *testing.T) {
 	t.Parallel()
 
-	report := reportContent{end: time.Date(2026, 8, 28, 7, 0, 0, 0, time.UTC)}
+	report := reportContent{serverName: "nas", end: time.Date(2026, 8, 28, 7, 0, 0, 0, time.UTC)}
 
-	// Mirrors report.defaultReportSubject: reproduces this feature's
-	// original hardcoded subject line when report.subject: is unset.
-	got := renderReportSubject("go-backup-tool report - {end}", report, notify.NoEscape)
+	got := renderReportSubject(defaultReportSubject, report, notify.NoEscape)
 
-	want := "go-backup-tool report - 2026-08-28 07:00"
+	want := "[nas] report - 2026-08-28 07:00"
 	if got != want {
 		t.Errorf("renderReportSubject() = %q, want %q", got, want)
 	}

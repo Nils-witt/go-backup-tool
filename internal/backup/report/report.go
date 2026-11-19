@@ -40,7 +40,7 @@ type FileReport struct {
 	// Notifications names notifications (managed in the web UI, see the
 	// settings package) to send this report to. A notification's email: block,
 	// if set, receives the full report as its body, with its own
-	// subject:/subject-placeholders (see pipeline.renderReportSubject)
+	// subject:/subject-placeholders (see reporter's renderReportSubject)
 	// substituted in if set, otherwise defaulting to defaultReportSubject; a
 	// notification's webhook: block, if set, receives a JSON summary (or
 	// its own body: template rendered the same way). Required (non-empty)
@@ -60,17 +60,17 @@ const DefaultHistoryDays = 30
 // MaxHistoryDays bounds FileReport.HistoryDays (about ten years).
 const MaxHistoryDays = 3650
 
-// Settings is fileReport after validation, ready for
+// Settings is FileReport after validation, ready for
 // reporter.Run to act on. Its zero value (Enabled false) means the
 // report is disabled.
 type Settings struct {
 	Enabled bool
 
-	// Schedule is fileReport.Schedule, parsed once here rather than
+	// Schedule is FileReport.Schedule, parsed once here rather than
 	// re-parsed on every scheduling loop iteration.
 	Schedule cron.Schedule
 
-	// Notifications is fileReport.Notifications: notification ids, looked
+	// Notifications is FileReport.Notifications: notification ids, looked
 	// up in the live notify.Registry each time the report is sent (see
 	// notify.Registry.Resolve), so edits made in the web UI apply.
 	Notifications []string
@@ -115,7 +115,7 @@ func parseUTCSchedule(schedule string) (cron.Schedule, error) {
 	return sched, nil
 }
 
-// DefaultSchedule is fileReport.Schedule's default when left unset:
+// DefaultSchedule is FileReport.Schedule's default when left unset:
 // once a day at 07:00 UTC.
 const DefaultSchedule = "0 7 * * *"
 

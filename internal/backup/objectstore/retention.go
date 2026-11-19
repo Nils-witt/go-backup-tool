@@ -70,7 +70,7 @@ func RecordObjectWrite(ctx context.Context, db store.Store, cfg *config.Config, 
 }
 
 // SweepRetentionForTarget sweeps db for t's server, for callers (see
-// sweepStartupRetention/sweepStartupReceiverRetention) that aren't already
+// pipeline.SweepStartupRetention/receiver.MonitorReceiverRetention) that aren't already
 // in the middle of a write. A nil db (the state db couldn't be opened at
 // startup) is a no-op.
 func SweepRetentionForTarget(ctx context.Context, db store.Store, t *config.Target, log *slog.Logger) error {

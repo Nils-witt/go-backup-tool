@@ -884,7 +884,7 @@ func TestHandleDownloadFileRecordsDownloadEvents(t *testing.T) {
 // TestHandleDownloadFileFiresDownloadWebhookOnSuccess is an end-to-end check
 // that a successful download through handleDownloadFile fires the
 // receiver's configured download-webhook (see
-// receiver.NotifyDownloadWebhook), in a background goroutine so it doesn't
+// receiver.NotifyDownload), in a background goroutine so it doesn't
 // delay the file already streamed to the caller.
 func TestHandleDownloadFileFiresDownloadWebhookOnSuccess(t *testing.T) {
 	t.Parallel()

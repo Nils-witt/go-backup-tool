@@ -248,10 +248,7 @@ func newConfigDefaults() *Config {
 // prepareJobs narrows jobs to the one named by jobFilter (if any) and
 // validates them.
 func prepareJobs(jobs []*Config, jobFilter string) ([]*Config, error) {
-	jobs, err := applyJobFilter(jobs, jobFilter)
-	if err != nil {
-		return nil, err
-	}
+	jobs = applyJobFilter(jobs, jobFilter)
 
 	if err := validateJobs(jobs); err != nil {
 		return nil, err
@@ -263,18 +260,18 @@ func prepareJobs(jobs []*Config, jobFilter string) ([]*Config, error) {
 // applyJobFilter applies -job, if given, restricting jobs to the single
 // named job — none, if the config file doesn't define it: it may be stored
 // in the state db instead (see RunConfig.JobFilter).
-func applyJobFilter(jobs []*Config, jobFilter string) ([]*Config, error) {
+func applyJobFilter(jobs []*Config, jobFilter string) []*Config {
 	if jobFilter == "" {
-		return jobs, nil
+		return jobs
 	}
 
 	for _, j := range jobs {
 		if j.Name == jobFilter {
-			return []*Config{j}, nil
+			return []*Config{j}
 		}
 	}
 
-	return nil, nil
+	return nil
 }
 
 // validateJobs validates every job, returning the first error found.

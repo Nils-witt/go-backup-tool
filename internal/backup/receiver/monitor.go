@@ -22,21 +22,11 @@ import (
 	"nilswitt.dev/go-backup-tool/internal/backup/store"
 )
 
-// SeedReceiverStatusFromState initializes statusStore's receivers from each
-// one's most recently persisted receiver_events row (see the store
-// package's GetLastReceiverEvent), so a restart's web UI can still show a
-// receiver's last activity instead of every receiver reverting to idle
-// until it next serves a request. Called once at startup, before the
-// receiver API's handlers can serve any request.
-func SeedReceiverStatusFromState(ctx context.Context, db store.Store, receivers map[string]config.ResolvedReceiver, statusStore *status.ReceiverStore, log *slog.Logger) {
-	for id := range receivers {
-		seedReceiverStatus(ctx, db, id, statusStore, log)
-	}
-}
-
-// seedReceiverStatus is SeedReceiverStatusFromState for a single receiver
-// id, also used when a receiver is created in the web UI (see
-// Manager.Create), since an id that existed before may have history.
+// seedReceiverStatus initializes receiver id's status from its most recently
+// persisted receiver_events row (see store.Store.GetLastReceiverEvent), so a
+// restarted web UI still shows the receiver's last activity instead of idle.
+// Manager calls it when it activates a receiver at startup and when one is
+// created in the web UI, since an id that existed before may have history.
 func seedReceiverStatus(ctx context.Context, db store.Store, id string, statusStore *status.ReceiverStore, log *slog.Logger) {
 	ev, ok, err := db.GetLastReceiverEvent(ctx, id)
 	if err != nil {
@@ -53,7 +43,7 @@ func seedReceiverStatus(ctx context.Context, db store.Store, id string, statusSt
 
 // recordReceiverEventBestEffort appends a receiver_events row for one
 // HandleReceiveObject request, win or lose, so the daily
-// report (see pipeline.RunDailyReportLoop) can summarize receiver activity
+// report (see reporter.Run) can summarize receiver activity
 // later. A nil db (the state db couldn't be opened at startup) is a no-op,
 // matching every other state-db write; a write failure is logged rather
 // than returned, since it shouldn't affect the response the request already
@@ -99,7 +89,7 @@ func MonitorReceiverRetention(ctx context.Context, db store.Store, receivers *Re
 // sweepAllReceivers runs one retention sweep (see objectstore.SweepRetentionForTarget)
 // across every entry in receivers with retention: set, factored out of
 // MonitorReceiverRetention's periodic loop so a single sweep pass can be
-// exercised directly in tests without also driving RunPeriodically's timing.
+// exercised directly in tests without also driving periodic.Run's timing.
 func sweepAllReceivers(ctx context.Context, db store.Store, receivers map[string]config.ResolvedReceiver, log *slog.Logger) {
 	for _, recv := range receivers {
 		if recv.Kind == config.ReceiverKindDirectory {
