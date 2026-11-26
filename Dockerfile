@@ -43,8 +43,8 @@ RUN apk add --no-cache ca-certificates gnupg tzdata \
     && addgroup -S backup && adduser -S backup -G backup
 
 COPY --from=builder /out/go-backup-tool /usr/local/bin/go-backup-tool
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+COPY docker-entrypoint.sh docker-healthcheck.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/docker-healthcheck.sh
 
 # The config file's directory also holds the sqlite state/retention
 # databases go-backup-tool writes next to it, so mount both a config.yaml
@@ -56,6 +56,12 @@ USER backup
 
 # Only used when the config file sets listen: (disabled by default).
 EXPOSE 8080
+
+# docker-healthcheck.sh runs `go-backup-tool health` against the web UI's
+# GET /api/health (up, state db reachable). Without the web UI there is
+# nothing to probe, so it reports healthy; see the script for details.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD ["/usr/local/bin/docker-healthcheck.sh"]
 
 # docker-entrypoint.sh imports every public key file under GPG_KEYS_DIR
 # (default /data/keys) into GNUPGHOME (default /data/.gnupg, persisted on

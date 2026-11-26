@@ -53,7 +53,7 @@ GO_BACKUP_TOOL_TOKEN=... go-backup-tool status        # jobs, targets and receiv
 GO_BACKUP_TOOL_TOKEN=... go-backup-tool status -json  # the same as JSON
 ```
 
-The instance is found by `-url` (e.g. `http://backup.lan:8080`), else `GO_BACKUP_TOOL_URL`, else `webui.listen` from `-config` (default `config.yaml`, reached via `localhost`). `health` calls the public `GET /api/health`; `status` needs an API token from the dashboard (Settings › API tokens), passed as `GO_BACKUP_TOOL_TOKEN` (or `-token`, which other users can see in the process list). `status` exits 3 when a job, target or receiver has failed or gone stale, so it doubles as a monitoring check. In Docker, with the web UI enabled, `HEALTHCHECK CMD ["go-backup-tool", "health"]` works from the image's `/data` working directory.
+The instance is found by `-url` (e.g. `http://backup.lan:8080`), else `GO_BACKUP_TOOL_URL`, else `webui.listen` from `-config` (default `config.yaml`, reached via `localhost`). `health` calls the public `GET /api/health`; `status` needs an API token from the dashboard (Settings › API tokens), passed as `GO_BACKUP_TOOL_TOKEN` (or `-token`, which other users can see in the process list). `status` exits 3 when a job, target or receiver has failed or gone stale, so it doubles as a monitoring check. The Docker image's `HEALTHCHECK` runs `health` (via `docker-healthcheck.sh`) every 30s; without the web UI there is nothing to probe, so it reports healthy. If the config file isn't `/data/config.yaml`, set `GO_BACKUP_TOOL_URL` (e.g. `http://localhost:8080`) on the container.
 
 Upgrading to v8 from an older release: see [`CHANGELOG.md`](CHANGELOG.md) for the config sections v8.0.0 removed and how to carry them over.
 
@@ -83,6 +83,8 @@ backup.example.com {
 	}
 }
 ```
+
+For Traefik, [`compose.traefik.yaml`](compose.traefik.yaml) is an override for `compose.yaml`. It routes a hostname to the container through Traefik's Docker provider instead of the loopback port, and drops the `Forwarded` header the same way: `BACKUP_HOST=backup.example.com docker compose -f compose.yaml -f compose.traefik.yaml up -d`. Its header comment lists what it expects from Traefik and from `config.yaml`.
 
 On startup the process logs a warning when it listens beyond loopback without `trust-proxy-headers`, since that usually means plain HTTP is reachable from the network.
 
